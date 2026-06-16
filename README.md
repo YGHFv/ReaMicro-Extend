@@ -1,86 +1,45 @@
 # ReaMicro Extend
 
-ReaMicro Extend is an LSPosed module for adding small behavior extensions to ReaMicro.
+ReaMicro Extend 是一个用于阅微的 LSPosed 扩展模块，目标是补充一些日常使用中的阅读、编辑、显示和管理体验。
 
-This repository contains only the open-source module framework and general hooks. Search providers and optional closed features are not included in the public source tree.
+## 功能
 
-## Features
+- 阅读页增强：提供自动翻页、保持屏幕常亮、导入覆盖检查等辅助能力。
+- 文本编辑增强：优化 EPUB/Web 编辑场景中的文本输入和保存体验。
+- 字体相关增强：支持全局字体补全、阅读字体隔离和字体混淆检测。
+- 账号与本地数据：提供账号数据导出和启动缓存清理相关开关。
+- 云盘与本地书库：补充 WebDAV、本地书库显示和下载取消等细节能力。
+- 屏幕方向控制：支持自动旋转、竖屏锁定、横屏锁定和反向旋转等设置。
+- 模块设置页：在阅微内提供统一的功能开关入口。
 
-- Reader-related behavior tweaks.
-- Settings UI for module switches.
-- External source loading through side-loaded `.rmsource` files.
-- Optional bundling of local `.rmsource` files at build time.
+## 构建
 
-## Side-Loaded Sources
-
-Association search providers are loaded from external source files instead of being hardcoded in this repository.
-
-At runtime, the module scans the app private source directory:
-
-```text
-/data/data/app.zhendong.reamicro/files/reamicro_sources
-```
-
-Supported file types:
-
-```text
-.rmsource
-.apk
-.jar
-.dex
-```
-
-Only loaded sources appear in the settings page. If no source file exists, no external source switch is shown.
-
-Source results must map to one of the known platform names maintained by the module. Unknown platforms are ignored instead of being added dynamically.
-
-## Bundled Local Sources
-
-For private or local builds, `.rmsource` files can be placed in:
-
-```text
-source-files/
-```
-
-If this directory exists locally, Gradle packages `source-files/*.rmsource` into the APK assets. On app startup, the module copies bundled source files into the app private source directory, then loads them the same way as manually side-loaded files.
-
-`source-files/` is ignored by Git and is not part of the open-source project.
-
-## Open-Source Boundary
-
-The public repository does not include:
-
-- Concrete association search provider implementations.
-- Private source files or generated `.rmsource` packages.
-- Closed optional features.
-- Private server addresses or credentials.
-
-The source-loading framework is public; individual sources can be distributed separately.
-
-## Build
-
-Requirements:
+需要：
 
 - Android SDK
 - JDK 17
 
-Build debug APK:
+构建调试版：
 
 ```bash
 ./gradlew :app:assembleDebug
 ```
 
-Run unit tests:
+运行单元测试：
 
 ```bash
 ./gradlew :app:testDebugUnitTest
 ```
 
-If `local.properties` is needed, point it to your Android SDK, for example:
+如需配置 `local.properties`，请指向本机 Android SDK，例如：
 
 ```properties
 sdk.dir=C:/Users/<name>/AppData/Local/Android/Sdk
 ```
+
+## 说明
+
+本项目仅提供公开模块代码。请在遵守相关应用和平台规则的前提下使用。
 
 ## License
 
