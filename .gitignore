@@ -1,0 +1,25 @@
+.alma-snapshots
+.tmp_*
+tmp/
+AGENTS.md
+build/
+.gradle/
+local.properties
+*.iml
+.alma-snapshots/
+.tmp_*/
+.idea/
+captures/
+app/build/
+*.apk
+*.aab
+!RM1.3.0+.APK
+.tools/
+tools/
+decompiled/
+dex_tmp/
+
+# Optional closed/local side-loaded ReaMicro sources. If these directories
+# exist locally, Gradle can bundle their .rmsource files into the APK.
+external-sources/
+source-files/
