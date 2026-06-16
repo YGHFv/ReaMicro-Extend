@@ -5,12 +5,14 @@ import dalvik.system.DexClassLoader
 import de.robv.android.xposed.XposedBridge
 import java.io.File
 import java.io.FileOutputStream
+import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import org.json.JSONObject
 
 object ExternalSourceLoader {
     private const val SOURCE_DIR = "reamicro_sources"
+    private const val BUNDLED_SYNC_STATE_DIR = ".bundled_sync_state"
     private const val BUNDLED_SOURCE_ASSET_DIR = "reamicro_sources"
     private const val MODULE_PACKAGE_NAME = "com.reamicro.fix"
     private const val MANIFEST_ENTRY = "manifest.json"
@@ -85,9 +87,15 @@ object ExternalSourceLoader {
         names.forEach { name ->
             runCatching {
                 val target = File(sourceDir, name)
-                if (target.isFile && target.lastModified() > appUpdatedAt) return@forEach
                 val bytes = moduleContext.assets.open("$BUNDLED_SOURCE_ASSET_DIR/$name").use { it.readBytes() }
-                writeBundledSourceIfNeeded(target, bytes, appUpdatedAt, name)
+                writeBundledSourceIfNeeded(
+                    sourceDir = sourceDir,
+                    target = target,
+                    bytes = bytes,
+                    bundledVersion = bundledVersion(appUpdatedAt, bytes),
+                    bundledUpdatedAt = appUpdatedAt,
+                    name = name,
+                )
             }.onFailure {
                 log("bundled source $name sync failed: ${it.message}")
             }
@@ -115,9 +123,15 @@ object ExternalSourceLoader {
                 entries.forEach { entry ->
                     val name = entry.name.substringAfterLast('/')
                     val target = File(sourceDir, name)
-                    if (target.isFile && target.lastModified() > appUpdatedAt) return@forEach
                     val bytes = zip.getInputStream(entry).use { it.readBytes() }
-                    writeBundledSourceIfNeeded(target, bytes, appUpdatedAt, name)
+                    writeBundledSourceIfNeeded(
+                        sourceDir = sourceDir,
+                        target = target,
+                        bytes = bytes,
+                        bundledVersion = bundledVersion(appUpdatedAt, bytes),
+                        bundledUpdatedAt = appUpdatedAt,
+                        name = name,
+                    )
                 }
             }
             true
@@ -137,21 +151,35 @@ object ExternalSourceLoader {
     }
 
     private fun writeBundledSourceIfNeeded(
+        sourceDir: File,
         target: File,
         bytes: ByteArray,
-        appUpdatedAt: Long,
+        bundledVersion: String,
+        bundledUpdatedAt: Long,
         name: String,
     ) {
-        val shouldWrite = !target.isFile ||
-            target.length() != bytes.size.toLong() ||
-            target.lastModified() < appUpdatedAt
+        val stateFile = File(File(sourceDir, BUNDLED_SYNC_STATE_DIR), "${safeStateName(name)}.version")
+        val previousBundledVersion = stateFile.takeIf { it.isFile }
+            ?.let { file -> runCatching { file.readText() }.getOrNull() }
+        val shouldWrite = !target.isFile || previousBundledVersion != bundledVersion
         if (!shouldWrite) return
         if (target.exists()) target.setWritable(true)
         FileOutputStream(target).use { it.write(bytes) }
         target.setReadOnly()
-        target.setLastModified(appUpdatedAt)
+        target.setLastModified(bundledUpdatedAt)
+        stateFile.parentFile?.mkdirs()
+        runCatching { stateFile.writeText(bundledVersion) }
+            .onFailure { log("bundled source $name state write failed: ${it.message}") }
         log("bundled source synced $name")
     }
+
+    private fun bundledVersion(updatedAt: Long, bytes: ByteArray): String {
+        val crc = CRC32().apply { update(bytes) }.value
+        return "$updatedAt:${bytes.size}:$crc"
+    }
+
+    private fun safeStateName(name: String): String =
+        name.replace(Regex("[^A-Za-z0-9_.-]+"), "_")
 
     private fun loadProvider(
         file: File,
