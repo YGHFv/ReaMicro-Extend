@@ -11,7 +11,7 @@ data class ManualAssociationDraft(
 ) {
     companion object {
         const val MAX_INTRO_LENGTH = 2_000
-        val STATUS_OPTIONS = listOf("", "连载中", "已完结")
+        val STATUS_OPTIONS = listOf("", "连载", "完结")
 
         fun fromFile(
             fileMetadata: AssociatedFileMetadata,

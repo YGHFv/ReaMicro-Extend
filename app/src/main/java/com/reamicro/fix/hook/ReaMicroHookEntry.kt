@@ -64,6 +64,11 @@ class ReaMicroHookEntry {
                 refreshCurrentActivityForGlobalFont()
             },
         ).install()
+        AssociationSearchHook(
+            classLoader = classLoader,
+            activityProvider = { currentActivityRef?.get() },
+            settingsProvider = moduleSettings::snapshot,
+        ).install()
         LocalExportHook(
             classLoader = classLoader,
             activityProvider = { currentActivityRef?.get() },
