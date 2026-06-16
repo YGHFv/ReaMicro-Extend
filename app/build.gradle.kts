@@ -40,6 +40,10 @@ tasks.matching { task ->
     dependsOn(syncBundledSources)
 }
 
+tasks.matching { task -> task.name.contains("lint", ignoreCase = true) }.configureEach {
+    dependsOn(syncBundledSources)
+}
+
 dependencies {
     compileOnly("io.github.libxposed:api:101.0.1")
 

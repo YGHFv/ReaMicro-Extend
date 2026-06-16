@@ -49,13 +49,24 @@ jobs:
       - name: Test
         run: ./gradlew :app:testDebugUnitTest
 
-      - name: Build debug APK
-        run: ./gradlew :app:assembleDebug
+      - name: Build APK
+        run: |
+          if ./gradlew :app:assembleRelease; then
+            echo "APK_VARIANT=release" >> "$GITHUB_ENV"
+          else
+            echo "Release build failed; falling back to debug APK."
+            ./gradlew :app:assembleDebug
+            echo "APK_VARIANT=debug" >> "$GITHUB_ENV"
+          fi
 
       - name: Prepare CI APK artifact
         run: |
           mkdir -p artifacts
-          cp app/build/outputs/apk/debug/app-debug.apk artifacts/ReaMicro-Extend-ci-debug.apk
+          if [ "$APK_VARIANT" = "release" ]; then
+            cp app/build/outputs/apk/release/*.apk artifacts/ReaMicro-Extend-ci-release.apk
+          else
+            cp app/build/outputs/apk/debug/app-debug.apk artifacts/ReaMicro-Extend-ci-debug.apk
+          fi
           ls -lah artifacts
 
       - name: Upload CI APK
@@ -74,7 +85,7 @@ jobs:
           VERSION_NAME="$(grep -oE 'versionName[[:space:]]*=[[:space:]]*"[^"]+"' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')"
           TAG="ci-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
           TITLE="CI ${VERSION_NAME} #${GITHUB_RUN_NUMBER}"
-          gh release create "$TAG" artifacts/ReaMicro-Extend-ci-debug.apk \
+          gh release create "$TAG" artifacts/*.apk \
             --target "$GITHUB_SHA" \
             --title "$TITLE" \
             --notes "Automated CI build from ${GITHUB_SHA}." \
