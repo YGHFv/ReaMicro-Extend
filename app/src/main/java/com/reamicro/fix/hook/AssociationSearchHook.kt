@@ -4,6 +4,7 @@ import android.app.Activity
 import com.reamicro.fix.association.AssociationSearchService
 import com.reamicro.fix.association.model.BookSearchResult
 import com.reamicro.fix.association.model.BookSource
+import com.reamicro.fix.association.orderExactTitleMatchesFirst
 import com.reamicro.fix.association.provider.AssociationSearchProviderRegistry
 import com.reamicro.fix.association.provider.ExternalSourceLoader
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
@@ -24,6 +25,7 @@ class AssociationSearchHook(
     private val searchResultsLock = Any()
     private var viewModelRef: WeakReference<Any>? = null
     @Volatile private var latestSearchResults: List<BookSearchResult> = emptyList()
+    @Volatile private var latestSearchKeyword: String = ""
 
     private val associationSearchService = AssociationSearchService(
         providersProvider = {
@@ -102,6 +104,7 @@ class AssociationSearchHook(
         val generation = searchGeneration.incrementAndGet()
         synchronized(searchResultsLock) {
             latestSearchResults = emptyList()
+            latestSearchKeyword = keyword
         }
         injectSearchGroups(viewModel)
         associationSearchService.searchProgressively(
@@ -111,7 +114,9 @@ class AssociationSearchHook(
             onProviderResults = { source, results, elapsedMs ->
                 if (generation != searchGeneration.get()) return@searchProgressively
                 synchronized(searchResultsLock) {
-                    latestSearchResults = (latestSearchResults + results).distinctBy { it.stableId }
+                    latestSearchResults = (latestSearchResults + results)
+                        .distinctBy { it.stableId }
+                        .orderExactTitleMatchesFirst(latestSearchKeyword)
                 }
                 activityProvider()?.runOnUiThread {
                     if (generation == searchGeneration.get()) {
@@ -132,6 +137,7 @@ class AssociationSearchHook(
         searchGeneration.incrementAndGet()
         synchronized(searchResultsLock) {
             latestSearchResults = emptyList()
+            latestSearchKeyword = ""
         }
     }
 
@@ -152,7 +158,9 @@ class AssociationSearchHook(
         val snapshot = settingsProvider()
         if (!snapshot.canRunAssociationSearch) return emptyList()
         val groupedBooks = linkedMapOf<String, MutableList<Any>>()
+        val keyword = latestSearchKeyword
         latestSearchResults
+            .orderExactTitleMatchesFirst(keyword)
             .filter { snapshot.isSearchSourceEnabled(it.source) }
             .forEach { result ->
                 runCatching {

@@ -108,6 +108,38 @@ class AssociationSearchServiceTest {
         assertTrue(results.any { it.sourceBookId == "1015648531" })
     }
 
+    @Test
+    fun searchMovesExactTitleMatchesAheadOfEarlierNonExactProviders() {
+        val service = AssociationSearchService(
+            providers = listOf(
+                staticProvider(
+                    source = BookSource.Ciweimao,
+                    result(
+                        title = "The Book Side Story",
+                        author = "author",
+                        id = "non-exact",
+                        displaySourceName = BookSource.Ciweimao.displayName,
+                        source = BookSource.Ciweimao,
+                    ),
+                ),
+                staticProvider(
+                    source = BookSource.FanQie,
+                    result(
+                        title = "The Book",
+                        author = "author",
+                        id = "exact",
+                        displaySourceName = BookSource.FanQie.displayName,
+                        source = BookSource.FanQie,
+                    ),
+                ),
+            ),
+        )
+
+        val results = service.search("The Book", limitPerSource = 10)
+
+        assertEquals(listOf("exact", "non-exact"), results.map { it.sourceBookId })
+    }
+
     private fun resultProvider(id: String): BookAssociationSearchProvider = object : BookAssociationSearchProvider {
         override val source: BookSource = BookSource.Ciweimao
 
@@ -143,6 +175,16 @@ class AssociationSearchServiceTest {
                 ),
             )
         }
+    }
+
+    private fun staticProvider(
+        source: BookSource,
+        vararg results: BookSearchResult,
+    ): BookAssociationSearchProvider = object : BookAssociationSearchProvider {
+        override val source: BookSource = source
+
+        override fun search(keyword: String, limit: Int): List<BookSearchResult> =
+            results.toList().take(limit)
     }
 
     private fun result(

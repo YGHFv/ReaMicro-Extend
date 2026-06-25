@@ -6,7 +6,6 @@ import com.reamicro.fix.association.model.ManualAssociationDraft
 import com.reamicro.fix.association.model.withAllowedAssociationPlatform
 import com.reamicro.fix.association.provider.AssociationSearchProviderRegistry
 import com.reamicro.fix.association.provider.BookAssociationSearchProvider
-import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReferenceArray
@@ -61,7 +60,7 @@ class AssociationSearchService(
             }
         }
         latch.await(PROVIDER_WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        return orderedResults(resultsByProvider)
+        return orderedResults(resultsByProvider).orderExactTitleMatchesFirst(keyword)
     }
 
     fun searchProgressively(
@@ -116,7 +115,10 @@ class AssociationSearchService(
         Thread {
             latch.await(maxWaitMs, TimeUnit.MILLISECONDS)
             runCatching {
-                onComplete(orderedResults(resultsByProvider), System.currentTimeMillis() - startedAt)
+                onComplete(
+                    orderedResults(resultsByProvider).orderExactTitleMatchesFirst(keyword),
+                    System.currentTimeMillis() - startedAt,
+                )
             }
         }.apply {
             name = "ReaMicroSearch-complete"
@@ -150,7 +152,7 @@ class AssociationSearchService(
         mapNotNull { it.withAllowedAssociationPlatform() }.distinctBy { it.stableId }
 
     private fun List<BookSearchResult>.rankForKeyword(keyword: String): List<BookSearchResult> {
-        val normalizedKeyword = keyword.normalizedSearchKey()
+        val normalizedKeyword = keyword.normalizedAssociationSearchKey()
         if (normalizedKeyword.isBlank()) return this
         return mapIndexed { index, result -> index to result }
             .sortedWith(
@@ -162,8 +164,8 @@ class AssociationSearchService(
     }
 
     private fun BookSearchResult.searchRank(normalizedKeyword: String): Int {
-        val titleKey = title.normalizedSearchKey()
-        val authorKey = author.normalizedSearchKey()
+        val titleKey = title.normalizedAssociationSearchKey()
+        val authorKey = author.normalizedAssociationSearchKey()
         return when {
             titleKey == normalizedKeyword -> 0
             titleKey.contains(normalizedKeyword) -> 1
@@ -174,10 +176,6 @@ class AssociationSearchService(
             else -> 6
         }
     }
-
-    private fun String.normalizedSearchKey(): String =
-        lowercase(Locale.ROOT)
-            .replace(Regex("[\\s\\u3000《》<>【】\\[\\]（）()「」『』:：,，.。!！?？\"'“”‘’、/\\\\_-]+"), "")
 
     private fun providerFetchLimit(limitPerSource: Int): Int =
         limitPerSource.coerceAtLeast(1).let { limit ->
