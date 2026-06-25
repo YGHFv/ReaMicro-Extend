@@ -2,21 +2,36 @@ package com.reamicro.fix.hook
 
 import android.app.Activity
 import android.app.Dialog
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.res.Configuration
+import android.os.Build
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.text.InputType
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.TextUtils
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
+import android.util.Xml
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.view.WindowInsetsController
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
@@ -26,6 +41,9 @@ import java.io.File
 import java.lang.ref.WeakReference
 import java.lang.reflect.Proxy
 import java.nio.charset.StandardCharsets
+import java.io.StringReader
+import java.util.Locale
+import org.xmlpull.v1.XmlPullParser
 
 class ReaderHook(
     private val classLoader: ClassLoader,
@@ -36,29 +54,61 @@ class ReaderHook(
     private var currentSelectionControllerRef: WeakReference<Any>? = null
     private var currentEpubRef: WeakReference<Any>? = null
     private var currentPageRef: WeakReference<Any>? = null
+    private var currentViewModelRef: WeakReference<Any>? = null
+    private var searchPageDialogRef: WeakReference<Dialog>? = null
+    private var searchMenuButtonRef: WeakReference<View>? = null
+    private var searchMenuButtonActivityRef: WeakReference<Activity>? = null
+    private var searchNavigationBarRef: WeakReference<View>? = null
+    private var searchNavigationBarActivityRef: WeakReference<Activity>? = null
+    private var searchOverlayThemeCallbacks: ComponentCallbacks2? = null
+    private var searchOverlayThemeCallbacksActivityRef: WeakReference<Activity>? = null
+    private var bottomSearchReceiverRef: WeakReference<Any>? = null
+    private var bottomSearchBookRef: WeakReference<Any>? = null
+    @Volatile private var lastCatalogContext: CatalogContext? = null
+    @Volatile private var lastSearchState: SearchState? = null
+    @Volatile private var activeSearchNavigation: SearchNavigationState? = null
+    @Volatile private var searchIndexState: SearchIndexState? = null
+    @Volatile private var searchIndexBuildingKey: String? = null
+    @Volatile private var searchStateGeneration: Long = 0L
+    @Volatile private var searchRunSeq: Long = 0L
+    @Volatile private var readerBottomMenuVisible: Boolean = false
 
     fun install() {
         installNativeSelectionHooks()
         hookReaderViewModel()
+        hookReaderCatalog()
+        hookReaderBottomBar()
+        hookHomeBookshelfScreen()
     }
 
     private fun canEditReaderSelection(): Boolean =
         settingsProvider().canEditReaderSelection
+
+    private fun canRunFullTextSearch(): Boolean {
+        val snapshot = settingsProvider()
+        return snapshot.moduleEnabled && snapshot.readerEnabled
+    }
+
+    private fun canShowReaderSearchEntry(): Boolean =
+        canRunFullTextSearch() && currentEpubRoot() != null && currentPageRef?.get() != null
 
     private fun hookReaderViewModel() {
         runCatching {
             val cls = classLoader.loadClass(READER_VIEW_MODEL_CLASS)
             XposedBridge.hookAllConstructors(cls, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
+                    currentViewModelRef = WeakReference(param.thisObject)
                     XposedBridge.log("$LOG_PREFIX ReaderViewModel created")
                 }
             })
             XposedBridge.hookAllMethods(cls, "onCleared", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     XposedBridge.log("$LOG_PREFIX ReaderViewModel cleared")
+                    if (currentViewModelRef?.get() === param.thisObject) currentViewModelRef = null
                     currentSelectionControllerRef = null
                     currentEpubRef = null
                     currentPageRef = null
+                    resetFullTextSearchState("ReaderViewModel cleared", removeOverlays = true)
                 }
             })
         }.onFailure {
@@ -73,6 +123,650 @@ class ReaderHook(
         hookNativeSelectionMenu()
         hookCurrentEpub()
         hookCurrentEpubPage()
+    }
+
+    private fun hookReaderCatalog() {
+        runCatching {
+            val catalogClass = classLoader.loadClass(READER_CATALOG_CLASS)
+            val methods = catalogClass.declaredMethods.filter {
+                it.name == "ReaderCatalog" &&
+                    it.parameterTypes.size >= 8 &&
+                    it.parameterTypes.getOrNull(4)?.let { type -> List::class.java.isAssignableFrom(type) } == true
+            }
+            if (methods.isEmpty()) error("ReaderCatalog composable not found")
+            methods.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val status = param.args?.getOrNull(1)
+                        if (!canRunFullTextSearch()) {
+                            activityProvider()?.runOnUiThread {
+                                clearSearchOverlays(clearNavigationState = true)
+                            }
+                            return
+                        }
+                        if (status?.toString() != "Catalog") return
+                        val catalog = (param.args?.getOrNull(4) as? List<*>)?.filterNotNull().orEmpty()
+                        val context = CatalogContext(
+                            intentReceiver = param.args?.getOrNull(0),
+                            book = param.args?.getOrNull(2),
+                            catalog = catalog,
+                        )
+                        val previousContext = lastCatalogContext
+                        if (previousContext != null && isDifferentSearchBook(previousContext, context)) {
+                            resetFullTextSearchState("catalog book changed", removeOverlays = true)
+                        }
+                        lastCatalogContext = context
+                        ensureSearchIndexAsync(context)
+                    }
+                })
+            }
+            XposedBridge.log("$LOG_PREFIX reader catalog full-text search hook installed: ${methods.size}")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX reader catalog full-text search hook failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun clearSearchOverlays(clearNavigationState: Boolean) {
+        closeSearchPage()
+        removeSearchMenuButton()
+        if (clearNavigationState) activeSearchNavigation = null
+        removeSearchNavigationBar()
+    }
+
+    private fun hookHomeBookshelfScreen() {
+        val targets = listOf(
+            HOME_SCREEN_CLASS to "HomeScreen",
+            BOOKSHELF_SCREEN_CLASS to "BookshelfScreen",
+        )
+        targets.forEach { (className, methodName) ->
+            runCatching {
+                val cls = classLoader.loadClass(className)
+                val methods = cls.declaredMethods.filter { it.name == methodName }
+                if (methods.isEmpty()) error("$methodName not found")
+                methods.forEach { method ->
+                    method.isAccessible = true
+                    XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            handleHomeBookshelfRendered(methodName)
+                        }
+                    })
+                }
+                XposedBridge.log("$LOG_PREFIX home search cleanup hook installed: $methodName/${methods.size}")
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX home search cleanup hook failed for $className: ${it.message}")
+            }
+        }
+    }
+
+    private fun handleHomeBookshelfRendered(source: String) {
+        val hadReaderSearchState = hasFullTextSearchState()
+        currentEpubRef = null
+        currentPageRef = null
+        readerBottomMenuVisible = false
+        if (hadReaderSearchState) {
+            resetFullTextSearchState("home rendered: $source", removeOverlays = true)
+        }
+    }
+
+    private fun hasFullTextSearchState(): Boolean =
+        bottomSearchReceiverRef?.get() != null ||
+            bottomSearchBookRef?.get() != null ||
+            lastCatalogContext != null ||
+            lastSearchState != null ||
+            activeSearchNavigation != null ||
+            searchIndexState != null ||
+            searchIndexBuildingKey != null ||
+            searchPageDialogRef?.get() != null ||
+            searchMenuButtonRef?.get() != null ||
+            searchNavigationBarRef?.get() != null
+
+    private fun resetFullTextSearchState(reason: String, removeOverlays: Boolean) {
+        searchStateGeneration += 1
+        searchRunSeq += 1
+        bottomSearchReceiverRef = null
+        bottomSearchBookRef = null
+        lastCatalogContext = null
+        lastSearchState = null
+        activeSearchNavigation = null
+        searchIndexState = null
+        searchIndexBuildingKey = null
+        if (removeOverlays) {
+            activityProvider()?.runOnUiThread {
+                closeSearchPage()
+                removeSearchMenuButton()
+                removeSearchNavigationBar()
+            }
+        }
+        XposedBridge.log("$LOG_PREFIX full-text search state reset: $reason")
+    }
+
+    private fun postRemoveTaggedViews(activity: Activity?, tagValue: Int) {
+        val targetActivity = activity ?: activityProvider() ?: return
+        val decor = targetActivity.window?.decorView as? ViewGroup ?: return
+        decor.post {
+            runCatching {
+                removeTaggedViews(decor, tagValue)
+                removeTaggedViews(targetActivity.findViewById(android.R.id.content), tagValue)
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX failed to remove overlay tag=$tagValue: ${it.stackTraceToString()}")
+            }
+        }
+    }
+
+    private fun updateSearchNavigationForBottomState(activity: Activity) {
+        if (readerBottomMenuVisible) {
+            searchNavigationBarRef?.get()?.visibility = View.GONE
+            return
+        }
+        if (activeSearchNavigation != null && lastSearchState != null) {
+            ensureSearchNavigationBar(activity)
+        } else {
+            removeSearchNavigationBar()
+        }
+    }
+
+    private fun hookReaderBottomBar() {
+        runCatching {
+            val cls = classLoader.loadClass(READER_BOTTOM_BAR_CLASS)
+            val methods = cls.declaredMethods.filter {
+                it.name == "ReaderBottomBar" && it.parameterTypes.size >= 7
+            }
+            if (methods.isEmpty()) error("ReaderBottomBar composable not found")
+            methods.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val statusName = param.args?.getOrNull(3)?.toString().orEmpty()
+                        val canShowSearchEntry = canShowReaderSearchEntry()
+                        readerBottomMenuVisible = canShowSearchEntry && statusName.isNotBlank() && statusName != "Reader"
+                        if (canShowSearchEntry && statusName == "Menu") {
+                            param.args?.getOrNull(1)?.let { bottomSearchReceiverRef = WeakReference(it) }
+                            param.args?.getOrNull(2)?.let { bottomSearchBookRef = WeakReference(it) }
+                        }
+                    }
+
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!canRunFullTextSearch()) {
+                            activityProvider()?.runOnUiThread {
+                                readerBottomMenuVisible = false
+                                bottomSearchReceiverRef = null
+                                bottomSearchBookRef = null
+                                removeSearchMenuButton()
+                                removeSearchNavigationBar()
+                            }
+                            return
+                        }
+                        val receiver = param.args?.getOrNull(1)
+                        val book = param.args?.getOrNull(2)
+                        val status = param.args?.getOrNull(3)
+                        val statusName = status?.toString().orEmpty()
+                        val canShowSearchEntry = canShowReaderSearchEntry()
+                        readerBottomMenuVisible = canShowSearchEntry && statusName.isNotBlank() && statusName != "Reader"
+                        if (canShowSearchEntry && statusName == "Menu") {
+                            bottomSearchReceiverRef = receiver?.let { WeakReference(it) }
+                            bottomSearchBookRef = book?.let { WeakReference(it) }
+                        }
+                        val activity = activityProvider() ?: return
+                        activity.runOnUiThread {
+                            if (statusName == "Menu") {
+                                if (canShowSearchEntry) {
+                                    showSearchMenuButton(activity, receiver, book)
+                                } else {
+                                    removeSearchMenuButton()
+                                }
+                            } else {
+                                removeSearchMenuButton()
+                            }
+                            updateSearchNavigationForBottomState(activity)
+                        }
+                    }
+                })
+            }
+            XposedBridge.log("$LOG_PREFIX reader bottom search hook installed: ${methods.size}")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX reader bottom search hook failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun showSearchMenuButton(activity: Activity, receiver: Any?, book: Any?) {
+        if (!canShowReaderSearchEntry()) {
+            removeSearchMenuButton()
+            return
+        }
+        val decor = activity.window?.decorView as? ViewGroup ?: return
+        ensureSearchOverlayThemeCallbacks(activity)
+        val existing = searchMenuButtonRef?.get()
+        if (existing != null && searchMenuButtonActivityRef?.get() === activity && existing.parent === decor) {
+            (existing as? SearchMenuButtonView)?.refreshColors()
+            existing.visibility = View.VISIBLE
+            existing.bringToFront()
+            bottomSearchReceiverRef = receiver?.let { WeakReference(it) } ?: bottomSearchReceiverRef
+            bottomSearchBookRef = book?.let { WeakReference(it) } ?: bottomSearchBookRef
+            return
+        }
+        searchMenuButtonRef = null
+        searchMenuButtonActivityRef = null
+        bottomSearchReceiverRef = receiver?.let { WeakReference(it) } ?: bottomSearchReceiverRef
+        bottomSearchBookRef = book?.let { WeakReference(it) } ?: bottomSearchBookRef
+        decor.post {
+            if (!canShowReaderSearchEntry()) return@post
+            removeTaggedViews(decor, SEARCH_MENU_BUTTON_TAG)
+            removeTaggedViews(activity.findViewById(android.R.id.content), SEARCH_MENU_BUTTON_TAG)
+            val current = searchMenuButtonRef?.get()
+            if (current != null && searchMenuButtonActivityRef?.get() === activity && current.parent === decor) {
+                (current as? SearchMenuButtonView)?.refreshColors()
+                current.visibility = View.VISIBLE
+                current.bringToFront()
+                return@post
+            }
+            val button = SearchMenuButtonView(activity).apply {
+                tag = SEARCH_MENU_BUTTON_TAG
+                contentDescription = "\u641c\u7d22\u5168\u4e66"
+                alpha = 0.94f
+                elevation = dp(activity, 6).toFloat()
+                setOnClickListener { openBottomSearchPage() }
+            }
+            decor.addView(button, FrameLayout.LayoutParams(
+                dp(activity, SEARCH_MENU_BUTTON_SIZE_DP),
+                dp(activity, SEARCH_MENU_BUTTON_SIZE_DP),
+            ).apply {
+                gravity = Gravity.BOTTOM or Gravity.END
+                rightMargin = dp(activity, SEARCH_MENU_BUTTON_RIGHT_MARGIN_DP)
+                bottomMargin = dp(activity, SEARCH_MENU_BUTTON_BOTTOM_MARGIN_DP)
+            })
+            button.bringToFront()
+            searchMenuButtonRef = WeakReference(button)
+            searchMenuButtonActivityRef = WeakReference(activity)
+            bottomSearchReceiverRef = receiver?.let { WeakReference(it) } ?: bottomSearchReceiverRef
+            bottomSearchBookRef = book?.let { WeakReference(it) } ?: bottomSearchBookRef
+        }
+    }
+
+    private fun removeSearchMenuButton() {
+        val activity = searchMenuButtonActivityRef?.get() ?: activityProvider()
+        searchMenuButtonRef = null
+        searchMenuButtonActivityRef = null
+        postRemoveTaggedViews(activity, SEARCH_MENU_BUTTON_TAG)
+        maybeUnregisterSearchOverlayThemeCallbacks()
+    }
+
+    private fun ensureSearchOverlayThemeCallbacks(activity: Activity) {
+        if (searchOverlayThemeCallbacksActivityRef?.get() === activity && searchOverlayThemeCallbacks != null) return
+        unregisterSearchOverlayThemeCallbacks()
+        val callbacks = object : ComponentCallbacks2 {
+            override fun onConfigurationChanged(newConfig: Configuration) {
+                activity.runOnUiThread {
+                    refreshSearchMenuButtonTheme()
+                    refreshSearchNavigationBarTheme()
+                }
+            }
+
+            override fun onLowMemory() = Unit
+
+            override fun onTrimMemory(level: Int) = Unit
+        }
+        searchOverlayThemeCallbacks = callbacks
+        searchOverlayThemeCallbacksActivityRef = WeakReference(activity)
+        activity.registerComponentCallbacks(callbacks)
+    }
+
+    private fun refreshSearchMenuButtonTheme() {
+        (searchMenuButtonRef?.get() as? SearchMenuButtonView)?.refreshColors()
+    }
+
+    private fun refreshSearchNavigationBarTheme() {
+        val bar = searchNavigationBarRef?.get() ?: return
+        val activity = searchNavigationBarActivityRef?.get() ?: bar.context
+        applySearchNavigationBarTheme(bar, DialogColors(activity))
+    }
+
+    private fun maybeUnregisterSearchOverlayThemeCallbacks() {
+        if (searchMenuButtonRef?.get() != null || searchNavigationBarRef?.get() != null) return
+        unregisterSearchOverlayThemeCallbacks()
+    }
+
+    private fun unregisterSearchOverlayThemeCallbacks() {
+        val callbacks = searchOverlayThemeCallbacks ?: return
+        val activity = searchOverlayThemeCallbacksActivityRef?.get()
+        runCatching { activity?.unregisterComponentCallbacks(callbacks) }
+        searchOverlayThemeCallbacks = null
+        searchOverlayThemeCallbacksActivityRef = null
+    }
+
+    private fun bottomSearchContext(receiver: Any?, book: Any?): CatalogContext? {
+        val existing = lastCatalogContext
+        val targetBook = book ?: existing?.book ?: return null
+        val catalog = existing?.takeIf { bookKey(it).isNotBlank() }?.catalog.orEmpty()
+        return CatalogContext(receiver ?: existing?.intentReceiver, targetBook, catalog)
+    }
+
+    private fun openBottomSearchPage() {
+        val activity = activityProvider() ?: return
+        if (!canShowReaderSearchEntry()) {
+            removeSearchMenuButton()
+            Toast.makeText(activity, "\u6682\u65e0\u6cd5\u641c\u7d22\u5f53\u524d\u4e66\u7c4d", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val context = bottomSearchContext(bottomSearchReceiverRef?.get(), bottomSearchBookRef?.get())
+        if (context == null) {
+            Toast.makeText(activity, "\u6682\u65e0\u6cd5\u641c\u7d22\u5f53\u524d\u4e66\u7c4d", Toast.LENGTH_SHORT).show()
+            return
+        }
+        activity.runOnUiThread {
+            ensureSearchIndexAsync(context)
+            showFullTextSearchPage(activity, context)
+        }
+    }
+
+    private fun closeSearchPage() {
+        searchPageDialogRef?.get()?.dismiss()
+        searchPageDialogRef = null
+    }
+
+    private fun showFullTextSearchPage(activity: Activity, context: CatalogContext) {
+        closeSearchPage()
+        var colors = DialogColors(activity)
+        val dialog = Dialog(activity)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        var visibleKeyword = ""
+        var visibleResults: List<FullTextSearchResult> = emptyList()
+        var visibleSearching = false
+        var visibleStatus: String? = null
+
+        val resultsContainer = LinearLayout(activity).apply {
+            tag = "searchResultsContainer"
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(colors.pageBackground)
+        }
+        val resultsScroll = ScrollView(activity).apply {
+            tag = "searchResultsScroll"
+            isFillViewport = true
+            setBackgroundColor(colors.pageBackground)
+            addView(resultsContainer, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+        val keywordInput = EditText(activity).apply {
+            tag = "searchKeywordInput"
+            setSingleLine(true)
+            hint = "\u641c\u7d22\u5168\u4e66"
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(colors.primaryText)
+            setHintTextColor(colors.secondaryText)
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setPadding(dp(activity, 16), 0, dp(activity, 16), 0)
+            background = searchKeywordInputBackground(activity, colors)
+        }
+
+        fun renderStatus(message: String) {
+            visibleStatus = message
+            visibleKeyword = ""
+            visibleResults = emptyList()
+            visibleSearching = false
+            resultsContainer.removeAllViews()
+            resultsContainer.addView(TextView(activity).apply {
+                text = message
+                textSize = 16f
+                setTextColor(colors.secondaryText)
+                setPadding(dp(activity, 32), dp(activity, 28), dp(activity, 32), 0)
+            })
+        }
+
+        fun clearVisibleResults() {
+            visibleStatus = null
+            visibleKeyword = ""
+            visibleResults = emptyList()
+            visibleSearching = false
+            resultsContainer.removeAllViews()
+        }
+
+        fun renderVisibleResults(
+            keyword: String,
+            results: List<FullTextSearchResult>,
+            searching: Boolean = false,
+        ) {
+            visibleStatus = null
+            visibleKeyword = keyword
+            visibleResults = results
+            visibleSearching = searching
+            renderSearchResults(activity, resultsContainer, keyword, results, colors, searching)
+        }
+
+        fun renderCached() {
+            val cached = lastSearchState?.takeIf { it.bookKey == bookKey(context) }
+            if (cached == null) {
+                clearVisibleResults()
+                return
+            }
+            keywordInput.setText(cached.keyword)
+            keywordInput.setSelection(keywordInput.text?.length ?: 0)
+            renderVisibleResults(cached.keyword, cached.results)
+        }
+
+        fun runSearch() {
+            val keyword = keywordInput.text?.toString().orEmpty().trim()
+            if (keyword.isBlank()) {
+                clearVisibleResults()
+                return
+            }
+            renderVisibleResults(keyword, emptyList(), searching = true)
+            val runSeq = System.currentTimeMillis()
+            searchRunSeq = runSeq
+            hideKeyboard(keywordInput)
+            Thread {
+                runCatching {
+                    searchFullTextStreaming(keyword, context) { results, done ->
+                        activity.runOnUiThread {
+                            if (searchRunSeq != runSeq || searchPageDialogRef?.get() !== dialog) return@runOnUiThread
+                            lastSearchState = SearchState(bookKey(context), keyword, results)
+                            renderVisibleResults(keyword, results, searching = !done)
+                        }
+                    }
+                }.onFailure {
+                    XposedBridge.log("$LOG_PREFIX full-text search failed: ${it.stackTraceToString()}")
+                    activity.runOnUiThread {
+                        if (searchRunSeq == runSeq && searchPageDialogRef?.get() === dialog) {
+                            renderStatus("\u641c\u7d22\u5931\u8d25")
+                        }
+                    }
+                }
+            }.apply {
+                name = "ReaMicroFullTextSearch"
+                isDaemon = true
+                start()
+            }
+        }
+
+        keywordInput.setOnEditorActionListener { _, actionId, event ->
+            val enterUp = event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_UP
+            if (actionId == EditorInfo.IME_ACTION_SEARCH || enterUp) {
+                runSearch()
+                true
+            } else {
+                false
+            }
+        }
+
+        val searchAction = TextView(activity).apply {
+            text = "\u641c\u7d22"
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(colors.actionBackground)
+            setOnClickListener { runSearch() }
+        }
+        val closeAction = TextView(activity).apply {
+            text = "\u5173\u95ed"
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(colors.primaryText)
+            setOnClickListener { dialog.dismiss() }
+        }
+        val header = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(activity, 14), dp(activity, 16), dp(activity, 14), dp(activity, 12))
+            addView(keywordInput, LinearLayout.LayoutParams(0, dp(activity, 40), 1f).apply {
+                rightMargin = dp(activity, 10)
+            })
+            addView(searchAction, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(activity, 44)).apply {
+                rightMargin = dp(activity, 16)
+            })
+            addView(closeAction, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(activity, 44)))
+        }
+
+        val root = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(colors.pageBackground)
+            addView(header, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+            addView(resultsScroll, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f,
+            ))
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) {
+            root.setOnApplyWindowInsetsListener { view, insets ->
+                view.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom)
+                insets
+            }
+        }
+
+        fun applySearchPageTheme() {
+            colors = DialogColors(activity)
+            root.setBackgroundColor(colors.pageBackground)
+            resultsScroll.setBackgroundColor(colors.pageBackground)
+            resultsContainer.setBackgroundColor(colors.pageBackground)
+            keywordInput.setTextColor(colors.primaryText)
+            keywordInput.setHintTextColor(colors.secondaryText)
+            keywordInput.background = searchKeywordInputBackground(activity, colors)
+            searchAction.setTextColor(colors.actionBackground)
+            closeAction.setTextColor(colors.primaryText)
+            dialog.window?.let { configureFullTextSearchWindow(it, colors, requestKeyboard = false) }
+            val status = visibleStatus
+            if (status != null) {
+                renderStatus(status)
+            } else if (visibleKeyword.isNotBlank() || visibleResults.isNotEmpty() || visibleSearching) {
+                renderVisibleResults(visibleKeyword, visibleResults, visibleSearching)
+            }
+        }
+
+        val themeCallbacks = object : ComponentCallbacks2 {
+            override fun onConfigurationChanged(newConfig: Configuration) {
+                activity.runOnUiThread {
+                    if (searchPageDialogRef?.get() === dialog) {
+                        applySearchPageTheme()
+                    }
+                }
+            }
+
+            override fun onLowMemory() = Unit
+
+            override fun onTrimMemory(level: Int) = Unit
+        }
+
+        dialog.setContentView(root)
+        dialog.setOnDismissListener {
+            if (searchPageDialogRef?.get() === dialog) searchPageDialogRef = null
+            runCatching { activity.unregisterComponentCallbacks(themeCallbacks) }
+            hideKeyboard(keywordInput)
+        }
+        searchPageDialogRef = WeakReference(dialog)
+        activity.registerComponentCallbacks(themeCallbacks)
+        dialog.show()
+        dialog.window?.let { window ->
+            configureFullTextSearchWindow(window, colors)
+        }
+        renderCached()
+        focusEditorAndShowKeyboard(activity, keywordInput)
+    }
+
+    private fun searchKeywordInputBackground(context: Context, colors: DialogColors): GradientDrawable =
+        GradientDrawable().apply {
+            setColor(colors.inputBackground)
+            cornerRadius = dp(context, 18).toFloat()
+            setStroke(dp(context, 1), colors.stroke)
+        }
+
+    private fun configureFullTextSearchWindow(
+        window: Window,
+        colors: DialogColors,
+        requestKeyboard: Boolean = true,
+    ) {
+        val bg = colors.pageBackground
+        val dark = colors.dark
+        window.apply {
+            setBackgroundDrawable(ColorDrawable(bg))
+            clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setDimAmount(0f)
+            setLayout(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+            )
+            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS)
+                clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION)
+                addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
+                statusBarColor = bg
+                navigationBarColor = bg
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                navigationBarDividerColor = Color.TRANSPARENT
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                isStatusBarContrastEnforced = false
+                isNavigationBarContrastEnforced = false
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                setDecorFitsSystemWindows(false)
+            }
+            decorView.setPadding(0, 0, 0, 0)
+            decorView.setBackgroundColor(bg)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                decorView.systemUiVisibility = fullTextSearchSystemUiFlags(dark)
+            }
+            setSoftInputMode(
+                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or (if (requestKeyboard) {
+                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
+                } else {
+                    WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
+                }),
+            )
+            applyFullTextSearchSystemBarAppearance(this, dark)
+        }
+    }
+
+    private fun applyFullTextSearchSystemBarAppearance(window: Window, dark: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        val lightBars = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+            WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+        window.insetsController?.setSystemBarsAppearance(
+            if (dark) 0 else lightBars,
+            lightBars,
+        )
+    }
+
+    private fun fullTextSearchSystemUiFlags(dark: Boolean): Int {
+        var flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        if (!dark && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            flags = flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+        }
+        if (!dark && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            flags = flags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        }
+        return flags
     }
 
     private fun hookNativeSelectionController() {
@@ -184,6 +878,19 @@ class ReaderHook(
                     method.isAccessible = true
                     XposedBridge.hookMethod(method, object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
+                            val previousEpub = currentEpubRef?.get()
+                            if (previousEpub != null && previousEpub !== param.thisObject) {
+                                val previousDirectory = epubDirectory(previousEpub)
+                                val nextDirectory = epubDirectory(param.thisObject)
+                                if (
+                                    previousDirectory.isBlank() ||
+                                    nextDirectory.isBlank() ||
+                                    previousDirectory != nextDirectory
+                                ) {
+                                    currentPageRef = null
+                                    resetFullTextSearchState("epub changed", removeOverlays = true)
+                                }
+                            }
                             currentEpubRef = WeakReference(param.thisObject)
                         }
                     })
@@ -241,6 +948,1081 @@ class ReaderHook(
             }
         }
     }
+
+    private fun renderSearchResults(
+        activity: Activity,
+        container: LinearLayout,
+        keyword: String,
+        results: List<FullTextSearchResult>,
+        colors: DialogColors,
+        searching: Boolean = false,
+    ) {
+        container.removeAllViews()
+        container.addView(TextView(activity).apply {
+            text = if (searching) {
+                "\u641c\u7d22\u4e2d\uff0c\u5df2\u627e\u5230 ${results.size} \u5904"
+            } else {
+                "\u641c\u7d22\u5b8c\u6210\uff0c\u5171\u627e\u5230 ${results.size} \u5904"
+            }
+            textSize = 15f
+            setTextColor(colors.secondaryText)
+            setPadding(dp(activity, 24), dp(activity, 12), dp(activity, 24), dp(activity, 4))
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ))
+        if (results.isEmpty()) {
+            return
+        }
+        var previousGroupKey: String? = null
+        results.forEachIndexed { index, result ->
+            val groupKey = searchResultGroupKey(result)
+            if (groupKey != previousGroupKey) {
+                container.addView(TextView(activity).apply {
+                    text = result.chapterTitle.ifBlank { result.file.nameWithoutExtension }
+                    textSize = 18f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(colors.secondaryText)
+                    setPadding(
+                        dp(activity, 24),
+                        if (index == 0) dp(activity, 14) else dp(activity, 22),
+                        dp(activity, 24),
+                        dp(activity, 6),
+                    )
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                }, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ))
+                previousGroupKey = groupKey
+            }
+            container.addView(searchResultCard(activity, result, index, colors), LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                leftMargin = dp(activity, 24)
+                rightMargin = dp(activity, 24)
+                bottomMargin = dp(activity, 12)
+            })
+        }
+    }
+
+    private fun searchResultGroupKey(result: FullTextSearchResult): String =
+        if (result.chapterIndex >= 0) {
+            "chapter:${result.chapterIndex}"
+        } else {
+            "file:${result.file.absolutePath}"
+        }
+
+    private fun searchResultCard(
+        activity: Activity,
+        result: FullTextSearchResult,
+        resultIndex: Int,
+        colors: DialogColors,
+    ): View =
+        LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(activity, 4), 0, dp(activity, 4))
+            addView(TextView(activity).apply {
+                text = redHighlightedSnippet(result)
+                textSize = 16f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(colors.primaryText)
+                setLineSpacing(0f, 1f)
+                includeFontPadding = false
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            setOnClickListener {
+                jumpToSearchResult(result, resultIndex)
+                closeSearchPage()
+            }
+        }
+
+    private fun redHighlightedSnippet(result: FullTextSearchResult): SpannableString =
+        SpannableString(result.snippet).apply {
+            val start = result.snippetMatchStart.coerceIn(0, result.snippet.length)
+            val end = result.snippetMatchEnd.coerceIn(start, result.snippet.length)
+            if (end > start) {
+                setSpan(ForegroundColorSpan(Color.RED), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                setSpan(StyleSpan(Typeface.BOLD), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+        }
+
+    private fun jumpToSearchResult(result: FullTextSearchResult, resultIndex: Int) {
+        val activity = activityProvider()
+        val viewModel = currentViewModelRef?.get()
+        val receiver = result.intentReceiver
+        if (receiver == null && viewModel == null) {
+            activity?.let {
+                Toast.makeText(it, "\u6682\u65e0\u6cd5\u8df3\u8f6c\u5230\u8be5\u7ed3\u679c", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        val returnTarget = activeSearchNavigation?.returnTarget ?: currentReadingTarget()
+        var jumped = false
+        if (!result.cfi.isNullOrBlank()) {
+            XposedBridge.log(
+                "$LOG_PREFIX full-text search jump result index=$resultIndex chapter=${result.chapterTitle} " +
+                    "file=${result.file.name} cfi=${result.cfi} snippet=${result.snippet.take(80)}",
+            )
+            if (!isValidEpubCfi(result.cfi)) {
+                XposedBridge.log("$LOG_PREFIX full-text search invalid cfi: ${result.cfi}")
+                activity?.let {
+                    Toast.makeText(it, "\u641c\u7d22\u7ed3\u679c\u5b9a\u4f4d\u5931\u8d25\uff1aCFI \u65e0\u6548", Toast.LENGTH_SHORT).show()
+                }
+                return
+            }
+            jumped = runCatching {
+                jumpToCfi(
+                    receiver = receiver,
+                    viewModel = viewModel,
+                    cfi = result.cfi,
+                    chapterIndex = result.chapterIndex.coerceAtLeast(0),
+                    title = result.chapterTitle,
+                    summary = result.snippet,
+                )
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX full-text search cfi jump failed: ${it.stackTraceToString()}")
+            }.getOrDefault(false)
+        }
+        if (!jumped) {
+            activity?.let {
+                Toast.makeText(it, "\u65e0\u6cd5\u7cbe\u786e\u5b9a\u4f4d\u5230\u8be5\u7ed3\u679c", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        if (jumped && activity != null && returnTarget != null) {
+            activeSearchNavigation = SearchNavigationState(
+                bookKey = lastSearchState?.bookKey ?: lastCatalogContext?.let(::bookKey).orEmpty(),
+                returnTarget = returnTarget,
+                currentIndex = resultIndex,
+            )
+            activity.runOnUiThread { ensureSearchNavigationBar(activity) }
+        }
+    }
+
+    private fun jumpToCfi(
+        receiver: Any?,
+        viewModel: Any?,
+        cfi: String,
+        chapterIndex: Int,
+        title: String,
+        summary: String,
+    ): Boolean {
+        val markJumped = runCatching {
+            val markClass = classLoader.loadClass(MARK_CLASS)
+            val mark = markClass.getDeclaredConstructor(
+                Long::class.javaPrimitiveType,
+                Long::class.javaPrimitiveType,
+                String::class.java,
+                Int::class.javaPrimitiveType,
+                String::class.java,
+                String::class.java,
+                String::class.java,
+                String::class.java,
+                Int::class.javaPrimitiveType,
+                String::class.java,
+                Int::class.javaPrimitiveType,
+                Long::class.javaPrimitiveType,
+                Long::class.javaPrimitiveType,
+            ).newInstance(
+                -System.currentTimeMillis(),
+                (callNoArg(lastCatalogContext?.book, "getId") as? Number)?.toLong() ?: 0L,
+                title,
+                0,
+                cfi,
+                cfi,
+                summary,
+                "",
+                1,
+                "red",
+                0,
+                System.currentTimeMillis(),
+                System.currentTimeMillis(),
+            )
+            val intentClass = classLoader.loadClass("$READER_UI_INTENT_CLASS\$MarkJump")
+            val intent = intentClass.getDeclaredConstructor(markClass).newInstance(mark)
+            dispatchReaderIntent(receiver, viewModel, intent, "MarkJump")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX full-text search mark jump failed: ${it.stackTraceToString()}")
+        }.getOrDefault(false)
+        if (markJumped) {
+            XposedBridge.log("$LOG_PREFIX full-text search mark jump dispatched cfi=$cfi")
+            return true
+        }
+
+        val bookmarkClass = classLoader.loadClass(BOOKMARK_CLASS)
+        val bookmark = bookmarkClass
+            .getDeclaredConstructor(
+                Int::class.javaPrimitiveType,
+                String::class.java,
+                String::class.java,
+                String::class.java,
+                String::class.java,
+                Int::class.javaPrimitiveType,
+            )
+            .newInstance(
+                chapterIndex,
+                title,
+                summary,
+                cfi,
+                "",
+                0,
+            )
+        val intentClass = classLoader.loadClass("$READER_UI_INTENT_CLASS\$BookmarkJump")
+        val intent = intentClass.getDeclaredConstructor(bookmarkClass).newInstance(bookmark)
+        return dispatchReaderIntent(receiver, viewModel, intent, "BookmarkJump").also {
+            XposedBridge.log("$LOG_PREFIX full-text search bookmark jump dispatched=$it cfi=$cfi")
+        }
+    }
+
+    private fun isValidEpubCfi(cfi: String): Boolean {
+        val looksValid = Regex("""^epubcfi\(/\d+/\d+/4(?:/\d+)*(?::\d+)?\)$""").matches(cfi)
+        return runCatching {
+            val epubCfiClass = classLoader.loadClass("org.epub.html.EpubCFI")
+            val companion = runCatching { epubCfiClass.getField("INSTANCE").get(null) }.getOrNull()
+                ?: runCatching { epubCfiClass.getField("Companion").get(null) }.getOrNull()
+                ?: return@runCatching looksValid
+            val create = companion.javaClass.methods.firstOrNull {
+                it.name == "create" && it.parameterTypes.size == 1 && it.parameterTypes[0] == String::class.java
+            } ?: return@runCatching looksValid
+            create.invoke(companion, cfi) != null
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX full-text search cfi validation failed: ${it.stackTraceToString()}")
+        }.getOrDefault(looksValid)
+    }
+
+    private fun currentReadingTarget(): ReadingTarget? {
+        val page = currentPageRef?.get() ?: return null
+        val cfi = callString(page, "getAnchor")
+            .ifBlank { callNoArg(page, "getStart")?.toString().orEmpty() }
+            .takeIf { it.isNotBlank() }
+            ?: return null
+        return ReadingTarget(
+            cfi = cfi,
+            chapterIndex = (callNoArg(page, "getChapterIndex") as? Int) ?: 0,
+            title = callString(callNoArg(page, "getChapter"), "getTitle").ifBlank { "\u539f\u6765\u8fdb\u5ea6" },
+            summary = callString(page, "getSummary"),
+        )
+    }
+
+    private fun returnToSearchOrigin() {
+        val navigation = activeSearchNavigation ?: return
+        if (!isSearchNavigationCurrent(navigation)) {
+            clearStaleSearchNavigation()
+            return
+        }
+        val target = navigation.returnTarget
+        val jumped = runCatching {
+            jumpToCfi(
+                receiver = lastCatalogContext?.intentReceiver,
+                viewModel = currentViewModelRef?.get(),
+                cfi = target.cfi,
+                chapterIndex = target.chapterIndex,
+                title = target.title,
+                summary = target.summary,
+            )
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX full-text search return failed: ${it.stackTraceToString()}")
+        }.getOrDefault(false)
+        activeSearchNavigation = null
+        activityProvider()?.let { activity ->
+            activity.runOnUiThread {
+                if (!jumped) Toast.makeText(activity, "\u8fd4\u56de\u8fdb\u5ea6\u5931\u8d25", Toast.LENGTH_SHORT).show()
+                removeSearchNavigationBar()
+            }
+        }
+    }
+
+    private fun jumpRelativeSearchResult(step: Int) {
+        val state = lastSearchState ?: return
+        val navigation = activeSearchNavigation ?: return
+        if (navigation.bookKey != state.bookKey) {
+            clearStaleSearchNavigation()
+            return
+        }
+        if (state.results.isEmpty()) return
+        val nextIndex = (navigation.currentIndex + step).coerceIn(0, state.results.lastIndex)
+        if (nextIndex == navigation.currentIndex) return
+        val result = state.results[nextIndex]
+        val cfi = result.cfi
+        if (cfi.isNullOrBlank()) {
+            activityProvider()?.let { activity ->
+                activity.runOnUiThread {
+                    Toast.makeText(activity, "\u65e0\u6cd5\u7cbe\u786e\u5b9a\u4f4d\u5230\u8be5\u7ed3\u679c", Toast.LENGTH_SHORT).show()
+                }
+            }
+            return
+        }
+        val receiver = result.intentReceiver ?: lastCatalogContext?.intentReceiver
+        val viewModel = currentViewModelRef?.get()
+        val jumped = runCatching {
+            jumpToCfi(receiver, viewModel, cfi, result.chapterIndex.coerceAtLeast(0), result.chapterTitle, result.snippet)
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX full-text search relative cfi jump failed: ${it.stackTraceToString()}")
+        }.getOrDefault(false)
+        if (jumped) {
+            activeSearchNavigation = navigation.copy(currentIndex = nextIndex)
+            activityProvider()?.let { activity ->
+                activity.runOnUiThread {
+                    ensureSearchNavigationBar(activity)
+                }
+            }
+        } else {
+            activityProvider()?.let { activity ->
+                activity.runOnUiThread {
+                    Toast.makeText(activity, "\u65e0\u6cd5\u7cbe\u786e\u5b9a\u4f4d\u5230\u8be5\u7ed3\u679c", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    private fun ensureSearchNavigationBar(activity: Activity) {
+        if (readerBottomMenuVisible) {
+            searchNavigationBarRef?.get()?.visibility = View.GONE
+            return
+        }
+        val decor = activity.window?.decorView as? ViewGroup ?: return
+        ensureSearchOverlayThemeCallbacks(activity)
+        val existing = searchNavigationBarRef?.get()
+        if (existing != null && searchNavigationBarActivityRef?.get() === activity && existing.parent === decor) {
+            applySearchNavigationBarTheme(existing, DialogColors(activity))
+            existing.visibility = View.VISIBLE
+            updateSearchNavigationBar(existing)
+            return
+        }
+        searchNavigationBarRef = null
+        searchNavigationBarActivityRef = null
+        decor.post {
+            if (readerBottomMenuVisible || activeSearchNavigation == null || lastSearchState == null) return@post
+            removeTaggedViews(decor, SEARCH_NAV_BAR_TAG)
+            removeTaggedViews(activity.findViewById(android.R.id.content), SEARCH_NAV_BAR_TAG)
+            val colors = DialogColors(activity)
+            val bar = LinearLayout(activity).apply {
+                tag = SEARCH_NAV_BAR_TAG
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+                setPadding(dp(activity, 6), dp(activity, 4), dp(activity, 6), dp(activity, 4))
+                addView(searchNavigationButton(activity, "\u4e0a\u4e00\u5904", colors).apply {
+                    tag = "prev"
+                    setOnClickListener { jumpRelativeSearchResult(-1) }
+                })
+                addView(searchNavigationButton(activity, "\u8fd4\u56de\u8fdb\u5ea6", colors).apply {
+                    tag = "return"
+                    setOnClickListener { returnToSearchOrigin() }
+                    setOnLongClickListener {
+                        activeSearchNavigation = null
+                        removeSearchNavigationBar()
+                        true
+                    }
+                })
+                addView(searchNavigationButton(activity, "\u4e0b\u4e00\u5904", colors).apply {
+                    tag = "next"
+                    setOnClickListener { jumpRelativeSearchResult(1) }
+                })
+                applySearchNavigationBarTheme(this, colors)
+            }
+            decor.addView(bar, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                bottomMargin = searchNavigationBottomMargin(activity)
+            })
+            searchNavigationBarRef = WeakReference(bar)
+            searchNavigationBarActivityRef = WeakReference(activity)
+            updateSearchNavigationBar(bar)
+        }
+    }
+
+    private fun updateSearchNavigationBarPosition() {
+        val bar = searchNavigationBarRef?.get() ?: return
+        if (readerBottomMenuVisible) {
+            bar.visibility = View.GONE
+            return
+        }
+        bar.visibility = View.VISIBLE
+        val context = searchNavigationBarActivityRef?.get() ?: bar.context
+        val params = bar.layoutParams as? FrameLayout.LayoutParams ?: return
+        val desiredMargin = searchNavigationBottomMargin(context)
+        if (params.bottomMargin != desiredMargin) {
+            params.bottomMargin = desiredMargin
+            bar.layoutParams = params
+        }
+        bar.bringToFront()
+    }
+
+    private fun searchNavigationBottomMargin(context: Context): Int =
+        dp(
+            context,
+            if (readerBottomMenuVisible) {
+                SEARCH_NAVIGATION_MENU_BOTTOM_MARGIN_DP
+            } else {
+                SEARCH_NAVIGATION_READER_BOTTOM_MARGIN_DP
+            },
+        )
+
+    private fun updateSearchNavigationBar(bar: View) {
+        val state = lastSearchState
+        val navigation = activeSearchNavigation
+        val navigationCurrent = state != null && navigation != null && navigation.bookKey == state.bookKey
+        val canPrev = navigationCurrent && navigation != null && navigation.currentIndex > 0
+        val canNext = navigationCurrent && navigation != null && state != null && navigation.currentIndex < state.results.lastIndex
+        fun update(tag: String, enabled: Boolean) {
+            val child = (bar as? ViewGroup)?.let { group ->
+                (0 until group.childCount).map { group.getChildAt(it) }.firstOrNull { it.tag == tag }
+            } ?: return
+            child.isEnabled = enabled
+            child.alpha = if (enabled) 1f else 0.42f
+        }
+        update("prev", canPrev)
+        update("next", canNext)
+    }
+
+    private fun isSearchNavigationCurrent(navigation: SearchNavigationState): Boolean =
+        lastSearchState?.bookKey == navigation.bookKey
+
+    private fun clearStaleSearchNavigation() {
+        activeSearchNavigation = null
+        activityProvider()?.runOnUiThread { removeSearchNavigationBar() }
+    }
+
+    private fun applySearchNavigationBarTheme(bar: View, colors: DialogColors) {
+        val context = bar.context
+        bar.background = GradientDrawable().apply {
+            setColor(colors.searchChipBackground)
+            cornerRadius = dp(context, 20).toFloat()
+            setStroke(dp(context, 1), colors.stroke)
+        }
+        val group = bar as? ViewGroup ?: return
+        for (index in 0 until group.childCount) {
+            (group.getChildAt(index) as? TextView)?.let { applySearchNavigationButtonTheme(it, colors) }
+        }
+    }
+
+    private fun applySearchNavigationButtonTheme(button: TextView, colors: DialogColors) {
+        val context = button.context
+        button.setTextColor(colors.primaryText)
+        button.background = GradientDrawable().apply {
+            setColor(colors.cardBackground)
+            cornerRadius = dp(context, 15).toFloat()
+            setStroke(dp(context, 1), colors.stroke)
+        }
+    }
+
+    private fun searchNavigationButton(activity: Activity, label: String, colors: DialogColors): TextView =
+        TextView(activity).apply {
+            text = label
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            minWidth = 0
+            minHeight = 0
+            setPadding(dp(activity, 10), 0, dp(activity, 10), 0)
+            applySearchNavigationButtonTheme(this, colors)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(activity, 30),
+            ).apply {
+                leftMargin = dp(activity, 3)
+                rightMargin = dp(activity, 3)
+            }
+        }
+
+    private fun removeSearchNavigationBar() {
+        val activity = searchNavigationBarActivityRef?.get() ?: activityProvider()
+        searchNavigationBarRef = null
+        searchNavigationBarActivityRef = null
+        postRemoveTaggedViews(activity, SEARCH_NAV_BAR_TAG)
+        maybeUnregisterSearchOverlayThemeCallbacks()
+    }
+
+    private fun removeTaggedViews(root: ViewGroup?, tagValue: Int) {
+        if (root == null) return
+        for (index in root.childCount - 1 downTo 0) {
+            val child = root.getChildAt(index) ?: continue
+            if (child.tag == tagValue) {
+                root.removeViewAt(index)
+            } else {
+                removeTaggedViews(child as? ViewGroup, tagValue)
+            }
+        }
+    }
+
+    private fun dispatchReaderIntent(receiver: Any?, viewModel: Any?, intent: Any, label: String): Boolean {
+        val targetViewModel = viewModel
+        if (targetViewModel != null) {
+            val viewModelIntent = targetViewModel.javaClass.methods.firstOrNull {
+                it.name == "intent" && it.parameterTypes.size == 1
+            }
+            if (viewModelIntent != null) {
+                viewModelIntent.invoke(targetViewModel, intent)
+                XposedBridge.log("$LOG_PREFIX full-text search $label sent to ReaderViewModel")
+                return true
+            }
+        }
+        if (receiver != null) {
+            val receiverIntent = receiver.javaClass.methods.firstOrNull {
+                it.name == "intent" && it.parameterTypes.size == 1
+            }
+            if (receiverIntent != null) {
+                receiverIntent.invoke(receiver, intent)
+                XposedBridge.log("$LOG_PREFIX full-text search $label sent to receiver")
+                return true
+            }
+        }
+        XposedBridge.log(
+            "$LOG_PREFIX full-text search $label dispatch failed: " +
+                "viewModel=${targetViewModel?.javaClass?.name.orEmpty()} receiver=${receiver?.javaClass?.name.orEmpty()}",
+        )
+        return false
+    }
+
+    private fun ensureSearchIndexAsync(context: CatalogContext) {
+        val key = bookKey(context)
+        if (key.isBlank()) return
+        if (searchIndexState?.bookKey == key || searchIndexBuildingKey == key) return
+        val generation = searchStateGeneration
+        searchIndexBuildingKey = key
+        Thread {
+            val state = runCatching { SearchIndexState(key, buildSearchDocuments(context)) }
+                .onFailure { XposedBridge.log("$LOG_PREFIX full-text index build failed: ${it.stackTraceToString()}") }
+                .getOrNull()
+            if (generation == searchStateGeneration && bookKey(context) == key) {
+                if (state != null) searchIndexState = state
+            }
+            if (generation == searchStateGeneration && searchIndexBuildingKey == key) searchIndexBuildingKey = null
+        }.apply {
+            name = "ReaMicroFullTextIndex"
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun searchFullTextStreaming(
+        keyword: String,
+        context: CatalogContext,
+        onUpdate: (List<FullTextSearchResult>, Boolean) -> Unit,
+    ) {
+        val key = bookKey(context)
+        val needle = keyword.lowercase(Locale.ROOT)
+        val generation = searchStateGeneration
+        val results = ArrayList<FullTextSearchResult>()
+        var lastEmitSize = 0
+        var lastEmitAt = 0L
+
+        fun emit(done: Boolean, force: Boolean = false) {
+            if (generation != searchStateGeneration) return
+            val now = System.currentTimeMillis()
+            if (!force && !done && results.size == lastEmitSize) return
+            if (!force && !done && results.size - lastEmitSize < SEARCH_EMIT_BATCH && now - lastEmitAt < SEARCH_EMIT_INTERVAL_MS) {
+                return
+            }
+            lastEmitSize = results.size
+            lastEmitAt = now
+            onUpdate(results.toList(), done)
+        }
+
+        val cachedDocuments = searchIndexState?.takeIf { it.bookKey == key }?.documents
+        if (cachedDocuments != null) {
+            for (document in cachedDocuments) {
+                if (generation != searchStateGeneration) return
+                if (results.size >= MAX_SEARCH_RESULTS) break
+                appendSearchMatches(document, needle, keyword, context, results)
+                emit(done = false)
+            }
+            emit(done = true, force = true)
+            return
+        }
+
+        val documents = ArrayList<SearchDocument>()
+        forEachSearchDocument(context) { document ->
+            if (generation != searchStateGeneration) return@forEachSearchDocument false
+            if (results.size < MAX_SEARCH_RESULTS) {
+                appendSearchMatches(document, needle, keyword, context, results)
+                emit(done = false)
+            }
+            documents.add(document)
+            results.size < MAX_SEARCH_RESULTS
+        }
+        if (generation == searchStateGeneration && bookKey(context) == key) {
+            searchIndexState = SearchIndexState(key, documents)
+        }
+        emit(done = true, force = true)
+    }
+
+    private fun appendSearchMatches(
+        document: SearchDocument,
+        needle: String,
+        keyword: String,
+        context: CatalogContext,
+        results: ArrayList<FullTextSearchResult>,
+    ) {
+        var from = 0
+        var countInFile = 0
+        while (results.size < MAX_SEARCH_RESULTS && countInFile < MAX_MATCHES_PER_FILE) {
+            val index = document.lowerText.indexOf(needle, from)
+            if (index < 0) break
+            val snippet = snippetFor(document.text, index, index + keyword.length)
+            val cfi = document.indexedText.cfiAt(index)
+            results.add(
+                FullTextSearchResult(
+                    chapterIndex = document.chapterIndex,
+                    chapter = document.chapter,
+                    chapterTitle = document.chapterTitle,
+                    intentReceiver = context.intentReceiver,
+                    cfi = cfi,
+                    file = document.file,
+                    snippet = snippet.text,
+                    snippetMatchStart = snippet.matchStart,
+                    snippetMatchEnd = snippet.matchEnd,
+                ),
+            )
+            XposedBridge.log(
+                "$LOG_PREFIX full-text search hit chapter=${document.chapterTitle} " +
+                    "file=${document.file.name} index=$index cfi=${cfi.orEmpty()} snippet=${snippet.text.take(60)}",
+            )
+            countInFile++
+            from = index + needle.length.coerceAtLeast(1)
+        }
+    }
+
+    private fun buildSearchDocuments(context: CatalogContext): List<SearchDocument> {
+        val documents = ArrayList<SearchDocument>()
+        forEachSearchDocument(context) { document ->
+            documents.add(document)
+            true
+        }
+        return documents
+    }
+
+    private fun forEachSearchDocument(context: CatalogContext, onDocument: (SearchDocument) -> Boolean) {
+        val epub = currentEpubRef?.get()
+        val root = currentEpubRoot() ?: return
+        val chaptersByHref = context.catalog
+            .mapIndexedNotNull { index, chapter ->
+                val href = callString(chapter, "getHref").substringBefore('#').trim()
+                if (href.isBlank()) null else normalizePath(href) to IndexedChapter(index, chapter)
+            }
+            .groupBy({ it.first }, { it.second })
+        val chaptersByFile = context.catalog
+            .mapIndexedNotNull { index, chapter ->
+                val file = searchFileForHref(root, callString(chapter, "getHref")) ?: return@mapIndexedNotNull null
+                file.absolutePath to IndexedChapter(index, chapter)
+            }
+            .groupBy({ it.first }, { it.second })
+        val itemRefs = (epub?.let { callNoArg(it, "getItemRefs") } as? Iterable<*>)?.filterNotNull().orEmpty()
+        val spineCfiIndex = (epub?.let { callNoArg(it, "getSpineCfiIndex") } as? Int) ?: -1
+        val files = catalogTextFiles(root, context.catalog, itemRefs)
+        for (file in files) {
+            val raw = runCatching { file.readText(StandardCharsets.UTF_8) }.getOrNull() ?: continue
+            val chapter = chapterForFile(root, file, chaptersByHref, chaptersByFile)
+            val cfiBase = cfiBaseForFile(root, file, itemRefs, spineCfiIndex, chapter?.chapter)
+            val indexedText = indexedSearchText(raw, cfiBase)
+            val text = indexedText.text.ifBlank { htmlToSearchText(raw) }
+            if (text.isBlank()) continue
+            val document =
+                SearchDocument(
+                    file = file,
+                    chapterIndex = chapter?.index ?: -1,
+                    chapter = chapter?.chapter,
+                    chapterTitle = searchChapterTitle(raw, chapter?.chapter, file),
+                    text = text,
+                    lowerText = text.lowercase(Locale.ROOT),
+                    indexedText = indexedText,
+                )
+            if (!onDocument(document)) return
+        }
+    }
+
+    private fun currentEpubRoot(): File? =
+        currentEpubRef?.get()
+            ?.let(::epubDirectory)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { File(it) }
+            ?.takeIf { it.isDirectory }
+
+    private fun epubDirectory(epub: Any?): String =
+        callNoArg(epub, "getDirectory")?.toString().orEmpty()
+
+    private fun catalogTextFiles(root: File, catalog: List<Any>, itemRefs: List<Any>): List<File> {
+        val fromSpine = itemRefs
+            .mapIndexedNotNull { position, item ->
+                val file = searchFileForHref(root, callString(item, "getHref")) ?: return@mapIndexedNotNull null
+                val index = (callNoArg(item, "getIndex") as? Number)?.toInt() ?: position
+                index to file
+            }
+            .sortedBy { it.first }
+            .map { it.second }
+            .distinctBy { it.absolutePath }
+        if (fromSpine.isNotEmpty()) return fromSpine
+
+        val fromCatalog = catalog
+            .mapNotNull { searchFileForHref(root, callString(it, "getHref")) }
+            .distinctBy { it.absolutePath }
+        if (fromCatalog.isNotEmpty()) return fromCatalog
+        return root.walkTopDown()
+            .filter { it.isFile && it.isTextContentFile() }
+            .map { it.canonicalFileSafe() ?: it }
+            .sortedBy { it.absolutePath }
+            .toList()
+    }
+
+    private fun searchFileForHref(root: File, href: String): File? {
+        val normalized = normalizePath(href.substringBefore('#'))
+        if (normalized.isBlank()) return null
+        val candidates = buildList {
+            add(File(root, normalized))
+            if ('/' in normalized) add(File(root, normalized.substringAfter('/')))
+            if ('/' in normalized) add(File(root, normalized.substringAfterLast('/')))
+        }
+        return candidates.firstNotNullOfOrNull { candidate ->
+            candidate.canonicalFileSafe()?.takeIf { it.isFile && it.isTextContentFile() }
+        }
+    }
+
+    private fun searchChapterTitle(raw: String, chapter: Any?, file: File): String {
+        val catalogTitle = chapter?.let(::catalogChapterTitle).orEmpty().normalizeChapterTitle()
+        val fileTitle = fileChapterTitleHint(raw)
+        return chooseChapterTitle(catalogTitle, fileTitle).ifBlank { file.nameWithoutExtension }
+    }
+
+    private fun fileChapterTitleHint(raw: String): String {
+        val headTitle = Regex("""(?is)<title\b[^>]*>(.*?)</title>""")
+            .find(raw)?.groupValues?.getOrNull(1)
+            ?.normalizeChapterTitle()
+            .orEmpty()
+        if (headTitle.isNotBlank()) return headTitle
+        return Regex("""(?is)<h[1-3]\b[^>]*>(.*?)</h[1-3]>""")
+            .find(raw)?.groupValues?.getOrNull(1)
+            ?.normalizeChapterTitle()
+            .orEmpty()
+    }
+
+    private fun chooseChapterTitle(catalogTitle: String, fileTitle: String): String {
+        if (fileTitle.isBlank()) return catalogTitle
+        if (catalogTitle.isBlank()) return fileTitle
+        if (fileTitle == catalogTitle) return catalogTitle
+        if (isBareChapterLabel(catalogTitle) && !isBareChapterLabel(fileTitle)) return fileTitle
+        if (fileTitle.length > catalogTitle.length && fileTitle.contains(catalogTitle)) return fileTitle
+        return catalogTitle
+    }
+
+    private fun String.normalizeChapterTitle(): String =
+        replace(Regex("<[^>]+>"), " ")
+            .decodeBasicHtmlEntities()
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+    private fun isBareChapterLabel(value: String): Boolean {
+        if (value.isBlank()) return false
+        val compact = value.replace(Regex("\\s+"), "")
+        return Regex("""^第[0-9一二三四五六七八九十百千万〇零两]+[章节卷回集部篇]$""").matches(compact) ||
+            compact in setOf("番外", "序章", "楔子", "后记", "尾声", "前言")
+    }
+
+    private fun catalogChapterTitle(chapter: Any): String {
+        listOf("getTitle", "getName", "getLabel", "getText", "getChapterName").forEach { method ->
+            callString(chapter, method).takeIf { it.isNotBlank() }?.let { return it }
+        }
+        listOf("title", "name", "label", "text", "chapterName").forEach { fieldName ->
+            runCatching {
+                chapter.javaClass.declaredFields.firstOrNull { it.name == fieldName }?.let { field ->
+                    field.isAccessible = true
+                    field.get(chapter)?.toString()?.takeIf { it.isNotBlank() }
+                }
+            }.getOrNull()?.let { return it }
+        }
+        val value = chapter.toString()
+        Regex("""(?:title|name|label|text|chapterName)=([^,\)]+)""")
+            .find(value)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
+        return ""
+    }
+
+    private fun cfiBaseForFile(
+        root: File,
+        file: File,
+        itemRefs: List<Any>,
+        spineCfiIndex: Int,
+        chapter: Any?,
+    ): CfiBase? {
+        cfiBaseFromChapter(chapter)?.let { return it }
+        if (spineCfiIndex < 0) return null
+        val relative = normalizePath(relativePath(root, file))
+        val itemRef = itemRefs.firstOrNull { item ->
+            val href = normalizePath(callString(item, "getHref").substringBefore('#'))
+            href.isNotBlank() && (relative == href || relative.endsWith("/$href") || href.endsWith("/$relative"))
+        } ?: return null
+        val itemRefIndex = (callNoArg(itemRef, "getIndex") as? Number)?.toInt() ?: return null
+        return CfiBase(spineCfiIndex, itemRefIndex)
+    }
+
+    private fun cfiBaseFromChapter(chapter: Any?): CfiBase? {
+        val cfi = callNoArg(chapter, "getCfi")?.toString().orEmpty()
+        val match = Regex("""epubcfi\(/(\d+)/(\d+)""").find(cfi) ?: return null
+        val spineIndex = match.groupValues.getOrNull(1)?.toIntOrNull() ?: return null
+        val itemRefIndex = match.groupValues.getOrNull(2)?.toIntOrNull() ?: return null
+        return CfiBase(spineIndex, itemRefIndex)
+    }
+
+    private fun indexedSearchText(raw: String, cfiBase: CfiBase?): IndexedSearchText {
+        if (cfiBase == null) return IndexedSearchText("", emptyList())
+        return runCatching {
+            val parser = Xml.newPullParser()
+            parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
+            parser.setInput(StringReader(searchBodyXml(raw)))
+            val builder = StringBuilder()
+            val spans = ArrayList<TextSpan>()
+            val frames = ArrayList<ElementFrame>()
+            var inBody = false
+            var skipDepth = 0
+
+            fun appendSeparator() {
+                if (builder.isNotEmpty() && builder.last() != '\n') builder.append('\n')
+            }
+
+            fun nextElementStep(): Int {
+                val parent = frames.lastOrNull() ?: return 1
+                parent.elementChildCount += 1
+                return parent.elementChildCount * 2
+            }
+
+            fun nextTextStep(): Int {
+                val parent = frames.lastOrNull() ?: return 1
+                parent.textChildCount += 1
+                return parent.textChildCount * 2 - 1
+            }
+
+            fun currentPath(): List<Int> =
+                frames.lastOrNull()?.path.orEmpty()
+
+            fun currentBlock(): BlockState? =
+                frames.asReversed().firstNotNullOfOrNull { it.block }
+
+            var event = parser.eventType
+            while (event != XmlPullParser.END_DOCUMENT) {
+                when (event) {
+                    XmlPullParser.START_TAG -> {
+                        val name = parser.name?.lowercase(Locale.ROOT).orEmpty()
+                        if (skipDepth > 0) {
+                            skipDepth++
+                        } else if (name in SKIPPED_SEARCH_TAGS) {
+                            if (inBody) nextElementStep()
+                            skipDepth = 1
+                        } else if (name == "body") {
+                            frames.add(ElementFrame(name = name, step = 4, path = emptyList()))
+                            inBody = true
+                        } else if (inBody) {
+                            val step = nextElementStep()
+                            val path = currentPath() + step
+                            val block = if (name in BLOCK_SEARCH_TAGS) BlockState(path) else null
+                            if (name in BLOCK_SEARCH_TAGS) {
+                                appendSeparator()
+                            }
+                            frames.add(ElementFrame(name = name, step = step, path = path, block = block))
+                            if (name == "br") {
+                                currentBlock()?.let { blockState ->
+                                    if (builder.isNotEmpty() && builder.last() != '\n') {
+                                        builder.append('\n')
+                                    }
+                                    blockState.offset += 1
+                                }
+                            }
+                        }
+                    }
+
+                    XmlPullParser.TEXT, XmlPullParser.CDSECT -> {
+                        if (skipDepth == 0 && inBody) {
+                            val rawText = parser.text.orEmpty()
+                            val normalized = normalizeSearchNodeText(rawText)
+                            if (normalized.text.isNotEmpty()) {
+                                val textStep = nextTextStep()
+                                val start = builder.length
+                                builder.append(normalized.text)
+                                val end = builder.length
+                                spans.add(
+                                    TextSpan(
+                                        start = start,
+                                        end = end,
+                                        base = cfiBase,
+                                        elementSteps = currentPath(),
+                                        textStep = textStep,
+                                        textOffset = normalized.leadingTrim,
+                                    ),
+                                )
+                            }
+                        }
+                    }
+
+                    XmlPullParser.COMMENT -> {
+                        // Comments are not addressable text content for generated CFI targets.
+                    }
+
+                    XmlPullParser.END_TAG -> {
+                        if (skipDepth > 0) {
+                            skipDepth--
+                        } else {
+                            val name = parser.name?.lowercase(Locale.ROOT).orEmpty()
+                            if (name == "body") {
+                                while (frames.isNotEmpty()) frames.removeAt(frames.lastIndex)
+                                inBody = false
+                            } else if (inBody && frames.isNotEmpty()) {
+                                val frame = frames.removeAt(frames.lastIndex)
+                                if (frame.name in BLOCK_SEARCH_TAGS) appendSeparator()
+                            }
+                        }
+                    }
+                }
+                event = parser.next()
+            }
+            IndexedSearchText(builder.toString().trimEnd(), spans).also {
+                XposedBridge.log(
+                    "$LOG_PREFIX full-text cfi index ok chars=${it.text.length} spans=${it.spans.size}",
+                )
+            }
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX full-text cfi index failed: ${it.message}")
+        }.getOrDefault(IndexedSearchText("", emptyList()))
+    }
+
+    private fun searchBodyXml(raw: String): String =
+        "<body>${sanitizeXmlForSearch(bodyOnlyHtml(raw)).normalizeSearchVoidTags()}</body>"
+
+    private fun sanitizeXmlForSearch(raw: String): String =
+        raw
+            .replace(Regex("<!DOCTYPE[\\s\\S]*?>", RegexOption.IGNORE_CASE), "")
+            .replace("&nbsp;", " ")
+            .replace("&copy;", "(c)")
+            .replace("&mdash;", "-")
+            .replace("&ndash;", "-")
+            .replace(Regex("&(?!amp;|lt;|gt;|quot;|apos;|#\\d+;|#x[0-9a-fA-F]+;)"), "&amp;")
+
+    private fun String.normalizeSearchVoidTags(): String {
+        var value = this
+        for (tag in SEARCH_VOID_TAGS) {
+            value = value.replace(Regex("<$tag\\b([^>]*)>", RegexOption.IGNORE_CASE)) { match ->
+                val raw = match.value
+                if (raw.endsWith("/>")) raw else "<$tag${match.groupValues.getOrNull(1).orEmpty()}/>"
+            }
+        }
+        return value
+    }
+
+    private fun normalizeSearchNodeText(value: String): NormalizedNodeText {
+        val start = value.indexOfFirst { it != ' ' && it != '\n' && it != '\r' && it != '\t' }
+        if (start < 0) return NormalizedNodeText("", 0)
+        val end = value.indexOfLast { it != ' ' && it != '\n' && it != '\r' && it != '\t' }
+        return NormalizedNodeText(value.substring(start, end + 1), start)
+    }
+
+    private fun chapterForFile(
+        root: File,
+        file: File,
+        chaptersByHref: Map<String, List<IndexedChapter>>,
+        chaptersByFile: Map<String, List<IndexedChapter>>,
+    ): IndexedChapter? {
+        val relative = normalizePath(relativePath(root, file))
+        val canonicalPath = (file.canonicalFileSafe() ?: file).absolutePath
+        return chaptersByFile[canonicalPath]?.firstOrNull()
+            ?: chaptersByHref[relative]?.firstOrNull()
+            ?: chaptersByHref.entries.firstOrNull { (href, _) -> sameSearchContentPath(relative, href) }?.value?.firstOrNull()
+    }
+
+    private fun sameSearchContentPath(relative: String, href: String): Boolean {
+        val left = normalizePath(relative)
+        val right = normalizePath(href)
+        if (left.isBlank() || right.isBlank()) return false
+        return left == right ||
+            left.endsWith("/$right") ||
+            right.endsWith("/$left") ||
+            left.substringAfterLast('/') == right.substringAfterLast('/')
+    }
+
+    private fun snippetFor(text: String, start: Int, end: Int): SearchSnippet {
+        val compactRadius = if (text.any { it.code > 127 }) SEARCH_CJK_SNIPPET_RADIUS else SEARCH_SNIPPET_RADIUS
+        val from = (start - compactRadius).coerceAtLeast(0)
+        val to = (end + compactRadius).coerceAtMost(text.length)
+        val prefix = if (from > 0) "\u2026" else ""
+        val suffix = if (to < text.length) "\u2026" else ""
+        val body = text.substring(from, to).replace(Regex("\\s+"), " ").trim()
+        val leadingTrim = text.substring(from, start).length -
+            text.substring(from, start).replace(Regex("^\\s+"), "").length
+        val matchStart = prefix.length + (start - from - leadingTrim).coerceAtLeast(0)
+        val matchEnd = (matchStart + (end - start)).coerceAtMost(prefix.length + body.length)
+        return SearchSnippet(prefix + body + suffix, matchStart, matchEnd)
+    }
+
+    private fun htmlToSearchText(value: String): String =
+        bodyOnlyHtml(value)
+            .replace(Regex("<script[\\s\\S]*?</script>", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("<style[\\s\\S]*?</style>", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), "\n")
+            .replace(Regex("</(p|div|h[1-6]|li|section|article)>", RegexOption.IGNORE_CASE), "\n")
+            .replace(Regex("<[^>]+>"), " ")
+            .decodeBasicHtmlEntities()
+            .replace(Regex("[ \\t\\x0B\\f\\r]+"), " ")
+            .replace(Regex("\\n\\s+"), "\n")
+            .replace(Regex("\\n{3,}"), "\n\n")
+            .trim()
+
+    private fun bodyOnlyHtml(value: String): String =
+        Regex("<body\\b[^>]*>([\\s\\S]*?)</body>", RegexOption.IGNORE_CASE)
+            .find(value)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?: value
+                .replace(Regex("<head\\b[\\s\\S]*?</head>", RegexOption.IGNORE_CASE), " ")
+                .replace(Regex("<title\\b[\\s\\S]*?</title>", RegexOption.IGNORE_CASE), " ")
+
+    private fun String.decodeBasicHtmlEntities(): String =
+        replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+
+    private fun relativePath(root: File, file: File): String {
+        val rootPath = (root.canonicalFileSafe() ?: root).absolutePath.trimEnd(File.separatorChar)
+        val filePath = (file.canonicalFileSafe() ?: file).absolutePath
+        return filePath.removePrefix(rootPath).trimStart(File.separatorChar)
+    }
+
+    private fun normalizePath(value: String): String =
+        value.replace('\\', '/').trimStart('/')
+
+    private fun bookTitle(context: CatalogContext): String =
+        callString(context.book, "getTitle")
+
+    private fun isDifferentSearchBook(previous: CatalogContext, next: CatalogContext): Boolean {
+        val previousKey = searchBookIdentity(previous)
+        val nextKey = searchBookIdentity(next)
+        return previousKey.isNotBlank() && nextKey.isNotBlank() && previousKey != nextKey
+    }
+
+    private fun searchBookIdentity(context: CatalogContext): String =
+        listOf(
+            callString(context.book, "getId"),
+            callString(context.book, "getBookId"),
+            bookTitle(context),
+        ).firstOrNull { it.isNotBlank() }.orEmpty()
+
+    private fun bookKey(context: CatalogContext): String =
+        listOf(
+            currentEpubRoot()?.absolutePath.orEmpty(),
+            callString(context.book, "getId"),
+            callString(context.book, "getBookId"),
+            bookTitle(context),
+        ).filter { it.isNotBlank() }.joinToString(separator = "|")
 
     private fun showSelectionEditDialog(activity: Activity, text: String, onSave: (String) -> Unit) {
         val colors = DialogColors(activity)
@@ -315,7 +2097,7 @@ class ReaderHook(
             )
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
-        focusThoughtStyleEditor(activity, editor)
+        focusEditorAndShowKeyboard(activity, editor)
     }
 
     private fun createThoughtStyleEditor(
@@ -361,7 +2143,7 @@ class ReaderHook(
             minHeight = dp(32)
         }
 
-    private fun focusThoughtStyleEditor(activity: Activity, editor: EditText) {
+    private fun focusEditorAndShowKeyboard(activity: Activity, editor: EditText) {
         editor.requestFocus()
         editor.postDelayed(
             {
@@ -371,6 +2153,14 @@ class ReaderHook(
             },
             120L,
         )
+    }
+
+    private fun hideKeyboard(view: View) {
+        runCatching {
+            (view.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+                ?.hideSoftInputFromWindow(view.windowToken, 0)
+            view.clearFocus()
+        }
     }
 
     private fun writeSelectionTextBack(oldText: String, newText: String): Boolean {
@@ -442,22 +2232,210 @@ class ReaderHook(
 
     private companion object {
         const val READER_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.reader.ReaderViewModel"
+        const val READER_UI_INTENT_CLASS = "app.zhendong.reamicro.ui.reader.ReaderUiIntent"
+        const val READER_CATALOG_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderCatalogKt"
+        const val READER_BOTTOM_BAR_CLASS = "app.zhendong.reamicro.ui.reader.components.ReaderBottomBarKt"
+        const val HOME_SCREEN_CLASS = "app.zhendong.reamicro.ui.home.HomeScreenKt"
+        const val BOOKSHELF_SCREEN_CLASS = "app.zhendong.reamicro.ui.home.BookshelfScreenKt"
+        const val BOOKMARK_CLASS = "app.zhendong.reamicro.data.reader.Bookmark"
+        const val MARK_CLASS = "app.zhendong.reamicro.data.db.entity.Mark"
         const val EDIT_ICON_CLASS = "androidx.compose.material.icons.outlined.EditKt"
         const val ICONS_OUTLINED_CLASS = "androidx.compose.material.icons.Icons\$Outlined"
         const val LOG_PREFIX = "ReaMicro LSP"
+        const val MAX_SEARCH_RESULTS = 2000
+        const val MAX_MATCHES_PER_FILE = 200
+        const val SEARCH_SNIPPET_RADIUS = 16
+        const val SEARCH_CJK_SNIPPET_RADIUS = 7
+        const val SEARCH_EMIT_BATCH = 8
+        const val SEARCH_EMIT_INTERVAL_MS = 220L
+        const val SEARCH_NAV_BAR_TAG = 0x524d5331
+        const val SEARCH_MENU_BUTTON_TAG = 0x524d5333
+        const val SEARCH_MENU_BUTTON_SIZE_DP = 44
+        const val SEARCH_MENU_BUTTON_RIGHT_MARGIN_DP = 28
+        const val SEARCH_MENU_BUTTON_BOTTOM_MARGIN_DP = 166
+        const val SEARCH_NAVIGATION_READER_BOTTOM_MARGIN_DP = 8
+        const val SEARCH_NAVIGATION_MENU_BOTTOM_MARGIN_DP = 190
+        val BLOCK_SEARCH_TAGS = setOf(
+            "p", "div", "section", "article", "li", "blockquote", "pre",
+            "h1", "h2", "h3", "h4", "h5", "h6",
+        )
+        val SKIPPED_SEARCH_TAGS = setOf("head", "script", "style", "title", "svg", "math")
+        val SEARCH_VOID_TAGS = setOf(
+            "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr",
+        )
+    }
+
+    private data class CatalogContext(
+        val intentReceiver: Any?,
+        val book: Any?,
+        val catalog: List<Any>,
+    )
+
+    private data class SearchState(
+        val bookKey: String,
+        val keyword: String,
+        val results: List<FullTextSearchResult>,
+    )
+
+    private data class SearchIndexState(
+        val bookKey: String,
+        val documents: List<SearchDocument>,
+    )
+
+    private data class SearchDocument(
+        val file: File,
+        val chapterIndex: Int,
+        val chapter: Any?,
+        val chapterTitle: String,
+        val text: String,
+        val lowerText: String,
+        val indexedText: IndexedSearchText,
+    )
+
+    private data class ReadingTarget(
+        val cfi: String,
+        val chapterIndex: Int,
+        val title: String,
+        val summary: String,
+    )
+
+    private data class SearchNavigationState(
+        val bookKey: String,
+        val returnTarget: ReadingTarget,
+        val currentIndex: Int,
+    )
+
+    private data class IndexedChapter(
+        val index: Int,
+        val chapter: Any,
+    )
+
+    private data class SearchSnippet(
+        val text: String,
+        val matchStart: Int,
+        val matchEnd: Int,
+    )
+
+    private data class NormalizedNodeText(
+        val text: String,
+        val leadingTrim: Int,
+    )
+
+    private data class CfiBase(
+        val spineIndex: Int,
+        val itemRefIndex: Int,
+    )
+
+    private data class BlockState(
+        val path: List<Int>,
+        var offset: Int = 0,
+    )
+
+    private data class ElementFrame(
+        val name: String,
+        val step: Int,
+        val path: List<Int>,
+        var elementChildCount: Int = 0,
+        var textChildCount: Int = 0,
+        val block: BlockState? = null,
+    )
+
+    private data class TextSpan(
+        val start: Int,
+        val end: Int,
+        val base: CfiBase,
+        val elementSteps: List<Int>,
+        val textStep: Int,
+        val textOffset: Int,
+    )
+
+    private data class IndexedSearchText(
+        val text: String,
+        val spans: List<TextSpan>,
+    ) {
+        fun cfiAt(index: Int): String? {
+            val span = spans.firstOrNull { index >= it.start && index < it.end } ?: return null
+            val elementPath = span.elementSteps.joinToString(separator = "") { "/$it" }
+            val offset = (span.textOffset + index - span.start).coerceAtLeast(0)
+            return "epubcfi(/${span.base.spineIndex}/${span.base.itemRefIndex}/4$elementPath/${span.textStep}:$offset)"
+        }
+    }
+
+    private data class FullTextSearchResult(
+        val chapterIndex: Int,
+        val chapter: Any?,
+        val chapterTitle: String,
+        val intentReceiver: Any?,
+        val cfi: String?,
+        val file: File,
+        val snippet: String,
+        val snippetMatchStart: Int,
+        val snippetMatchEnd: Int,
+    )
+
+    private class SearchMenuButtonView(context: Context) : View(context) {
+        private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+        }
+        private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = dp(context, 1).toFloat()
+        }
+        private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = dp(context, 3).toFloat()
+            strokeCap = Paint.Cap.ROUND
+        }
+
+        init {
+            refreshColors()
+        }
+
+        fun refreshColors() {
+            val colors = DialogColors(context)
+            fillPaint.color = colors.cardBackground
+            strokePaint.color = colors.stroke
+            iconPaint.color = colors.actionBackground
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val cx = width / 2f
+            val cy = height / 2f
+            val radius = (minOf(width, height) / 2f) - dp(context, 1)
+            canvas.drawCircle(cx, cy, radius, fillPaint)
+            canvas.drawCircle(cx, cy, radius, strokePaint)
+            val lensRadius = dp(context, 7).toFloat()
+            val lensCx = cx - dp(context, 3)
+            val lensCy = cy - dp(context, 3)
+            canvas.drawCircle(lensCx, lensCy, lensRadius, iconPaint)
+            canvas.drawLine(
+                lensCx + lensRadius * 0.72f,
+                lensCy + lensRadius * 0.72f,
+                lensCx + lensRadius * 1.55f,
+                lensCy + lensRadius * 1.55f,
+                iconPaint,
+            )
+        }
     }
 
     private class DialogColors(context: Context) {
-        private val night = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+        val dark: Boolean = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
             Configuration.UI_MODE_NIGHT_YES
-        val cardBackground: Int = if (night) Color.rgb(38, 38, 38) else Color.WHITE
-        val inputBackground: Int = if (night) Color.rgb(44, 44, 44) else Color.WHITE
-        val primaryText: Int = if (night) Color.rgb(238, 238, 238) else Color.rgb(25, 25, 25)
-        val secondaryText: Int = if (night) Color.rgb(170, 170, 170) else Color.rgb(118, 118, 118)
-        val stroke: Int = if (night) Color.rgb(68, 68, 68) else Color.rgb(228, 228, 228)
-        val inputStroke: Int = if (night) Color.rgb(236, 162, 100) else Color.rgb(238, 118, 62)
-        val actionBackground: Int = if (night) Color.rgb(180, 112, 64) else Color.rgb(238, 118, 62)
+        val pageBackground: Int = if (dark) Color.rgb(17, 19, 24) else Color.WHITE
+        val cardBackground: Int = if (dark) Color.rgb(38, 38, 38) else Color.WHITE
+        val inputBackground: Int = if (dark) Color.rgb(44, 44, 44) else Color.WHITE
+        val primaryText: Int = if (dark) Color.rgb(238, 238, 238) else Color.rgb(25, 25, 25)
+        val secondaryText: Int = if (dark) Color.rgb(170, 170, 170) else Color.rgb(118, 118, 118)
+        val stroke: Int = if (dark) Color.rgb(68, 68, 68) else Color.rgb(228, 228, 228)
+        val searchChipBackground: Int = if (dark) Color.rgb(42, 42, 42) else Color.rgb(246, 246, 248)
+        val inputStroke: Int = if (dark) Color.rgb(236, 162, 100) else Color.rgb(238, 118, 62)
+        val actionBackground: Int = if (dark) Color.rgb(180, 112, 64) else Color.rgb(238, 118, 62)
         val actionText: Int = Color.WHITE
-        val accent: Int = if (night) Color.rgb(236, 183, 102) else Color.rgb(171, 105, 38)
+        val accent: Int = if (dark) Color.rgb(236, 183, 102) else Color.rgb(171, 105, 38)
     }
 }
+
+private fun dp(context: Context, value: Int): Int =
+    (value * context.resources.displayMetrics.density).toInt()

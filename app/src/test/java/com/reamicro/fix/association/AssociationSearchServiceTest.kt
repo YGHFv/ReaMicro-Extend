@@ -74,6 +74,40 @@ class AssociationSearchServiceTest {
         assertTrue(completed.await(2, TimeUnit.SECONDS))
     }
 
+    @Test
+    fun searchRanksExactTitleIntoLimitedResultsAfterFetchingExtraRows() {
+        val keyword = "我真没想重生啊"
+        val provider = object : BookAssociationSearchProvider {
+            override val source: BookSource = BookSource.WanFengLi
+
+            override fun search(keyword: String, limit: Int): List<BookSearchResult> =
+                (1..10).map { index ->
+                    result(
+                        title = "作者命中结果$index",
+                        author = keyword,
+                        id = "author-$index",
+                        displaySourceName = BookSource.SFAcg.displayName,
+                        source = source,
+                    )
+                }.plus(
+                    result(
+                        title = keyword,
+                        author = "柳岸花又明",
+                        id = "1015648531",
+                        displaySourceName = BookSource.QiDian.displayName,
+                        source = source,
+                    ),
+                ).take(limit)
+        }
+        val service = AssociationSearchService(providers = listOf(provider))
+
+        val results = service.search(keyword, limitPerSource = 10)
+
+        assertEquals(10, results.size)
+        assertEquals(keyword, results.first().title)
+        assertTrue(results.any { it.sourceBookId == "1015648531" })
+    }
+
     private fun resultProvider(id: String): BookAssociationSearchProvider = object : BookAssociationSearchProvider {
         override val source: BookSource = BookSource.Ciweimao
 
@@ -110,4 +144,19 @@ class AssociationSearchServiceTest {
             )
         }
     }
+
+    private fun result(
+        title: String,
+        author: String,
+        id: String,
+        displaySourceName: String,
+        source: BookSource,
+    ): BookSearchResult =
+        BookSearchResult(
+            title = title,
+            author = author,
+            source = source,
+            sourceBookId = id,
+            displaySourceName = displaySourceName,
+        )
 }

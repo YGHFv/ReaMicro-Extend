@@ -56,7 +56,9 @@ internal object ReaMicroBookMetadataSync {
     fun syncBookMetadata(repository: Any?, book: Any?, patch: BookMetadataPatch): Boolean =
         runCatching {
             val targetRepository = repository ?: currentBookshelfRepository() ?: return false
-            val updated = copyBookWithMetadata(book ?: return false, patch) ?: return false
+            val originalBook = book ?: return false
+            val sourceBook = latestBook(targetRepository, originalBook) ?: originalBook
+            val updated = copyBookWithMetadata(sourceBook, patch) ?: return false
             val updateMethod = method(targetRepository.javaClass, "updateBook", 2)
             invokeSuspendBlocking(targetRepository.javaClass.classLoader, updateMethod, targetRepository, updated)
             XposedBridge.log(
@@ -68,11 +70,25 @@ internal object ReaMicroBookMetadataSync {
             XposedBridge.log("$LOG_PREFIX failed to sync book metadata: ${it.stackTraceToString()}")
         }.getOrDefault(false)
 
+    private fun latestBook(repository: Any, book: Any): Any? =
+        runCatching {
+            val id = longValue(book, "getId")
+            if (id <= 0L) return@runCatching null
+            val findMethod = method(repository.javaClass, "findBookById", 2)
+            invokeSuspendBlocking(repository.javaClass.classLoader, findMethod, repository, id)
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX failed to reload book metadata target: ${it.stackTraceToString()}")
+        }.getOrNull()
+
     private fun copyBookWithMetadata(book: Any, patch: BookMetadataPatch): Any? =
         runCatching {
-            val copy = method(book.javaClass, "copy", 23)
-            copy.invoke(
-                book,
+            val copy = book.javaClass.methods.firstOrNull {
+                it.name == "copy" && it.parameterTypes.size == 24
+            } ?: book.javaClass.methods.first {
+                it.name == "copy" && it.parameterTypes.size == 23
+            }
+            copy.isAccessible = true
+            val args = mutableListOf<Any?>(
                 longValue(book, "getId"),
                 stringValue(book, "getUuid"),
                 longValue(book, "getUid"),
@@ -85,6 +101,12 @@ internal object ReaMicroBookMetadataSync {
                 stringValue(book, "getGroup"),
                 longValue(book, "getCreated"),
                 intValue(book, "getCfiVersion"),
+            )
+            if (copy.parameterTypes.size == 24) {
+                args.add(intValue(book, "getEmbeddedFonts"))
+            }
+            args.addAll(
+                listOf(
                 stringValue(book, "getEpubcfi"),
                 stringValue(book, "getChapter"),
                 floatValue(book, "getProgress"),
@@ -96,7 +118,9 @@ internal object ReaMicroBookMetadataSync {
                 stringValue(book, "getBackupId"),
                 stringValue(book, "getBackupCode"),
                 patch.publisher ?: stringValue(book, "getPublisher"),
+                ),
             )
+            copy.invoke(book, *args.toTypedArray())
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to copy book metadata: ${it.stackTraceToString()}")
         }.getOrNull()

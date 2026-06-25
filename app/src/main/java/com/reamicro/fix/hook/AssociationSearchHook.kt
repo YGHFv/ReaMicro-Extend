@@ -106,7 +106,7 @@ class AssociationSearchHook(
         injectSearchGroups(viewModel)
         associationSearchService.searchProgressively(
             keyword = keyword,
-            limitPerSource = 3,
+            limitPerSource = 10,
             maxWaitMs = SOURCE_SEARCH_WAIT_TIMEOUT_MS,
             onProviderResults = { source, results, elapsedMs ->
                 if (generation != searchGeneration.get()) return@searchProgressively

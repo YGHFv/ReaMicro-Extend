@@ -71,6 +71,7 @@ internal class EpubWebEditorPanel(
     private var stagedCoverTargetPath: String = ""
     private var lastCoverResultSignature: String = ""
     private var lastCoverResultAtMs: Long = 0L
+    @Volatile private var metadataChanged: Boolean = false
     private val globalUiFontFile: File? by lazy { resolveGlobalUiFontFile() }
 
     fun show() {
@@ -139,6 +140,15 @@ internal class EpubWebEditorPanel(
             runCatching {
                 webView.removeJavascriptInterface(BRIDGE_NAME)
                 webView.destroy()
+            }
+            if (metadataChanged && !activity.isFinishing) {
+                activity.window?.decorView?.postDelayed({
+                    runCatching {
+                        if (!activity.isFinishing) activity.recreate()
+                    }.onFailure {
+                        XposedBridge.log("$LOG_PREFIX file editor metadata refresh failed: ${it.stackTraceToString()}")
+                    }
+                }, 250L)
             }
         }
         synchronized(activePanels) {
@@ -876,6 +886,7 @@ internal class EpubWebEditorPanel(
                 publisher = metadata.optString("publisher"),
             ),
         )
+        metadataChanged = true
     }
 
     private fun createBookshelfCoverSnapshot(source: File, refresh: Boolean): String {

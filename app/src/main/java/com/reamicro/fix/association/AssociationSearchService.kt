@@ -6,6 +6,7 @@ import com.reamicro.fix.association.model.ManualAssociationDraft
 import com.reamicro.fix.association.model.withAllowedAssociationPlatform
 import com.reamicro.fix.association.provider.AssociationSearchProviderRegistry
 import com.reamicro.fix.association.provider.BookAssociationSearchProvider
+import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReferenceArray
@@ -39,9 +40,14 @@ class AssociationSearchService(
             Thread {
                 try {
                     runCatching {
-                        provider.search(keyword, limitPerSource)
+                        provider.search(keyword, providerFetchLimit(limitPerSource))
                     }.onSuccess { providerResults ->
-                        resultsByProvider.set(index, providerResults.sanitizePlatforms())
+                        resultsByProvider.set(
+                            index,
+                            providerResults.sanitizePlatforms()
+                                .rankForKeyword(keyword)
+                                .take(limitPerSource.coerceAtLeast(1)),
+                        )
                     }.onFailure {
                         onProviderError(provider.source, it)
                     }
@@ -78,7 +84,10 @@ class AssociationSearchService(
                 val providerStartedAt = System.currentTimeMillis()
                 try {
                     runCatching {
-                        provider.search(keyword, limitPerSource).sanitizePlatforms()
+                        provider.search(keyword, providerFetchLimit(limitPerSource))
+                            .sanitizePlatforms()
+                            .rankForKeyword(keyword)
+                            .take(limitPerSource.coerceAtLeast(1))
                     }.onSuccess { providerResults ->
                         resultsByProvider.set(index, providerResults)
                         if (providerResults.isNotEmpty()) {
@@ -140,6 +149,41 @@ class AssociationSearchService(
     private fun List<BookSearchResult>.sanitizePlatforms(): List<BookSearchResult> =
         mapNotNull { it.withAllowedAssociationPlatform() }.distinctBy { it.stableId }
 
+    private fun List<BookSearchResult>.rankForKeyword(keyword: String): List<BookSearchResult> {
+        val normalizedKeyword = keyword.normalizedSearchKey()
+        if (normalizedKeyword.isBlank()) return this
+        return mapIndexed { index, result -> index to result }
+            .sortedWith(
+                compareBy<Pair<Int, BookSearchResult>> { (_, result) ->
+                    result.searchRank(normalizedKeyword)
+                }.thenBy { it.first },
+            )
+            .map { it.second }
+    }
+
+    private fun BookSearchResult.searchRank(normalizedKeyword: String): Int {
+        val titleKey = title.normalizedSearchKey()
+        val authorKey = author.normalizedSearchKey()
+        return when {
+            titleKey == normalizedKeyword -> 0
+            titleKey.contains(normalizedKeyword) -> 1
+            normalizedKeyword.contains(titleKey) && titleKey.isNotBlank() -> 2
+            authorKey == normalizedKeyword -> 3
+            authorKey.contains(normalizedKeyword) -> 4
+            normalizedKeyword.contains(authorKey) && authorKey.isNotBlank() -> 5
+            else -> 6
+        }
+    }
+
+    private fun String.normalizedSearchKey(): String =
+        lowercase(Locale.ROOT)
+            .replace(Regex("[\\s\\u3000《》<>【】\\[\\]（）()「」『』:：,，.。!！?？\"'“”‘’、/\\\\_-]+"), "")
+
+    private fun providerFetchLimit(limitPerSource: Int): Int =
+        limitPerSource.coerceAtLeast(1).let { limit ->
+            maxOf(limit, minOf(MAX_PROVIDER_FETCH_LIMIT, limit * PROVIDER_FETCH_MULTIPLIER + 1))
+        }
+
     private fun orderedResults(resultsByProvider: AtomicReferenceArray<List<BookSearchResult>>): List<BookSearchResult> =
         buildList {
             for (index in 0 until resultsByProvider.length()) {
@@ -149,5 +193,7 @@ class AssociationSearchService(
 
     private companion object {
         const val PROVIDER_WAIT_TIMEOUT_MS = 4_500L
+        const val PROVIDER_FETCH_MULTIPLIER = 3
+        const val MAX_PROVIDER_FETCH_LIMIT = 20
     }
 }
