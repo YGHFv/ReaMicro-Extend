@@ -601,8 +601,9 @@ class ReaderHook(
                 runCatching {
                     searchFullTextStreaming(keyword, context) { results, done ->
                         activity.runOnUiThread {
-                            if (searchRunSeq != runSeq || searchPageDialogRef?.get() !== dialog) return@runOnUiThread
+                            if (searchRunSeq != runSeq) return@runOnUiThread
                             lastSearchState = SearchState(bookKey(context), keyword, results)
+                            if (searchPageDialogRef?.get() !== dialog) return@runOnUiThread
                             renderVisibleResults(keyword, results, searching = !done)
                         }
                     }
@@ -1927,61 +1928,33 @@ class ReaderHook(
 
     private fun scheduleSearchJumpVisibilityCorrection(receiver: Any?, viewModel: Any?, mark: Any) {
         val id = searchResultHighlightMarkId(mark) ?: return
-        var attempts = 0
-        var stableMismatchCount = 0
-        var lastMismatchKey: String? = null
-        var dispatchedFromPageKey: String? = null
+        var corrected = false
         val block = correctionBlock@{
-            if (activeSearchHighlightId == id && !isSearchHighlightOnCurrentVisiblePage(id)) {
-                val currentKey = currentVisibleSearchPageKey()
-                val targetKey = targetSearchHighlightPageKey()
-                if (currentKey == null || targetKey == null) {
-                    scheduleSearchResultHighlightRefresh(viewModel ?: currentViewModelRef?.get(), mark, id, 250L)
-                    return@correctionBlock
-                }
-                val mismatchKey = "$currentKey->$targetKey"
-                if (mismatchKey == lastMismatchKey) {
-                    stableMismatchCount++
-                } else {
-                    lastMismatchKey = mismatchKey
-                    stableMismatchCount = 1
-                }
-                val canSendFirstCorrection = attempts == 0 && stableMismatchCount >= SEARCH_JUMP_STABLE_MISMATCH_CHECKS
-                val canRetrySwallowedCorrection = attempts > 0 &&
-                    attempts < SEARCH_JUMP_MAX_CORRECTION_ATTEMPTS &&
-                    dispatchedFromPageKey == currentKey &&
-                    stableMismatchCount >= SEARCH_JUMP_RETRY_STABLE_MISMATCH_CHECKS
-                if (canSendFirstCorrection || canRetrySwallowedCorrection) {
-                    attempts++
-                    val next = searchHighlightCorrectionNext()
-                    dispatchedFromPageKey = currentKey
-                    XposedBridge.log(
-                        "$LOG_PREFIX full-text search highlight not on current page; " +
-                            "correcting id=$id attempt=$attempts next=$next " +
-                            "current=${currentVisiblePageNumber ?: -1}/${currentVisiblePageSignature.orEmpty()} " +
-                            "target=${activeSearchHighlightPageNumber ?: -1}/${activeSearchHighlightPageSignature.orEmpty()}",
-                    )
-                    dispatchTapDirection(receiver, viewModel, next = next)
-                }
+            if (corrected || activeSearchHighlightId != id || isSearchHighlightOnCurrentVisiblePage(id)) {
+                return@correctionBlock
+            }
+            val correction = searchHighlightCorrectionDirection()
+            if (correction != null) {
+                corrected = true
+                XposedBridge.log(
+                    "$LOG_PREFIX full-text search single page correction id=$id next=$correction " +
+                        "current=${currentVisiblePageNumber ?: -1}/${currentVisiblePageSignature.orEmpty()} " +
+                        "target=${activeSearchHighlightPageNumber ?: -1}/${activeSearchHighlightPageSignature.orEmpty()}",
+                )
+                dispatchTapDirection(receiver, viewModel, next = correction)
                 scheduleSearchResultHighlightRefresh(viewModel ?: currentViewModelRef?.get(), mark, id, 250L)
             }
         }
         val view = activityProvider()?.window?.decorView
         if (view != null) {
-            view.postDelayed(block, SEARCH_JUMP_FAST_VISIBILITY_CHECK_DELAY_MS)
-            view.postDelayed(block, SEARCH_JUMP_RETRY_VISIBILITY_CHECK_DELAY_MS)
-            view.postDelayed(block, SEARCH_JUMP_FINAL_VISIBILITY_CHECK_DELAY_MS)
-            view.postDelayed(block, SEARCH_JUMP_LAST_VISIBILITY_CHECK_DELAY_MS)
+            view.postDelayed(block, SEARCH_JUMP_SINGLE_CORRECTION_DELAY_MS)
+            view.postDelayed(block, SEARCH_JUMP_SINGLE_CORRECTION_FALLBACK_DELAY_MS)
         } else {
             Thread {
                 runCatching {
-                    Thread.sleep(SEARCH_JUMP_FAST_VISIBILITY_CHECK_DELAY_MS)
+                    Thread.sleep(SEARCH_JUMP_SINGLE_CORRECTION_DELAY_MS)
                     block()
-                    Thread.sleep(SEARCH_JUMP_RETRY_VISIBILITY_CHECK_DELAY_MS - SEARCH_JUMP_FAST_VISIBILITY_CHECK_DELAY_MS)
-                    block()
-                    Thread.sleep(SEARCH_JUMP_FINAL_VISIBILITY_CHECK_DELAY_MS - SEARCH_JUMP_RETRY_VISIBILITY_CHECK_DELAY_MS)
-                    block()
-                    Thread.sleep(SEARCH_JUMP_LAST_VISIBILITY_CHECK_DELAY_MS - SEARCH_JUMP_FINAL_VISIBILITY_CHECK_DELAY_MS)
+                    Thread.sleep(SEARCH_JUMP_SINGLE_CORRECTION_FALLBACK_DELAY_MS - SEARCH_JUMP_SINGLE_CORRECTION_DELAY_MS)
                     block()
                 }
             }.apply {
@@ -2009,15 +1982,26 @@ class ReaderHook(
             currentSignature.isNullOrBlank()
     }
 
-    private fun searchHighlightCorrectionNext(): Boolean {
+    private fun searchHighlightCorrectionDirection(): Boolean? {
         val targetNumber = activeSearchHighlightPageNumber
         val currentNumber = currentVisiblePageNumber
-        return if (targetNumber != null && currentNumber != null && targetNumber != currentNumber) {
-            targetNumber > currentNumber
-        } else {
-            true
+        if (targetNumber != null && currentNumber != null) {
+            return when {
+                targetNumber > currentNumber -> true
+                targetNumber < currentNumber -> false
+                else -> null
+            }
         }
+        val targetKey = targetSearchHighlightPageKey()
+        val currentKey = currentVisibleSearchPageKey()
+        if (targetKey != null && currentKey != null) {
+            return if (targetKey != currentKey) true else null
+        }
+        return if (activeSearchHighlightVisibleId != idOrNull(activeSearchHighlightMark)) true else null
     }
+
+    private fun idOrNull(mark: Any?): Long? =
+        mark?.let(::searchResultHighlightMarkId)
 
     private fun currentVisibleSearchPageKey(): String? =
         currentVisiblePageSignature?.takeIf { it.isNotBlank() }
@@ -3155,13 +3139,8 @@ class ReaderHook(
         const val SEARCH_MENU_BUTTON_BOTTOM_MARGIN_DP = 166
         const val SEARCH_NAVIGATION_READER_BOTTOM_MARGIN_DP = 8
         const val SEARCH_NAVIGATION_MENU_BOTTOM_MARGIN_DP = 190
-        const val SEARCH_JUMP_FAST_VISIBILITY_CHECK_DELAY_MS = 220L
-        const val SEARCH_JUMP_RETRY_VISIBILITY_CHECK_DELAY_MS = 620L
-        const val SEARCH_JUMP_FINAL_VISIBILITY_CHECK_DELAY_MS = 1200L
-        const val SEARCH_JUMP_LAST_VISIBILITY_CHECK_DELAY_MS = 1800L
-        const val SEARCH_JUMP_MAX_CORRECTION_ATTEMPTS = 2
-        const val SEARCH_JUMP_STABLE_MISMATCH_CHECKS = 2
-        const val SEARCH_JUMP_RETRY_STABLE_MISMATCH_CHECKS = 3
+        const val SEARCH_JUMP_SINGLE_CORRECTION_DELAY_MS = 760L
+        const val SEARCH_JUMP_SINGLE_CORRECTION_FALLBACK_DELAY_MS = 1250L
         const val SEARCH_HIGHLIGHT_OFFSET_TOLERANCE = 8
         const val SEARCH_ORIGIN_PREFS = "reamicro_search_origin"
         const val SEARCH_ORIGIN_KEY_TIMESTAMP = "timestamp"
