@@ -75,6 +75,8 @@ class ReaderHook(
     @Volatile private var searchStateGeneration: Long = 0L
     @Volatile private var searchRunSeq: Long = 0L
     @Volatile private var activeSearchJobKey: String? = null
+    @Volatile private var activeSearchPageToken: Long = 0L
+    @Volatile private var activeSearchPageUpdate: ((SearchState, Boolean) -> Unit)? = null
     @Volatile private var readerBottomMenuVisible: Boolean = false
     @Volatile private var activeSearchHighlightId: Long? = null
     @Volatile private var activeSearchHighlightMark: Any? = null
@@ -259,6 +261,8 @@ class ReaderHook(
         searchStateGeneration += 1
         searchRunSeq += 1
         activeSearchJobKey = null
+        activeSearchPageToken = 0L
+        activeSearchPageUpdate = null
         clearSearchResultHighlight()
         bottomSearchReceiverRef = null
         bottomSearchBookRef = null
@@ -498,10 +502,14 @@ class ReaderHook(
     private fun closeSearchPage() {
         searchPageDialogRef?.get()?.dismiss()
         searchPageDialogRef = null
+        activeSearchPageToken = 0L
+        activeSearchPageUpdate = null
     }
 
     private fun showFullTextSearchPage(activity: Activity, context: CatalogContext) {
         closeSearchPage()
+        val pageBookKey = bookKey(context)
+        val pageToken = System.nanoTime()
         var colors = DialogColors(activity)
         val dialog = Dialog(activity)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
@@ -577,16 +585,28 @@ class ReaderHook(
             scrollSearchResultToCenter(resultsScroll, resultsContainer, currentResultIndex)
         }
 
+        activeSearchPageToken = pageToken
+        activeSearchPageUpdate = { state, searching ->
+            activity.runOnUiThread {
+                if (activeSearchPageToken != pageToken) return@runOnUiThread
+                if (searchPageDialogRef?.get() !== dialog) return@runOnUiThread
+                if (state.bookKey != pageBookKey) return@runOnUiThread
+                if (keywordInput.text?.toString()?.trim().orEmpty() != state.keyword) return@runOnUiThread
+                renderVisibleResults(state.keyword, state.results, searching)
+            }
+        }
+
         fun renderCached(): Boolean {
-            val cached = lastSearchState?.takeIf { it.bookKey == bookKey(context) }
+            val cached = lastSearchState?.takeIf { it.bookKey == pageBookKey }
             if (cached == null) {
                 clearVisibleResults()
                 return false
             }
             keywordInput.setText(cached.keyword)
             keywordInput.setSelection(keywordInput.text?.length ?: 0)
-            renderVisibleResults(cached.keyword, cached.results)
-            return cached.results.isNotEmpty()
+            val searching = activeSearchJobKey == fullTextSearchJobKey(cached.bookKey, cached.keyword)
+            renderVisibleResults(cached.keyword, cached.results, searching)
+            return cached.results.isNotEmpty() || searching
         }
 
         fun runSearch() {
@@ -607,11 +627,10 @@ class ReaderHook(
                         activity.runOnUiThread {
                             val currentBookKey = bookKey(context)
                             if (activeSearchJobKey != jobKey && searchRunSeq != runSeq) return@runOnUiThread
-                            lastSearchState = SearchState(currentBookKey, keyword, results)
+                            val state = SearchState(currentBookKey, keyword, results)
+                            lastSearchState = state
                             if (done && activeSearchJobKey == jobKey) activeSearchJobKey = null
-                            if (searchPageDialogRef?.get() !== dialog) return@runOnUiThread
-                            if (keywordInput.text?.toString()?.trim().orEmpty() != keyword) return@runOnUiThread
-                            renderVisibleResults(keyword, results, searching = !done)
+                            activeSearchPageUpdate?.invoke(state, !done)
                         }
                     }
                 }.onFailure {
@@ -724,6 +743,10 @@ class ReaderHook(
         dialog.setContentView(root)
         dialog.setOnDismissListener {
             if (searchPageDialogRef?.get() === dialog) searchPageDialogRef = null
+            if (activeSearchPageToken == pageToken) {
+                activeSearchPageToken = 0L
+                activeSearchPageUpdate = null
+            }
             runCatching { activity.unregisterComponentCallbacks(themeCallbacks) }
             hideKeyboard(keywordInput)
         }
@@ -732,7 +755,7 @@ class ReaderHook(
         dialog.show()
         dialog.window?.let { window ->
             configureFullTextSearchWindow(window, colors, requestKeyboard = lastSearchState?.takeIf {
-                it.bookKey == bookKey(context)
+                it.bookKey == pageBookKey
             }?.results.isNullOrEmpty())
         }
         val hasCachedResults = renderCached()
