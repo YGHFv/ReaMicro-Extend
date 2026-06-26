@@ -74,6 +74,7 @@ class ReaderHook(
     @Volatile private var searchIndexBuildingKey: String? = null
     @Volatile private var searchStateGeneration: Long = 0L
     @Volatile private var searchRunSeq: Long = 0L
+    @Volatile private var activeSearchJobKey: String? = null
     @Volatile private var readerBottomMenuVisible: Boolean = false
     @Volatile private var activeSearchHighlightId: Long? = null
     @Volatile private var activeSearchHighlightMark: Any? = null
@@ -257,6 +258,7 @@ class ReaderHook(
     private fun resetFullTextSearchState(reason: String, removeOverlays: Boolean) {
         searchStateGeneration += 1
         searchRunSeq += 1
+        activeSearchJobKey = null
         clearSearchResultHighlight()
         bottomSearchReceiverRef = null
         bottomSearchBookRef = null
@@ -596,14 +598,19 @@ class ReaderHook(
             renderVisibleResults(keyword, emptyList(), searching = true)
             val runSeq = System.currentTimeMillis()
             searchRunSeq = runSeq
+            val jobKey = fullTextSearchJobKey(bookKey(context), keyword)
+            activeSearchJobKey = jobKey
             hideKeyboard(keywordInput)
             Thread {
                 runCatching {
                     searchFullTextStreaming(keyword, context) { results, done ->
                         activity.runOnUiThread {
-                            if (searchRunSeq != runSeq) return@runOnUiThread
-                            lastSearchState = SearchState(bookKey(context), keyword, results)
+                            val currentBookKey = bookKey(context)
+                            if (activeSearchJobKey != jobKey && searchRunSeq != runSeq) return@runOnUiThread
+                            lastSearchState = SearchState(currentBookKey, keyword, results)
+                            if (done && activeSearchJobKey == jobKey) activeSearchJobKey = null
                             if (searchPageDialogRef?.get() !== dialog) return@runOnUiThread
+                            if (keywordInput.text?.toString()?.trim().orEmpty() != keyword) return@runOnUiThread
                             renderVisibleResults(keyword, results, searching = !done)
                         }
                     }
@@ -2907,6 +2914,9 @@ class ReaderHook(
             callString(context.book, "getBookId"),
             bookTitle(context),
         ).filter { it.isNotBlank() }.joinToString(separator = "|")
+
+    private fun fullTextSearchJobKey(bookKey: String, keyword: String): String =
+        "$bookKey\n${keyword.lowercase(Locale.ROOT)}"
 
     private fun showSelectionEditDialog(activity: Activity, text: String, onSave: (String) -> Unit) {
         val colors = DialogColors(activity)
