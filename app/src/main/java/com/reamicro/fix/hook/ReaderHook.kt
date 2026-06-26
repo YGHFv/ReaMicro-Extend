@@ -1928,11 +1928,33 @@ class ReaderHook(
     private fun scheduleSearchJumpVisibilityCorrection(receiver: Any?, viewModel: Any?, mark: Any) {
         val id = searchResultHighlightMarkId(mark) ?: return
         var attempts = 0
-        val block = {
+        var stableMismatchCount = 0
+        var lastMismatchKey: String? = null
+        var dispatchedFromPageKey: String? = null
+        val block = correctionBlock@{
             if (activeSearchHighlightId == id && !isSearchHighlightOnCurrentVisiblePage(id)) {
-                if (attempts < SEARCH_JUMP_MAX_CORRECTION_ATTEMPTS) {
+                val currentKey = currentVisibleSearchPageKey()
+                val targetKey = targetSearchHighlightPageKey()
+                if (currentKey == null || targetKey == null) {
+                    scheduleSearchResultHighlightRefresh(viewModel ?: currentViewModelRef?.get(), mark, id, 250L)
+                    return@correctionBlock
+                }
+                val mismatchKey = "$currentKey->$targetKey"
+                if (mismatchKey == lastMismatchKey) {
+                    stableMismatchCount++
+                } else {
+                    lastMismatchKey = mismatchKey
+                    stableMismatchCount = 1
+                }
+                val canSendFirstCorrection = attempts == 0 && stableMismatchCount >= SEARCH_JUMP_STABLE_MISMATCH_CHECKS
+                val canRetrySwallowedCorrection = attempts > 0 &&
+                    attempts < SEARCH_JUMP_MAX_CORRECTION_ATTEMPTS &&
+                    dispatchedFromPageKey == currentKey &&
+                    stableMismatchCount >= SEARCH_JUMP_RETRY_STABLE_MISMATCH_CHECKS
+                if (canSendFirstCorrection || canRetrySwallowedCorrection) {
                     attempts++
                     val next = searchHighlightCorrectionNext()
+                    dispatchedFromPageKey = currentKey
                     XposedBridge.log(
                         "$LOG_PREFIX full-text search highlight not on current page; " +
                             "correcting id=$id attempt=$attempts next=$next " +
@@ -1996,6 +2018,14 @@ class ReaderHook(
             true
         }
     }
+
+    private fun currentVisibleSearchPageKey(): String? =
+        currentVisiblePageSignature?.takeIf { it.isNotBlank() }
+            ?: currentVisiblePageNumber?.let { "n=$it" }
+
+    private fun targetSearchHighlightPageKey(): String? =
+        activeSearchHighlightPageSignature?.takeIf { it.isNotBlank() }
+            ?: activeSearchHighlightPageNumber?.let { "n=$it" }
 
     private fun dispatchTapDirection(receiver: Any?, viewModel: Any?, next: Boolean): Boolean =
         runCatching {
@@ -3129,7 +3159,9 @@ class ReaderHook(
         const val SEARCH_JUMP_RETRY_VISIBILITY_CHECK_DELAY_MS = 620L
         const val SEARCH_JUMP_FINAL_VISIBILITY_CHECK_DELAY_MS = 1200L
         const val SEARCH_JUMP_LAST_VISIBILITY_CHECK_DELAY_MS = 1800L
-        const val SEARCH_JUMP_MAX_CORRECTION_ATTEMPTS = 4
+        const val SEARCH_JUMP_MAX_CORRECTION_ATTEMPTS = 2
+        const val SEARCH_JUMP_STABLE_MISMATCH_CHECKS = 2
+        const val SEARCH_JUMP_RETRY_STABLE_MISMATCH_CHECKS = 3
         const val SEARCH_HIGHLIGHT_OFFSET_TOLERANCE = 8
         const val SEARCH_ORIGIN_PREFS = "reamicro_search_origin"
         const val SEARCH_ORIGIN_KEY_TIMESTAMP = "timestamp"
