@@ -74,6 +74,7 @@ class ReaderHook(
     @Volatile private var readerBottomMenuVisible: Boolean = false
     @Volatile private var activeSearchHighlightId: Long? = null
     @Volatile private var activeSearchHighlightMark: Any? = null
+    @Volatile private var activeSearchHighlightVisibleId: Long? = null
     @Volatile private var activeSearchHighlightRenderLogId: Long? = null
     @Volatile private var activeSearchHighlightRenderLogCount: Int = 0
 
@@ -1250,7 +1251,11 @@ class ReaderHook(
                     chapterIndex = result.chapterIndex.coerceAtLeast(0),
                     title = result.chapterTitle,
                     summary = result.snippet,
-                )
+                ).also { jumped ->
+                    if (jumped && highlightMark != null) {
+                        scheduleSearchJumpVisibilityCorrection(receiver, viewModel, highlightMark)
+                    }
+                }
             }.onFailure {
                 XposedBridge.log("$LOG_PREFIX full-text search cfi jump failed: ${it.stackTraceToString()}")
             }.getOrDefault(false)
@@ -1425,7 +1430,11 @@ class ReaderHook(
                 chapterIndex = result.chapterIndex.coerceAtLeast(0),
                 title = result.chapterTitle,
                 summary = result.snippet,
-            )
+            ).also { jumped ->
+                if (jumped && highlightMark != null) {
+                    scheduleSearchJumpVisibilityCorrection(receiver, viewModel, highlightMark)
+                }
+            }
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX full-text search relative cfi jump failed: ${it.stackTraceToString()}")
         }.getOrDefault(false)
@@ -1620,6 +1629,7 @@ class ReaderHook(
         val id = searchResultHighlightMarkId(mark) ?: return
         activeSearchHighlightId = id
         activeSearchHighlightMark = mark
+        activeSearchHighlightVisibleId = null
         activeSearchHighlightRenderLogId = null
         activeSearchHighlightRenderLogCount = 0
         XposedBridge.log("$LOG_PREFIX full-text search highlight active ${describeSearchHighlightMark(mark)}")
@@ -1659,6 +1669,7 @@ class ReaderHook(
     private fun clearSearchResultHighlight(viewModel: Any? = currentViewModelRef?.get()): Boolean {
         activeSearchHighlightId = null
         activeSearchHighlightMark = null
+        activeSearchHighlightVisibleId = null
         activeSearchHighlightRenderLogId = null
         activeSearchHighlightRenderLogCount = 0
         return updateSearchMarks(viewModel, "clear") { marks ->
@@ -1709,6 +1720,9 @@ class ReaderHook(
 
     private fun logSearchHighlightContentOverlay(status: String, count: Int, mark: Any) {
         val id = searchResultHighlightMarkId(mark) ?: searchResultHighlightResolvedMarkId(mark) ?: return
+        if (status == "output" || status == "forced") {
+            activeSearchHighlightVisibleId = id
+        }
         if (activeSearchHighlightRenderLogId != id) {
             activeSearchHighlightRenderLogId = id
             activeSearchHighlightRenderLogCount = 0
@@ -1720,6 +1734,42 @@ class ReaderHook(
                 describeSearchHighlightMark(mark),
         )
     }
+
+    private fun scheduleSearchJumpVisibilityCorrection(receiver: Any?, viewModel: Any?, mark: Any) {
+        val id = searchResultHighlightMarkId(mark) ?: return
+        val block = {
+            if (activeSearchHighlightId == id && activeSearchHighlightVisibleId != id) {
+                XposedBridge.log("$LOG_PREFIX full-text search highlight not visible after jump; correcting to next page id=$id")
+                dispatchTapDirection(receiver, viewModel, next = true)
+                scheduleSearchResultHighlightRefresh(viewModel ?: currentViewModelRef?.get(), mark, id, 250L)
+            }
+        }
+        val view = activityProvider()?.window?.decorView
+        if (view != null) {
+            view.postDelayed(block, SEARCH_JUMP_VISIBILITY_CHECK_DELAY_MS)
+        } else {
+            Thread {
+                runCatching {
+                    Thread.sleep(SEARCH_JUMP_VISIBILITY_CHECK_DELAY_MS)
+                    block()
+                }
+            }.apply {
+                name = "ReaMicroSearchJumpCorrection"
+                isDaemon = true
+                start()
+            }
+        }
+    }
+
+    private fun dispatchTapDirection(receiver: Any?, viewModel: Any?, next: Boolean): Boolean =
+        runCatching {
+            val intentClass = classLoader.loadClass("$READER_UI_INTENT_CLASS\$TapDirection")
+            val direction = System.currentTimeMillis() * if (next) 1L else -1L
+            val intent = intentClass.getDeclaredConstructor(Long::class.javaPrimitiveType).newInstance(direction)
+            dispatchReaderIntent(receiver, viewModel, intent, if (next) "TapDirectionNext" else "TapDirectionPrev")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX full-text search tap direction correction failed: ${it.stackTraceToString()}")
+        }.getOrDefault(false)
 
     private fun createResolvedSearchHighlightMark(mark: Any): Any? =
         runCatching {
@@ -2813,6 +2863,7 @@ class ReaderHook(
         const val SEARCH_MENU_BUTTON_BOTTOM_MARGIN_DP = 166
         const val SEARCH_NAVIGATION_READER_BOTTOM_MARGIN_DP = 8
         const val SEARCH_NAVIGATION_MENU_BOTTOM_MARGIN_DP = 190
+        const val SEARCH_JUMP_VISIBILITY_CHECK_DELAY_MS = 900L
         const val MARK_KIND_HIGHLIGHT = 0
         const val MARK_STYLE_FILL = 0
         const val MARK_STYLE_LINE = 1
@@ -2938,12 +2989,12 @@ class ReaderHook(
             val safeLength = length.coerceAtLeast(1)
             val lastMatchIndex = (safeStart + safeLength - 1).coerceIn(safeStart, text.lastIndex)
             val candidates = listOf(
-                (safeStart + safeLength / 2).coerceIn(safeStart, lastMatchIndex),
+                safeStart + safeLength,
                 lastMatchIndex,
+                (safeStart + safeLength / 2).coerceIn(safeStart, lastMatchIndex),
                 safeStart,
             ).distinct()
-            return candidates.firstNotNullOfOrNull { cfiAt(it) }
-                ?: cfiAtBoundary(safeStart + safeLength)
+            return candidates.firstNotNullOfOrNull { cfiAtBoundary(it) ?: cfiAt(it.coerceAtMost(text.lastIndex)) }
         }
 
         private fun TextSpan.cfiAt(relativeIndex: Int): String {
