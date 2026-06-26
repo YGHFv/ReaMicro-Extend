@@ -543,7 +543,12 @@ class ReaderHook(
             visibleKeyword = keyword
             visibleResults = results
             visibleSearching = searching
-            renderSearchResults(activity, resultsContainer, keyword, results, colors, searching)
+            val currentResultIndex = activeSearchNavigation
+                ?.takeIf { it.bookKey == bookKey(context) }
+                ?.currentIndex
+                ?.takeIf { it in results.indices }
+            renderSearchResults(activity, resultsContainer, keyword, results, colors, searching, currentResultIndex)
+            scrollSearchResultToCenter(resultsScroll, resultsContainer, currentResultIndex)
         }
 
         fun renderCached(): Boolean {
@@ -1117,6 +1122,7 @@ class ReaderHook(
         results: List<FullTextSearchResult>,
         colors: DialogColors,
         searching: Boolean = false,
+        currentResultIndex: Int? = null,
     ) {
         container.removeAllViews()
         container.addView(TextView(activity).apply {
@@ -1158,7 +1164,15 @@ class ReaderHook(
                 ))
                 previousGroupKey = groupKey
             }
-            container.addView(searchResultCard(activity, result, index, colors), LinearLayout.LayoutParams(
+            container.addView(searchResultCard(activity, result, index, colors).apply {
+                tag = searchResultViewTag(index)
+                if (index == currentResultIndex) {
+                    background = GradientDrawable().apply {
+                        setColor(Color.argb(34, Color.red(colors.actionBackground), Color.green(colors.actionBackground), Color.blue(colors.actionBackground)))
+                        cornerRadius = dp(activity, 6).toFloat()
+                    }
+                }
+            }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply {
@@ -1168,6 +1182,31 @@ class ReaderHook(
             })
         }
     }
+
+    private fun scrollSearchResultToCenter(scrollView: ScrollView, container: LinearLayout, index: Int?) {
+        if (index == null) return
+        val action = Runnable {
+            val target = findSearchResultView(container, index) ?: return@Runnable
+            val viewport = scrollView.height.takeIf { it > 0 } ?: return@Runnable
+            val targetCenter = target.top + target.height / 2
+            val maxScroll = (container.height - viewport).coerceAtLeast(0)
+            val desired = (targetCenter - viewport / 2).coerceIn(0, maxScroll)
+            scrollView.scrollTo(0, desired)
+        }
+        scrollView.post(action)
+        scrollView.postDelayed(action, 120L)
+    }
+
+    private fun findSearchResultView(container: LinearLayout, index: Int): View? {
+        val tag = searchResultViewTag(index)
+        for (childIndex in 0 until container.childCount) {
+            val child = container.getChildAt(childIndex)
+            if (child?.tag == tag) return child
+        }
+        return null
+    }
+
+    private fun searchResultViewTag(index: Int): String = "searchResult:$index"
 
     private fun searchResultGroupKey(result: FullTextSearchResult): String =
         if (result.chapterIndex >= 0) {
@@ -1737,12 +1776,15 @@ class ReaderHook(
 
     private fun scheduleSearchJumpVisibilityCorrection(receiver: Any?, viewModel: Any?, mark: Any) {
         val id = searchResultHighlightMarkId(mark) ?: return
-        var corrected = false
+        var attempts = 0
         val block = {
             if (activeSearchHighlightId == id && activeSearchHighlightVisibleId != id) {
-                if (!corrected) {
-                    corrected = true
-                    XposedBridge.log("$LOG_PREFIX full-text search highlight not visible after jump; correcting to next page id=$id")
+                if (attempts < SEARCH_JUMP_MAX_CORRECTION_ATTEMPTS) {
+                    attempts++
+                    XposedBridge.log(
+                        "$LOG_PREFIX full-text search highlight not visible after jump; " +
+                            "correcting to next page id=$id attempt=$attempts",
+                    )
                     dispatchTapDirection(receiver, viewModel, next = true)
                 }
                 scheduleSearchResultHighlightRefresh(viewModel ?: currentViewModelRef?.get(), mark, id, 250L)
@@ -1752,12 +1794,15 @@ class ReaderHook(
         if (view != null) {
             view.postDelayed(block, SEARCH_JUMP_FAST_VISIBILITY_CHECK_DELAY_MS)
             view.postDelayed(block, SEARCH_JUMP_RETRY_VISIBILITY_CHECK_DELAY_MS)
+            view.postDelayed(block, SEARCH_JUMP_FINAL_VISIBILITY_CHECK_DELAY_MS)
         } else {
             Thread {
                 runCatching {
                     Thread.sleep(SEARCH_JUMP_FAST_VISIBILITY_CHECK_DELAY_MS)
                     block()
                     Thread.sleep(SEARCH_JUMP_RETRY_VISIBILITY_CHECK_DELAY_MS - SEARCH_JUMP_FAST_VISIBILITY_CHECK_DELAY_MS)
+                    block()
+                    Thread.sleep(SEARCH_JUMP_FINAL_VISIBILITY_CHECK_DELAY_MS - SEARCH_JUMP_RETRY_VISIBILITY_CHECK_DELAY_MS)
                     block()
                 }
             }.apply {
@@ -2881,6 +2926,8 @@ class ReaderHook(
         const val SEARCH_NAVIGATION_MENU_BOTTOM_MARGIN_DP = 190
         const val SEARCH_JUMP_FAST_VISIBILITY_CHECK_DELAY_MS = 220L
         const val SEARCH_JUMP_RETRY_VISIBILITY_CHECK_DELAY_MS = 520L
+        const val SEARCH_JUMP_FINAL_VISIBILITY_CHECK_DELAY_MS = 900L
+        const val SEARCH_JUMP_MAX_CORRECTION_ATTEMPTS = 3
         const val SEARCH_HIGHLIGHT_OFFSET_TOLERANCE = 8
         const val MARK_KIND_HIGHLIGHT = 0
         const val MARK_STYLE_FILL = 0
