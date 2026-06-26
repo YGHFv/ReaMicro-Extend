@@ -84,14 +84,6 @@ class XposedModuleSettings(
         putBoolean(ModuleSettings.KEY_FONT_SETTINGS_ENABLED, enabled)
     }
 
-    fun setFontIsolationEnabled(enabled: Boolean) {
-        putBoolean(ModuleSettings.KEY_FONT_ISOLATION_ENABLED, enabled)
-    }
-
-    fun setFontObfuscationDetectionEnabled(enabled: Boolean) {
-        putBoolean(ModuleSettings.KEY_FONT_OBFUSCATION_DETECTION_ENABLED, enabled)
-    }
-
     fun setAccountEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_ACCOUNT_ENABLED, enabled)
     }
@@ -181,52 +173,6 @@ class XposedModuleSettings(
     fun setFontKaiMapping(family: String) {
         putString(ModuleSettings.KEY_FONT_MAPPING_KAI, family)
     }
-
-    fun bookTypeSetting(bookId: Long): ReaderTypeSettingSnapshot {
-        val prefs = prefs() ?: return ReaderTypeSettingSnapshot()
-        val prefix = bookTypeSettingPrefix(bookId)
-        return ReaderTypeSettingSnapshot(
-            embeddedFonts = prefs.booleanOrNull("${prefix}embedded_fonts"),
-        )
-    }
-
-    fun setBookTypeSetting(bookId: Long, value: ReaderTypeSettingSnapshot) {
-        val editor = prefs()?.edit() ?: return
-        val prefix = bookTypeSettingPrefix(bookId)
-        putNullableBoolean(editor, "${prefix}embedded_fonts", value.embeddedFonts)
-        clearUnsupportedBookTypeSettings(editor, prefix)
-        editor.commit()
-    }
-
-    fun setBookTypeSettingValue(bookId: Long, keyName: String, value: Any?) {
-        val editor = prefs()?.edit() ?: return
-        val prefix = bookTypeSettingPrefix(bookId)
-        when (keyName) {
-            "embedded_fonts" -> putNullableBoolean(editor, "${prefix}embedded_fonts", value as? Boolean)
-            else -> return
-        }
-        clearUnsupportedBookTypeSettings(editor, prefix)
-        editor.commit()
-    }
-
-    private fun clearUnsupportedBookTypeSettings(editor: SharedPreferences.Editor, prefix: String) {
-        editor.remove("${prefix}family")
-        editor.remove("${prefix}text_size")
-        editor.remove("${prefix}line_height")
-        editor.remove("${prefix}padding")
-        editor.remove("${prefix}built_in_fonts")
-    }
-
-    private fun putNullableBoolean(editor: SharedPreferences.Editor, key: String, value: Boolean?) {
-        if (value == null) {
-            editor.remove(key)
-        } else {
-            editor.putBoolean(key, value)
-        }
-    }
-
-    private fun SharedPreferences.booleanOrNull(key: String): Boolean? =
-        if (contains(key)) getBoolean(key, false) else null
 
     private fun putBoolean(key: String, value: Boolean) {
         prefs()?.edit()?.putBoolean(key, value)?.commit()
@@ -362,14 +308,6 @@ class XposedModuleSettings(
                 ModuleSettings.KEY_FONT_SETTINGS_ENABLED,
                 ModuleSettings.DEFAULT_FONT_SETTINGS_ENABLED,
             ),
-            fontIsolationEnabled = prefs.getBoolean(
-                ModuleSettings.KEY_FONT_ISOLATION_ENABLED,
-                ModuleSettings.DEFAULT_FONT_ISOLATION_ENABLED,
-            ),
-            fontObfuscationDetectionEnabled = prefs.getBoolean(
-                ModuleSettings.KEY_FONT_OBFUSCATION_DETECTION_ENABLED,
-                ModuleSettings.DEFAULT_FONT_OBFUSCATION_DETECTION_ENABLED,
-            ),
             accountEnabled = prefs.getBoolean(
                 ModuleSettings.KEY_ACCOUNT_ENABLED,
                 ModuleSettings.DEFAULT_ACCOUNT_ENABLED,
@@ -460,8 +398,6 @@ class XposedModuleSettings(
             snapshot.readerEditOverwriteEnabled,
             snapshot.fontEnabled,
             snapshot.fontSettingsEnabled,
-            snapshot.fontIsolationEnabled,
-            snapshot.fontObfuscationDetectionEnabled,
             snapshot.accountEnabled,
             snapshot.accountExportEnabled,
             snapshot.accountCacheCleanupEnabled,
@@ -495,8 +431,6 @@ class XposedModuleSettings(
                     "readerEditOverwrite=${snapshot.readerEditOverwriteEnabled}, " +
                     "font=${snapshot.fontEnabled}, " +
                     "fontSettings=${snapshot.fontSettingsEnabled}, " +
-                    "fontIsolation=${snapshot.fontIsolationEnabled}, " +
-                    "fontObfuscationDetection=${snapshot.fontObfuscationDetectionEnabled}, " +
                     "account=${snapshot.accountEnabled}, " +
                     "accountExport=${snapshot.accountExportEnabled}, " +
                     "accountCacheCleanup=${snapshot.accountCacheCleanupEnabled}, " +
@@ -519,7 +453,4 @@ class XposedModuleSettings(
         const val CACHE_WINDOW_MS = 200L
         const val ASSOCIATION_SOURCE_KEY_PREFIX = "association_source_"
     }
-
-    private fun bookTypeSettingPrefix(bookId: Long): String =
-        "${ModuleSettings.KEY_BOOK_TYPESETTING_PREFIX}${bookId}_"
 }

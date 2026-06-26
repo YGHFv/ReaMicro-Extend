@@ -18,8 +18,6 @@ object ModuleSettings {
     const val KEY_READER_EDIT_OVERWRITE_ENABLED = "reader_edit_overwrite_enabled"
     const val KEY_FONT_ENABLED = "font_enabled"
     const val KEY_FONT_SETTINGS_ENABLED = "font_settings_enabled"
-    const val KEY_FONT_ISOLATION_ENABLED = "font_isolation_enabled"
-    const val KEY_FONT_OBFUSCATION_DETECTION_ENABLED = "font_obfuscation_detection_enabled"
     const val KEY_ACCOUNT_ENABLED = "account_enabled"
     const val KEY_ACCOUNT_EXPORT_ENABLED = "account_export_enabled"
     const val KEY_ACCOUNT_CACHE_CLEANUP_ENABLED = "account_cache_cleanup_enabled"
@@ -50,8 +48,6 @@ object ModuleSettings {
     const val DEFAULT_READER_EDIT_OVERWRITE_ENABLED = false
     const val DEFAULT_FONT_ENABLED = false
     const val DEFAULT_FONT_SETTINGS_ENABLED = false
-    const val DEFAULT_FONT_ISOLATION_ENABLED = false
-    const val DEFAULT_FONT_OBFUSCATION_DETECTION_ENABLED = true
     const val DEFAULT_ACCOUNT_ENABLED = false
     const val DEFAULT_ACCOUNT_EXPORT_ENABLED = false
     const val DEFAULT_ACCOUNT_CACHE_CLEANUP_ENABLED = false
@@ -77,7 +73,6 @@ object ModuleSettings {
     const val KEY_FONT_MAPPING_SONG = "font_mapping_song"
     const val KEY_FONT_MAPPING_KAI = "font_mapping_kai"
 
-    const val KEY_BOOK_TYPESETTING_PREFIX = "book_typesetting_"
     const val WANFENGLI_SOURCE_GROUP_ID = "wanfengli"
     const val KEY_WANFENGLI_HIDDEN_MIGRATED = "wanfengli_hidden_source_migrated"
     val DEFAULT_SEARCH_SOURCE_GROUP_IDS = setOf("fanqie")
@@ -127,8 +122,6 @@ data class ModuleSettingsSnapshot(
     val readerEditOverwriteEnabled: Boolean = ModuleSettings.DEFAULT_READER_EDIT_OVERWRITE_ENABLED,
     val fontEnabled: Boolean = ModuleSettings.DEFAULT_FONT_ENABLED,
     val fontSettingsEnabled: Boolean = ModuleSettings.DEFAULT_FONT_SETTINGS_ENABLED,
-    val fontIsolationEnabled: Boolean = ModuleSettings.DEFAULT_FONT_ISOLATION_ENABLED,
-    val fontObfuscationDetectionEnabled: Boolean = ModuleSettings.DEFAULT_FONT_OBFUSCATION_DETECTION_ENABLED,
     val accountEnabled: Boolean = ModuleSettings.DEFAULT_ACCOUNT_ENABLED,
     val accountExportEnabled: Boolean = ModuleSettings.DEFAULT_ACCOUNT_EXPORT_ENABLED,
     val accountCacheCleanupEnabled: Boolean = ModuleSettings.DEFAULT_ACCOUNT_CACHE_CLEANUP_ENABLED,
@@ -179,12 +172,6 @@ data class ModuleSettingsSnapshot(
 
     val canUseFontSettings: Boolean
         get() = canRunFontCompletion && fontSettingsEnabled
-
-    val canIsolateReaderTypeSetting: Boolean
-        get() = canRunFontCompletion && fontIsolationEnabled
-
-    val canDetectObfuscatedFonts: Boolean
-        get() = canRunFontCompletion && fontObfuscationDetectionEnabled
 
     val canRunAccountCompletion: Boolean
         get() = moduleEnabled && accountEnabled
@@ -244,10 +231,3 @@ data class FontSettingsSnapshot(
     val songMapping: String = "",
     val kaiMapping: String = "",
 )
-
-data class ReaderTypeSettingSnapshot(
-    val embeddedFonts: Boolean? = null,
-) {
-    val hasAnyValue: Boolean
-        get() = embeddedFonts != null
-}

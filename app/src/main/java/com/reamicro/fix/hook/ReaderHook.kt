@@ -37,12 +37,16 @@ import android.widget.Toast
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
+import de.robv.android.xposed.XposedHelpers
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Method
 import java.io.File
 import java.lang.ref.WeakReference
 import java.lang.reflect.Proxy
 import java.nio.charset.StandardCharsets
 import java.io.StringReader
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
 import org.xmlpull.v1.XmlPullParser
 
 class ReaderHook(
@@ -55,6 +59,7 @@ class ReaderHook(
     private var currentEpubRef: WeakReference<Any>? = null
     private var currentPageRef: WeakReference<Any>? = null
     private var currentViewModelRef: WeakReference<Any>? = null
+    private var currentSessionRef: WeakReference<Any>? = null
     private var searchPageDialogRef: WeakReference<Dialog>? = null
     private var searchMenuButtonRef: WeakReference<View>? = null
     private var searchMenuButtonActivityRef: WeakReference<Activity>? = null
@@ -86,8 +91,11 @@ class ReaderHook(
     @Volatile private var activeSearchHighlightRenderLogId: Long? = null
     @Volatile private var activeSearchHighlightRenderLogCount: Int = 0
     @Volatile private var pendingSearchOriginRestore: Boolean = false
+    @Volatile private var scrollCrashMarkerOwnedByThisProcess: Boolean = false
 
     fun install() {
+        hookContentDomRenderTextWidthFallback()
+        hookScrollPagerCrashGuard()
         installNativeSelectionHooks()
         hookReaderViewModel()
         hookReaderCatalog()
@@ -112,6 +120,11 @@ class ReaderHook(
             XposedBridge.hookAllConstructors(cls, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     currentViewModelRef = WeakReference(param.thisObject)
+                    param.args?.firstOrNull { it?.javaClass?.name == SESSION_CLASS }
+                        ?.let { session ->
+                            currentSessionRef = WeakReference(session)
+                            restoreTranslateFlipStyleIfScrollCrashed(session, "ReaderViewModel")
+                        }
                     XposedBridge.log("$LOG_PREFIX ReaderViewModel created")
                     scheduleRestorePersistedSearchOrigin("viewModel created")
                 }
@@ -120,6 +133,8 @@ class ReaderHook(
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     XposedBridge.log("$LOG_PREFIX ReaderViewModel cleared")
                     if (currentViewModelRef?.get() === param.thisObject) currentViewModelRef = null
+                    currentSessionRef = null
+                    clearScrollCrashPending("ReaderViewModel cleared")
                     currentSelectionControllerRef = null
                     currentEpubRef = null
                     currentPageRef = null
@@ -144,6 +159,141 @@ class ReaderHook(
         }
     }
 
+    private fun hookScrollPagerCrashGuard() {
+        runCatching {
+            val scrollPagerClass = classLoader.loadClass(SCROLL_PAGER_KT_CLASS)
+            val methods = scrollPagerClass.declaredMethods.filter {
+                it.name == "ScrollPager" && it.parameterTypes.size >= 9
+            }
+            methods.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val session = currentSessionRef?.get()
+                        if (isPreviousScrollCrashPending()) {
+                            session?.let { restoreTranslateFlipStyleIfScrollCrashed(it, "ScrollPager") }
+                            param.result = null
+                            XposedBridge.log("$LOG_PREFIX ScrollPager blocked while fallback to translate is pending")
+                            return
+                        }
+                        markScrollCrashPending()
+                    }
+                })
+            }
+            XposedBridge.log("$LOG_PREFIX scroll crash guard hook installed count=${methods.size}")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX scroll crash guard hook failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun restoreTranslateFlipStyleIfScrollCrashed(session: Any, source: String) {
+        if (!isPreviousScrollCrashPending()) return
+        Thread {
+            runCatching {
+                forceTranslateFlipStyle(session)
+                clearScrollCrashPending("fallback updated by $source")
+                val activity = activityProvider()
+                activity?.runOnUiThread {
+                    Toast.makeText(activity, "\u5df2\u81ea\u52a8\u5207\u6362\u4e3a\u5e73\u79fb\u7ffb\u9875", Toast.LENGTH_SHORT).show()
+                }
+                XposedBridge.log("$LOG_PREFIX scroll crash fallback switched flip_style to translate from $source")
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX scroll crash fallback update failed from $source: ${it.stackTraceToString()}")
+            }
+        }.apply {
+            name = "ReaMicroScrollCrashFallback"
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun forceTranslateFlipStyle(session: Any) {
+        val prefKeysClass = classLoader.loadClass(PREF_KEYS_CLASS)
+        val prefKeys = prefKeysClass.getDeclaredField("INSTANCE")
+            .apply { isAccessible = true }
+            .get(null)
+        val flipStyleKey = prefKeysClass.methods.first {
+            it.name == "getFLIP_STYLE" && it.parameterTypes.isEmpty()
+        }.invoke(prefKeys)
+        val method = session.javaClass.methods.first {
+            it.name == "update" && it.parameterTypes.size == 3
+        }.apply { isAccessible = true }
+        invokeSuspendBlocking(method, session, flipStyleKey, Integer.valueOf(FLIP_STYLE_TRANSLATE))
+    }
+
+    private fun markScrollCrashPending() {
+        val context = activityProvider()?.applicationContext ?: return
+        context.getSharedPreferences(SCROLL_CRASH_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(SCROLL_CRASH_PENDING_KEY, true)
+            .apply()
+        scrollCrashMarkerOwnedByThisProcess = true
+    }
+
+    private fun clearScrollCrashPending(reason: String) {
+        val context = activityProvider()?.applicationContext ?: return
+        val prefs = context.getSharedPreferences(SCROLL_CRASH_PREFS, Context.MODE_PRIVATE)
+        scrollCrashMarkerOwnedByThisProcess = false
+        if (!prefs.getBoolean(SCROLL_CRASH_PENDING_KEY, false)) return
+        prefs.edit().remove(SCROLL_CRASH_PENDING_KEY).apply()
+        XposedBridge.log("$LOG_PREFIX scroll crash pending cleared: $reason")
+    }
+
+    private fun isScrollCrashPending(): Boolean =
+        activityProvider()?.applicationContext
+            ?.getSharedPreferences(SCROLL_CRASH_PREFS, Context.MODE_PRIVATE)
+            ?.getBoolean(SCROLL_CRASH_PENDING_KEY, false)
+            ?: false
+
+    private fun isPreviousScrollCrashPending(): Boolean =
+        isScrollCrashPending() && !scrollCrashMarkerOwnedByThisProcess
+
+    private fun hookContentDomRenderTextWidthFallback() {
+        runCatching {
+            val contentDomClass = classLoader.loadClass(CONTENT_DOM_CLASS)
+            val methods = contentDomClass.declaredMethods.filter {
+                it.name == "getRenderTextWidthDp" && it.parameterTypes.isEmpty()
+            }
+            methods.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val error = param.throwable ?: return
+                        if (!isUninitializedContentDomParent(error)) return
+                        val fallback = fallbackRenderTextWidthDp(param.thisObject) ?: return
+                        param.result = fallback
+                        XposedBridge.log("$LOG_PREFIX ContentDom parent fallback render width=$fallback")
+                    }
+                })
+            }
+            XposedBridge.log("$LOG_PREFIX ContentDom render width fallback hook installed count=${methods.size}")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX ContentDom render width fallback hook failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun isUninitializedContentDomParent(error: Throwable): Boolean =
+        error is UninitializedPropertyAccessException &&
+            error.message?.contains("parent") == true
+
+    private fun fallbackRenderTextWidthDp(contentDom: Any?): Float? =
+        runCatching {
+            val textLayout = callNoArg(contentDom, "getTextLayout") ?: return@runCatching null
+            val size = callNoArg(textLayout, "getSize") as? Number ?: return@runCatching null
+            val widthPx = (size.toLong() shr 32).toInt()
+            if (widthPx <= 0) return@runCatching 0f
+            val epubWindowClass = classLoader.loadClass(UI_EPUB_WINDOW_CLASS)
+            val instance = epubWindowClass.getDeclaredField("INSTANCE")
+                .apply { isAccessible = true }
+                .get(null)
+            val dpFloat = epubWindowClass.methods.firstOrNull {
+                it.name == "dpFloat" && it.parameterTypes.size == 1
+            } ?: return@runCatching widthPx.toFloat()
+            val dp = (dpFloat.invoke(instance, Integer.valueOf(widthPx)) as? Number)?.toFloat()
+                ?: widthPx.toFloat()
+            kotlin.math.ceil(dp.toDouble()).toFloat()
+        }.getOrNull()
+
     private fun installNativeSelectionHooks() {
         if (nativeSelectionHookInstalled) return
         nativeSelectionHookInstalled = true
@@ -152,6 +302,8 @@ class ReaderHook(
         hookCurrentEpub()
         hookCurrentEpubPage()
         hookSearchHighlightRenderInputs()
+        hookReaderSharedStateMarks()
+        hookReaderCatalogHighlightPrecomputations()
     }
 
     private fun hookReaderCatalog() {
@@ -186,6 +338,7 @@ class ReaderHook(
                             resetFullTextSearchState("catalog book changed", removeOverlays = true)
                         }
                         lastCatalogContext = context
+                        injectSearchHighlightIntoReaderCatalog(param)
                         ensureSearchIndexAsync(context)
                         scheduleRestorePersistedSearchOrigin("catalog context")
                     }
@@ -195,6 +348,13 @@ class ReaderHook(
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX reader catalog full-text search hook failed: ${it.stackTraceToString()}")
         }
+    }
+
+    private fun injectSearchHighlightIntoReaderCatalog(param: XC_MethodHook.MethodHookParam) {
+        val args = param.args ?: return
+        val chapterItemsMap = args.getOrNull(5) as? Map<*, *> ?: return
+        val nextMap = appendActiveSearchHighlightCatalogItemMap(chapterItemsMap) ?: return
+        args[5] = nextMap
     }
 
     private fun clearSearchOverlays(clearNavigationState: Boolean) {
@@ -1009,6 +1169,49 @@ class ReaderHook(
         }
     }
 
+    private fun hookReaderSharedStateMarks() {
+        runCatching {
+            val sharedStateClass = classLoader.loadClass(READER_SHARED_STATE_CLASS)
+            XposedBridge.hookAllMethods(sharedStateClass, "getMarks", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val original = (param.result as? List<*>) ?: return
+                    val nextMarks = appendActiveSearchHighlightMark(original, "ReaderSharedState") ?: return
+                    param.result = nextMarks
+                }
+            })
+            XposedBridge.log("$LOG_PREFIX full-text search highlight ReaderSharedState hook installed")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX full-text search highlight ReaderSharedState hook failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun hookReaderCatalogHighlightPrecomputations() {
+        runCatching {
+            val viewModelClass = classLoader.loadClass(READER_VIEW_MODEL_CLASS)
+            val methods = viewModelClass.declaredMethods.filter { method ->
+                method.name == "computeCatalogPrecomputations" &&
+                    method.parameterTypes.size >= 3 &&
+                    List::class.java.isAssignableFrom(method.parameterTypes[2])
+            }
+            methods.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val args = param.args ?: return
+                        val originalMarks = args.getOrNull(2) as? List<*> ?: return
+                        val nextMarks = appendActiveSearchHighlightMark(originalMarks, "CatalogPrecompute") ?: return
+                        args[2] = nextMarks
+                    }
+                })
+            }
+            XposedBridge.log(
+                "$LOG_PREFIX full-text search highlight CatalogPrecompute hook installed count=${methods.size}",
+            )
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX full-text search highlight CatalogPrecompute hook failed: ${it.stackTraceToString()}")
+        }
+    }
+
     private fun hookSearchHighlightRenderInputs() {
         hookSearchHighlightMarksArgument(
             className = "org.epub.ui.BodyKt",
@@ -1097,12 +1300,12 @@ class ReaderHook(
     private fun hookSearchHighlightContentOverlays() {
         runCatching {
             val contentClass = classLoader.loadClass("org.epub.ui.ContentKt")
-            val methods = contentClass.declaredMethods.filter { method ->
-                method.parameterTypes.size == 5 &&
-                    List::class.java.isAssignableFrom(method.returnType) &&
-                    List::class.java.isAssignableFrom(method.parameterTypes[1]) &&
-                    method.parameterTypes[3] == Int::class.javaPrimitiveType
+            val candidates = contentClass.declaredMethods.filter { method ->
+                List::class.java.isAssignableFrom(method.returnType) &&
+                    method.parameterTypes.any { List::class.java.isAssignableFrom(it) } &&
+                    method.parameterTypes.any { it == Int::class.javaPrimitiveType }
             }
+            val methods = candidates.filter(::isSearchHighlightContentOverlayMethod)
             methods.forEach { method ->
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
@@ -1142,10 +1345,26 @@ class ReaderHook(
                     }
                 })
             }
-            XposedBridge.log("$LOG_PREFIX full-text search highlight ContentOverlay hook installed count=${methods.size}")
+            XposedBridge.log(
+                "$LOG_PREFIX full-text search highlight ContentOverlay hook installed " +
+                    "count=${methods.size}, candidates=${candidates.size}",
+            )
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX full-text search highlight ContentOverlay hook failed: ${it.stackTraceToString()}")
         }
+    }
+
+    private fun isSearchHighlightContentOverlayMethod(method: Method): Boolean {
+        val params = method.parameterTypes
+        if (params.size !in 4..6) return false
+        if (!List::class.java.isAssignableFrom(params.getOrNull(1) ?: return false)) return false
+        if (params.getOrNull(3) != Int::class.javaPrimitiveType) return false
+        val names = params.map { it.name }
+        val hasContentDom = names.getOrNull(0) == "org.epub.html.node.ContentDom" ||
+            names.getOrNull(0)?.endsWith(".ContentDom") == true
+        val hasVisibleWindow = names.getOrNull(2) == "org.epub.ui.ContentVisibleTextWindow" ||
+            names.getOrNull(2)?.endsWith(".ContentVisibleTextWindow") == true
+        return hasContentDom && hasVisibleWindow
     }
 
     private fun openNativeSelectionEditor() {
@@ -1781,7 +2000,11 @@ class ReaderHook(
 
     private fun createSearchResultHighlightMark(result: FullTextSearchResult, resultIndex: Int): Any? {
         val startCfi = result.startCfi?.takeIf { it.isNotBlank() } ?: result.cfi?.takeIf { it.isNotBlank() } ?: return null
-        val endCfi = result.endCfi?.takeIf { it.isNotBlank() && it != startCfi } ?: return null
+        val endCfi = result.endCfi
+            ?.takeIf { it.isNotBlank() && it != startCfi }
+            ?: searchHighlightEndCfi(startCfi, result.matchText.length)
+            ?: result.cfi?.takeIf { it.isNotBlank() && it != startCfi }
+            ?: return null
         return createReaderMark(
             id = SEARCH_HIGHLIGHT_MARK_ID_BASE + resultIndex.coerceAtLeast(0),
             chapter = result.chapterTitle,
@@ -1805,23 +2028,45 @@ class ReaderHook(
         runCatching {
             val markClass = classLoader.loadClass(MARK_CLASS)
             val now = System.currentTimeMillis()
-            markClass.getDeclaredConstructor(
-                Long::class.javaPrimitiveType,
-                Long::class.javaPrimitiveType,
-                String::class.java,
-                Int::class.javaPrimitiveType,
-                String::class.java,
-                String::class.java,
-                String::class.java,
-                String::class.java,
-                Int::class.javaPrimitiveType,
-                String::class.java,
-                Int::class.javaPrimitiveType,
-                Long::class.javaPrimitiveType,
-                Long::class.javaPrimitiveType,
-            ).newInstance(
+            val bookId = (callNoArg(lastCatalogContext?.book, "getId") as? Number)?.toLong() ?: 0L
+            val constructors = markClass.declaredConstructors.onEach { it.isAccessible = true }
+            val newCtor = constructors.firstOrNull { ctor ->
+                val params = ctor.parameterTypes
+                params.size == 14 &&
+                    params[0] == Long::class.javaPrimitiveType &&
+                    params[1] == Long::class.javaPrimitiveType &&
+                    params[2] == Long::class.javaPrimitiveType &&
+                    params[3] == String::class.java
+            }
+            if (newCtor != null) {
+                return@runCatching newCtor.newInstance(
+                    id,
+                    bookId,
+                    0L,
+                    chapter,
+                    MARK_KIND_HIGHLIGHT,
+                    startCfi,
+                    endCfi,
+                    quote,
+                    "",
+                    style,
+                    color,
+                    MARK_SYNCED_NO,
+                    now,
+                    now,
+                )
+            }
+
+            val oldCtor = constructors.firstOrNull { ctor ->
+                val params = ctor.parameterTypes
+                params.size == 13 &&
+                    params[0] == Long::class.javaPrimitiveType &&
+                    params[1] == Long::class.javaPrimitiveType &&
+                    params[2] == String::class.java
+            } ?: error("No compatible Mark constructor found: ${constructors.joinToString { it.toString() }}")
+            oldCtor.newInstance(
                 id,
-                (callNoArg(lastCatalogContext?.book, "getId") as? Number)?.toLong() ?: 0L,
+                bookId,
                 chapter,
                 MARK_KIND_HIGHLIGHT,
                 startCfi,
@@ -1906,6 +2151,86 @@ class ReaderHook(
             label?.let { logSearchHighlightRenderInput(it, original.size, next.size, mark) }
         }
     }
+
+    private fun appendActiveSearchHighlightCatalogItemMap(original: Map<*, *>): Map<Any?, Any?>? {
+        val mark = activeSearchHighlightMark ?: return null
+        val id = searchResultHighlightMarkId(mark) ?: return null
+        if (catalogItemMapContainsSearchHighlight(original, id)) return null
+        val key = resolveActiveSearchHighlightCatalogMapKey(original, mark) ?: return null
+        val currentItems = (original[key] as? List<*>)?.filterNotNull().orEmpty()
+        if (currentItems.any { catalogChapterItemMarkId(it) == id }) return null
+        val item = createSearchHighlightCatalogChapterItem(mark) ?: return null
+        return LinkedHashMap<Any?, Any?>(original.size + 1).apply {
+            original.forEach { (entryKey, entryValue) -> put(entryKey, entryValue) }
+            put(key, ArrayList<Any>(currentItems.size + 1).apply {
+                addAll(currentItems)
+                add(item)
+            })
+        }.also {
+            logSearchHighlightRenderInput("ReaderCatalog", currentItems.size, currentItems.size + 1, mark)
+        }
+    }
+
+    private fun catalogItemMapContainsSearchHighlight(map: Map<*, *>, id: Long): Boolean =
+        map.values.any { value ->
+            (value as? Iterable<*>)?.any { item -> catalogChapterItemMarkId(item) == id } == true
+        }
+
+    private fun catalogChapterItemMarkId(item: Any?): Long? =
+        callNoArg(item, "getMark")?.let(::searchResultHighlightMarkId)
+
+    private fun createSearchHighlightCatalogChapterItem(mark: Any): Any? =
+        runCatching {
+            val cfi = createEpubCfi(callString(mark, "getStartCfi")) ?: return@runCatching null
+            val itemClass = classLoader.loadClass(CATALOG_CHAPTER_ITEM_CLASS)
+            val ctor = itemClass.declaredConstructors.firstOrNull { it.parameterTypes.size == 4 }
+                ?: return@runCatching null
+            ctor.isAccessible = true
+            ctor.newInstance(null, mark, cfi, false)
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX create search highlight catalog item failed: ${it.stackTraceToString()}")
+        }.getOrNull()
+
+    private fun resolveActiveSearchHighlightCatalogMapKey(map: Map<*, *>, mark: Any): Any? {
+        val context = lastCatalogContext ?: return map.keys.firstOrNull()
+        val catalog = context.catalog
+        val startCfi = callString(mark, "getStartCfi")
+        val index = resolveCatalogIndexForCfi(startCfi, catalog)
+        val byIndex = index
+            ?.takeIf { it in catalog.indices }
+            ?.let { callNoArg(catalog[it], "getId") }
+            ?.let { id -> map.keys.firstOrNull { key -> key.toString() == id.toString() } ?: id }
+        if (byIndex != null) return byIndex
+
+        val chapter = callString(mark, "getChapter")
+        if (chapter.isNotBlank()) {
+            catalog.firstOrNull { catalogChapterTitle(it) == chapter }
+                ?.let { callNoArg(it, "getId") }
+                ?.let { id -> return map.keys.firstOrNull { key -> key.toString() == id.toString() } ?: id }
+        }
+        return map.keys.firstOrNull()
+    }
+
+    private fun resolveCatalogIndexForCfi(cfi: String, catalog: List<Any>): Int? =
+        runCatching {
+            if (cfi.isBlank() || catalog.isEmpty()) return@runCatching null
+            val cfiObject = createEpubCfi(cfi) ?: return@runCatching null
+            val viewModel = currentViewModelRef?.get() ?: return@runCatching null
+            (XposedHelpers.callMethod(viewModel, "resolveCatalogIndexByCfi", cfiObject, catalog) as? Number)?.toInt()
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX resolve search highlight catalog index failed: ${it.stackTraceToString()}")
+        }.getOrNull()
+
+    private fun createEpubCfi(cfi: String): Any? =
+        runCatching {
+            if (cfi.isBlank()) return@runCatching null
+            val cfiClass = classLoader.loadClass("org.epub.html.EpubCFI")
+            val cfiObject = companionObject(cfiClass) ?: return@runCatching null
+            val create = cfiObject.javaClass.methods.firstOrNull {
+                it.name == "create" && it.parameterTypes.size == 1 && it.parameterTypes[0] == String::class.java
+            } ?: return@runCatching null
+            create.invoke(cfiObject, cfi)
+        }.getOrNull()
 
     private fun logSearchHighlightRenderInput(label: String, before: Int, after: Int, mark: Any) {
         val id = searchResultHighlightMarkId(mark) ?: return
@@ -2091,7 +2416,7 @@ class ReaderHook(
         runCatching {
             if (renderedTextLength <= 0) return@runCatching null
             val quote = callString(mark, "getQuote").takeIf { it.isNotBlank() } ?: return@runCatching null
-            val content = callString(contentDom, "getContent").takeIf { it.isNotBlank() } ?: return@runCatching null
+            val content = contentDomPlainText(contentDom).takeIf { it.isNotBlank() } ?: return@runCatching null
             val location = callNoArg(contentDom, "getLocation")
             val baseOffset = ((callNoArg(callNoArg(location, "getOffset"), "getOffset") as? Number)?.toInt() ?: 0)
             val visibleStart = ((callNoArg(visibleWindow, "getStart") as? Number)?.toInt() ?: baseOffset)
@@ -2117,19 +2442,48 @@ class ReaderHook(
             val textRange = textRange(localStart, localEnd) ?: return@runCatching null
             val color = markColorTokenToColor(callString(mark, "getColor")) ?: return@runCatching null
             val overlayClass = classLoader.loadClass("org.epub.ui.ContentMarkOverlay")
-            val ctor = overlayClass.declaredConstructors.firstOrNull { it.parameterTypes.size == 5 }
+            val ctor = overlayClass.declaredConstructors.firstOrNull { ctor ->
+                val params = ctor.parameterTypes
+                params.size == 5 &&
+                    params[0].name == "org.epub.ui.ResolvedMark" &&
+                    params[1] == Long::class.javaPrimitiveType &&
+                    params[2] == Int::class.javaPrimitiveType &&
+                    params[3] == Long::class.javaPrimitiveType
+            } ?: overlayClass.declaredConstructors.firstOrNull { ctor ->
+                val params = ctor.parameterTypes
+                params.size == 4 &&
+                    params[0].name == "org.epub.ui.ResolvedMark" &&
+                    params[1] == Long::class.javaPrimitiveType &&
+                    params[2] == Int::class.javaPrimitiveType &&
+                    params[3] == Long::class.javaPrimitiveType
+            }
                 ?: return@runCatching null
             ctor.isAccessible = true
-            ctor.newInstance(
-                resolved,
-                textRange,
-                (callNoArg(mark, "getStyle") as? Number)?.toInt() ?: MARK_STYLE_FILL,
-                color,
-                null,
-            )
+            val style = (callNoArg(mark, "getStyle") as? Number)?.toInt() ?: MARK_STYLE_FILL
+            if (ctor.parameterTypes.size == 5) {
+                ctor.newInstance(resolved, textRange, style, color, null)
+            } else {
+                ctor.newInstance(resolved, textRange, style, color)
+            }
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX create search highlight overlay failed: ${it.stackTraceToString()}")
         }.getOrNull()
+
+    private fun contentDomPlainText(contentDom: Any?): String =
+        runCatching {
+            val annotated = callNoArg(contentDom, "getContent") ?: return@runCatching ""
+            callNoArg(annotated, "getText")?.toString()
+                ?: (annotated as? CharSequence)?.toString()
+                ?: annotated.toString()
+        }.getOrDefault("")
+
+    private fun searchHighlightEndCfi(startCfi: String, length: Int): String? {
+        if (length <= 0) return null
+        val match = Regex(""":(\d+)\)?$""").find(startCfi) ?: return null
+        val start = match.groupValues.getOrNull(1)?.toIntOrNull() ?: return null
+        val end = start + length.coerceAtLeast(1)
+        return startCfi.replaceRange(match.groups[1]!!.range, end.toString())
+    }
 
     private fun searchHighlightQuoteStart(
         content: String,
@@ -2252,15 +2606,23 @@ class ReaderHook(
                 ?: return@runCatching false.also {
                     XposedBridge.log("$LOG_PREFIX full-text search highlight $label skipped: marksFlow null")
                 }
-            val current = (callNoArg(marksFlow, "getValue") as? List<*>)?.filterNotNull().orEmpty()
+            val current = (XposedHelpers.callMethod(marksFlow, "getValue") as? List<*>)?.filterNotNull().orEmpty()
             val next = transform(current)
             if (next === current) return@runCatching true
-            val setValue = marksFlow.javaClass.methods.firstOrNull {
-                it.name == "setValue" && it.parameterTypes.size == 1
-            } ?: return@runCatching false.also {
-                XposedBridge.log("$LOG_PREFIX full-text search highlight $label skipped: setValue not found")
+            val updated = runCatching {
+                XposedHelpers.callMethod(marksFlow, "setValue", next)
+                true
+            }.recoverCatching {
+                val compareResult = XposedHelpers.callMethod(marksFlow, "compareAndSet", current, next)
+                compareResult == true
+            }.getOrElse { error ->
+                XposedBridge.log(
+                    "$LOG_PREFIX full-text search highlight $label skipped: marksFlow update failed " +
+                        "${marksFlow.javaClass.name}: ${error.message}",
+                )
+                false
             }
-            setValue.invoke(marksFlow, next)
+            if (!updated) return@runCatching false
             XposedBridge.log(
                 "$LOG_PREFIX full-text search highlight $label marks ${current.size}->${next.size} " +
                     "active=${activeSearchHighlightId ?: 0L}",
@@ -3137,6 +3499,68 @@ class ReaderHook(
             .replace("<", "&lt;")
             .replace(">", "&gt;")
 
+    private fun invokeSuspendBlocking(method: Method, target: Any?, vararg args: Any?): Any? {
+        val latch = CountDownLatch(1)
+        var value: Any? = null
+        var error: Throwable? = null
+        val continuationClass = XposedHelpers.findClass(KOTLIN_CONTINUATION_CLASS, classLoader)
+        val throwOnFailure = XposedHelpers.findClass(KOTLIN_RESULT_KT_CLASS, classLoader).declaredMethods.first {
+            it.name == "throwOnFailure" && it.parameterTypes.size == 1
+        }.apply { isAccessible = true }
+        val continuation = Proxy.newProxyInstance(classLoader, arrayOf(continuationClass)) { proxy, proxyMethod, proxyArgs ->
+            when (proxyMethod.name) {
+                "getContext" -> emptyCoroutineContext()
+                "resumeWith" -> {
+                    val result = proxyArgs?.getOrNull(0)
+                    runCatching {
+                        throwOnFailure.invoke(null, result)
+                        value = result
+                    }.onFailure {
+                        error = if (it is InvocationTargetException) it.targetException ?: it else it
+                    }
+                    latch.countDown()
+                    targetUnit()
+                }
+                "toString" -> "ReaMicroReaderContinuation"
+                "hashCode" -> System.identityHashCode(proxy)
+                "equals" -> proxy === proxyArgs?.getOrNull(0)
+                else -> null
+            }
+        }
+        val returned = try {
+            method.invoke(target, *args.toMutableList().apply { add(continuation) }.toTypedArray())
+        } catch (e: InvocationTargetException) {
+            throw e.targetException ?: e
+        }
+        if (returned !== coroutineSuspended()) return returned
+        latch.await()
+        error?.let { throw it }
+        return value
+    }
+
+    private fun emptyCoroutineContext(): Any =
+        XposedHelpers.findClass(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS, classLoader)
+            .getDeclaredField("INSTANCE")
+            .apply { isAccessible = true }
+            .get(null)
+
+    private fun coroutineSuspended(): Any =
+        runCatching {
+            XposedHelpers.findClass(KOTLIN_INTRINSICS_CLASS, classLoader).methods.first {
+                it.name == "getCOROUTINE_SUSPENDED" && it.parameterTypes.isEmpty()
+            }.apply { isAccessible = true }.invoke(null)
+        }.getOrElse {
+            (XposedHelpers.findClass(KOTLIN_COROUTINE_SINGLETONS_CLASS, classLoader).enumConstants ?: emptyArray())
+                .first { value -> value.toString() == "COROUTINE_SUSPENDED" }
+        }
+
+    private fun targetUnit(): Any? = runCatching {
+        XposedHelpers.findClass(KOTLIN_UNIT_CLASS, classLoader)
+            .getDeclaredField("INSTANCE")
+            .apply { isAccessible = true }
+            .get(null)
+    }.getOrNull()
+
     private fun callNoArg(target: Any?, name: String): Any? =
         runCatching {
             target?.javaClass?.methods?.firstOrNull {
@@ -3152,13 +3576,30 @@ class ReaderHook(
         const val READER_UI_INTENT_CLASS = "app.zhendong.reamicro.ui.reader.ReaderUiIntent"
         const val READER_CATALOG_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderCatalogKt"
         const val READER_BOTTOM_BAR_CLASS = "app.zhendong.reamicro.ui.reader.components.ReaderBottomBarKt"
+        const val READER_SHARED_STATE_CLASS = "app.zhendong.reamicro.ui.reader.components.ReaderSharedState"
+        const val SCROLL_PAGER_KT_CLASS = "app.zhendong.reamicro.ui.reader.components.ScrollPagerKt"
+        const val SESSION_CLASS = "app.zhendong.reamicro.repository.core.Session"
+        const val PREF_KEYS_CLASS = "app.zhendong.reamicro.constants.PrefKeys"
+        const val CONTENT_DOM_CLASS = "org.epub.html.node.ContentDom"
+        const val UI_EPUB_WINDOW_CLASS = "org.epub.UIEpubWindow"
         const val HOME_SCREEN_CLASS = "app.zhendong.reamicro.ui.home.HomeScreenKt"
         const val BOOKSHELF_SCREEN_CLASS = "app.zhendong.reamicro.ui.home.BookshelfScreenKt"
         const val BOOKMARK_CLASS = "app.zhendong.reamicro.data.reader.Bookmark"
         const val MARK_CLASS = "app.zhendong.reamicro.data.db.entity.Mark"
+        const val CATALOG_CHAPTER_ITEM_CLASS = "app.zhendong.reamicro.ui.reader.CatalogChapterItem"
         const val EDIT_ICON_CLASS = "androidx.compose.material.icons.outlined.EditKt"
         const val ICONS_OUTLINED_CLASS = "androidx.compose.material.icons.Icons\$Outlined"
         const val LOG_PREFIX = "ReaMicro LSP"
+        const val FLIP_STYLE_TRANSLATE = 0
+        const val SCROLL_CRASH_PREFS = "reamicro_scroll_crash_guard"
+        const val SCROLL_CRASH_PENDING_KEY = "scroll_crash_pending"
+        const val KOTLIN_FUNCTION0_CLASS = "kotlin.jvm.functions.Function0"
+        const val KOTLIN_UNIT_CLASS = "kotlin.Unit"
+        const val KOTLIN_CONTINUATION_CLASS = "kotlin.coroutines.Continuation"
+        const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = "kotlin.coroutines.EmptyCoroutineContext"
+        const val KOTLIN_INTRINSICS_CLASS = "kotlin.coroutines.intrinsics.IntrinsicsKt"
+        const val KOTLIN_COROUTINE_SINGLETONS_CLASS = "kotlin.coroutines.intrinsics.CoroutineSingletons"
+        const val KOTLIN_RESULT_KT_CLASS = "kotlin.ResultKt"
         const val MAX_SEARCH_RESULTS = 2000
         const val MAX_MATCHES_PER_FILE = 200
         const val SEARCH_SNIPPET_RADIUS = 16

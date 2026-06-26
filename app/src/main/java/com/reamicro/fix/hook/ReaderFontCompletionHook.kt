@@ -1,8 +1,6 @@
 package com.reamicro.fix.hook
 
 import android.app.Activity
-import android.widget.Toast
-import com.reamicro.fix.settings.ReaderTypeSettingSnapshot
 import com.reamicro.fix.settings.XposedModuleSettings
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -10,12 +8,7 @@ import de.robv.android.xposed.XposedHelpers
 import java.io.File
 import java.lang.ref.WeakReference
 import java.lang.reflect.Field
-import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
-import java.lang.reflect.Proxy
-import java.util.LinkedHashSet
-import java.util.concurrent.CountDownLatch
-import kotlin.text.RegexOption
 
 class ReaderFontCompletionHook(
     private val classLoader: ClassLoader,
@@ -33,7 +26,6 @@ class ReaderFontCompletionHook(
     fun install() {
         hookReaderViewModel()
         hookPagerInput()
-        hookSessionUpdate()
         hookFontProvider()
     }
 
@@ -43,11 +35,9 @@ class ReaderFontCompletionHook(
             XposedBridge.hookAllConstructors(readerViewModelClass, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val bookId = (param.args?.getOrNull(0) as? Number)?.toLong() ?: return
-                    val session = param.args?.getOrNull(2) ?: return
                     activeReader = ActiveReader(
                         bookId = bookId,
                         viewModelRef = WeakReference(param.thisObject),
-                        sessionRef = WeakReference(session),
                     )
                     XposedBridge.log("$LOG_PREFIX font completion reader captured: bookId=$bookId")
                 }
@@ -56,7 +46,6 @@ class ReaderFontCompletionHook(
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val active = activeReader ?: return
                     if (active.viewModelRef.get() !== param.thisObject) return
-                    restoreGlobalTypeSetting(active)
                     activeReader = null
                 }
             })
@@ -71,14 +60,10 @@ class ReaderFontCompletionHook(
                     if (!snapshot.canRunFontCompletion) return
                     val current = readResolvedTypeSetting(config)
                     val active = activeReader?.takeIf { it.viewModelRef.get() === param.thisObject }
-                    if (active?.originalConfig == null) active?.originalConfig = current
 
                     val prepared = active?.takeIf { it.lastRenderConfig == current }?.lastEffectiveConfig
-                    val effective = prepared ?: effectiveTypeSetting(current, active, snapshot.canIsolateReaderTypeSetting)
+                    val effective = prepared ?: current
                     param.args[0] = newReaderEpubConfig(effective)
-                    if (snapshot.canIsolateReaderTypeSetting && active != null) {
-                        syncSessionForActiveBook(active, effective)
-                    }
                 }
             })
             XposedBridge.log("$LOG_PREFIX font completion ReaderViewModel hook installed")
@@ -97,8 +82,7 @@ class ReaderFontCompletionHook(
                     if (!snapshot.canRunFontCompletion) return
                     val current = readResolvedTypeSetting(config)
                     val active = activeReader
-                    if (active?.originalConfig == null) active?.originalConfig = current
-                    val effective = effectiveTypeSetting(current, active, snapshot.canIsolateReaderTypeSetting)
+                    val effective = current
                     active?.lastEffectiveConfig = effective
                     active?.lastRenderConfig = effective
                     param.args[1] = newReaderEpubConfig(effective)
@@ -110,56 +94,12 @@ class ReaderFontCompletionHook(
         }
     }
 
-    private fun hookSessionUpdate() {
-        runCatching {
-            XposedBridge.hookAllMethods(cls(SESSION_CLASS), "update", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val active = activeReader ?: return
-                    if (active.sessionRef.get() !== param.thisObject) return
-                    if (active.syncing || active.restoring) return
-                    if (!settings.snapshot().canDetectObfuscatedFonts) return
-                    if (shouldBlockEmbeddedFontDisable(active, param)) {
-                        param.setObjectExtra(BLOCKED_EMBEDDED_FONT_DISABLE, true)
-                        param.result = targetUnit()
-                    }
-                }
-
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val active = activeReader ?: return
-                    if (active.sessionRef.get() !== param.thisObject) return
-                    if (active.syncing || active.restoring) return
-                    if (param.getObjectExtra(BLOCKED_EMBEDDED_FONT_DISABLE) == true) return
-                    if (!settings.snapshot().canIsolateReaderTypeSetting) return
-                    val keyName = param.args?.getOrNull(0)?.toString().orEmpty()
-                    val typeKey = typeSettingKeyName(keyName) ?: return
-                    settings.setBookTypeSettingValue(active.bookId, typeKey, param.args?.getOrNull(1))
-                    XposedBridge.log("$LOG_PREFIX isolated type setting saved: bookId=${active.bookId}, key=$typeKey")
-                }
-            })
-            XposedBridge.log("$LOG_PREFIX font completion Session.update hook installed")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX font completion Session.update hook failed: ${it.stackTraceToString()}")
-        }
-    }
-
     private fun hookFontProvider() {
         runCatching {
             val fontProviderClass = cls(FONT_PROVIDER_CLASS)
-            XposedBridge.hookAllMethods(fontProviderClass, "attach", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val active = activeReader ?: return
-                    if (!settings.snapshot().canDetectObfuscatedFonts) return
-                    val cssPath = param.args?.getOrNull(0)?.toString().orEmpty()
-                    val ruleSets = param.args?.getOrNull(1) as? Array<*> ?: return
-                    rememberAttachedFonts(active, cssPath, ruleSets)
-                }
-            })
             XposedBridge.hookAllMethods(fontProviderClass, "withName", object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val names = fontFamilyArgumentNames(param.args)
-                    activeReader?.takeIf { settings.snapshot().canDetectObfuscatedFonts }?.let {
-                        inspectRequestedAttachedFonts(it, names)
-                    }
                     if (!settings.snapshot().canUseFontSettings) return
                     if (!fontProviderBoolean("embeddedFonts", true)) return
                     if (!fontProviderBoolean("buildInFonts", true)) return
@@ -262,216 +202,6 @@ class ReaderFontCompletionHook(
             if (!appliedMappingLogKeys.add(key)) return
         }
         XposedBridge.log("$LOG_PREFIX font mapping applied: $target -> ${displayFontName(selection)}")
-    }
-
-    private fun isolatedTypeSetting(stored: ReaderTypeSettingSnapshot, current: ResolvedTypeSetting): ResolvedTypeSetting {
-        return ResolvedTypeSetting(
-            family = current.family,
-            textSize = current.textSize,
-            lineHeight = current.lineHeight,
-            padding = current.padding,
-            embeddedFonts = stored.embeddedFonts ?: current.embeddedFonts,
-            buildInFonts = current.buildInFonts,
-        )
-    }
-
-    private fun effectiveTypeSetting(
-        current: ResolvedTypeSetting,
-        active: ActiveReader?,
-        isolationEnabled: Boolean,
-    ): ResolvedTypeSetting {
-        if (!isolationEnabled || active == null) return current
-        return isolatedTypeSetting(settings.bookTypeSetting(active.bookId), current)
-    }
-
-    private fun syncSessionForActiveBook(active: ActiveReader, target: ResolvedTypeSetting) {
-        if (active.synced) return
-        val session = active.sessionRef.get() ?: return
-        active.synced = true
-        Thread {
-            active.syncing = true
-            runCatching {
-                updateSession(session, target)
-            }.onFailure {
-                XposedBridge.log("$LOG_PREFIX sync isolated type setting failed: ${it.stackTraceToString()}")
-            }
-            active.syncing = false
-        }.apply {
-            name = "ReaMicro-FontIsolationSync"
-            isDaemon = true
-            start()
-        }
-    }
-
-    private fun restoreGlobalTypeSetting(active: ActiveReader) {
-        val original = active.originalConfig ?: return
-        val session = active.sessionRef.get() ?: return
-        if (!settings.snapshot().canIsolateReaderTypeSetting) return
-        Thread {
-            active.restoring = true
-            runCatching {
-                updateSession(session, original)
-            }.onFailure {
-                XposedBridge.log("$LOG_PREFIX restore global type setting failed: ${it.stackTraceToString()}")
-            }
-            active.restoring = false
-        }.apply {
-            name = "ReaMicro-FontIsolationRestore"
-            isDaemon = true
-            start()
-        }
-    }
-
-    private fun updateSession(session: Any, value: ResolvedTypeSetting) {
-        val update = method(SESSION_CLASS, "update", 3)
-        invokeSuspendBlocking(update, session, prefKey("getEMBEDDED_FONTS"), value.embeddedFonts)
-    }
-
-    private fun prefKey(getterName: String): Any {
-        val prefKeys = staticObject(PREF_KEYS_CLASS, "INSTANCE")
-        return prefKeys.javaClass.methods.first {
-            it.name == getterName && it.parameterTypes.isEmpty()
-        }.invoke(prefKeys)
-    }
-
-    private fun typeSettingKeyName(prefName: String): String? =
-        when (prefName) {
-            "embedded_fonts" -> "embedded_fonts"
-            else -> null
-        }
-
-    private fun shouldBlockEmbeddedFontDisable(active: ActiveReader, param: XC_MethodHook.MethodHookParam): Boolean {
-        val keyName = param.args?.getOrNull(0)?.toString().orEmpty()
-        val requestedValue = param.args?.getOrNull(1) as? Boolean
-        if (keyName != "embedded_fonts" || requestedValue != false) {
-            active.pendingEmbeddedFontDisableAtMs = 0L
-            return false
-        }
-        if (!active.hasObfuscatedEmbeddedFonts) return false
-        val now = System.currentTimeMillis()
-        val pendingAt = active.pendingEmbeddedFontDisableAtMs
-        if (pendingAt > 0L && now - pendingAt <= FORCE_DISABLE_EMBEDDED_FONT_WINDOW_MS) {
-            active.pendingEmbeddedFontDisableAtMs = 0L
-            XposedBridge.log("$LOG_PREFIX embedded font disable force-allowed: bookId=${active.bookId}")
-            return false
-        }
-        active.pendingEmbeddedFontDisableAtMs = now
-        showToast("本书疑似存在字体混淆，不建议关闭 EPUB 字体；再点一次可强制关闭")
-        XposedBridge.log(
-            "$LOG_PREFIX embedded font disable blocked: bookId=${active.bookId}, reason=${active.obfuscatedFontReason.orEmpty()}",
-        )
-        return true
-    }
-
-    private fun rememberAttachedFonts(active: ActiveReader, cssPath: String, ruleSets: Array<*>) {
-        var remembered = 0
-        for (ruleSet in ruleSets) {
-            val candidates = extractAttachedFontCandidates(cssPath, ruleSet)
-            if (candidates.isEmpty()) continue
-            synchronized(active.attachedFontFilesByFamily) {
-                for (candidate in candidates) {
-                    val familyKey = normalizedFamilyName(candidate.familyName)
-                    val files = active.attachedFontFilesByFamily.getOrPut(familyKey) { mutableListOf() }
-                    if (files.none { it.absolutePath == candidate.file.absolutePath }) {
-                        files.add(candidate.file)
-                        remembered++
-                    }
-                }
-            }
-        }
-        if (remembered > 0) {
-            XposedBridge.log("$LOG_PREFIX epub font candidates remembered: bookId=${active.bookId}, count=$remembered")
-        }
-    }
-
-    private fun inspectRequestedAttachedFonts(active: ActiveReader, names: List<String>) {
-        if (active.hasObfuscatedEmbeddedFonts || names.isEmpty()) return
-        val candidateFiles = synchronized(active.attachedFontFilesByFamily) {
-            names.asSequence()
-                .map(::normalizedFamilyName)
-                .flatMap { familyKey -> active.attachedFontFilesByFamily[familyKey].orEmpty().asSequence() }
-                .distinctBy { it.absolutePath }
-                .toList()
-        }
-        val fontFile = candidateFiles.maxByOrNull { it.length() } ?: return
-        inspectFontFile(active, fontFile, names)
-    }
-
-    private fun inspectFontFile(active: ActiveReader, fontFile: File, names: List<String>) {
-        val normalizedPath = fontFile.absolutePath
-        val shouldInspect = synchronized(active.inspectedFontPaths) {
-            active.inspectedFontPaths.add(normalizedPath)
-        }
-        if (!shouldInspect) return
-        val result = EpubFontObfuscationDetector.detect(fontFile)
-        XposedBridge.log(
-            "$LOG_PREFIX epub font inspect: bookId=${active.bookId}, requested=${names.joinToString("|")}, path=$normalizedPath, " +
-                "suspicious=${result.suspicious}, reason=${result.reason}, detail=${result.detail}",
-        )
-        if (!result.suspicious) return
-        active.hasObfuscatedEmbeddedFonts = true
-        active.obfuscatedFontReason = "${fontFile.name}:${result.reason}${formatDetectionDetail(result.detail)}"
-        active.pendingEmbeddedFontDisableAtMs = 0L
-        XposedBridge.log(
-            "$LOG_PREFIX epub font obfuscation detected: bookId=${active.bookId}, ${active.obfuscatedFontReason}",
-        )
-    }
-
-    private fun extractAttachedFontCandidates(cssPath: String, ruleSet: Any?): List<AttachedFontCandidate> {
-        val declarations = callMethod(ruleSet, "getDeclarations") as? Iterable<*> ?: return emptyList()
-        var familyName: String? = null
-        var srcValue: String? = null
-        for (declaration in declarations) {
-            val property = callMethod(declaration, "getProperty")?.toString().orEmpty()
-            when (property) {
-                "font-family" -> {
-                    familyName = callMethod(declaration, "getValue")
-                        ?.toString()
-                        ?.trim()
-                        ?.trim('"', '\'')
-                        ?.takeIf { it.isNotEmpty() }
-                }
-                "src" -> {
-                    srcValue = callMethod(declaration, "getValue")?.toString()
-                }
-            }
-        }
-        if (familyName.isNullOrBlank() || srcValue.isNullOrBlank()) return emptyList()
-        val baseDir = File(cssPath).parentFile
-        return extractUrlValues(srcValue)
-            .mapNotNull { resolveAttachedFontFile(baseDir, it) }
-            .filter { it.isFile && isFontFileName(it.name) }
-            .map { AttachedFontCandidate(familyName = familyName, file = it) }
-    }
-
-    private fun extractUrlValues(srcValue: String): List<String> =
-        FONT_URL_REGEX.findAll(srcValue)
-            .mapNotNull { match ->
-                match.groups[2]?.value
-                    ?.substringBefore('#')
-                    ?.substringBefore('?')
-                    ?.trim()
-                    ?.takeIf { it.isNotEmpty() }
-            }
-            .toList()
-
-    private fun resolveAttachedFontFile(baseDir: File?, value: String): File? {
-        val normalized = value.replace('\\', File.separatorChar).replace('/', File.separatorChar)
-        val candidate = File(normalized)
-        val resolved = if (candidate.isAbsolute) candidate else File(baseDir, normalized)
-        return resolved.takeIf { it.exists() }
-    }
-
-    private fun formatDetectionDetail(detail: String): String =
-        if (detail.isBlank()) "" else " ($detail)"
-
-    private fun showToast(message: String) {
-        val activity = activityProvider() ?: return
-        runCatching {
-            activity.runOnUiThread {
-                Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
-            }
-        }
     }
 
     private fun readResolvedTypeSetting(config: Any): ResolvedTypeSetting =
@@ -644,64 +374,6 @@ class ReaderFontCompletionHook(
             .getDeclaredConstructor(Any::class.java, Any::class.java)
             .newInstance(first, second)
 
-    private fun invokeSuspendBlocking(method: Method, target: Any?, vararg args: Any?): Any? {
-        val latch = CountDownLatch(1)
-        var value: Any? = null
-        var error: Throwable? = null
-        val continuationClass = cls(KOTLIN_CONTINUATION_CLASS)
-        val continuation = Proxy.newProxyInstance(classLoader, arrayOf(continuationClass)) { proxy, proxyMethod, proxyArgs ->
-            when (proxyMethod.name) {
-                "getContext" -> emptyCoroutineContext()
-                "resumeWith" -> {
-                    val result = proxyArgs?.getOrNull(0)
-                    runCatching {
-                        throwOnFailure(result)
-                        value = result
-                    }.onFailure {
-                        error = if (it is InvocationTargetException) it.targetException ?: it else it
-                    }
-                    latch.countDown()
-                    targetUnit()
-                }
-                "toString" -> "ReaMicroFontContinuation"
-                "hashCode" -> System.identityHashCode(proxy)
-                "equals" -> proxy === proxyArgs?.getOrNull(0)
-                else -> null
-            }
-        }
-        val returned = try {
-            method.invoke(target, *args.toMutableList().apply { add(continuation) }.toTypedArray())
-        } catch (e: InvocationTargetException) {
-            throw e.targetException ?: e
-        }
-        if (returned !== coroutineSuspended()) return returned
-        latch.await()
-        error?.let { throw it }
-        return value
-    }
-
-    private fun throwOnFailure(value: Any?) {
-        cls(KOTLIN_RESULT_KT_CLASS).declaredMethods.first {
-            it.name == "throwOnFailure" && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }.invoke(null, value)
-    }
-
-    private fun emptyCoroutineContext(): Any =
-        staticObject(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS, "INSTANCE")
-
-    private fun coroutineSuspended(): Any =
-        runCatching {
-            cls(KOTLIN_INTRINSICS_CLASS).methods.first {
-                it.name == "getCOROUTINE_SUSPENDED" && it.parameterTypes.isEmpty()
-            }.invoke(null) ?: error("COROUTINE_SUSPENDED not found")
-        }.getOrElse {
-            cls(KOTLIN_COROUTINE_SINGLETONS_CLASS).enumConstants.orEmpty()
-                .first { it.toString() == "COROUTINE_SUSPENDED" }
-        }
-
-    private fun targetUnit(): Any =
-        staticObject(KOTLIN_UNIT_CLASS, "INSTANCE")
-
     private fun callMethod(target: Any?, name: String): Any? {
         if (target == null) return null
         return target.javaClass.methods.firstOrNull {
@@ -769,23 +441,8 @@ class ReaderFontCompletionHook(
     private data class ActiveReader(
         val bookId: Long,
         val viewModelRef: WeakReference<Any>,
-        val sessionRef: WeakReference<Any>,
-        @Volatile var originalConfig: ResolvedTypeSetting? = null,
         @Volatile var lastEffectiveConfig: ResolvedTypeSetting? = null,
         @Volatile var lastRenderConfig: ResolvedTypeSetting? = null,
-        @Volatile var hasObfuscatedEmbeddedFonts: Boolean = false,
-        @Volatile var obfuscatedFontReason: String? = null,
-        val attachedFontFilesByFamily: MutableMap<String, MutableList<File>> = LinkedHashMap(),
-        val inspectedFontPaths: MutableSet<String> = LinkedHashSet(),
-        @Volatile var pendingEmbeddedFontDisableAtMs: Long = 0L,
-        @Volatile var synced: Boolean = false,
-        @Volatile var syncing: Boolean = false,
-        @Volatile var restoring: Boolean = false,
-    )
-
-    private data class AttachedFontCandidate(
-        val familyName: String,
-        val file: File,
     )
 
     private data class ResolvedTypeSetting(
@@ -803,25 +460,13 @@ class ReaderFontCompletionHook(
         const val READER_EPUB_CONFIG_CLASS = "app.zhendong.reamicro.ui.reader.ReaderViewModel\$ReaderEpubConfig"
         const val READER_PAGER_INPUT_CLASS = "app.zhendong.reamicro.ui.reader.ReaderViewModel\$PagerInput"
         const val APPLY_EPUB_CONFIG_METHOD = "applyEpubConfig"
-        const val SESSION_CLASS = "app.zhendong.reamicro.repository.core.Session"
-        const val PREF_KEYS_CLASS = "app.zhendong.reamicro.constants.PrefKeys"
-        const val UI_EPUB_WINDOW_CLASS = "org.epub.UIEpubWindow"
         const val FONT_PROVIDER_CLASS = "org.epub.FontProvider"
         const val FONT_FAMILY_CLASS = "androidx.compose.ui.text.font.FontFamily"
         const val FONT_FAMILY_KT_CLASS = "androidx.compose.ui.text.font.FontFamilyKt"
         const val FONT_WEIGHT_CLASS = "androidx.compose.ui.text.font.FontWeight"
         const val KOTLIN_PAIR_CLASS = "kotlin.Pair"
-        const val KOTLIN_CONTINUATION_CLASS = "kotlin.coroutines.Continuation"
-        const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = "kotlin.coroutines.EmptyCoroutineContext"
-        const val KOTLIN_INTRINSICS_CLASS = "kotlin.coroutines.intrinsics.IntrinsicsKt"
-        const val KOTLIN_COROUTINE_SINGLETONS_CLASS = "kotlin.coroutines.intrinsics.CoroutineSingletons"
-        const val KOTLIN_RESULT_KT_CLASS = "kotlin.ResultKt"
-        const val KOTLIN_UNIT_CLASS = "kotlin.Unit"
-        const val BLOCKED_EMBEDDED_FONT_DISABLE = "reamicro.blockedEmbeddedFontDisable"
-        const val FORCE_DISABLE_EMBEDDED_FONT_WINDOW_MS = 3000L
         const val FAMILY_SYSTEM = "system"
         const val FAMILY_SOURCE_HAN_SERIF = "serif"
-        val FONT_URL_REGEX = Regex("""url\s*\(\s*(['"]?)([^)'"]+)\1\s*\)""", RegexOption.IGNORE_CASE)
         fun isBuiltinFontSelection(selection: String): Boolean =
             selection == FAMILY_SYSTEM || selection == FAMILY_SOURCE_HAN_SERIF
 

@@ -651,26 +651,6 @@ class ReaMicroSettingsHook(
                             checked
                         },
                     ),
-                    ToggleRow(
-                        key = ModuleSettings.KEY_FONT_ISOLATION_ENABLED,
-                        title = "\u8bbe\u7f6e\u9694\u79bb",
-                        checked = snapshot.fontIsolationEnabled,
-                        visibleProvider = { booleanStateValue(fontExpandedState) },
-                        onChanged = { checked, _ ->
-                            settings.setFontIsolationEnabled(checked)
-                            checked
-                        },
-                    ),
-                    ToggleRow(
-                        key = ModuleSettings.KEY_FONT_OBFUSCATION_DETECTION_ENABLED,
-                        title = "\u6df7\u6dc6\u68c0\u67e5",
-                        checked = snapshot.fontObfuscationDetectionEnabled,
-                        visibleProvider = { booleanStateValue(fontExpandedState) },
-                        onChanged = { checked, _ ->
-                            settings.setFontObfuscationDetectionEnabled(checked)
-                            checked
-                        },
-                    ),
                 )
                 renderHostSettingsCard(
                     fontRows,

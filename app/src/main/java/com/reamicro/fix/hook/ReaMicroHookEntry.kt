@@ -69,6 +69,11 @@ class ReaMicroHookEntry {
             activityProvider = { currentActivityRef?.get() },
             settingsProvider = moduleSettings::snapshot,
         ).install()
+        BookDetailsAssociationActionHook(
+            classLoader = classLoader,
+            activityProvider = { currentActivityRef?.get() },
+            settingsProvider = moduleSettings::snapshot,
+        ).install()
         LocalExportHook(
             classLoader = classLoader,
             activityProvider = { currentActivityRef?.get() },
