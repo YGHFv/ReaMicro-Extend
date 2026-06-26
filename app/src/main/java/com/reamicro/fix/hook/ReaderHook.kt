@@ -1865,20 +1865,29 @@ class ReaderHook(
         windowEnd: Int,
         expectedLocalStart: Int?,
     ): Int? {
-        if (expectedLocalStart != null &&
-            expectedLocalStart >= windowStart &&
-            expectedLocalStart + quote.length <= windowEnd &&
-            content.regionMatches(expectedLocalStart, quote, 0, quote.length)
-        ) {
-            return expectedLocalStart
+        if (expectedLocalStart != null) {
+            if (expectedLocalStart !in windowStart..windowEnd || expectedLocalStart + quote.length > windowEnd) {
+                return null
+            }
+            if (content.regionMatches(expectedLocalStart, quote, 0, quote.length)) {
+                return expectedLocalStart
+            }
+            val nearbyStart = (expectedLocalStart - SEARCH_HIGHLIGHT_OFFSET_TOLERANCE).coerceAtLeast(windowStart)
+            val nearbyEnd = (expectedLocalStart + SEARCH_HIGHLIGHT_OFFSET_TOLERANCE)
+                .coerceAtMost(windowEnd - quote.length)
+            if (nearbyEnd >= nearbyStart) {
+                val nearbyMatches = generateSequence(content.indexOf(quote, nearbyStart)) { previous ->
+                    content.indexOf(quote, previous + 1)
+                }.takeWhile { it >= 0 && it <= nearbyEnd }.toList()
+                return nearbyMatches.minByOrNull { kotlin.math.abs(it - expectedLocalStart) }
+            }
+            return null
         }
         val matches = generateSequence(content.indexOf(quote, windowStart)) { previous ->
             content.indexOf(quote, previous + 1)
         }.takeWhile { it >= 0 && it + quote.length <= windowEnd }.toList()
         if (matches.isEmpty()) return null
-        return expectedLocalStart?.let { expected ->
-            matches.minByOrNull { kotlin.math.abs(it - expected) }
-        } ?: matches.first()
+        return matches.first()
     }
 
     private fun cfiCharacterOffset(cfi: String): Int? =
@@ -2872,6 +2881,7 @@ class ReaderHook(
         const val SEARCH_NAVIGATION_MENU_BOTTOM_MARGIN_DP = 190
         const val SEARCH_JUMP_FAST_VISIBILITY_CHECK_DELAY_MS = 220L
         const val SEARCH_JUMP_RETRY_VISIBILITY_CHECK_DELAY_MS = 520L
+        const val SEARCH_HIGHLIGHT_OFFSET_TOLERANCE = 8
         const val MARK_KIND_HIGHLIGHT = 0
         const val MARK_STYLE_FILL = 0
         const val MARK_STYLE_LINE = 1
