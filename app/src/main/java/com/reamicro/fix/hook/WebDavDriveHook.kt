@@ -4716,27 +4716,7 @@ class WebDavDriveHook(
             val detail = onlineRuleValue(node, rule.optString("bookUrl", ""), baseUrl)
             val cover = onlineRuleValue(node, rule.optString("coverUrl", ""), baseUrl)
             val intro = onlineRuleValue(node, rule.optString("intro", ""), baseUrl).cleanOnlineText()
-            val kind = onlineRuleValue(node, rule.optString("kind", ""), baseUrl).cleanOnlineText()
-            val wordCount = onlineRuleValue(node, rule.optString("wordCount", ""), baseUrl)
-                .ifBlank { onlineRuleValue(node, rule.optString("word_count", ""), baseUrl) }
-                .ifBlank { onlineJsonString(node, "word_number") }
-                .ifBlank { onlineJsonString(node, "word_count") }
-                .cleanOnlineText()
-            val updateTime = onlineRuleValue(node, rule.optString("updateTime", ""), baseUrl)
-                .ifBlank { onlineJsonString(node, "updated_at") }
-                .ifBlank { onlineJsonString(node, "last_chapter_update_time") }
-                .ifBlank { onlineJsonString(node, "last_chapter_first_pass_time") }
-                .ifBlank { onlineJsonString(node, "firstPassTime") }
-                .cleanOnlineText()
-            val chapterCount = onlineJsonInt(
-                node,
-                "$.chapter_count",
-                "chapter_count",
-                "$.total_chapters",
-                "total_chapters",
-                "chapterCount",
-                "chapter_count_total",
-            )
+            val meta = onlineResultMetadata(source, node, rule, baseUrl)
             OnlineBookSearchResult(
                 sourceName = source.name,
                 name = name,
@@ -4744,10 +4724,10 @@ class WebDavDriveHook(
                 coverUrl = resolveOnlineUrl(baseUrl, cover),
                 detailUrl = resolveOnlineUrl(baseUrl, detail),
                 intro = intro,
-                chapterCount = chapterCount,
-                status = onlineCompletionStatusText(kind, node),
-                wordCount = formatOnlineWordCount(wordCount),
-                updateTime = formatOnlineUpdateTime(updateTime),
+                chapterCount = meta.chapterCount,
+                status = meta.status,
+                wordCount = meta.wordCount,
+                updateTime = meta.updateTime,
             )
         }.distinctBy { "${it.name}|${it.author}|${it.detailUrl}" }
             .take(ONLINE_COMPLETION_RESULT_LIMIT)
@@ -4764,10 +4744,7 @@ class WebDavDriveHook(
         val detail = firstJsonString(json, "bookUrl", "detailUrl", "url", "href", "link")
         val cover = firstJsonString(json, "coverUrl", "cover", "img", "image", "bookCover")
         val intro = firstJsonString(json, "intro", "desc", "description", "bookDesc").cleanOnlineText()
-        val chapterCount = onlineJsonInt(json, "$.chapter_count", "chapter_count", "$.total_chapters", "total_chapters")
-        val kind = firstJsonString(json, "kind", "category", "tags")
-        val wordCount = firstJsonString(json, "wordCount", "word_count", "word_number", "words")
-        val updateTime = firstJsonString(json, "updateTime", "updated_at", "last_chapter_update_time", "last_chapter_first_pass_time")
+        val meta = onlineResultMetadata(source, json, null, baseUrl)
         return OnlineBookSearchResult(
             sourceName = source.name,
             name = name,
@@ -4775,10 +4752,10 @@ class WebDavDriveHook(
             coverUrl = resolveOnlineUrl(baseUrl, cover),
             detailUrl = resolveOnlineUrl(baseUrl, detail),
             intro = intro,
-            chapterCount = chapterCount,
-            status = onlineCompletionStatusText(kind, json),
-            wordCount = formatOnlineWordCount(wordCount),
-            updateTime = formatOnlineUpdateTime(updateTime),
+            chapterCount = meta.chapterCount,
+            status = meta.status,
+            wordCount = meta.wordCount,
+            updateTime = meta.updateTime,
         )
     }
 
@@ -4823,6 +4800,78 @@ class WebDavDriveHook(
             .firstOrNull { it.isNotBlank() && it != "null" }
             .orEmpty()
 
+    private fun onlineResultMetadata(
+        source: OnlineSourceEntry,
+        node: Any?,
+        rule: JSONObject?,
+        baseUrl: String,
+        chapterCountFallback: Int = 0,
+    ): OnlineResultMetadata {
+        val kind = rule?.optString("kind", "").orEmpty()
+            .takeIf { it.isNotBlank() }
+            ?.let { onlineRuleValue(node, it, baseUrl) }
+            .orEmpty()
+        val wordCount = rule?.optString("wordCount", "").orEmpty()
+            .takeIf { it.isNotBlank() }
+            ?.let { onlineRuleValue(node, it, baseUrl) }
+            .orEmpty()
+            .ifBlank { onlineFirstJsonString(node, ONLINE_WORD_COUNT_FIELDS) }
+        val updateTime = rule?.optString("updateTime", "").orEmpty()
+            .takeIf { it.isNotBlank() }
+            ?.let { onlineRuleValue(node, it, baseUrl) }
+            .orEmpty()
+            .ifBlank { onlineFirstJsonString(node, ONLINE_UPDATE_TIME_FIELDS) }
+        val chapterCount = onlineFirstJsonInt(node, ONLINE_CHAPTER_COUNT_FIELDS)
+            .takeIf { it > 0 }
+            ?: chapterCountFallback.coerceAtLeast(0)
+        val status = onlineCompletionStatusText(kind, node)
+        logOnlineMetadataGaps(source, node, status, wordCount, updateTime, chapterCount)
+        return OnlineResultMetadata(
+            status = status,
+            wordCount = formatOnlineWordCount(wordCount),
+            updateTime = formatOnlineUpdateTime(updateTime),
+            chapterCount = chapterCount,
+        )
+    }
+
+    private fun logOnlineMetadataGaps(
+        source: OnlineSourceEntry,
+        node: Any?,
+        status: String,
+        wordCount: String,
+        updateTime: String,
+        chapterCount: Int,
+    ) {
+        if (status.isNotBlank() && wordCount.isNotBlank() && updateTime.isNotBlank() && chapterCount > 0) return
+        val keys = (node as? JSONObject)?.keys()?.asSequence()?.take(24)?.joinToString(",").orEmpty()
+        logWebDav(
+            "online metadata partial source=${source.name} " +
+                "status=${status.isNotBlank()} words=${wordCount.isNotBlank()} " +
+                "update=${updateTime.isNotBlank()} chapters=${chapterCount > 0} keys=$keys",
+        )
+    }
+
+    private fun onlineFirstJsonString(node: Any?, fields: List<String>): String =
+        fields.asSequence()
+            .flatMap { field -> sequenceOf(field, "$.$field", "$..$field") }
+            .map { onlineJsonString(node, it).cleanOnlineText() }
+            .firstOrNull { it.isNotBlank() && it != "null" }
+            .orEmpty()
+
+    private fun onlineFirstJsonInt(node: Any?, fields: List<String>): Int =
+        fields.asSequence()
+            .flatMap { field -> sequenceOf(field, "$.$field", "$..$field") }
+            .mapNotNull { rule ->
+                onlineJsonString(node, rule)
+                    .replace(",", "")
+                    .trim()
+                    .takeIf { it.isNotBlank() && it != "null" }
+                    ?.toDoubleOrNull()
+                    ?.toInt()
+            }
+            .firstOrNull { it > 0 }
+            ?: 0
+
     private fun onlineCompletionSearchMetaLine(result: OnlineBookSearchResult): String =
         listOfNotNull(
             result.status.ifBlank { null },
@@ -4833,6 +4882,30 @@ class WebDavDriveHook(
 
     private fun onlineCompletionStatusText(kind: String, node: Any?): String {
         val text = kind.cleanOnlineText()
+        statusTextFromHumanText(text)?.let { return it }
+        onlineFirstJsonString(node, ONLINE_STATUS_TEXT_FIELDS)
+            .takeIf { it.isNotBlank() }
+            ?.let { statusTextFromHumanText(it) }
+            ?.let { return it }
+        onlineJsonString(node, "$..creation_status").trim().takeIf { it.isNotBlank() }?.let { value ->
+            return when (value.toIntOrNull()) {
+                1 -> "连载"
+                4 -> "断更"
+                else -> "完结"
+            }
+        }
+        onlineJsonString(node, "$..tomato_book_status").trim().takeIf { it.isNotBlank() }?.let { value ->
+            return when (value.toIntOrNull()) {
+                3 -> "下架"
+                else -> ""
+            }
+        }
+        listOf("is_finish", "isFinished", "finished", "complete", "completed").forEach { field ->
+            val value = onlineJsonString(node, "$..$field").trim().lowercase(Locale.ROOT)
+            if (value.isNotBlank()) {
+                return if (value in setOf("true", "1", "yes")) "完结" else "连载"
+            }
+        }
         val statusSource = text.ifBlank {
             sequenceOf(
                 "status",
@@ -4849,13 +4922,23 @@ class WebDavDriveHook(
         }
         val normalized = statusSource.lowercase(Locale.ROOT)
         return when {
+            statusSource.contains("断更") -> "断更"
+            statusSource.contains("下架") -> "下架"
             statusSource.contains("连载") || normalized in setOf("1", "serial", "ongoing", "false") -> "连载"
             statusSource.contains("完结") || statusSource.contains("已完") ||
                 normalized in setOf("0", "2", "3", "4", "finish", "finished", "complete", "completed", "true") -> "完结"
-            statusSource.contains("断更") -> "断更"
             else -> ""
         }
     }
+
+    private fun statusTextFromHumanText(text: String): String? =
+        when {
+            text.contains("断更") -> "断更"
+            text.contains("下架") -> "下架"
+            text.contains("连载") -> "连载"
+            text.contains("完结") || text.contains("已完") -> "完结"
+            else -> null
+        }
 
     private fun formatOnlineWordCount(raw: String): String {
         val text = raw.cleanOnlineText()
@@ -6704,7 +6787,64 @@ class WebDavDriveHook(
             }
             error("在线源目录为空$hint，已停止导入：${target.source.name}")
         }
+        enrichOnlineTargetFromDetail(target, detail.body, detail.url, chapters.size)
         return OnlineTocSnapshot(detail = detail, toc = toc, chapters = chapters)
+    }
+
+    private fun enrichOnlineTargetFromDetail(
+        target: OnlineDownloadTarget,
+        detailBody: String,
+        detailUrl: String,
+        chapterCount: Int,
+    ) {
+        val root = parseOnlineJsonRoot(detailBody) ?: return
+        val bookInfoRule = runCatching { JSONObject(target.source.ruleBookInfo) }.getOrNull()
+        val node = bookInfoRule?.optString("init", "").orEmpty()
+            .trim()
+            .takeIf { it.isNotBlank() }
+            ?.let { onlineJsonRuleValues(root, it).firstOrNull() }
+            ?: root
+        val meta = onlineResultMetadata(
+            source = target.source,
+            node = node,
+            rule = bookInfoRule,
+            baseUrl = detailUrl,
+            chapterCountFallback = chapterCount,
+        )
+        val current = target.result
+        val enriched = current.copy(
+            author = current.author.ifBlank {
+                bookInfoRule?.optString("author", "").orEmpty()
+                    .takeIf { it.isNotBlank() }
+                    ?.let { onlineRuleValue(node, it, detailUrl).cleanOnlineText() }
+                    .orEmpty()
+                    .ifBlank { onlineFirstJsonString(node, listOf("author", "bookAuthor", "authorName", "writer")) }
+            },
+            coverUrl = current.coverUrl.ifBlank {
+                bookInfoRule?.optString("coverUrl", "").orEmpty()
+                    .takeIf { it.isNotBlank() }
+                    ?.let { resolveOnlineUrl(detailUrl, onlineRuleValue(node, it, detailUrl)) }
+                    .orEmpty()
+                    .ifBlank { resolveOnlineUrl(detailUrl, onlineFirstJsonString(node, listOf("cover", "coverUrl", "thumb_url", "thumb_uri", "bookCover"))) }
+            },
+            intro = current.intro.ifBlank {
+                bookInfoRule?.optString("intro", "").orEmpty()
+                    .takeIf { it.isNotBlank() }
+                    ?.let { onlineRuleValue(node, it, detailUrl).cleanOnlineText() }
+                    .orEmpty()
+                    .ifBlank { onlineFirstJsonString(node, listOf("intro", "abstract", "description", "bookDesc")) }
+            },
+            chapterCount = current.chapterCount.takeIf { it > 0 } ?: meta.chapterCount,
+            status = current.status.ifBlank { meta.status },
+            wordCount = current.wordCount.ifBlank { meta.wordCount },
+            updateTime = current.updateTime.ifBlank { meta.updateTime },
+        )
+        target.result = enriched
+        logWebDav(
+            "online metadata enriched source=${target.source.name} book=${enriched.name} " +
+                "status=${enriched.status} words=${enriched.wordCount} " +
+                "chapters=${enriched.chapterCount} update=${enriched.updateTime}",
+        )
     }
 
     private fun downloadOnlineChapter(
@@ -10327,10 +10467,17 @@ img{max-width:100%;max-height:100%;height:auto;}
         val updateTime: String = "",
     )
 
+    private data class OnlineResultMetadata(
+        val status: String = "",
+        val wordCount: String = "",
+        val updateTime: String = "",
+        val chapterCount: Int = 0,
+    )
+
     private data class OnlineDownloadTarget(
         val source: OnlineSourceEntry,
         val query: String,
-        val result: OnlineBookSearchResult,
+        var result: OnlineBookSearchResult,
     )
 
     private data class OnlineImportedBookSourceInfo(
@@ -11150,6 +11297,52 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val REQUEST_LOCAL_LIBRARY_DIR = 8931
         val startupCacheCleanupStarted = AtomicBoolean(false)
         val NATIVE_CLOUD_DOWNLOAD_TYPES = setOf(BACKUP_TYPE_BAIDU, BACKUP_TYPE_YUN115, BACKUP_TYPE_ALIYUN)
+        val ONLINE_WORD_COUNT_FIELDS = listOf(
+            "wordCount",
+            "word_count",
+            "word_number",
+            "wordNum",
+            "word_num",
+            "words",
+            "total_words",
+            "totalWords",
+        )
+        val ONLINE_UPDATE_TIME_FIELDS = listOf(
+            "updateTime",
+            "updated_at",
+            "update_time",
+            "last_chapter_update_time",
+            "last_chapter_first_pass_time",
+            "latest_chapter_update_time",
+            "latest_update_time",
+            "firstPassTime",
+            "first_pass_time",
+        )
+        val ONLINE_CHAPTER_COUNT_FIELDS = listOf(
+            "chapterCount",
+            "chapter_count",
+            "chapter_count_total",
+            "total_chapters",
+            "totalChapter",
+            "total_chapter",
+            "chapter_num",
+            "chapterNum",
+            "chapters_count",
+            "latest_chapter_index",
+        )
+        val ONLINE_STATUS_TEXT_FIELDS = listOf(
+            "status",
+            "bookStatus",
+            "book_status",
+            "creation_status",
+            "tomato_book_status",
+            "serial_status",
+            "is_finish",
+            "isFinished",
+            "finished",
+            "complete",
+            "completed",
+        )
         val UUID_DIR_REGEX = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
         val ONLINE_CHAPTER_TITLE_REGEX = Regex("(第\\s*[0-9０-９一二三四五六七八九十百千万〇零两]+\\s*[章节卷回集部篇]|chapter\\s*\\d+)", RegexOption.IGNORE_CASE)
         val ONLINE_VOLUME_TITLE_REGEX = Regex("(第\\s*[0-9０-９一二三四五六七八九十百千万〇零两]+\\s*卷|正文|番外|后日谈|外传|分卷|volume\\s*\\d+|part\\s*\\d+)", RegexOption.IGNORE_CASE)
