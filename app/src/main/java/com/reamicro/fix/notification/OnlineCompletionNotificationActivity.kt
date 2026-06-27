@@ -87,13 +87,15 @@ class OnlineCompletionNotificationActivity : Activity() {
         }
         builder
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(onlineCompletionDownloadTitle(title))
-            .setContentText(text)
+            .setContentTitle(onlineCompletionDownloadTitle(progress, text))
+            .setContentText(onlineCompletionDownloadText(title, text))
+            .setStyle(Notification.BigTextStyle().bigText(onlineCompletionDownloadBigText(title, text, progress)))
             .setOnlyAlertOnce(true)
             .setOngoing(!done)
             .setAutoCancel(done)
             .setProgress(100, progress, false)
         manager.notify(id, builder.build())
+        cancelOnlineCompletionNotificationIfDone(manager, id, done)
         Log.i(LOG_TAG, "module activity notification posted fallback id=$id progress=$progress done=$done title=$title")
     }
 

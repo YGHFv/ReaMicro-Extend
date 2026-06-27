@@ -43,6 +43,9 @@ import android.webkit.JavascriptInterface
 import com.reamicro.fix.online.OnlineConcurrentRateLimiter
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.OnlineSourceStore
+import com.reamicro.fix.notification.cancelOnlineCompletionNotificationIfDone
+import com.reamicro.fix.notification.onlineCompletionDownloadBigText
+import com.reamicro.fix.notification.onlineCompletionDownloadText
 import com.reamicro.fix.notification.onlineCompletionDownloadTitle
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
@@ -163,6 +166,7 @@ class WebDavDriveHook(
     private val onlineCompletionExpandedSources = ConcurrentHashMap<String, Boolean>()
     private val onlineCompletionSearchTargets = ConcurrentHashMap<String, OnlineDownloadTarget>()
     private val onlineCompletionRunningDownloads = ConcurrentHashMap<String, Boolean>()
+    private val onlineCompletionPublisherCleanupIds = ConcurrentHashMap.newKeySet<String>()
     private val onlineCompletionNotificationIds = AtomicInteger(4300)
     private val onlineCompletionNotificationBlockedLogged = AtomicBoolean(false)
     private val onlineCompletionModuleServiceUnavailable = AtomicBoolean(false)
@@ -286,6 +290,7 @@ class WebDavDriveHook(
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val book = param.args?.getOrNull(1) ?: return
                     if (!isOnlineCompletionLocalBook(book)) return
+                    cleanupOnlineCompletionBookPublisherIfNeeded(book)
                     onlineCompletionBookRowInfoDepth.set((onlineCompletionBookRowInfoDepth.get() ?: 0) + 1)
                 }
 
@@ -2480,6 +2485,22 @@ class WebDavDriveHook(
         return invokeSuspendBlocking(findMethod, bookshelf, bookId)
     }
 
+    private fun findLocalBookByUuid(uid: Long, uuid: String): Any? {
+        if (uid <= 0L || uuid.isBlank()) return null
+        val bookshelf = currentBookshelfRepository() ?: return null
+        val bookDao = fieldValue(bookshelf, "bookDao") ?: return null
+        val findMethod = (bookDao.javaClass.methods.asSequence() + bookDao.javaClass.declaredMethods.asSequence())
+            .firstOrNull { candidate ->
+                candidate.name == "findByUidAndUuid" &&
+                    candidate.parameterTypes.size == 3 &&
+                    candidate.parameterTypes[0] == java.lang.Long.TYPE &&
+                    candidate.parameterTypes[1] == String::class.java
+            }
+            ?.apply { isAccessible = true }
+            ?: return null
+        return invokeSuspendBlocking(findMethod, bookDao, uid, uuid)
+    }
+
     private fun updateLocalBook(book: Any) {
         val bookshelf = currentBookshelfRepository()
             ?: error("BookshelfRepository not available for WebDAV update")
@@ -2494,6 +2515,22 @@ class WebDavDriveHook(
     }
 
     private fun copyBookWithBackup(book: Any, backupType: Int, backupId: String, backupCode: String): Any {
+        return copyBookWithBackupAndPublisher(
+            book = book,
+            backupType = backupType,
+            backupId = backupId,
+            backupCode = backupCode,
+            publisher = book.callString("getPublisher"),
+        )
+    }
+
+    private fun copyBookWithBackupAndPublisher(
+        book: Any,
+        backupType: Int,
+        backupId: String,
+        backupCode: String,
+        publisher: String,
+    ): Any {
         val copyMethod = book.javaClass.methods.firstOrNull {
             it.name == "copy" && it.parameterTypes.size == 24
         } ?: book.javaClass.methods.first {
@@ -2529,7 +2566,7 @@ class WebDavDriveHook(
                 backupType,
                 backupId,
                 backupCode,
-                book.callString("getPublisher"),
+                publisher,
             ),
         )
         return copyMethod.invoke(book, *args.toTypedArray())
@@ -5148,7 +5185,37 @@ class WebDavDriveHook(
     private fun isOnlineCompletionLocalBook(book: Any): Boolean =
         bookBackupTypeOf(book) == BACKUP_TYPE_ONLINE_COMPLETION ||
             isOnlineCompletionPath(bookBackupIdOf(book)) ||
-            isOnlineCompletionPath(book.callString("getUri"))
+            isOnlineCompletionPath(book.callString("getUri")) ||
+            isOnlineCompletionUuid(book.callString("getUuid"))
+
+    private fun isOnlineCompletionUuid(uuid: String): Boolean =
+        uuid.startsWith(ONLINE_COMPLETION_UUID_PREFIX)
+
+    private fun cleanupOnlineCompletionBookPublisherIfNeeded(book: Any) {
+        val uuid = book.callString("getUuid")
+        if (!isOnlineCompletionUuid(uuid)) return
+        val publisher = book.callString("getPublisher")
+        if (publisher.isBlank()) return
+        if (!onlineCompletionPublisherCleanupIds.add(uuid)) return
+        Thread({
+            runCatching {
+                val latest = findLocalBookByUuid(book.callLong("getUid"), uuid) ?: book
+                if (latest.callString("getPublisher").isBlank()) return@runCatching
+                val updated = copyBookWithBackupAndPublisher(
+                    book = latest,
+                    backupType = BACKUP_TYPE_ONLINE_COMPLETION,
+                    backupId = bookBackupIdOf(latest).ifBlank { onlineImportedBookBackupIdFromBook(latest) },
+                    backupCode = latest.callString("getBackupCode").ifBlank { onlineSourceIdFromUuid(uuid) },
+                    publisher = "",
+                )
+                updateLocalBook(updated)
+                logWebDav("online completion stale publisher cleared uuid=$uuid oldPublisher=$publisher")
+            }.onFailure {
+                onlineCompletionPublisherCleanupIds.remove(uuid)
+                XposedBridge.log("$LOG_PREFIX online completion publisher cleanup failed: ${it.stackTraceToString()}")
+            }
+        }, "ReaMicroOnlinePublisherCleanup").start()
+    }
 
     private fun handleOnlineCompletionSearchTap(book: Any): Boolean {
         val path = cloudPathOf(book)
@@ -5466,6 +5533,8 @@ class WebDavDriveHook(
         return OnlineDownloadedChapter(
             title = chapter.title.ifBlank { "第 ${index + 1} 章" },
             content = content,
+            volumeTitle = chapter.volumeTitle,
+            level = chapter.level,
         )
     }
 
@@ -5538,9 +5607,15 @@ class WebDavDriveHook(
         if (nodes.isEmpty()) return emptyList()
         val titleRule = rule.optString("chapterName", "")
         val urlRule = rule.optString("chapterUrl", "")
+        val isVolumeRule = rule.optString("isVolume", "")
+        var currentVolumeTitle = ""
         return nodes.mapIndexedNotNull { index, node ->
             val title = onlineRuleValue(node, titleRule, baseUrl).cleanOnlineText()
                 .ifBlank { "第 ${index + 1} 章" }
+            if (isOnlineTocVolumeNode(node, isVolumeRule, title, baseUrl)) {
+                currentVolumeTitle = title
+                return@mapIndexedNotNull null
+            }
             val ruleRawUrl = onlineRuleValue(node, urlRule, baseUrl)
             val fallbackRawUrl = if (ruleRawUrl.isBlank()) fallbackOnlineChapterRawUrl(node) else ""
             val rawUrl = ruleRawUrl.ifBlank { fallbackRawUrl }
@@ -5551,9 +5626,52 @@ class WebDavDriveHook(
                 )
             }
             val url = buildOnlineChapterUrl(source, baseUrl, urlRule, rawUrl)
-            if (url.isBlank()) null else OnlineChapter(title, url)
+            val volumeTitle = onlineChapterVolumeTitle(node).ifBlank { currentVolumeTitle }
+            if (url.isBlank()) null else OnlineChapter(
+                title = title,
+                url = url,
+                volumeTitle = volumeTitle,
+                level = if (volumeTitle.isBlank()) 0 else 1,
+            )
         }.distinctBy { it.url }
     }
+
+    private fun isOnlineTocVolumeNode(node: Any?, isVolumeRule: String, title: String, baseUrl: String): Boolean {
+        val explicit = isVolumeRule.trim()
+            .takeIf { it.isNotBlank() }
+            ?.let { onlineRuleValue(node, it, baseUrl).trim().lowercase(Locale.ROOT) }
+        if (explicit != null) {
+            return explicit == "true" || explicit == "1" || explicit == "yes" || explicit == "volume"
+        }
+        return title.isNotBlank() &&
+            !ONLINE_CHAPTER_TITLE_REGEX.containsMatchIn(title) &&
+            ONLINE_VOLUME_TITLE_REGEX.containsMatchIn(title)
+    }
+
+    private fun onlineChapterVolumeTitle(node: Any?): String =
+        listOf(
+            "$.volume_name",
+            "$.volumeName",
+            "$.volume",
+            "$.part_name",
+            "$.partName",
+            "$.section_name",
+            "$.sectionName",
+            "$.group_name",
+            "$.groupName",
+            "volume_name",
+            "volumeName",
+            "volume",
+            "part_name",
+            "partName",
+            "section_name",
+            "sectionName",
+            "group_name",
+            "groupName",
+        ).asSequence()
+            .map { onlineJsonString(node, it).cleanOnlineText() }
+            .firstOrNull { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+            .orEmpty()
 
     private fun fallbackOnlineChapterRawUrl(node: Any?): String =
         listOf("$.itemId", "$.item_id", "$.chapter_id", "$.id", "$.url", "$.href", "itemId", "chapter_id", "id")
@@ -5832,6 +5950,11 @@ class WebDavDriveHook(
             target.result.detailUrl.ifBlank { target.source.sourceUrl },
             java.lang.Long.valueOf(file.length()),
         )
+        syncOnlineCompletionImportedBookMetadata(
+            bookshelf = bookshelf,
+            target = target,
+            sourceUrl = target.result.detailUrl.ifBlank { target.source.sourceUrl },
+        )
         logWebDav("online completion importBook result=$result file=${file.absolutePath} size=${file.length()}")
         if (result != true) {
             logWebDav(
@@ -5840,6 +5963,37 @@ class WebDavDriveHook(
             )
         }
         return result == true
+    }
+
+    private fun syncOnlineCompletionImportedBookMetadata(bookshelf: Any, target: OnlineDownloadTarget, sourceUrl: String) {
+        runCatching {
+            val imported = findLocalBookByUrl(bookshelf, sourceUrl)
+                ?: findLocalBookByUrl(bookshelf, target.result.detailUrl)
+                ?: return
+            val updated = copyBookWithBackupAndPublisher(
+                book = imported,
+                backupType = BACKUP_TYPE_ONLINE_COMPLETION,
+                backupId = onlineImportedBookBackupId(target),
+                backupCode = target.source.id,
+                publisher = "",
+            )
+            updateLocalBook(updated)
+            logWebDav(
+                "online completion metadata synced uuid=${updated.callString("getUuid")} " +
+                    "backupId=${bookBackupIdOf(updated)} source=${target.source.name}",
+            )
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX online completion metadata sync failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun findLocalBookByUrl(bookshelf: Any, url: String): Any? {
+        if (url.isBlank()) return null
+        val findMethod = (bookshelf.javaClass.methods.asSequence() + bookshelf.javaClass.declaredMethods.asSequence())
+            .firstOrNull { it.name == "findBookByUrl" && it.parameterTypes.size == 2 }
+            ?.apply { isAccessible = true }
+            ?: return null
+        return invokeSuspendBlocking(findMethod, bookshelf, url)
     }
 
     private fun currentOnlineCompletionBooksDir(bookshelf: Any): Any {
@@ -6006,13 +6160,15 @@ class WebDavDriveHook(
             }
             builder
                 .setSmallIcon(context.applicationInfo.icon)
-                .setContentTitle(onlineCompletionDownloadTitle(title))
-                .setContentText(text)
+                .setContentTitle(onlineCompletionDownloadTitle(progress, text))
+                .setContentText(onlineCompletionDownloadText(title, text))
+                .setStyle(Notification.BigTextStyle().bigText(onlineCompletionDownloadBigText(title, text, progress)))
                 .setOnlyAlertOnce(true)
                 .setOngoing(!done)
                 .setAutoCancel(done)
                 .setProgress(100, progress.coerceIn(0, 100), false)
             manager.notify(id, builder.build())
+            cancelOnlineCompletionNotificationIfDone(manager, id, done)
             logWebDav("online completion host notification posted id=$id moduleRelaySent=$moduleRelaySent")
             true
         }.getOrElse {
@@ -6213,6 +6369,7 @@ $paragraphs
             ""
         }
         val coverMeta = if (hasCover) """<meta name="cover" content="cover-image"/>""" else ""
+        val onlineMeta = onlineSourceMetadataOpf(target)
         return """<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="2.0">
 <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
@@ -6220,8 +6377,8 @@ $paragraphs
 <dc:title>${target.result.name.xmlEscape()}</dc:title>
 <dc:creator>${target.result.author.xmlEscape()}</dc:creator>
 <dc:language>zh-CN</dc:language>
-<dc:publisher>${target.source.name.xmlEscape()}</dc:publisher>
 $coverMeta
+$onlineMeta
 </metadata>
 <manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>$coverManifest$manifestChapters</manifest>
 <spine toc="ncx">$spine</spine>
@@ -6230,6 +6387,37 @@ $coverMeta
 
     private fun onlineBookUuid(target: OnlineDownloadTarget): String =
         "reamicro-online-${target.source.id}-${(target.result.detailUrl.ifBlank { target.result.name }).hashCode().toUInt()}"
+
+    private fun onlineSourceMetadataOpf(target: OnlineDownloadTarget): String =
+        listOf(
+            "reamicro-online-source-id" to target.source.id,
+            "reamicro-online-source-name" to target.source.name,
+            "reamicro-online-detail-url" to target.result.detailUrl,
+        ).joinToString("\n") { (name, value) ->
+            """<meta name="${name.xmlEscape()}" content="${value.xmlEscape()}"/>"""
+        }
+
+    private fun onlineImportedBookBackupId(target: OnlineDownloadTarget): String =
+        ONLINE_COMPLETION_BOOK_PREFIX +
+            URLEncoder.encode(target.source.id, "UTF-8") +
+            "?name=${URLEncoder.encode(target.source.name, "UTF-8")}" +
+            "&detail=${URLEncoder.encode(target.result.detailUrl.ifBlank { target.source.sourceUrl }, "UTF-8")}"
+
+    private fun onlineImportedBookBackupIdFromBook(book: Any): String {
+        val uuid = book.callString("getUuid")
+        val sourceId = onlineSourceIdFromUuid(uuid)
+        val sourceName = book.callString("getPublisher")
+        val detailUrl = book.callString("getUri")
+        return ONLINE_COMPLETION_BOOK_PREFIX +
+            URLEncoder.encode(sourceId, "UTF-8") +
+            "?name=${URLEncoder.encode(sourceName, "UTF-8")}" +
+            "&detail=${URLEncoder.encode(detailUrl, "UTF-8")}"
+    }
+
+    private fun onlineSourceIdFromUuid(uuid: String): String =
+        uuid.removePrefix(ONLINE_COMPLETION_UUID_PREFIX)
+            .substringBeforeLast('-', "")
+            .ifBlank { "unknown" }
 
     private fun coverMimeType(ext: String): String =
         when (ext.lowercase(Locale.ROOT)) {
@@ -8438,11 +8626,15 @@ $coverMeta
     private data class OnlineChapter(
         val title: String,
         val url: String,
+        val volumeTitle: String = "",
+        val level: Int = 0,
     )
 
     private data class OnlineDownloadedChapter(
         val title: String,
         val content: String,
+        val volumeTitle: String = "",
+        val level: Int = 0,
     )
 
     private data class OnlineBinaryPayload(
@@ -9108,6 +9300,7 @@ $coverMeta
         const val BACKUP_TYPE_ALIYUN = 4
         const val ONLINE_COMPLETION_SOURCE_PREFIX = "reamicro-online-source://"
         const val ONLINE_COMPLETION_BOOK_PREFIX = "reamicro-online-book://"
+        const val ONLINE_COMPLETION_UUID_PREFIX = "reamicro-online-"
         const val ONLINE_COMPLETION_NOTIFICATION_CHANNEL = "reamicro_online_completion_download"
         const val MODULE_PACKAGE_NAME = "com.reamicro.fix"
         const val ONLINE_COMPLETION_NOTIFICATION_ACTION = "com.reamicro.fix.ONLINE_COMPLETION_NOTIFICATION"
@@ -9185,6 +9378,7 @@ $coverMeta
         val NATIVE_CLOUD_DOWNLOAD_TYPES = setOf(BACKUP_TYPE_BAIDU, BACKUP_TYPE_YUN115, BACKUP_TYPE_ALIYUN)
         val UUID_DIR_REGEX = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
         val ONLINE_CHAPTER_TITLE_REGEX = Regex("(第\\s*[0-9０-９一二三四五六七八九十百千万〇零两]+\\s*[章节卷回集部篇]|chapter\\s*\\d+)", RegexOption.IGNORE_CASE)
+        val ONLINE_VOLUME_TITLE_REGEX = Regex("(第\\s*[0-9０-９一二三四五六七八九十百千万〇零两]+\\s*卷|正文|番外|后日谈|外传|分卷|volume\\s*\\d+|part\\s*\\d+)", RegexOption.IGNORE_CASE)
         val BOOK_EXTENSIONS = setOf(".epub", ".mobi", ".azw3", ".txt")
         val WEBDAV_UPLOAD_RETRY_CODES = setOf(405, 409, 412, 423)
         const val WEBDAV_PROPFIND_BODY =

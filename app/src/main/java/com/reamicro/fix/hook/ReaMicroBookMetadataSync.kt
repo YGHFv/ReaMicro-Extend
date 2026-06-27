@@ -24,6 +24,7 @@ internal object ReaMicroBookMetadataSync {
     private const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = "kotlin.coroutines.EmptyCoroutineContext"
     private const val KOTLIN_INTRINSICS_CLASS = "kotlin.coroutines.intrinsics.IntrinsicsKt"
     private const val KOTLIN_COROUTINE_SINGLETONS_CLASS = "kotlin.coroutines.intrinsics.CoroutineSingletons"
+    private const val ONLINE_COMPLETION_UUID_PREFIX = "reamicro-online-"
 
     private var bookshelfRepositoryRef: WeakReference<Any>? = null
 
@@ -34,15 +35,23 @@ internal object ReaMicroBookMetadataSync {
 
     fun currentBookshelfRepository(): Any? = bookshelfRepositoryRef?.get()
 
-    fun metadataFromOpf(opf: Any?): BookMetadataPatch =
-        BookMetadataPatch(
+    fun metadataFromOpf(opf: Any?): BookMetadataPatch {
+        val uuid = callStringPath(opf, "metadata", "uuid", "value")
+            ?: callStringPath(opf, "metadata", "uuid")
+        val publisher = if (uuid.orEmpty().startsWith(ONLINE_COMPLETION_UUID_PREFIX)) {
+            ""
+        } else {
+            callStringPath(opf, "metadata", "publisher", "value")
+                ?: callStringPath(opf, "metadata", "publisher")
+        }
+        return BookMetadataPatch(
             title = callStringPath(opf, "metadata", "title", "value")?.takeIf { it.isNotBlank() },
             subtitle = callStringPath(opf, "metadata", "subtitle", "value"),
             author = authorsFromOpf(opf),
             cover = coverFromOpf(opf),
-            publisher = callStringPath(opf, "metadata", "publisher", "value")
-                ?: callStringPath(opf, "metadata", "publisher"),
+            publisher = publisher,
         )
+    }
 
     fun syncBookMetadataAsync(repository: Any?, book: Any?, patch: BookMetadataPatch, delayMs: Long = 0L) {
         if (book == null) return

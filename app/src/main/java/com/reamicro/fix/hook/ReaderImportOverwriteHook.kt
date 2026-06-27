@@ -66,7 +66,13 @@ class ReaderImportOverwriteHook(
                         "$LOG_PREFIX overwrite check intercepted: title=$title, uuid=$uuid, uri=$uriOverride, conflict=$conflict",
                     )
 
-                    when (showOverwriteConfirm(conflict.oldTitle, title)) {
+                    val decision = if (isOnlineCompletionUuid(uuid)) {
+                        XposedBridge.log("$LOG_PREFIX online completion overwrite forced silently: title=$title, uuid=$uuid")
+                        OverwriteDecision.OVERWRITE
+                    } else {
+                        showOverwriteConfirm(conflict.oldTitle, title)
+                    }
+                    when (decision) {
                         OverwriteDecision.OVERWRITE -> {
                             val oldUuid = conflict.oldUuid
                             if (!oldUuid.isNullOrBlank() && oldUuid != uuid) {
@@ -163,7 +169,12 @@ class ReaderImportOverwriteHook(
                     XposedBridge.log(
                         "$LOG_PREFIX pre-import conflict intercepted: title=$title, uuid=$uuid, conflict=$conflict",
                     )
-                    val decision = showOverwriteConfirm(conflict.oldTitle, title)
+                    val decision = if (isOnlineCompletionUuid(uuid)) {
+                        XposedBridge.log("$LOG_PREFIX online completion pre-import overwrite forced silently: title=$title, uuid=$uuid")
+                        OverwriteDecision.OVERWRITE
+                    } else {
+                        showOverwriteConfirm(conflict.oldTitle, title)
+                    }
                     val preDecision = PreImportDecision(
                         decision = decision,
                         oldTitle = conflict.oldTitle,
@@ -278,6 +289,9 @@ class ReaderImportOverwriteHook(
             runCatching { callStringPath(opf, "metadata", "getUuid", "value") }.getOrNull(),
             runCatching { resolveReaMicroMd5Identifier(opf) }.getOrNull(),
         ).firstOrNull { !it.isNullOrBlank() }
+
+    private fun isOnlineCompletionUuid(uuid: String): Boolean =
+        uuid.startsWith(ONLINE_COMPLETION_UUID_PREFIX)
 
     private fun resolveReaMicroMd5Identifier(opf: Any?): String? {
         val metadata = noArgValue(opf, "getMetadata") ?: noArgValue(opf, "metadata") ?: return null
@@ -933,6 +947,7 @@ class ReaderImportOverwriteHook(
         const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = "kotlin.coroutines.EmptyCoroutineContext"
         const val KOTLIN_INTRINSICS_CLASS = "kotlin.coroutines.intrinsics.IntrinsicsKt"
         const val KOTLIN_COROUTINE_SINGLETONS_CLASS = "kotlin.coroutines.intrinsics.CoroutineSingletons"
+        const val ONLINE_COMPLETION_UUID_PREFIX = "reamicro-online-"
         const val PRE_IMPORT_DECISION_TTL_MS = 120_000L
         const val POST_IMPORT_METADATA_SYNC_DELAY_MS = 2_500L
         val REAMICRO_MD5_REGEX = Regex("^[0-9a-fA-F]{32}$")

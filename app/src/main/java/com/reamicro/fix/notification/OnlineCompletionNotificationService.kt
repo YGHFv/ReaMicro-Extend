@@ -35,6 +35,7 @@ class OnlineCompletionNotificationService : Service() {
         val done = intent.getBooleanExtra(EXTRA_DONE, false)
         val notification = buildNotification(title, text, progress, done)
         runCatching {
+            val manager = notificationManager()
             if (!done && foregroundId == 0) {
                 foregroundId = id
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -43,11 +44,11 @@ class OnlineCompletionNotificationService : Service() {
                     startForeground(id, notification)
                 }
             } else {
-                notificationManager()?.notify(id, notification)
+                manager?.notify(id, notification)
             }
             Log.i(LOG_TAG, "module service notification posted id=$id progress=$progress done=$done title=$title")
             if (done) {
-                notificationManager()?.notify(id, notification)
+                manager?.notify(id, notification)
                 if (id == foregroundId) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                         stopForeground(STOP_FOREGROUND_DETACH)
@@ -57,6 +58,7 @@ class OnlineCompletionNotificationService : Service() {
                     }
                     foregroundId = 0
                 }
+                manager?.let { cancelOnlineCompletionNotificationIfDone(it, id, true) }
                 stopSelf(startId)
             }
         }.onFailure {
@@ -76,8 +78,9 @@ class OnlineCompletionNotificationService : Service() {
         }
         return builder
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(onlineCompletionDownloadTitle(title))
-            .setContentText(text)
+            .setContentTitle(onlineCompletionDownloadTitle(progress, text))
+            .setContentText(onlineCompletionDownloadText(title, text))
+            .setStyle(Notification.BigTextStyle().bigText(onlineCompletionDownloadBigText(title, text, progress)))
             .setOnlyAlertOnce(true)
             .setOngoing(!done)
             .setAutoCancel(done)
