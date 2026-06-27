@@ -1,20 +1,62 @@
 package com.reamicro.fix.notification
 
 import android.Manifest
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Bundle
 import android.util.Log
 import com.reamicro.fix.R
 
-class OnlineCompletionNotificationReceiver : BroadcastReceiver() {
-    override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != ACTION_ONLINE_COMPLETION_NOTIFICATION) return
+class OnlineCompletionNotificationActivity : Activity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        handleNotificationIntent(intent)
+        finish()
+        overridePendingTransition(0, 0)
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleNotificationIntent(intent)
+        finish()
+        overridePendingTransition(0, 0)
+    }
+
+    private fun handleNotificationIntent(intent: Intent?) {
+        if (intent?.action != ACTION_ONLINE_COMPLETION_NOTIFICATION) return
+        Log.i(LOG_TAG, "module notification activity launched")
+        if (!startNotificationService(intent)) {
+            postNotification(this, intent)
+        }
+    }
+
+    private fun startNotificationService(intent: Intent): Boolean {
+        val done = intent.getBooleanExtra(EXTRA_DONE, false)
+        val serviceIntent = Intent(intent).apply {
+            setClass(this@OnlineCompletionNotificationActivity, OnlineCompletionNotificationService::class.java)
+        }
+        return runCatching {
+            val component = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !done) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+            Log.i(LOG_TAG, "module notification activity started service component=$component done=$done")
+            component != null
+        }.getOrElse {
+            Log.i(LOG_TAG, "module notification activity service start failed", it)
+            false
+        }
+    }
+
+    private fun postNotification(context: Context, intent: Intent) {
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -52,7 +94,7 @@ class OnlineCompletionNotificationReceiver : BroadcastReceiver() {
             .setAutoCancel(done)
             .setProgress(100, progress, false)
         manager.notify(id, builder.build())
-        Log.i(LOG_TAG, "module receiver notification posted id=$id progress=$progress done=$done title=$title")
+        Log.i(LOG_TAG, "module activity notification posted fallback id=$id progress=$progress done=$done title=$title")
     }
 
     private companion object {

@@ -32,6 +32,14 @@
             </intent-filter>
         </receiver>
 
+        <activity
+            android:name=".notification.OnlineCompletionNotificationActivity"
+            android:enabled="true"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:theme="@style/NoDisplayTheme" />
+
         <service
             android:name=".notification.OnlineCompletionNotificationService"
             android:enabled="true"

@@ -43,6 +43,7 @@ import android.webkit.JavascriptInterface
 import com.reamicro.fix.online.OnlineConcurrentRateLimiter
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.OnlineSourceStore
+import com.reamicro.fix.notification.onlineCompletionDownloadTitle
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import de.robv.android.xposed.XC_MethodHook
@@ -165,6 +166,7 @@ class WebDavDriveHook(
     private val onlineCompletionNotificationIds = AtomicInteger(4300)
     private val onlineCompletionNotificationBlockedLogged = AtomicBoolean(false)
     private val onlineCompletionModuleServiceUnavailable = AtomicBoolean(false)
+    private val onlineCompletionModuleActivityStarted = ConcurrentHashMap.newKeySet<Int>()
     @Volatile private var lastHomeSearchViewModelRef: WeakReference<Any>? = null
     @Volatile private var lastHomeSearchQuery: String = ""
     @Volatile private var lastHomeSearchWebDavResults: List<Any> = emptyList()
@@ -5988,7 +5990,7 @@ class WebDavDriveHook(
             }
             builder
                 .setSmallIcon(context.applicationInfo.icon)
-                .setContentTitle("$ONLINE_COMPLETION_TITLE：$title")
+                .setContentTitle(onlineCompletionDownloadTitle(title))
                 .setContentText(text)
                 .setOnlyAlertOnce(true)
                 .setOngoing(!done)
@@ -6011,6 +6013,14 @@ class WebDavDriveHook(
         progress: Int,
         done: Boolean,
     ): Boolean {
+        val moduleAlreadyStarted = onlineCompletionModuleActivityStarted.contains(id)
+        if (!moduleAlreadyStarted) {
+            if (startOnlineCompletionNotificationActivity(context, id, title, text, progress, done)) {
+                onlineCompletionModuleActivityStarted.add(id)
+                if (done) onlineCompletionModuleActivityStarted.remove(id)
+                return true
+            }
+        }
         val serviceSent = if (onlineCompletionModuleServiceUnavailable.get()) {
             false
         } else {
@@ -6035,8 +6045,62 @@ class WebDavDriveHook(
                 false
             }
         }
-        if (serviceSent) return true
-        return runCatching {
+        if (serviceSent) {
+            onlineCompletionModuleActivityStarted.add(id)
+            if (done) onlineCompletionModuleActivityStarted.remove(id)
+            return true
+        }
+        val broadcastSent = onlineCompletionModuleActivityStarted.contains(id) &&
+            sendOnlineCompletionNotificationBroadcast(context, id, title, text, progress, done)
+        if (broadcastSent) {
+            if (done) onlineCompletionModuleActivityStarted.remove(id)
+            return true
+        }
+        val activityRetrySent = moduleAlreadyStarted &&
+            startOnlineCompletionNotificationActivity(context, id, title, text, progress, done)
+        if (activityRetrySent) onlineCompletionModuleActivityStarted.add(id)
+        if (done) onlineCompletionModuleActivityStarted.remove(id)
+        return activityRetrySent
+    }
+
+    private fun startOnlineCompletionNotificationActivity(
+        context: Context,
+        id: Int,
+        title: String,
+        text: String,
+        progress: Int,
+        done: Boolean,
+    ): Boolean =
+        runCatching {
+            val intent = onlineCompletionNotificationIntent(id, title, text, progress, done).apply {
+                setClassName(MODULE_PACKAGE_NAME, ONLINE_COMPLETION_NOTIFICATION_ACTIVITY_CLASS)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
+                addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
+                addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY)
+                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            context.startActivity(intent)
+            logWebDav(
+                "online completion module notification activity start sent " +
+                    "id=$id progress=$progress done=$done",
+            )
+            true
+        }.getOrElse {
+            logWebDav("online completion module notification activity failed: ${it.message ?: it.javaClass.name}")
+            false
+        }
+
+    private fun sendOnlineCompletionNotificationBroadcast(
+        context: Context,
+        id: Int,
+        title: String,
+        text: String,
+        progress: Int,
+        done: Boolean,
+    ): Boolean =
+        runCatching {
             val intent = onlineCompletionNotificationIntent(id, title, text, progress, done).apply {
                 setClassName(MODULE_PACKAGE_NAME, ONLINE_COMPLETION_NOTIFICATION_RECEIVER_CLASS)
             }
@@ -6047,7 +6111,6 @@ class WebDavDriveHook(
             logWebDav("online completion module notification relay failed: ${it.message ?: it.javaClass.name}")
             false
         }
-    }
 
     private fun onlineCompletionNotificationIntent(
         id: Int,
@@ -6058,6 +6121,7 @@ class WebDavDriveHook(
     ): Intent =
         Intent(ONLINE_COMPLETION_NOTIFICATION_ACTION).apply {
                 addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+                addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
                 putExtra(ONLINE_COMPLETION_NOTIFICATION_EXTRA_ID, id)
                 putExtra(ONLINE_COMPLETION_NOTIFICATION_EXTRA_TITLE, title)
                 putExtra(ONLINE_COMPLETION_NOTIFICATION_EXTRA_TEXT, text)
@@ -9031,6 +9095,8 @@ $coverMeta
         const val ONLINE_COMPLETION_NOTIFICATION_CHANNEL = "reamicro_online_completion_download"
         const val MODULE_PACKAGE_NAME = "com.reamicro.fix"
         const val ONLINE_COMPLETION_NOTIFICATION_ACTION = "com.reamicro.fix.ONLINE_COMPLETION_NOTIFICATION"
+        const val ONLINE_COMPLETION_NOTIFICATION_ACTIVITY_CLASS =
+            "com.reamicro.fix.notification.OnlineCompletionNotificationActivity"
         const val ONLINE_COMPLETION_NOTIFICATION_RECEIVER_CLASS =
             "com.reamicro.fix.notification.OnlineCompletionNotificationReceiver"
         const val ONLINE_COMPLETION_NOTIFICATION_SERVICE_CLASS =

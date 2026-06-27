@@ -45,6 +45,7 @@ class OnlineCompletionNotificationService : Service() {
             } else {
                 notificationManager()?.notify(id, notification)
             }
+            Log.i(LOG_TAG, "module service notification posted id=$id progress=$progress done=$done title=$title")
             if (done) {
                 notificationManager()?.notify(id, notification)
                 if (id == foregroundId) {
@@ -75,7 +76,7 @@ class OnlineCompletionNotificationService : Service() {
         }
         return builder
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("$ONLINE_COMPLETION_TITLE：$title")
+            .setContentTitle(onlineCompletionDownloadTitle(title))
             .setContentText(text)
             .setOnlyAlertOnce(true)
             .setOngoing(!done)
@@ -106,7 +107,7 @@ class OnlineCompletionNotificationService : Service() {
         const val EXTRA_TEXT = "text"
         const val EXTRA_PROGRESS = "progress"
         const val EXTRA_DONE = "done"
-        const val ONLINE_COMPLETION_TITLE = "在线补全"
+        const val ONLINE_COMPLETION_TITLE = "\u5728\u7ebf\u8865\u5168"
         const val ONLINE_COMPLETION_NOTIFICATION_CHANNEL = "reamicro_online_completion_download"
     }
 }
