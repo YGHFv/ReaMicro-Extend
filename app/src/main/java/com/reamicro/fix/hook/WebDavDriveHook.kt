@@ -7150,8 +7150,34 @@ $paragraphs
                 return mutable
             }
         }
-        val scanCount = mutable.size.coerceAtMost(3)
-        repeat(scanCount) { index ->
+        val scanCount = mutable.size.coerceAtMost(ONLINE_CHAPTER_TITLE_SCAN_LINES)
+        for (index in 0 until (scanCount - 1).coerceAtLeast(0)) {
+            if ((mutable[index] + mutable[index + 1]).normalizedChapterTitleKey() == titleKey) {
+                mutable.removeAt(index + 1)
+                mutable.removeAt(index)
+                return mutable
+            }
+        }
+        if (parts.size >= 2) {
+            val titlePrefix = parts.first()
+            val titleSuffix = parts.drop(1).joinToString("")
+            for (index in 0 until (scanCount - 1).coerceAtLeast(0)) {
+                val firstRemainder = stripChapterTitlePrefix(mutable[index], titlePrefix)
+                if (firstRemainder != null && firstRemainder.isBlank()) {
+                    val secondRemainder = stripChapterTitlePrefix(mutable[index + 1], titleSuffix)
+                    if (secondRemainder != null) {
+                        if (secondRemainder.isBlank()) {
+                            mutable.removeAt(index + 1)
+                        } else {
+                            mutable[index + 1] = secondRemainder
+                        }
+                        mutable.removeAt(index)
+                        return mutable
+                    }
+                }
+            }
+        }
+        for (index in 0 until scanCount) {
             stripChapterTitlePrefix(mutable.getOrNull(index).orEmpty(), title)?.let { remainder ->
                 if (remainder.isBlank()) {
                     mutable.removeAt(index)
@@ -10359,6 +10385,7 @@ img{max-width:100%;max-height:100%;height:auto;}
         val ONLINE_SPECIAL_HEADING_SPLIT_REGEX =
             Regex("^(番外|后日谈|后记|序章|楔子|终章)\\s*[:：、.\\-—]?\\s*(.+)$")
         val ONLINE_COMPLETION_CHAPTER_FILE_REGEX = Regex("""chapter_(\d+)\.xhtml""", RegexOption.IGNORE_CASE)
+        const val ONLINE_CHAPTER_TITLE_SCAN_LINES = 8
         val BOOK_EXTENSIONS = setOf(".epub", ".mobi", ".azw3", ".txt")
         val WEBDAV_UPLOAD_RETRY_CODES = setOf(405, 409, 412, 423)
         const val WEBDAV_PROPFIND_BODY =
