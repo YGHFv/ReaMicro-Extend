@@ -11,7 +11,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.net.Uri
-import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -39,7 +38,6 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -1083,6 +1081,7 @@ class WebDavDriveHook(
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!canUseCloudExtendedDisplay()) return
                     val book = param.args?.getOrNull(1) ?: return
+                    if (isOnlineCompletionPath(cloudPathOf(book))) return
                     val updatedAt = book.callLong("getUpdatedAt")
                     if (updatedAt <= 0L) return
                     cloudBookRowExtendedDisplay.set(
@@ -5259,10 +5258,6 @@ class WebDavDriveHook(
                 functionProxy("WebDavHomeSearchItem", FUNCTION3_CLASS) { args ->
                     val item = args?.getOrNull(0) ?: return@functionProxy targetUnit()
                     val composer = args.getOrNull(1) ?: return@functionProxy targetUnit()
-                    if (isOnlineCompletionRenderType(type)) {
-                        renderOnlineCompletionHomeSearchSection(title, results, composer)
-                        return@functionProxy targetUnit()
-                    }
                     val render = {
                         method(HOME_SEARCH_BAR_CLASS, HOME_CLOUD_RESULT_LIST_METHOD, 6).invoke(
                             null,
@@ -5294,6 +5289,13 @@ class WebDavDriveHook(
                         } finally {
                             popLocalLibraryIcon()
                         }
+                    } else if (isOnlineCompletionRenderType(type)) {
+                        pushOnlineCompletionCloudTitle(onlineCompletionTitleForType(type, title))
+                        try {
+                            withWebDavIcon { render() }
+                        } finally {
+                            popOnlineCompletionCloudTitle()
+                        }
                     } else {
                         withWebDavIcon { render() }
                     }
@@ -5311,152 +5313,6 @@ class WebDavDriveHook(
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to render WebDAV home search section: ${it.stackTraceToString()}")
         }
-    }
-
-    private fun renderOnlineCompletionHomeSearchSection(title: String, results: List<*>, composer: Any) {
-        val factory = functionProxy("OnlineCompletionHomeSearchAndroidView", FUNCTION1_CLASS) { args ->
-            val context = args?.getOrNull(0) as? Context
-                ?: activityProvider()
-                ?: error("No context for online completion search rows")
-            createOnlineCompletionSearchRowsView(context, title, results)
-        }
-        runCatching {
-            cls(ANDROID_VIEW_KT_CLASS).declaredMethods.first {
-                it.name == ANDROID_VIEW_METHOD && it.parameterTypes.size == 6
-            }.apply { isAccessible = true }.invoke(
-                null,
-                factory,
-                fillMaxWidthModifier(),
-                null,
-                composer,
-                0,
-                4,
-            )
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to render online completion search rows: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun createOnlineCompletionSearchRowsView(context: Context, title: String, results: List<*>): View {
-        val primary = context.resolveThemeColor(android.R.attr.textColorPrimary, Color.rgb(34, 34, 34))
-        val secondary = context.resolveThemeColor(android.R.attr.textColorSecondary, Color.rgb(102, 102, 102))
-        val tertiary = Color.rgb(132, 132, 132)
-        val container = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(context.dp(18), context.dp(8), context.dp(18), context.dp(4))
-        }
-        container.addView(TextView(context).apply {
-            text = title.ifBlank { ONLINE_COMPLETION_TITLE }
-            setTextColor(secondary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, 0, 0, context.dp(8))
-        })
-        val rendered = results.mapNotNull { rawBook ->
-            val book = rawBook ?: return@mapNotNull null
-            val path = cloudPathOf(book)
-            onlineCompletionSearchTargets[path]?.let { target -> book to target }
-        }
-        if (rendered.isEmpty()) {
-            container.addView(TextView(context).apply {
-                text = "暂无可下载结果"
-                setTextColor(tertiary)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                setPadding(0, context.dp(6), 0, context.dp(12))
-            })
-            return container
-        }
-        rendered.forEach { (book, target) ->
-            container.addView(
-                createOnlineCompletionSearchRowView(
-                    context = context,
-                    book = book,
-                    target = target,
-                    primary = primary,
-                    secondary = secondary,
-                    tertiary = tertiary,
-                ),
-            )
-        }
-        return container
-    }
-
-    private fun createOnlineCompletionSearchRowView(
-        context: Context,
-        book: Any,
-        target: OnlineDownloadTarget,
-        primary: Int,
-        secondary: Int,
-        tertiary: Int,
-    ): View {
-        val row = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = context.dp(84)
-            setPadding(0, context.dp(6), 0, context.dp(8))
-            setOnClickListener { handleOnlineCompletionSearchTap(book) }
-        }
-        val cover = ImageView(context).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            background = roundedDrawable(Color.rgb(232, 232, 232), context.dp(4).toFloat())
-        }
-        row.addView(cover, LinearLayout.LayoutParams(context.dp(46), context.dp(62)).apply {
-            rightMargin = context.dp(12)
-        })
-        loadOnlineCompletionSearchCover(cover, target.result.coverUrl)
-
-        val texts = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        texts.addView(TextView(context).apply {
-            text = target.result.name.ifBlank { "未命名" }
-            setTextColor(primary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-        })
-        texts.addView(TextView(context).apply {
-            text = target.result.author.ifBlank { "未知作者" }
-            setTextColor(secondary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, context.dp(3), 0, 0)
-        })
-        texts.addView(TextView(context).apply {
-            text = onlineCompletionSearchMetaLine(target.result)
-            setTextColor(tertiary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, context.dp(3), 0, 0)
-        })
-        row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        return row
-    }
-
-    private fun loadOnlineCompletionSearchCover(imageView: ImageView, coverUrl: String) {
-        val url = coverUrl.trim()
-        if (url.isBlank()) return
-        Thread({
-            runCatching {
-                val connection = URL(url).openConnection().apply {
-                    connectTimeout = 4_000
-                    readTimeout = 6_000
-                }
-                connection.getInputStream().use { input -> BitmapFactory.decodeStream(input) }
-            }.onSuccess { bitmap ->
-                if (bitmap != null) {
-                    Handler(Looper.getMainLooper()).post {
-                        imageView.setImageBitmap(bitmap)
-                    }
-                }
-            }.onFailure {
-                logWebDav("online completion cover preview failed url=${url.take(120)} error=${it.message.orEmpty()}")
-            }
-        }, "ReaMicroOnlineSearchCover").start()
     }
 
     private fun newCloudFolder(entry: WebDavEntry): Any =
@@ -5737,15 +5593,10 @@ class WebDavDriveHook(
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val path = "$ONLINE_COMPLETION_BOOK_PREFIX${source.id}/$index?q=$encodedQuery"
         onlineCompletionSearchTargets[path] = OnlineDownloadTarget(source, query, result)
-        val subtitle = listOfNotNull(
-            result.author.takeIf { it.isNotBlank() }?.let { "作者 $it" },
-            result.sourceName.takeIf { it.isNotBlank() },
-            result.detailUrl.takeIf { it.isNotBlank() },
-        ).joinToString(" · ")
         return newOnlineCompletionCloudBook(
             path = path,
             name = result.name,
-            subtitle = subtitle,
+            subtitle = onlineCompletionSearchMetaLine(result),
             result = result,
         )
     }
