@@ -43,6 +43,7 @@ import com.reamicro.fix.association.provider.AssociationSearchProviderRegistry
 import com.reamicro.fix.association.provider.ExternalSourceLoader
 import com.reamicro.fix.association.provider.YouShuLoginCookies
 import com.reamicro.fix.association.provider.YouShuLoginState
+import com.reamicro.fix.online.OnlineSourceAuth
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.OnlineSourceStore
 import com.reamicro.fix.settings.ModuleSettings
@@ -2198,13 +2199,31 @@ class ReaMicroSettingsHook(
                 dialog.setOnShowListener {
                     dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
                     dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                        activity.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE)
-                            .edit()
-                            .putString("online_login_user_${source.id}", userInput.text?.toString().orEmpty())
-                            .putString("online_login_password_${source.id}", passwordInput.text?.toString().orEmpty())
-                            .apply()
-                        resolve(true)
-                        dialog.dismiss()
+                        val username = userInput.text?.toString().orEmpty()
+                        val password = passwordInput.text?.toString().orEmpty()
+                        if (username.isBlank() || password.isBlank()) {
+                            Toast.makeText(activity, "请输入账号和密码", Toast.LENGTH_SHORT).show()
+                            return@setOnClickListener
+                        }
+                        val positiveButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                        positiveButton.isEnabled = false
+                        Toast.makeText(activity, "正在登录 ${source.name}", Toast.LENGTH_SHORT).show()
+                        Thread({
+                            val result = OnlineSourceAuth.login(
+                                activity.applicationContext,
+                                source,
+                                username,
+                                password,
+                            )
+                            activity.runOnUiThread {
+                                positiveButton.isEnabled = true
+                                Toast.makeText(activity, result.message, Toast.LENGTH_SHORT).show()
+                                if (result.success) {
+                                    resolve(true)
+                                    dialog.dismiss()
+                                }
+                            }
+                        }, "ReaMicroOnlineSourceLogin").start()
                     }
                     dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
                         resolve(true)

@@ -41,6 +41,7 @@ import android.widget.TextView
 import android.widget.Toast
 import android.webkit.JavascriptInterface
 import com.reamicro.fix.online.OnlineConcurrentRateLimiter
+import com.reamicro.fix.online.OnlineSourceAuth
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.OnlineSourceStore
 import com.reamicro.fix.notification.cancelOnlineCompletionNotificationIfDone
@@ -2853,6 +2854,7 @@ class WebDavDriveHook(
         backupId: String,
         backupCode: String,
         publisher: String,
+        cover: String? = null,
     ): Any {
         val copyMethod = book.javaClass.methods.firstOrNull {
             it.name == "copy" && it.parameterTypes.size == 24
@@ -2867,7 +2869,7 @@ class WebDavDriveHook(
             book.callString("getTitle"),
             book.callString("getSubtitle"),
             book.callString("getAuthor"),
-            book.callString("getCover"),
+            cover?.takeIf { it.isNotBlank() } ?: book.callString("getCover"),
             book.callLong("getSize"),
             book.callString("getUri"),
             book.callString("getGroup"),
@@ -4387,25 +4389,40 @@ class WebDavDriveHook(
             return OnlineHttpResponse(requestUrl, onlineDataUrlStringResponse(requestUrl))
         }
         return withOnlineCleartextAllowed(requestUrl) {
-            val connection = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = onlineConnectTimeoutMillis(source)
-                readTimeout = onlineReadTimeoutMillis(source)
-                setRequestProperty("User-Agent", "Mozilla/5.0 ReaMicro-Extend/online-source")
-                setRequestProperty("Accept", "application/json,text/html,application/xhtml+xml,*/*")
-                parseOnlineHeaders(source.header).forEach { (name, value) ->
-                    if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
+            fun execute(authRetried: Boolean): OnlineHttpResponse {
+                val connection = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = onlineConnectTimeoutMillis(source)
+                    readTimeout = onlineReadTimeoutMillis(source)
+                    setRequestProperty("User-Agent", "Mozilla/5.0 ReaMicro-Extend/online-source")
+                    setRequestProperty("Accept", "application/json,text/html,application/xhtml+xml,*/*")
+                    parseOnlineHeaders(source.header).forEach { (name, value) ->
+                        if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
+                    }
+                    OnlineSourceAuth.requestHeaders(currentContext(), source).forEach { (name, value) ->
+                        if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
+                    }
+                }
+                try {
+                    val code = connection.responseCode
+                    val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                    val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                    if (code in 200..299) return OnlineHttpResponse(connection.url.toString(), body)
+                    if ((code == 401 || code == 403) && !authRetried && source.hasLoginConfig) {
+                        val login = OnlineSourceAuth.loginWithSavedCredentials(currentContext(), source)
+                        logWebDav(
+                            "online completion auth retry source=${source.name} code=$code " +
+                                "success=${login.success} message=${login.message}",
+                        )
+                        if (login.success) return execute(authRetried = true)
+                    }
+                    val authHint = if (code == 401 || code == 403) "：未登录或会员权限不足" else ""
+                    error("HTTP $code$authHint")
+                } finally {
+                    connection.disconnect()
                 }
             }
-            try {
-                val code = connection.responseCode
-                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-                val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-                if (code !in 200..299) error("HTTP $code")
-                OnlineHttpResponse(connection.url.toString(), body)
-            } finally {
-                connection.disconnect()
-            }
+            execute(authRetried = false)
         }
     }
 
@@ -4644,11 +4661,17 @@ class WebDavDriveHook(
     private fun onlineJsonRuleValues(node: Any?, rule: String): List<Any?> {
         if (node == null || rule.isBlank()) return emptyList()
         onlineJsonCandidateRoots(node).forEach { candidate ->
-            val values = onlineJsonValues(candidate, rule)
+            val values = onlineJsonValues(candidate, rule).flatMap(::onlineJsonRuleItems)
             if (values.isNotEmpty()) return values
         }
         return emptyList()
     }
+
+    private fun onlineJsonRuleItems(value: Any?): List<Any?> =
+        when (value) {
+            is JSONArray -> (0 until value.length()).map { value.opt(it) }
+            else -> listOfNotNull(value).filter { it != JSONObject.NULL }
+        }
 
     private fun onlineJsonCandidateRoots(node: Any?): List<Any?> {
         val roots = linkedSetOf<Any?>()
@@ -4759,12 +4782,30 @@ class WebDavDriveHook(
         }.trim()
 
     private fun replaceFanqieCover(raw: String): String {
-        var url = raw.trim()
-        if (url.isBlank()) return ""
-        url = url.removePrefix("https://").removePrefix("http://")
-        val parts = url.split('/').toMutableList()
-        if (parts.isNotEmpty()) parts[0] = "https://p6-novel.byteimg.com/origin"
-        return parts.joinToString("/") { part -> part.substringBefore('~').substringBefore('?') }
+        val clean = raw.trim().substringBefore('~').substringBefore('?').trim()
+        if (clean.isBlank()) return ""
+        val path = runCatching {
+            val normalized = if (clean.startsWith("//")) "https:$clean" else clean
+            if (normalized.startsWith("http://", ignoreCase = true) ||
+                normalized.startsWith("https://", ignoreCase = true)
+            ) {
+                URI(normalized).rawPath.orEmpty().trimStart('/')
+            } else {
+                normalized.trimStart('/')
+            }
+        }.getOrDefault(clean.trimStart('/'))
+            .removePrefix("origin/")
+            .removePrefix("/origin/")
+            .trimStart('/')
+        val imagePath = when {
+            path.isBlank() -> return ""
+            path.startsWith("novel-pic/", ignoreCase = true) -> path
+            path.startsWith("novel-images/", ignoreCase = true) -> path
+            path.startsWith("novel-static/", ignoreCase = true) -> path
+            path.contains('/') -> path
+            else -> "novel-pic/$path"
+        }
+        return "https://p6-novel.byteimg.com/origin/$imagePath"
     }
 
     private fun sourceBaseUrl(source: OnlineSourceEntry): String =
@@ -5758,22 +5799,35 @@ class WebDavDriveHook(
     ) {
         private var lastNotificationAtMs = 0L
         private var lastProgress = -1
+        private var lastMessage = ""
 
         @Synchronized
         fun running(progress: Int, message: String, force: Boolean = false): Boolean {
             val now = System.currentTimeMillis()
-            if (!force &&
-                now - lastNotificationAtMs < ONLINE_COMPLETION_NOTIFICATION_MIN_INTERVAL_MS &&
-                progress < 100
-            ) {
+            val compactMessage = message.replace(Regex("\\s+"), " ").trim()
+            val progressChanged = progress != lastProgress
+            val phaseChanged = compactMessage != lastMessage &&
+                !compactMessage.startsWith("下载章节 ") &&
+                !compactMessage.startsWith("重试章节 ")
+            val shouldSend = force ||
+                progressChanged ||
+                phaseChanged ||
+                now - lastNotificationAtMs >= ONLINE_COMPLETION_NOTIFICATION_MIN_INTERVAL_MS ||
+                progress >= 100
+            if (!shouldSend) {
                 return true
             }
             lastNotificationAtMs = now
             lastProgress = progress
+            lastMessage = compactMessage
             if (tracker != null && workId != null) {
-                setTrackedWorkState(tracker, workId, "Running", progress, null, null, "$bookName：$message")
+                setTrackedWorkState(tracker, workId, "Running", progress, null, null, "$bookName：$compactMessage")
             }
-            return updateOnlineCompletionNotification(context, notificationId, bookName, message, progress, false)
+            logWebDav(
+                "online completion progress notify id=$notificationId progress=$progress " +
+                    "force=$force progressChanged=$progressChanged phaseChanged=$phaseChanged text=$compactMessage",
+            )
+            return updateOnlineCompletionNotification(context, notificationId, bookName, compactMessage, progress, false)
         }
 
         @Synchronized
@@ -5842,6 +5896,7 @@ class WebDavDriveHook(
             "online completion chapters=${chapters.size} " +
                 "first=${chapters.firstOrNull()?.title.orEmpty()} firstUrl=${chapters.firstOrNull()?.url.orEmpty()}",
         )
+        onProgress(5, "开始下载章节 0/${chapters.size}")
         val downloaded = MutableList<OnlineDownloadedChapter?>(chapters.size) { null }
         val attempts = IntArray(chapters.size)
         val failed = linkedSetOf<Int>()
@@ -5851,6 +5906,16 @@ class WebDavDriveHook(
                 OnlineConcurrentRateLimiter.withLimitBlocking(target.source) {
                     downloadOnlineBytes(target.source, coverUrl)
                 }
+            }.onSuccess { payload ->
+                logWebDav(
+                    "online completion cover downloaded url=${coverUrl.take(160)} " +
+                        "bytes=${payload.bytes.size} type=${payload.mimeType.ifBlank { "unknown" }}",
+                )
+            }.onFailure { error ->
+                logWebDav(
+                    "online completion cover failed url=${coverUrl.take(160)} " +
+                        "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
+                )
             }.getOrNull()
         }
         val shouldImportFirstBatch = chapters.size > ONLINE_COMPLETION_PARTIAL_IMPORT_THRESHOLD
@@ -6302,26 +6367,43 @@ class WebDavDriveHook(
 
     private fun downloadOnlineBytes(source: OnlineSourceEntry, requestUrl: String): OnlineBinaryPayload {
         return withOnlineCleartextAllowed(requestUrl) {
-            val connection = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = onlineConnectTimeoutMillis(source)
-                readTimeout = onlineReadTimeoutMillis(source)
-                setRequestProperty("User-Agent", "Mozilla/5.0 ReaMicro-Extend/online-source")
-                parseOnlineHeaders(source.header).forEach { (name, value) ->
-                    if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
+            fun execute(authRetried: Boolean): OnlineBinaryPayload {
+                val connection = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = onlineConnectTimeoutMillis(source)
+                    readTimeout = onlineReadTimeoutMillis(source)
+                    setRequestProperty("User-Agent", "Mozilla/5.0 ReaMicro-Extend/online-source")
+                    parseOnlineHeaders(source.header).forEach { (name, value) ->
+                        if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
+                    }
+                    OnlineSourceAuth.requestHeaders(currentContext(), source).forEach { (name, value) ->
+                        if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
+                    }
+                }
+                try {
+                    val code = connection.responseCode
+                    if (code in 200..299) {
+                        return OnlineBinaryPayload(
+                            bytes = connection.inputStream.use { it.readBytes() },
+                            mimeType = connection.contentType?.substringBefore(';')?.trim().orEmpty(),
+                            url = connection.url.toString(),
+                        )
+                    }
+                    if ((code == 401 || code == 403) && !authRetried && source.hasLoginConfig) {
+                        val login = OnlineSourceAuth.loginWithSavedCredentials(currentContext(), source)
+                        logWebDav(
+                            "online completion binary auth retry source=${source.name} code=$code " +
+                                "success=${login.success} message=${login.message}",
+                        )
+                        if (login.success) return execute(authRetried = true)
+                    }
+                    val authHint = if (code == 401 || code == 403) "：未登录或会员权限不足" else ""
+                    error("HTTP $code$authHint")
+                } finally {
+                    connection.disconnect()
                 }
             }
-            try {
-                val code = connection.responseCode
-                if (code !in 200..299) error("HTTP $code")
-                OnlineBinaryPayload(
-                    bytes = connection.inputStream.use { it.readBytes() },
-                    mimeType = connection.contentType?.substringBefore(';')?.trim().orEmpty(),
-                    url = connection.url.toString(),
-                )
-            } finally {
-                connection.disconnect()
-            }
+            execute(authRetried = false)
         }
     }
 
@@ -6347,6 +6429,7 @@ class WebDavDriveHook(
             val coverExt = cover?.url?.substringBefore('?')?.substringAfterLast('.', "jpg")?.takeIf { it.length in 3..5 } ?: "jpg"
             cover?.let {
                 writeBytesZipEntry(zip, "OEBPS/Images/cover.$coverExt", it.bytes)
+                writeTextZipEntry(zip, "OEBPS/Text/cover.xhtml", onlineCoverXhtml(target, coverExt))
             }
             chapters.forEachIndexed { index, chapter ->
                 writeTextZipEntry(
@@ -6418,11 +6501,13 @@ class WebDavDriveHook(
                 backupId = onlineImportedBookBackupId(target),
                 backupCode = target.source.id,
                 publisher = "",
+                cover = imported.callString("getCover").ifBlank { target.result.coverUrl },
             )
             updateLocalBook(updated)
             logWebDav(
                 "online completion metadata synced uuid=${updated.callString("getUuid")} " +
-                    "backupId=${bookBackupIdOf(updated)} source=${target.source.name}",
+                    "backupId=${bookBackupIdOf(updated)} source=${target.source.name} " +
+                    "cover=${updated.callString("getCover").take(120)}",
             )
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX online completion metadata sync failed: ${it.stackTraceToString()}")
@@ -6628,22 +6713,26 @@ class WebDavDriveHook(
         done: Boolean,
     ): Boolean {
         val moduleAlreadyStarted = onlineCompletionModuleActivityStarted.contains(id)
-        if (!moduleAlreadyStarted) {
+        val broadcastSent = sendOnlineCompletionNotificationBroadcast(context, id, title, text, progress, done)
+        val activitySent = if (!moduleAlreadyStarted && !done) {
             if (startOnlineCompletionNotificationActivity(context, id, title, text, progress, done)) {
                 onlineCompletionModuleActivityStarted.add(id)
-                sendOnlineCompletionNotificationBroadcast(context, id, title, text, progress, done)
-                if (done) onlineCompletionModuleActivityStarted.remove(id)
-                return true
+                true
+            } else {
+                false
             }
+        } else {
+            false
         }
-        val serviceSent = if (onlineCompletionModuleServiceUnavailable.get()) {
+        val shouldTryService = done || moduleAlreadyStarted || (!broadcastSent && !activitySent)
+        val serviceSent = if (!shouldTryService || onlineCompletionModuleServiceUnavailable.get()) {
             false
         } else {
             runCatching {
                 val intent = onlineCompletionNotificationIntent(id, title, text, progress, done).apply {
                     setClassName(MODULE_PACKAGE_NAME, ONLINE_COMPLETION_NOTIFICATION_SERVICE_CLASS)
                 }
-                val component = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !done) {
+                val component = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !done && !moduleAlreadyStarted) {
                     context.startForegroundService(intent)
                 } else {
                     context.startService(intent)
@@ -6665,9 +6754,11 @@ class WebDavDriveHook(
             if (done) onlineCompletionModuleActivityStarted.remove(id)
             return true
         }
-        val broadcastSent = onlineCompletionModuleActivityStarted.contains(id) &&
-            sendOnlineCompletionNotificationBroadcast(context, id, title, text, progress, done)
         if (broadcastSent) {
+            if (done) onlineCompletionModuleActivityStarted.remove(id)
+            return true
+        }
+        if (activitySent) {
             if (done) onlineCompletionModuleActivityStarted.remove(id)
             return true
         }
@@ -6720,7 +6811,10 @@ class WebDavDriveHook(
                 setClassName(MODULE_PACKAGE_NAME, ONLINE_COMPLETION_NOTIFICATION_RECEIVER_CLASS)
             }
             context.sendBroadcast(intent)
-            logWebDav("online completion module notification broadcast sent")
+            logWebDav(
+                "online completion module notification broadcast sent " +
+                    "id=$id progress=$progress done=$done",
+            )
             true
         }.getOrElse {
             logWebDav("online completion module notification relay failed: ${it.message ?: it.javaClass.name}")
@@ -6896,11 +6990,12 @@ $paragraphs
         }
         val spine = chapters.indices.joinToString("") { index -> """<itemref idref="chapter${index + 1}"/>""" }
         val coverManifest = if (hasCover) {
-            """<item id="cover-image" href="Images/cover.$coverExt" media-type="${coverMimeType(coverExt)}"/>"""
+            """<item id="cover-image" href="Images/cover.$coverExt" media-type="${coverMimeType(coverExt)}" properties="cover-image"/><item id="cover-page" href="Text/cover.xhtml" media-type="application/xhtml+xml"/>"""
         } else {
             ""
         }
         val coverMeta = if (hasCover) """<meta name="cover" content="cover-image"/>""" else ""
+        val coverGuide = if (hasCover) """<guide><reference type="cover" title="Cover" href="Text/cover.xhtml"/></guide>""" else ""
         val onlineMeta = onlineSourceMetadataOpf(target)
         return """<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="2.0">
@@ -6914,8 +7009,19 @@ $onlineMeta
 </metadata>
 <manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>$coverManifest$manifestChapters</manifest>
 <spine toc="ncx">$spine</spine>
+$coverGuide
 </package>"""
     }
+
+    private fun onlineCoverXhtml(target: OnlineDownloadTarget, coverExt: String): String =
+        """<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>${target.result.name.xmlEscape()}</title><style type="text/css">
+body{margin:0;padding:0;text-align:center;}
+img{max-width:100%;max-height:100%;height:auto;}
+</style></head>
+<body><img alt="${target.result.name.xmlEscape()}" src="../Images/cover.$coverExt"/></body>
+</html>"""
 
     private fun onlineBookUuid(target: OnlineDownloadTarget): String =
         "reamicro-online-${target.source.id}-${(target.result.detailUrl.ifBlank { target.result.name }).hashCode().toUInt()}"
