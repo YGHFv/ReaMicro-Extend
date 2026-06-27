@@ -919,7 +919,7 @@ class WebDavDriveHook(
         row.addView(cover, LinearLayout.LayoutParams(context.dp(48), context.dp(66)).apply {
             rightMargin = context.dp(14)
         })
-        loadOnlineCompletionSearchCover(cover, target.result.coverUrl)
+        loadOnlineCompletionSearchCover(cover, target.source, target.result.coverUrl)
 
         val texts = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -955,16 +955,31 @@ class WebDavDriveHook(
         return row
     }
 
-    private fun loadOnlineCompletionSearchCover(imageView: ImageView, coverUrl: String) {
-        val url = coverUrl.trim()
+    private fun loadOnlineCompletionSearchCover(imageView: ImageView, source: OnlineSourceEntry, coverUrl: String) {
+        val url = normalizeOnlineCoverUrl(source, sourceBaseUrl(source), coverUrl).trim()
         if (url.isBlank()) return
         Thread({
             runCatching {
-                val connection = URL(url).openConnection().apply {
-                    connectTimeout = 4_000
-                    readTimeout = 6_000
+                val connection = withOnlineCleartextAllowed(url) {
+                    (URL(url).openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = 4_000
+                        readTimeout = 6_000
+                        setRequestProperty("User-Agent", "Mozilla/5.0 ReaMicro-Extend/online-source")
+                        setRequestProperty("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+                        parseOnlineHeaders(source.header).forEach { (name, value) ->
+                            if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
+                        }
+                        OnlineSourceAuth.requestHeaders(currentContext(), source).forEach { (name, value) ->
+                            if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
+                        }
+                    }
                 }
-                connection.getInputStream().use { input -> BitmapFactory.decodeStream(input) }
+                try {
+                    connection.inputStream.use { input -> BitmapFactory.decodeStream(input) }
+                } finally {
+                    connection.disconnect()
+                }
             }.onSuccess { bitmap ->
                 if (bitmap != null) {
                     Handler(Looper.getMainLooper()).post {
@@ -4616,10 +4631,11 @@ class WebDavDriveHook(
                 coverUrl = result.coverUrl.ifBlank {
                     rule?.optString("coverUrl", "").orEmpty()
                         .takeIf { it.isNotBlank() }
-                        ?.let { resolveOnlineUrl(detail.url, onlineRuleValue(node, it, detail.url)) }
+                        ?.let { normalizeOnlineCoverUrl(source, detail.url, onlineRuleValue(node, it, detail.url)) }
                         .orEmpty()
                         .ifBlank {
-                            resolveOnlineUrl(
+                            normalizeOnlineCoverUrl(
+                                source,
                                 detail.url,
                                 onlineFirstJsonString(node, listOf("cover", "coverUrl", "thumb_url", "thumb_uri", "bookCover")),
                             )
@@ -4809,7 +4825,7 @@ class WebDavDriveHook(
                 sourceName = source.name,
                 name = name,
                 author = author,
-                coverUrl = resolveOnlineUrl(baseUrl, cover),
+                coverUrl = normalizeOnlineCoverUrl(source, baseUrl, cover),
                 detailUrl = resolveOnlineUrl(baseUrl, detail),
                 intro = intro,
                 chapterCount = meta.chapterCount,
@@ -4837,7 +4853,7 @@ class WebDavDriveHook(
             sourceName = source.name,
             name = name,
             author = author,
-            coverUrl = resolveOnlineUrl(baseUrl, cover),
+            coverUrl = normalizeOnlineCoverUrl(source, baseUrl, cover),
             detailUrl = resolveOnlineUrl(baseUrl, detail),
             intro = intro,
             chapterCount = meta.chapterCount,
@@ -5312,6 +5328,27 @@ class WebDavDriveHook(
                 else -> URL(URL(baseUrl), raw).toString()
             }
         }.getOrDefault(raw)
+    }
+
+    private fun normalizeOnlineCoverUrl(source: OnlineSourceEntry, baseUrl: String, value: String): String {
+        val resolved = resolveOnlineUrl(baseUrl.ifBlank { sourceBaseUrl(source) }, value)
+        if (!resolved.startsWith("http://", ignoreCase = true)) return resolved
+        val sourceUrl = sourceBaseUrl(source).ifBlank { baseUrl }
+        val sourceUri = runCatching { URI(sourceUrl) }.getOrNull()
+        if (!sourceUri?.scheme.equals("https", ignoreCase = true)) return resolved
+        val coverUri = runCatching { URI(resolved) }.getOrNull() ?: return resolved
+        if (!coverUri.host.equals(sourceUri?.host.orEmpty(), ignoreCase = true)) return resolved
+        return runCatching {
+            URI(
+                "https",
+                coverUri.userInfo,
+                coverUri.host,
+                coverUri.port,
+                coverUri.rawPath,
+                coverUri.rawQuery,
+                coverUri.rawFragment,
+            ).toString()
+        }.getOrDefault(resolved)
     }
 
     private fun String.cleanOnlineText(): String =
@@ -6513,13 +6550,6 @@ class WebDavDriveHook(
                                         "online completion partial import visible book=${target.result.name} " +
                                             "dir=${importedDir.absolutePath}",
                                     )
-                                    Handler(Looper.getMainLooper()).post {
-                                        Toast.makeText(
-                                            context,
-                                            "已加入书架：${target.result.name}",
-                                            Toast.LENGTH_SHORT,
-                                        ).show()
-                                    }
                                 }
                                 importResult.imported
                             }.onFailure { error ->
@@ -6925,9 +6955,15 @@ class WebDavDriveHook(
             coverUrl = current.coverUrl.ifBlank {
                 bookInfoRule?.optString("coverUrl", "").orEmpty()
                     .takeIf { it.isNotBlank() }
-                    ?.let { resolveOnlineUrl(detailUrl, onlineRuleValue(node, it, detailUrl)) }
+                    ?.let { normalizeOnlineCoverUrl(target.source, detailUrl, onlineRuleValue(node, it, detailUrl)) }
                     .orEmpty()
-                    .ifBlank { resolveOnlineUrl(detailUrl, onlineFirstJsonString(node, listOf("cover", "coverUrl", "thumb_url", "thumb_uri", "bookCover"))) }
+                    .ifBlank {
+                        normalizeOnlineCoverUrl(
+                            target.source,
+                            detailUrl,
+                            onlineFirstJsonString(node, listOf("cover", "coverUrl", "thumb_url", "thumb_uri", "bookCover")),
+                        )
+                    }
             },
             intro = current.intro.ifBlank {
                 bookInfoRule?.optString("intro", "").orEmpty()
