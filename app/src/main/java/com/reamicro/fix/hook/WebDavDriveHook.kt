@@ -130,6 +130,9 @@ class WebDavDriveHook(
     private val homeWebDavSearchRender = ThreadLocal<HomeSearchRenderContext?>()
     private val cloudBookRowExtendedDisplay = ThreadLocal<CloudBookRowExtendedDisplayContext?>()
     private val onlineCompletionBookRowInfoDepth = ThreadLocal<Int>()
+    private val onlineCompletionLocalSheetBook = ThreadLocal<Any?>()
+    private val onlineCompletionLocalSheetDepth = ThreadLocal<Int>()
+    private val onlineCompletionUpdateRowInjecting = ThreadLocal<Boolean>()
     private val webDavBackupCardDepth = ThreadLocal<Int>()
     private var webDavAccountNavGraphScopeRef: WeakReference<Any>? = null
     private var localLibraryAccountNavGraphScopeRef: WeakReference<Any>? = null
@@ -166,6 +169,7 @@ class WebDavDriveHook(
     private val onlineCompletionExpandedSources = ConcurrentHashMap<String, Boolean>()
     private val onlineCompletionSearchTargets = ConcurrentHashMap<String, OnlineDownloadTarget>()
     private val onlineCompletionRunningDownloads = ConcurrentHashMap<String, Boolean>()
+    private val onlineCompletionRunningUpdates = ConcurrentHashMap<String, Boolean>()
     private val onlineCompletionPublisherCleanupIds = ConcurrentHashMap.newKeySet<String>()
     private val onlineCompletionNotificationIds = AtomicInteger(4300)
     private val onlineCompletionNotificationBlockedLogged = AtomicBoolean(false)
@@ -190,6 +194,7 @@ class WebDavDriveHook(
         hookWebDavCleartextPolicy()
         hookBackupTypeName()
         hookOnlineCompletionBookRowDuration()
+        hookOnlineCompletionBookLocalSheet()
         hookHomeCloudResultListRenderContext()
         hookHomeViewModelDependencies()
         hookWebDavRowIcon()
@@ -317,6 +322,324 @@ class WebDavDriveHook(
             XposedBridge.log("$LOG_PREFIX failed to hook online completion book row duration: ${it.stackTraceToString()}")
         }
     }
+
+    private fun hookOnlineCompletionBookLocalSheet() {
+        runCatching {
+            val sheetClass = cls(BOOK_LOCAL_SHEET_CLASS)
+            sheetClass.declaredMethods
+                .filter { method ->
+                    (method.name == BOOK_LOCAL_SHEET_METHOD && method.parameterTypes.size == 5) ||
+                        (method.name == BOOK_LOCAL_SHEET_CONTENT_METHOD &&
+                            method.parameterTypes.firstOrNull()?.name == BOOK_CLASS)
+                }
+                .forEach { method ->
+                    method.isAccessible = true
+                    XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            onlineCompletionLocalSheetDepth.set((onlineCompletionLocalSheetDepth.get() ?: 0) + 1)
+                            onlineCompletionLocalSheetBook.set(param.args?.getOrNull(0))
+                        }
+
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val nextDepth = ((onlineCompletionLocalSheetDepth.get() ?: 0) - 1).coerceAtLeast(0)
+                            onlineCompletionLocalSheetDepth.set(nextDepth)
+                            if (nextDepth == 0) onlineCompletionLocalSheetBook.remove()
+                        }
+                    })
+                }
+
+            val fileBackupMethods = sheetClass.declaredMethods.filter {
+                it.name == FILE_BACKUP_METHOD && it.parameterTypes.size == 5
+            }
+            fileBackupMethods.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (onlineCompletionUpdateRowInjecting.get() == true) return
+                        val book = onlineCompletionLocalSheetBook.get() ?: return
+                        val info = onlineImportedBookSourceInfo(book) ?: return
+                        val composer = param.args?.getOrNull(3) ?: return
+                        onlineCompletionUpdateRowInjecting.set(true)
+                        runCatching {
+                            renderOnlineCompletionUpdateDivider(composer)
+                            renderOnlineCompletionUpdateRow(book, info, composer)
+                        }.onFailure {
+                            XposedBridge.log("$LOG_PREFIX online completion update row render failed: ${it.stackTraceToString()}")
+                        }
+                        onlineCompletionUpdateRowInjecting.remove()
+                    }
+                })
+            }
+            logWebDav("online completion local sheet hook installed backups=${fileBackupMethods.size}")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX failed to hook online completion local sheet: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun renderOnlineCompletionUpdateRow(book: Any, info: OnlineImportedBookSourceInfo, composer: Any) {
+        val modifier = paddingModifier(
+            clickableModifier(modifierInstance(), "OnlineCompletionChapterUpdate") {
+                startOnlineCompletionChapterUpdate(book, info)
+            },
+            start = 18,
+            top = 16,
+            end = 12,
+            bottom = 16,
+        )
+        val content = functionProxy("OnlineCompletionUpdateRowContent", FUNCTION3_CLASS) { args ->
+            val rowScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            val innerComposer = args.getOrNull(1) ?: return@functionProxy targetUnit()
+            onlineCompletionUpdateImageVector()?.let { image ->
+                renderOnlineCompletionIcon(
+                    image = image,
+                    modifier = sizeModifier(
+                        paddingModifier(
+                            modifierInstance(),
+                            start = 0,
+                            top = 0,
+                            end = 16,
+                            bottom = 0,
+                        ),
+                        20,
+                    ),
+                    tint = colorScheme(innerComposer).longMethod("getOnBackground"),
+                    composer = innerComposer,
+                )
+            }
+            renderOnlineCompletionPrimaryText(
+                text = "数据更新",
+                modifier = rowWeightModifier(rowScope, modifierInstance()),
+                composer = innerComposer,
+            )
+            renderOnlineCompletionSecondaryText(
+                text = info.sourceName.ifBlank { "未知源" },
+                composer = innerComposer,
+            )
+            navigateNextImageVector()?.let { image ->
+                renderOnlineCompletionIcon(
+                    image = image,
+                    modifier = paddingModifier(
+                        modifierInstance(),
+                        start = 0,
+                        top = 2,
+                        end = 0,
+                        bottom = 0,
+                    ),
+                    tint = colorScheme(innerComposer).longMethod("getSurfaceContainerHighest"),
+                    composer = innerComposer,
+                )
+            }
+            targetUnit()
+        }
+        method(ROW_KT_CLASS, ROW_METHOD, 7).invoke(
+            null,
+            modifier,
+            arrangementStart(),
+            alignmentCenterVertically(),
+            content,
+            composer,
+            384,
+            0,
+        )
+    }
+
+    private fun renderOnlineCompletionPrimaryText(text: String, modifier: Any?, composer: Any) {
+        method(MATERIAL3_TEXT_CLASS, MATERIAL3_TEXT_METHOD, 22).invoke(
+            null,
+            text,
+            modifier,
+            colorScheme(composer).longMethod("getOnBackground"),
+            null,
+            0L,
+            null,
+            null,
+            null,
+            0L,
+            null,
+            null,
+            0L,
+            0,
+            false,
+            0,
+            0,
+            null,
+            typography(composer).method0("getLabelLarge"),
+            composer,
+            0,
+            0,
+            TEXT_DEFAULT_MASK_WITH_MODIFIER,
+        )
+    }
+
+    private fun renderOnlineCompletionSecondaryText(text: String, composer: Any) {
+        method(MATERIAL3_TEXT_CLASS, MATERIAL3_TEXT_METHOD, 22).invoke(
+            null,
+            text,
+            null,
+            themeOnBackgroundVariant(composer),
+            null,
+            0L,
+            null,
+            null,
+            null,
+            0L,
+            null,
+            null,
+            0L,
+            textOverflowEllipsis(),
+            false,
+            1,
+            0,
+            null,
+            typography(composer).method0("getBodyMedium"),
+            composer,
+            0,
+            24960,
+            TEXT_SECONDARY_SINGLE_LINE_MASK,
+        )
+    }
+
+    private fun renderOnlineCompletionIcon(image: Any, modifier: Any, tint: Long, composer: Any) {
+        iconImageVectorMethod().invoke(
+            null,
+            image,
+            null,
+            modifier,
+            tint,
+            composer,
+            48,
+            0,
+        )
+    }
+
+    private fun iconImageVectorMethod(): Method =
+        synchronized(methodCache) {
+            methodCache.getOrPut("$ICON_KT_CLASS#$ICON_METHOD/ImageVector") {
+                cls(ICON_KT_CLASS).declaredMethods.firstOrNull {
+                    it.name == ICON_METHOD &&
+                        it.parameterTypes.size == 7 &&
+                        it.parameterTypes.firstOrNull()?.name == IMAGE_VECTOR_CLASS
+                }?.apply { isAccessible = true }
+                    ?: error("$ICON_KT_CLASS.$ICON_METHOD ImageVector overload not found")
+            }
+        }
+
+    private fun renderOnlineCompletionUpdateDivider(composer: Any) {
+        simpleDividerMethod().invoke(
+            null,
+            method(PADDING_KT_CLASS, PADDING_ABSOLUTE_DEFAULT_METHOD, 7).invoke(
+                null,
+                modifierInstance(),
+                udp(54),
+                0f,
+                0f,
+                0f,
+                14,
+                null,
+            ),
+            0L,
+            composer,
+            0,
+            2,
+        )
+    }
+
+    private fun rowWeightModifier(rowScope: Any, modifier: Any): Any =
+        rowScope.javaClass.methods.first {
+            it.name == "weight" && it.parameterTypes.size == 3
+        }.invoke(rowScope, modifier, 1f, true)
+
+    private fun sizeModifier(baseModifier: Any, size: Int): Any =
+        method(SIZE_KT_CLASS, SIZE_METHOD, 2).invoke(null, baseModifier, udp(size))
+
+    private fun paddingModifier(
+        baseModifier: Any,
+        start: Int,
+        top: Int,
+        end: Int,
+        bottom: Int,
+    ): Any =
+        method(PADDING_KT_CLASS, PADDING_METHOD, 5).invoke(
+            null,
+            baseModifier,
+            udp(start),
+            udp(top),
+            udp(end),
+            udp(bottom),
+        )
+
+    private fun clickableModifier(baseModifier: Any, name: String, onClick: () -> Unit): Any =
+        method(CLICKABLE_KT_CLASS, CLICKABLE_DEFAULT_METHOD, 9).invoke(
+            null,
+            baseModifier,
+            null,
+            null,
+            false,
+            null,
+            null,
+            functionProxy(name, FUNCTION0_CLASS) {
+                onClick()
+                targetUnit()
+            },
+            28,
+            null,
+        )
+
+    private fun arrangementStart(): Any =
+        staticObject(ARRANGEMENT_CLASS, "INSTANCE").method0("getStart")
+
+    private fun alignmentCenterVertically(): Any =
+        staticObject(ALIGNMENT_CLASS, "INSTANCE").method0("getCenterVertically")
+
+    private fun themeOnBackgroundVariant(composer: Any): Long =
+        method(THEME_KT_CLASS, "getOnBackgroundVariant", 1).invoke(null, colorScheme(composer)) as Long
+
+    private fun textOverflowEllipsis(): Int =
+        staticObject(TEXT_OVERFLOW_CLASS, "INSTANCE").method0("getEllipsis") as Int
+
+    private fun onlineCompletionUpdateImageVector(): Any? =
+        listOf(
+            Triple("androidx.compose.material.icons.filled.RefreshKt", "getRefresh", ICONS_FILLED_CLASS),
+            Triple("androidx.compose.material.icons.filled.SyncKt", "getSync", ICONS_FILLED_CLASS),
+            Triple(EDIT_ICON_CLASS, "getEdit", ICONS_OUTLINED_CLASS),
+        ).firstNotNullOfOrNull { (className, methodName, holderClass) ->
+            runCatching {
+                method(className, methodName, 1).invoke(null, staticObject(holderClass, "INSTANCE"))
+            }.getOrNull()
+        }
+
+    private fun navigateNextImageVector(): Any? =
+        runCatching {
+            method(NAVIGATE_NEXT_ICON_CLASS, "getNavigateNext", 1).invoke(
+                null,
+                staticObject(ICONS_AUTO_MIRRORED_FILLED_CLASS, "INSTANCE"),
+            )
+        }.getOrNull()
+
+    private fun colorScheme(composer: Any): Any {
+        val materialTheme = staticObject(MATERIAL_THEME_CLASS, "INSTANCE")
+        val stable = staticInt(MATERIAL_THEME_CLASS, "\$stable")
+        return method(MATERIAL_THEME_CLASS, "getColorScheme", 2).invoke(materialTheme, composer, stable)
+    }
+
+    private fun typography(composer: Any): Any {
+        val materialTheme = staticObject(MATERIAL_THEME_CLASS, "INSTANCE")
+        val stable = staticInt(MATERIAL_THEME_CLASS, "\$stable")
+        return method(MATERIAL_THEME_CLASS, "getTypography", 2).invoke(materialTheme, composer, stable)
+    }
+
+    private fun modifierInstance(): Any =
+        staticObject(MODIFIER_CLASS, "INSTANCE")
+
+    private fun simpleDividerMethod(): Method =
+        synchronized(methodCache) {
+            methodCache.getOrPut("$DIVIDER_KT_CLASS#SimpleDivider/5") {
+                cls(DIVIDER_KT_CLASS).declaredMethods.firstOrNull {
+                    it.name.contains("SimpleDivider") && it.parameterTypes.size == 5
+                }?.apply { isAccessible = true }
+                    ?: error("SimpleDivider method not found")
+            }
+        }
 
     private fun hookWebDavCleartextPolicy() {
         val hooked = mutableListOf<String>()
@@ -1709,7 +2032,7 @@ class WebDavDriveHook(
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val book = param.args?.getOrNull(1) ?: return
                     val type = book.callInt("getType")
-                    if (type == BACKUP_TYPE_ONLINE_COMPLETION || isOnlineCompletionPath(cloudPathOf(book))) {
+                    if (isOnlineCompletionPath(cloudPathOf(book))) {
                         handleOnlineCompletionSearchTap(book)
                         param.result = targetUnit()
                         return
@@ -5013,7 +5336,7 @@ class WebDavDriveHook(
     }
 
     private fun isOnlineCompletionRenderType(type: Int): Boolean =
-        type == BACKUP_TYPE_ONLINE_COMPLETION || onlineCompletionRenderTitles.containsKey(type)
+        onlineCompletionRenderTitles.containsKey(type)
 
     private fun onlineCompletionTitleForType(type: Int, fallback: String = ONLINE_COMPLETION_TITLE): String =
         onlineCompletionRenderTitles[type].orEmpty()
@@ -5183,10 +5506,11 @@ class WebDavDriveHook(
         path.startsWith(ONLINE_COMPLETION_SOURCE_PREFIX) || path.startsWith(ONLINE_COMPLETION_BOOK_PREFIX)
 
     private fun isOnlineCompletionLocalBook(book: Any): Boolean =
-        bookBackupTypeOf(book) == BACKUP_TYPE_ONLINE_COMPLETION ||
-            isOnlineCompletionPath(bookBackupIdOf(book)) ||
+        isOnlineCompletionPath(bookBackupIdOf(book)) ||
             isOnlineCompletionPath(book.callString("getUri")) ||
-            isOnlineCompletionUuid(book.callString("getUuid"))
+            isOnlineCompletionUuid(book.callString("getUuid")) ||
+            (bookBackupTypeOf(book) == BACKUP_TYPE_ONLINE_COMPLETION &&
+                book.callString("getBackupCode").startsWith("online_"))
 
     private fun isOnlineCompletionUuid(uuid: String): Boolean =
         uuid.startsWith(ONLINE_COMPLETION_UUID_PREFIX)
@@ -5216,6 +5540,89 @@ class WebDavDriveHook(
             }
         }, "ReaMicroOnlinePublisherCleanup").start()
     }
+
+    private fun onlineImportedBookSourceInfo(book: Any): OnlineImportedBookSourceInfo? {
+        if (!isOnlineCompletionLocalBook(book)) return null
+        val context = currentContext()
+        val backupId = bookBackupIdOf(book)
+        val backupCode = book.callString("getBackupCode")
+        val uuid = book.callString("getUuid")
+        val sourceId = onlineSourceIdFromEncodedValue(backupCode)
+            .ifBlank { onlineSourceIdFromEncodedValue(backupId) }
+            .ifBlank { onlineSourceIdFromUuid(uuid) }
+        val sourceById = context?.let { appContext ->
+            OnlineSourceStore.list(appContext).firstOrNull { source -> source.id == sourceId }
+        }
+        val detailUrl = onlineCompletionQueryParameter(backupId, "detail")
+            .ifBlank { book.callString("getUri").takeIf { it.startsWith("http", ignoreCase = true) }.orEmpty() }
+        val sourceName = sourceById?.name.orEmpty()
+            .ifBlank { onlineCompletionQueryParameter(backupId, "name") }
+            .ifBlank { book.callString("getPublisher") }
+            .ifBlank { sourceId }
+        return OnlineImportedBookSourceInfo(
+            sourceId = sourceId,
+            sourceName = sourceName.ifBlank { "未知源" },
+            detailUrl = detailUrl,
+            source = sourceById,
+        )
+    }
+
+    private fun startOnlineCompletionChapterUpdate(book: Any, info: OnlineImportedBookSourceInfo) {
+        val source = info.source ?: currentContext()?.let { context ->
+            OnlineSourceStore.list(context).firstOrNull { source -> source.id == info.sourceId }
+        }
+        if (source == null) {
+            showToast("在线补全源不可用：${info.sourceName}")
+            return
+        }
+        val title = book.callString("getTitle").ifBlank { "未命名图书" }
+        val detailUrl = info.detailUrl
+            .ifBlank { book.callString("getUri").takeIf { it.startsWith("http", ignoreCase = true) }.orEmpty() }
+        if (detailUrl.isBlank()) {
+            showToast("缺少在线源详情地址，无法更新章节")
+            return
+        }
+        val key = "${book.callString("getUuid")}|${source.id}|$detailUrl"
+        if (onlineCompletionRunningUpdates.putIfAbsent(key, true) == true) {
+            showToast("正在更新：$title")
+            return
+        }
+        runCatching {
+            val target = OnlineDownloadTarget(
+                source = source,
+                query = title,
+                result = OnlineBookSearchResult(
+                    sourceName = source.name,
+                    name = title,
+                    author = book.callString("getAuthor"),
+                    coverUrl = book.callString("getCover"),
+                    detailUrl = detailUrl,
+                    intro = "",
+                ),
+            )
+            startOnlineCompletionDownload(target)
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX online completion update start failed: ${it.stackTraceToString()}")
+            showToast("章节更新启动失败：${it.message ?: title}")
+        }.also {
+            onlineCompletionRunningUpdates.remove(key)
+        }
+    }
+
+    private fun onlineSourceIdFromEncodedValue(value: String): String {
+        val text = value.trim()
+        if (text.isBlank()) return ""
+        if (text.startsWith(ONLINE_COMPLETION_BOOK_PREFIX)) {
+            return runCatching { Uri.parse(text).host.orEmpty() }.getOrDefault("")
+        }
+        return text.takeUnless { it.contains("://") }.orEmpty()
+    }
+
+    private fun onlineCompletionQueryParameter(value: String, name: String): String =
+        runCatching {
+            if (!value.startsWith(ONLINE_COMPLETION_BOOK_PREFIX)) return@runCatching ""
+            Uri.parse(value).getQueryParameter(name).orEmpty()
+        }.getOrDefault("")
 
     private fun handleOnlineCompletionSearchTap(book: Any): Boolean {
         val path = cloudPathOf(book)
@@ -5271,11 +5678,19 @@ class WebDavDriveHook(
         )
         val tracker = currentWorkTracker()
         val workId = tracker?.let { createOnlineCompletionTrackedTask(it, target.result.name) }
-        val notificationReady = updateOnlineCompletionNotification(context, notificationId, target.result.name, "准备下载", 0, false)
+        val progressNotifier = OnlineCompletionProgressNotifier(
+            context = context,
+            notificationId = notificationId,
+            bookName = target.result.name,
+            tracker = tracker,
+            workId = workId,
+        )
+        val notificationReady = progressNotifier.running(0, "准备下载", force = true)
         if (!notificationReady) {
             showToast("阅微通知权限未开启，下载继续在后台进行")
         }
         Thread({
+            var partialImportThread: Thread? = null
             runCatching {
                 val localFile = importCacheFile(
                     context.cacheDir,
@@ -5287,61 +5702,44 @@ class WebDavDriveHook(
                     target = target,
                     outputFile = localFile,
                     onProgress = { progress, message ->
-                        if (tracker != null && workId != null) {
-                            setTrackedWorkState(tracker, workId, "Running", progress, null, null, "${target.result.name}：$message")
-                        }
-                        updateOnlineCompletionNotification(context, notificationId, target.result.name, message, progress, false)
+                        progressNotifier.running(progress, message)
                     },
                     onPartialReady = { partialFile, count ->
-                        if (tracker != null && workId != null) {
-                            setTrackedWorkState(tracker, workId, "Running", 48, null, null, "${target.result.name}：导入前 $count 章")
+                        progressNotifier.running(48, "正在导入前 $count 章", force = true)
+                        partialImportThread = Thread({
+                            val partialImported = runCatching {
+                                importOnlineCompletionBook(partialFile, target)
+                            }.onFailure { error ->
+                                logWebDav(
+                                    "online completion partial import failed but download continues: " +
+                                        "${error.message ?: error.javaClass.name}",
+                                )
+                            }.getOrDefault(false)
+                            val continueMessage = if (partialImported) {
+                                "已导入前 $count 章，继续下载"
+                            } else {
+                                "前 $count 章已写入，继续下载"
+                            }
+                            progressNotifier.running(50, continueMessage, force = true)
+                        }, "ReaMicroOnlineCompletionPartialImport").also {
+                            it.start()
                         }
-                        updateOnlineCompletionNotification(context, notificationId, target.result.name, "正在导入前 $count 章", 48, false)
-                        val partialImported = runCatching {
-                            importOnlineCompletionBook(partialFile, target)
-                        }.onFailure { error ->
-                            logWebDav(
-                                "online completion partial import failed but download continues: " +
-                                    "${error.message ?: error.javaClass.name}",
-                            )
-                        }.getOrDefault(false)
-                        val continueMessage = if (partialImported) {
-                            "已导入前 $count 章，继续下载"
-                        } else {
-                            "前 $count 章已写入，继续下载"
-                        }
-                        if (tracker != null && workId != null) {
-                            setTrackedWorkState(tracker, workId, "Running", 50, null, null, "${target.result.name}：继续下载")
-                        }
-                        updateOnlineCompletionNotification(context, notificationId, target.result.name, continueMessage, 50, false)
                     },
                 )
-                if (tracker != null && workId != null) {
-                    setTrackedWorkState(tracker, workId, "Running", 94, null, null, "${target.result.name}：正在导入")
+                partialImportThread?.takeIf { it.isAlive }?.let { thread ->
+                    progressNotifier.running(90, "等待前 100 章导入完成", force = true)
+                    thread.join()
                 }
-                updateOnlineCompletionNotification(context, notificationId, target.result.name, "正在导入阅微", 94, false)
+                progressNotifier.running(94, "正在导入阅微", force = true)
                 importOnlineCompletionBook(localFile, target)
-                if (tracker != null && workId != null) {
-                    setTrackedWorkState(tracker, workId, "Success", 100, null, target.result.detailUrl, target.result.name)
-                }
-                updateOnlineCompletionNotification(context, notificationId, target.result.name, "已导入阅微", 100, true)
+                progressNotifier.finish("已导入阅微", target.result.detailUrl, success = true)
                 logWebDav("online completion download imported file=${localFile.absolutePath} size=${localFile.length()}")
                 Handler(Looper.getMainLooper()).post {
                     Toast.makeText(context, "已导入：${target.result.name}", Toast.LENGTH_SHORT).show()
                 }
             }.onFailure {
                 XposedBridge.log("$LOG_PREFIX online completion download failed: ${it.stackTraceToString()}")
-                updateOnlineCompletionNotification(
-                    context,
-                    notificationId,
-                    target.result.name,
-                    it.message ?: "下载失败",
-                    100,
-                    true,
-                )
-                if (tracker != null && workId != null) {
-                    setTrackedWorkState(tracker, workId, "Error", 100, it.message ?: "下载失败", null, target.result.name)
-                }
+                progressNotifier.finish(it.message ?: "下载失败", null, success = false)
                 Handler(Looper.getMainLooper()).post {
                     Toast.makeText(context, "在线补全下载失败：${it.message ?: target.result.name}", Toast.LENGTH_SHORT).show()
                 }
@@ -5349,6 +5747,50 @@ class WebDavDriveHook(
                 onlineCompletionRunningDownloads.remove(key)
             }
         }, "ReaMicroOnlineCompletionDownload").start()
+    }
+
+    private inner class OnlineCompletionProgressNotifier(
+        private val context: Context,
+        private val notificationId: Int,
+        private val bookName: String,
+        private val tracker: Any?,
+        private val workId: String?,
+    ) {
+        private var lastNotificationAtMs = 0L
+        private var lastProgress = -1
+
+        @Synchronized
+        fun running(progress: Int, message: String, force: Boolean = false): Boolean {
+            val now = System.currentTimeMillis()
+            if (!force &&
+                now - lastNotificationAtMs < ONLINE_COMPLETION_NOTIFICATION_MIN_INTERVAL_MS &&
+                progress < 100
+            ) {
+                return true
+            }
+            lastNotificationAtMs = now
+            lastProgress = progress
+            if (tracker != null && workId != null) {
+                setTrackedWorkState(tracker, workId, "Running", progress, null, null, "$bookName：$message")
+            }
+            return updateOnlineCompletionNotification(context, notificationId, bookName, message, progress, false)
+        }
+
+        @Synchronized
+        fun finish(message: String, data: String?, success: Boolean) {
+            if (tracker != null && workId != null) {
+                setTrackedWorkState(
+                    tracker,
+                    workId,
+                    if (success) "Success" else "Error",
+                    100,
+                    if (success) null else message,
+                    data,
+                    bookName,
+                )
+            }
+            updateOnlineCompletionNotification(context, notificationId, bookName, message, 100, true)
+        }
     }
 
     private fun createOnlineCompletionTrackedTask(tracker: Any, bookName: String): String? =
@@ -5962,7 +6404,7 @@ class WebDavDriveHook(
                     "treating as non-fatal result=$result file=${file.absolutePath}",
             )
         }
-        return result == true
+        return true
     }
 
     private fun syncOnlineCompletionImportedBookMetadata(bookshelf: Any, target: OnlineDownloadTarget, sourceUrl: String) {
@@ -6189,6 +6631,7 @@ class WebDavDriveHook(
         if (!moduleAlreadyStarted) {
             if (startOnlineCompletionNotificationActivity(context, id, title, text, progress, done)) {
                 onlineCompletionModuleActivityStarted.add(id)
+                sendOnlineCompletionNotificationBroadcast(context, id, title, text, progress, done)
                 if (done) onlineCompletionModuleActivityStarted.remove(id)
                 return true
             }
@@ -6325,19 +6768,108 @@ class WebDavDriveHook(
     }
 
     private fun chapterXhtml(title: String, content: String): String {
-        val paragraphs = content.lineSequence()
+        val bodyLines = stripDuplicatedChapterTitle(title, content.lineSequence()
             .map { it.trim() }
             .filter { it.isNotBlank() }
-            .joinToString("\n") { "<p>${it.xmlEscape()}</p>" }
-            .ifBlank { "<p>${title.xmlEscape()}</p>" }
+            .toList())
+        val paragraphs = bodyLines.joinToString("\n") { "<p>${it.xmlEscape()}</p>" }
+        val heading = chapterHeadingHtml(title)
         return """<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml">
-<head><title>${title.xmlEscape()}</title></head>
-<body><h1>${title.xmlEscape()}</h1>
+<head><title>${title.xmlEscape()}</title><style type="text/css">
+body{line-height:1.75;}
+h1{font-size:1.12em;line-height:1.45;text-align:center;margin:1.1em 0 .9em;font-weight:600;}
+p{margin:.75em 0;}
+</style></head>
+<body><h1>$heading</h1>
 $paragraphs
 </body>
 </html>"""
     }
+
+    private fun stripDuplicatedChapterTitle(title: String, lines: List<String>): List<String> {
+        if (lines.isEmpty()) return emptyList()
+        val titleKey = title.normalizedChapterTitleKey()
+        if (titleKey.isBlank()) return lines
+        val parts = splitChapterHeading(title)
+        val mutable = lines.toMutableList()
+        stripChapterTitlePrefix(mutable.firstOrNull().orEmpty(), title)?.let { remainder ->
+            if (remainder.isBlank()) mutable.removeAt(0) else mutable[0] = remainder
+            return mutable
+        }
+        if (mutable.size >= 2 && (mutable[0] + mutable[1]).normalizedChapterTitleKey() == titleKey) {
+            mutable.removeAt(0)
+            mutable.removeAt(0)
+            return mutable
+        }
+        if (parts.size >= 2 && mutable.size >= 2) {
+            stripChapterTitlePrefix(mutable[0], parts.first())?.takeIf { it.isBlank() }?.let {
+                mutable.removeAt(0)
+                stripChapterTitlePrefix(mutable.firstOrNull().orEmpty(), parts.drop(1).joinToString(""))?.let { remainder ->
+                    if (remainder.isBlank()) mutable.removeAt(0) else mutable[0] = remainder
+                }
+                return mutable
+            }
+        }
+        val scanCount = mutable.size.coerceAtMost(3)
+        repeat(scanCount) { index ->
+            stripChapterTitlePrefix(mutable.getOrNull(index).orEmpty(), title)?.let { remainder ->
+                if (remainder.isBlank()) {
+                    mutable.removeAt(index)
+                } else {
+                    mutable[index] = remainder
+                }
+                return mutable
+            }
+        }
+        return mutable
+    }
+
+    private fun stripChapterTitlePrefix(line: String, title: String): String? {
+        val target = title.normalizedChapterTitleKey()
+        if (line.isBlank() || target.isBlank()) return null
+        var targetIndex = 0
+        var removeEnd = -1
+        for (index in line.indices) {
+            val key = line[index].toString().normalizedChapterTitleKey()
+            if (key.isBlank()) {
+                if (targetIndex == 0) continue
+                continue
+            }
+            if (targetIndex >= target.length) break
+            if (key != target[targetIndex].toString()) return null
+            targetIndex += 1
+            removeEnd = index + 1
+            if (targetIndex == target.length) break
+        }
+        if (targetIndex != target.length || removeEnd < 0) return null
+        return line.substring(removeEnd)
+            .trimStart { it.isWhitespace() || it in "　:：、，,。.!！?？-—_；;]" }
+    }
+
+    private fun chapterHeadingHtml(title: String): String =
+        splitChapterHeading(title).joinToString("<br/>") { it.xmlEscape() }
+
+    private fun splitChapterHeading(title: String): List<String> {
+        val clean = title.trim()
+        if (clean.isBlank()) return listOf("")
+        ONLINE_CHAPTER_HEADING_SPLIT_REGEX.matchEntire(clean)?.let { match ->
+            val prefix = match.groupValues[1].trim()
+            val suffix = match.groupValues[2].trim()
+            if (prefix.isNotBlank() && suffix.isNotBlank()) return listOf(prefix, suffix)
+        }
+        ONLINE_SPECIAL_HEADING_SPLIT_REGEX.matchEntire(clean)?.let { match ->
+            val prefix = match.groupValues[1].trim()
+            val suffix = match.groupValues[2].trim()
+            if (prefix.isNotBlank() && suffix.isNotBlank()) return listOf(prefix, suffix)
+        }
+        return listOf(clean)
+    }
+
+    private fun String.normalizedChapterTitleKey(): String =
+        trim()
+            .lowercase(Locale.ROOT)
+            .replace(Regex("[\\s　:：、，,。.!！?？《》\"'“”‘’\\-—_]+"), "")
 
     private fun onlineTocNcx(target: OnlineDownloadTarget, chapters: List<OnlineDownloadedChapter>): String {
         val points = chapters.mapIndexed { index, chapter ->
@@ -8326,6 +8858,30 @@ $onlineMeta
         }
     }
 
+    private fun staticObject(className: String, fieldName: String): Any {
+        val clazz = cls(className)
+        val field = runCatching { clazz.getDeclaredField(fieldName) }
+            .recoverCatching { clazz.getField(fieldName) }
+            .recoverCatching { clazz.getDeclaredField("Companion") }
+            .getOrElse {
+                val fields = clazz.declaredFields.joinToString { field -> "${field.name}:${field.type.name}" }
+                error("$className.$fieldName not found; fields=[$fields]")
+            }
+        field.isAccessible = true
+        return field.get(null)
+    }
+
+    private fun staticInt(className: String, fieldName: String): Int =
+        cls(className).getDeclaredField(fieldName).apply { isAccessible = true }.getInt(null)
+
+    private fun Any.method0(name: String): Any =
+        javaClass.methods.first {
+            it.parameterTypes.isEmpty() && (it.name == name || it.name.startsWith("$name-"))
+        }.apply { isAccessible = true }.invoke(this)
+
+    private fun Any.longMethod(name: String): Long =
+        method0(name) as Long
+
     private fun invokeFunction1(function: Any, arg: Any?) {
         val invoke = function.javaClass.methods.firstOrNull {
             it.name == "invoke" && it.parameterTypes.size == 1
@@ -8621,6 +9177,13 @@ $onlineMeta
         val source: OnlineSourceEntry,
         val query: String,
         val result: OnlineBookSearchResult,
+    )
+
+    private data class OnlineImportedBookSourceInfo(
+        val sourceId: String,
+        val sourceName: String,
+        val detailUrl: String,
+        val source: OnlineSourceEntry?,
     )
 
     private data class OnlineChapter(
@@ -9158,6 +9721,10 @@ $onlineMeta
         const val HOME_SEARCH_RESULT_LAZY_METHOD = "SearchResult\$lambda\$0\$0"
         const val HOME_CLOUD_RESULT_LIST_METHOD = "CloudResultList"
         const val HOME_SEARCH_TAP_METHOD = "SearchResult\$lambda\$0\$0\$1\$0\$0\$0\$0"
+        const val BOOK_LOCAL_SHEET_CLASS = "app.zhendong.reamicro.ui.home.components.BookLocalSheetKt"
+        const val BOOK_LOCAL_SHEET_METHOD = "BookLocalSheet"
+        const val BOOK_LOCAL_SHEET_CONTENT_METHOD = "BookLocalSheet\$lambda\$2"
+        const val FILE_BACKUP_METHOD = "FileBackup"
         const val FOOTER_CLASS = "app.zhendong.reamicro.arch.components.item.FooterKt"
         const val FOOTER_METHOD = "footer"
         const val CLOUD_BOOK_LIST_CLASS = "app.zhendong.reamicro.ui.storage.components.CloudBookListKt"
@@ -9261,6 +9828,24 @@ $onlineMeta
         const val FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
         const val FUNCTION3_CLASS = "kotlin.jvm.functions.Function3"
         const val KOTLIN_PAIR_CLASS = "kotlin.Pair"
+        const val ROW_KT_CLASS = "androidx.compose.foundation.layout.RowKt"
+        const val ROW_METHOD = "Row"
+        const val ARRANGEMENT_CLASS = "androidx.compose.foundation.layout.Arrangement"
+        const val ALIGNMENT_CLASS = "androidx.compose.ui.Alignment"
+        const val TEXT_OVERFLOW_CLASS = "androidx.compose.ui.text.style.TextOverflow"
+        const val ICON_KT_CLASS = "androidx.compose.material3.IconKt"
+        const val ICON_METHOD = "Icon-ww6aTOc"
+        const val IMAGE_VECTOR_CLASS = "androidx.compose.ui.graphics.vector.ImageVector"
+        const val EDIT_ICON_CLASS = "androidx.compose.material.icons.outlined.EditKt"
+        const val NAVIGATE_NEXT_ICON_CLASS = "androidx.compose.material.icons.automirrored.filled.NavigateNextKt"
+        const val ICONS_FILLED_CLASS = "androidx.compose.material.icons.Icons\$Filled"
+        const val ICONS_OUTLINED_CLASS = "androidx.compose.material.icons.Icons\$Outlined"
+        const val ICONS_AUTO_MIRRORED_FILLED_CLASS = "androidx.compose.material.icons.Icons\$AutoMirrored\$Filled"
+        const val MATERIAL3_TEXT_METHOD = "Text-Nvy7gAk"
+        const val MATERIAL_THEME_CLASS = "androidx.compose.material3.MaterialTheme"
+        const val THEME_KT_CLASS = "app.zhendong.reamicro.arch.theme.ThemeKt"
+        const val CLICKABLE_KT_CLASS = "androidx.compose.foundation.ClickableKt"
+        const val CLICKABLE_DEFAULT_METHOD = "clickable-O2vRcR0\$default"
         const val IMAGE_VECTOR_BUILDER_CLASS = "androidx.compose.ui.graphics.vector.ImageVector\$Builder"
         const val VECTOR_KT_CLASS = "androidx.compose.ui.graphics.vector.VectorKt"
         const val COLOR_KT_CLASS = "androidx.compose.ui.graphics.ColorKt"
@@ -9273,12 +9858,16 @@ $onlineMeta
         const val SIMPLE_DIVIDER_METHOD = "SimpleDivider-iJQMabo"
         const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
         const val SIZE_KT_CLASS = "androidx.compose.foundation.layout.SizeKt"
+        const val SIZE_METHOD = "size-3ABfNKs"
         const val FILL_MAX_SIZE_METHOD = "fillMaxSize"
         const val FILL_MAX_WIDTH_METHOD = "fillMaxWidth"
         const val PADDING_KT_CLASS = "androidx.compose.foundation.layout.PaddingKt"
+        const val PADDING_METHOD = "padding-qDBjuR0"
         const val PADDING_ABSOLUTE_DEFAULT_METHOD = "padding-qDBjuR0\$default"
         const val UNIT_EXT_KT_CLASS = "app.zhendong.reamicro.arch.extensions.UnitExtKt"
         const val UDP_METHOD = "getUdp"
+        const val TEXT_DEFAULT_MASK_WITH_MODIFIER = 131064
+        const val TEXT_SECONDARY_SINGLE_LINE_MASK = 110586
         const val OKHTTP_CLIENT_CLASS = "okhttp3.OkHttpClient"
         const val OKHTTP_REQUEST_CLASS = "okhttp3.Request"
         const val OKHTTP_REQUEST_BUILDER_CLASS = "okhttp3.Request\$Builder"
@@ -9367,6 +9956,7 @@ $onlineMeta
         const val ONLINE_COMPLETION_PARTIAL_IMPORT_CHAPTERS = 100
         const val ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT = 3
         const val ONLINE_COMPLETION_RETRY_DELAY_MS = 6_000L
+        const val ONLINE_COMPLETION_NOTIFICATION_MIN_INTERVAL_MS = 1_000L
         const val CLOUD_STORAGE_SCREEN_REFRESH_DEBOUNCE_MS = 1_000L
         const val STRING_KEY_UPLOAD_TO_115 = "upload_to_115"
         const val HOME_SEARCH_DEBOUNCE_MS = 250L
@@ -9379,6 +9969,10 @@ $onlineMeta
         val UUID_DIR_REGEX = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
         val ONLINE_CHAPTER_TITLE_REGEX = Regex("(第\\s*[0-9０-９一二三四五六七八九十百千万〇零两]+\\s*[章节卷回集部篇]|chapter\\s*\\d+)", RegexOption.IGNORE_CASE)
         val ONLINE_VOLUME_TITLE_REGEX = Regex("(第\\s*[0-9０-９一二三四五六七八九十百千万〇零两]+\\s*卷|正文|番外|后日谈|外传|分卷|volume\\s*\\d+|part\\s*\\d+)", RegexOption.IGNORE_CASE)
+        val ONLINE_CHAPTER_HEADING_SPLIT_REGEX =
+            Regex("^(第\\s*[0-9０-９一二三四五六七八九十百千万〇零两]+\\s*[章节卷回集部篇])\\s*(.+)$")
+        val ONLINE_SPECIAL_HEADING_SPLIT_REGEX =
+            Regex("^(番外|后日谈|后记|序章|楔子|终章)\\s*[:：、.\\-—]?\\s*(.+)$")
         val BOOK_EXTENSIONS = setOf(".epub", ".mobi", ".azw3", ".txt")
         val WEBDAV_UPLOAD_RETRY_CODES = setOf(405, 409, 412, 423)
         const val WEBDAV_PROPFIND_BODY =

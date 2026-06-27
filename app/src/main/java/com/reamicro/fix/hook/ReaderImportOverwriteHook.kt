@@ -21,6 +21,7 @@ import java.io.File
 import java.lang.ref.WeakReference
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
+import java.lang.reflect.Modifier
 import java.lang.reflect.Proxy
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -66,8 +67,11 @@ class ReaderImportOverwriteHook(
                         "$LOG_PREFIX overwrite check intercepted: title=$title, uuid=$uuid, uri=$uriOverride, conflict=$conflict",
                     )
 
-                    val decision = if (isOnlineCompletionUuid(uuid)) {
-                        XposedBridge.log("$LOG_PREFIX online completion overwrite forced silently: title=$title, uuid=$uuid")
+                    val decision = if (isOnlineCompletionImport(uuid, uriOverride, conflict)) {
+                        XposedBridge.log(
+                            "$LOG_PREFIX online completion overwrite forced silently: title=$title, " +
+                                "uuid=$uuid uri=$uriOverride oldBook=${conflict.oldUuid}",
+                        )
                         OverwriteDecision.OVERWRITE
                     } else {
                         showOverwriteConfirm(conflict.oldTitle, title)
@@ -169,8 +173,11 @@ class ReaderImportOverwriteHook(
                     XposedBridge.log(
                         "$LOG_PREFIX pre-import conflict intercepted: title=$title, uuid=$uuid, conflict=$conflict",
                     )
-                    val decision = if (isOnlineCompletionUuid(uuid)) {
-                        XposedBridge.log("$LOG_PREFIX online completion pre-import overwrite forced silently: title=$title, uuid=$uuid")
+                    val decision = if (isOnlineCompletionImport(uuid, "", conflict)) {
+                        XposedBridge.log(
+                            "$LOG_PREFIX online completion pre-import overwrite forced silently: " +
+                                "title=$title, uuid=$uuid oldBook=${conflict.oldUuid}",
+                        )
                         OverwriteDecision.OVERWRITE
                     } else {
                         showOverwriteConfirm(conflict.oldTitle, title)
@@ -292,6 +299,22 @@ class ReaderImportOverwriteHook(
 
     private fun isOnlineCompletionUuid(uuid: String): Boolean =
         uuid.startsWith(ONLINE_COMPLETION_UUID_PREFIX)
+
+    private fun isOnlineCompletionImport(uuid: String, uriOverride: String, conflict: ImportConflict): Boolean =
+        isOnlineCompletionUuid(uuid) ||
+            isOnlineCompletionPath(uriOverride) ||
+            isOnlineCompletionBook(conflict.oldBook)
+
+    private fun isOnlineCompletionBook(book: Any?): Boolean =
+        isOnlineCompletionPath(book.stringOrNull("getBackupId").orEmpty()) ||
+            isOnlineCompletionPath(book.uriOrNull().orEmpty()) ||
+            isOnlineCompletionUuid(book.uuidOrNull().orEmpty()) ||
+            (book.intOrNull("getBackupType") == BACKUP_TYPE_ONLINE_COMPLETION &&
+                book.stringOrNull("getBackupCode").orEmpty().startsWith("online_"))
+
+    private fun isOnlineCompletionPath(value: String): Boolean =
+        value.startsWith(ONLINE_COMPLETION_BOOK_PREFIX) ||
+            value.startsWith(ONLINE_COMPLETION_SOURCE_PREFIX)
 
     private fun resolveReaMicroMd5Identifier(opf: Any?): String? {
         val metadata = noArgValue(opf, "getMetadata") ?: noArgValue(opf, "metadata") ?: return null
@@ -581,6 +604,18 @@ class ReaderImportOverwriteHook(
                 ?.invoke(this) as? Number)?.toLong()
         }.getOrNull()
 
+    private fun Any?.intOrNull(methodName: String): Int? =
+        runCatching {
+            (this?.javaClass?.methods?.firstOrNull { it.name == methodName && it.parameterTypes.isEmpty() }
+                ?.invoke(this) as? Number)?.toInt()
+        }.getOrNull()
+
+    private fun Any?.stringOrNull(methodName: String): String? =
+        runCatching {
+            this?.javaClass?.methods?.firstOrNull { it.name == methodName && it.parameterTypes.isEmpty() }
+                ?.invoke(this)?.toString()
+        }.getOrNull()?.takeIf { it.isNotBlank() }
+
     private fun Any?.hasLocalBookData(): Boolean {
         val context = activityProvider()?.applicationContext ?: currentApplicationContext() ?: return false
         val uid = longOrNull("getUid") ?: return false
@@ -701,9 +736,25 @@ class ReaderImportOverwriteHook(
     private fun obtainOpf(root: Any): Any? =
         runCatching {
             val opfClass = XposedHelpers.findClass(OPF_CLASS, classLoader)
-            val instance = opfClass.getDeclaredField("INSTANCE")
-                .apply { isAccessible = true }
-                .get(null)
+            val instance = sequenceOf("INSTANCE", "Companion")
+                .mapNotNull { fieldName ->
+                    runCatching {
+                        opfClass.companionField(fieldName)?.let { field ->
+                            field.isAccessible = true
+                            field.get(null)
+                        }
+                    }.getOrNull()
+                }
+                .firstOrNull()
+                ?: (opfClass.declaredFields.asSequence() + opfClass.fields.asSequence())
+                    .filter { Modifier.isStatic(it.modifiers) && it.type.name.contains("Opf\$Companion") }
+                    .mapNotNull { field ->
+                        runCatching {
+                            field.isAccessible = true
+                            field.get(null)
+                        }.getOrNull()
+                    }
+                    .firstOrNull()
                 ?: return null
             (instance.javaClass.methods.asSequence() + instance.javaClass.declaredMethods.asSequence())
                 .firstOrNull { it.name == "obtain" && it.parameterTypes.size == 1 }
@@ -712,6 +763,11 @@ class ReaderImportOverwriteHook(
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to obtain import opf: ${it.stackTraceToString()}")
         }.getOrNull()
+
+    private fun Class<*>.companionField(name: String) =
+        runCatching { getDeclaredField(name) }
+            .recoverCatching { getField(name) }
+            .getOrNull()
 
     private fun Any.overwriteToRoot(root: Any): Any =
         runCatching {
@@ -947,6 +1003,9 @@ class ReaderImportOverwriteHook(
         const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = "kotlin.coroutines.EmptyCoroutineContext"
         const val KOTLIN_INTRINSICS_CLASS = "kotlin.coroutines.intrinsics.IntrinsicsKt"
         const val KOTLIN_COROUTINE_SINGLETONS_CLASS = "kotlin.coroutines.intrinsics.CoroutineSingletons"
+        const val BACKUP_TYPE_ONLINE_COMPLETION = 10
+        const val ONLINE_COMPLETION_SOURCE_PREFIX = "reamicro-online-source://"
+        const val ONLINE_COMPLETION_BOOK_PREFIX = "reamicro-online-book://"
         const val ONLINE_COMPLETION_UUID_PREFIX = "reamicro-online-"
         const val PRE_IMPORT_DECISION_TTL_MS = 120_000L
         const val POST_IMPORT_METADATA_SYNC_DELAY_MS = 2_500L

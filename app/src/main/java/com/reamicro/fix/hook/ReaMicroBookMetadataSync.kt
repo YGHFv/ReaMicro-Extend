@@ -38,7 +38,9 @@ internal object ReaMicroBookMetadataSync {
     fun metadataFromOpf(opf: Any?): BookMetadataPatch {
         val uuid = callStringPath(opf, "metadata", "uuid", "value")
             ?: callStringPath(opf, "metadata", "uuid")
-        val publisher = if (uuid.orEmpty().startsWith(ONLINE_COMPLETION_UUID_PREFIX)) {
+        val isOnlineCompletion = uuid.orEmpty().startsWith(ONLINE_COMPLETION_UUID_PREFIX) ||
+            hasOnlineCompletionSourceMeta(opf)
+        val publisher = if (isOnlineCompletion) {
             ""
         } else {
             callStringPath(opf, "metadata", "publisher", "value")
@@ -152,6 +154,17 @@ internal object ReaMicroBookMetadataSync {
                 ?.toString()
                 ?.takeIf { it.isNotBlank() }
         }.getOrNull()
+
+    private fun hasOnlineCompletionSourceMeta(opf: Any?): Boolean =
+        runCatching {
+            val metadata = callValue(opf, "metadata") ?: callValue(opf, "getMetadata") ?: return false
+            val metas = callValue(metadata, "metas") ?: callValue(metadata, "getMetas") ?: return false
+            (metas as? Iterable<*>)?.any { meta ->
+                sequenceOf("name", "property", "id", "getName", "getProperty", "getId")
+                    .mapNotNull { callStringPath(meta, it)?.trim() }
+                    .any { it.equals("reamicro-online-source-id", ignoreCase = true) }
+            } == true
+        }.getOrDefault(false)
 
     private fun callStringPath(target: Any?, vararg path: String): String? {
         var current = target ?: return null
