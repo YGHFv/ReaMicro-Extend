@@ -1870,7 +1870,7 @@ class ReaMicroSettingsHook(
                         add(
                             ActionRow(
                                 key = "online_source_${source.id}",
-                                title = source.name,
+                                title = source.name.compactOnlineSourceLine(),
                                 subtitle = onlineSourceSubtitle(source),
                                 onClick = { confirmOrRemoveOnlineSource(source) },
                                 onLongClick = { armOnlineSourceRemoval(source) },
@@ -1892,14 +1892,19 @@ class ReaMicroSettingsHook(
 
     private fun onlineSourceSubtitle(source: OnlineSourceEntry): String {
         val login = when {
-            source.webLoginUrl.isNotBlank() -> "可登录"
+            source.webLoginUrl.isNotBlank() -> "网页登录"
             source.hasLoginConfig -> "有登录配置，可跳过"
             else -> "无需登录"
         }
-        val rate = source.concurrentRate.takeIf { it.isNotBlank() }?.let { "频控 $it" }
-        val origin = source.sourceUrl.ifBlank { source.origin }.ifBlank { source.fileName }
-        return listOfNotNull(login, rate, origin.takeIf { it.isNotBlank() }).joinToString(" · ")
+        val rate = source.concurrentRate
+            .compactOnlineSourceLine()
+            .takeIf { it.isNotBlank() && it != "0" }
+            ?.let { "频控：$it" }
+        return listOfNotNull(login, rate).joinToString(" · ")
     }
+
+    private fun String.compactOnlineSourceLine(): String =
+        replace(Regex("\\s+"), " ").trim()
 
     private fun listOnlineSources(): List<OnlineSourceEntry> =
         OnlineSourceStore.list(activityProvider()?.applicationContext)
