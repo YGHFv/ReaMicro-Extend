@@ -4545,15 +4545,103 @@ class WebDavDriveHook(
             val response = OnlineConcurrentRateLimiter.withLimitBlocking(source) {
                 requestOnlineSearch(source, requestUrl)
             }
-            val results = parseOnlineSearchResults(source, query, response)
+            val parsedResults = parseOnlineSearchResults(source, query, response)
                 .distinctBy { "${it.name}|${it.author}|${it.detailUrl}" }
                 .take(ONLINE_COMPLETION_RESULT_LIMIT)
+            val results = enrichOnlineSearchResultsMetadata(source, parsedResults)
             logWebDav("online completion source ok name=${source.name} results=${results.size} first=${results.firstOrNull()?.name.orEmpty()}")
             OnlineSearchGroup(source, query, results, "")
         }.getOrElse {
             logWebDav("online completion source failed name=${source.name} error=${it.message}")
             OnlineSearchGroup(source, query, emptyList(), it.message.orEmpty().ifBlank { "搜索失败" })
         }
+    }
+
+    private fun enrichOnlineSearchResultsMetadata(
+        source: OnlineSourceEntry,
+        results: List<OnlineBookSearchResult>,
+    ): List<OnlineBookSearchResult> {
+        if (results.isEmpty()) return results
+        val selected = results.take(ONLINE_COMPLETION_SEARCH_METADATA_ENRICH_LIMIT)
+        val enriched = arrayOfNulls<OnlineBookSearchResult>(selected.size)
+        val latch = CountDownLatch(selected.size)
+        selected.forEachIndexed { index, result ->
+            Thread({
+                try {
+                    enriched[index] = enrichOnlineSearchResultMetadata(source, result)
+                } finally {
+                    latch.countDown()
+                }
+            }, "ReaMicroOnlineMeta-${source.id.takeLast(6)}-$index").start()
+        }
+        latch.await(ONLINE_COMPLETION_SEARCH_METADATA_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        return results.mapIndexed { index, result ->
+            if (index < enriched.size) enriched[index] ?: result else result
+        }
+    }
+
+    private fun enrichOnlineSearchResultMetadata(
+        source: OnlineSourceEntry,
+        result: OnlineBookSearchResult,
+    ): OnlineBookSearchResult {
+        if (
+            result.detailUrl.isBlank() ||
+            (
+                result.wordCount.isNotBlank() &&
+                    result.updateTime.isNotBlank() &&
+                    result.chapterCount > 0 &&
+                    result.status.isNotBlank()
+                )
+        ) return result
+        return runCatching {
+            val detail = OnlineConcurrentRateLimiter.withLimitBlocking(source) {
+                requestOnlineSearch(source, result.detailUrl)
+            }
+            val root = parseOnlineJsonRoot(detail.body) ?: return result
+            val rule = runCatching { JSONObject(source.ruleBookInfo) }.getOrNull()
+            val node = rule?.optString("init", "").orEmpty()
+                .trim()
+                .takeIf { it.isNotBlank() }
+                ?.let { onlineJsonRuleValues(root, it).firstOrNull() }
+                ?: root
+            val meta = onlineResultMetadata(source, node, rule, detail.url)
+            val enriched = result.copy(
+                author = result.author.ifBlank {
+                    rule?.optString("author", "").orEmpty()
+                        .takeIf { it.isNotBlank() }
+                        ?.let { onlineRuleValue(node, it, detail.url).cleanOnlineText() }
+                        .orEmpty()
+                        .ifBlank { onlineFirstJsonString(node, listOf("author", "bookAuthor", "authorName", "writer")) }
+                },
+                coverUrl = result.coverUrl.ifBlank {
+                    rule?.optString("coverUrl", "").orEmpty()
+                        .takeIf { it.isNotBlank() }
+                        ?.let { resolveOnlineUrl(detail.url, onlineRuleValue(node, it, detail.url)) }
+                        .orEmpty()
+                        .ifBlank {
+                            resolveOnlineUrl(
+                                detail.url,
+                                onlineFirstJsonString(node, listOf("cover", "coverUrl", "thumb_url", "thumb_uri", "bookCover")),
+                            )
+                        }
+                },
+                chapterCount = result.chapterCount.takeIf { it > 0 } ?: meta.chapterCount,
+                status = result.status.ifBlank { meta.status },
+                wordCount = result.wordCount.ifBlank { meta.wordCount },
+                updateTime = result.updateTime.ifBlank { meta.updateTime },
+            )
+            logWebDav(
+                "online search metadata enriched source=${source.name} book=${enriched.name} " +
+                    "status=${enriched.status} words=${enriched.wordCount} " +
+                    "chapters=${enriched.chapterCount} update=${enriched.updateTime}",
+            )
+            enriched
+        }.onFailure {
+            logWebDav(
+                "online search metadata enrich failed source=${source.name} book=${result.name} " +
+                    "url=${result.detailUrl.take(120)} error=${it.javaClass.simpleName}: ${it.message.orEmpty()}",
+            )
+        }.getOrDefault(result)
     }
 
     private fun buildOnlineSearchUrl(source: OnlineSourceEntry, query: String): String {
@@ -11282,6 +11370,8 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val ONLINE_COMPLETION_RESULT_LIMIT = 8
         const val ONLINE_COMPLETION_MAX_CHAPTERS = 500
         const val ONLINE_COMPLETION_SEARCH_TIMEOUT_MS = 8_000L
+        const val ONLINE_COMPLETION_SEARCH_METADATA_TIMEOUT_MS = 6_000L
+        const val ONLINE_COMPLETION_SEARCH_METADATA_ENRICH_LIMIT = 8
         const val ONLINE_COMPLETION_PARTIAL_IMPORT_THRESHOLD = 200
         const val ONLINE_COMPLETION_PARTIAL_IMPORT_CHAPTERS = 100
         const val ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT = 3
@@ -11329,6 +11419,10 @@ img{max-width:100%;max-height:100%;height:auto;}
             "chapterNum",
             "chapters_count",
             "latest_chapter_index",
+            "serial_count",
+            "content_chapter_number",
+            "real_chapter_order",
+            "estimated_chapter_count",
         )
         val ONLINE_STATUS_TEXT_FIELDS = listOf(
             "status",
