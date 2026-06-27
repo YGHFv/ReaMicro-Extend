@@ -6785,6 +6785,22 @@ class WebDavDriveHook(
         val sourceUrl = target.result.detailUrl.ifBlank { target.source.sourceUrl }
         return findLocalBookByUrl(bookshelf, sourceUrl)
             ?: findLocalBookByUrl(bookshelf, target.result.detailUrl)
+            ?: findLocalBookByUuid(currentBookshelfUid(bookshelf), onlineBookUuid(target))
+    }
+
+    private fun currentBookshelfUid(bookshelf: Any): Long {
+        val userStorage = fieldValue(bookshelf, "userStorage")
+            ?: bookshelf.javaClass.methods.firstOrNull { it.name == "getUserStorage" && it.parameterTypes.isEmpty() }
+                ?.apply { isAccessible = true }
+                ?.invoke(bookshelf)
+            ?: return 0L
+        return (fieldValue(userStorage, "uid") as? Number)?.toLong()
+            ?: userStorage.javaClass.methods.firstOrNull { it.name == "getUid" && it.parameterTypes.isEmpty() }
+                ?.apply { isAccessible = true }
+                ?.invoke(userStorage)
+                ?.let { it as? Number }
+                ?.toLong()
+            ?: 0L
     }
 
     private fun okioPathToFile(path: Any): File =
