@@ -5033,6 +5033,7 @@ class WebDavDriveHook(
         if (text.isBlank()) return ""
         if (text.contains("字")) return text
         val number = text.replace(",", "").trim().toLongOrNull() ?: return text
+        if (number <= 0L) return ""
         return if (number >= 10_000L) {
             val value = number / 10_000.0
             val formatted = if (number % 10_000L == 0L) {
@@ -6482,7 +6483,8 @@ class WebDavDriveHook(
                     task = task,
                     onProgress = { progress, message ->
                         throwIfOnlineCompletionDownloadCancelled(task)
-                        progressNotifier.running(progress, message)
+                        val displayedProgress = if (task.importedBookDir != null && progress < 50) 50 else progress
+                        progressNotifier.running(displayedProgress, message)
                     },
                     onPartialReady = { partialFile, count ->
                         throwIfOnlineCompletionDownloadCancelled(task)
@@ -6506,6 +6508,18 @@ class WebDavDriveHook(
                                 importResult.bookDir?.let { importedDir ->
                                     task.importedBookDir = importedDir
                                     flushOnlineCompletionDownloadedChapters(task)
+                                    syncOnlineCompletionImportedBookSize(target)
+                                    logWebDav(
+                                        "online completion partial import visible book=${target.result.name} " +
+                                            "dir=${importedDir.absolutePath}",
+                                    )
+                                    Handler(Looper.getMainLooper()).post {
+                                        Toast.makeText(
+                                            context,
+                                            "已加入书架：${target.result.name}",
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
                                 }
                                 importResult.imported
                             }.onFailure { error ->
