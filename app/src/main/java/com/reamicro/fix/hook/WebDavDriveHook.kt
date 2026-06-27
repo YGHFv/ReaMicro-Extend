@@ -2595,37 +2595,37 @@ class WebDavDriveHook(
 
     private fun hookThirdAccountWebDavRoute() {
         runCatching {
-            val method = cls(APP_KT_CLASS).declaredMethods.first {
-                it.name == THIRD_ACCOUNT_ROUTE_METHOD && it.parameterTypes.size == 5
-            }.apply { isAccessible = true }
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val backStackEntry = param.args?.getOrNull(2) ?: return
-                    val route = runCatching { navBackStackEntryToThirdAccount(backStackEntry) }.getOrNull() ?: return
-                    val type = route.javaClass.methods.firstOrNull { it.name == "getType" && it.parameterTypes.isEmpty() }
-                        ?.invoke(route) as? Number ?: return
-                    val navGraphScope = param.args?.getOrNull(0) ?: return
-                    if (type.toInt() == BACKUP_TYPE_LOCAL_LIBRARY) {
-                        clearWebDavAccountContext()
-                        markLocalLibraryAccountContext(navGraphScope)
-                        val composer = param.args?.getOrNull(3) ?: return
-                        renderLocalLibraryAccountRoute(navGraphScope, composer)
-                        param.result = targetUnit()
-                        return
-                    }
-                    if (type.toInt() != BACKUP_TYPE_WEBDAV) {
-                        clearWebDavAccountContext()
+            val methods = routeMethods(THIRD_ACCOUNT_ROUTE_METHOD, THIRD_ACCOUNT_ROUTE_METHOD_LEGACY)
+            methods.forEach { method ->
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val backStackEntry = param.args?.getOrNull(2) ?: return
+                        val route = runCatching { navBackStackEntryToThirdAccount(backStackEntry) }.getOrNull() ?: return
+                        val type = route.javaClass.methods.firstOrNull { it.name == "getType" && it.parameterTypes.isEmpty() }
+                            ?.invoke(route) as? Number ?: return
+                        val navGraphScope = param.args?.getOrNull(0) ?: return
+                        if (type.toInt() == BACKUP_TYPE_LOCAL_LIBRARY) {
+                            clearWebDavAccountContext()
+                            markLocalLibraryAccountContext(navGraphScope)
+                            val composer = param.args?.getOrNull(3) ?: return
+                            renderLocalLibraryAccountRoute(navGraphScope, composer)
+                            param.result = targetUnit()
+                            return
+                        }
+                        if (type.toInt() != BACKUP_TYPE_WEBDAV) {
+                            clearWebDavAccountContext()
+                            clearLocalLibraryAccountContext()
+                            return
+                        }
                         clearLocalLibraryAccountContext()
-                        return
+                        markWebDavAccountContext(navGraphScope)
+                        val composer = param.args?.getOrNull(3) ?: return
+                        renderWebDavAccountRoute(navGraphScope, composer)
+                        param.result = targetUnit()
                     }
-                    clearLocalLibraryAccountContext()
-                    markWebDavAccountContext(navGraphScope)
-                    val composer = param.args?.getOrNull(3) ?: return
-                    renderWebDavAccountRoute(navGraphScope, composer)
-                    param.result = targetUnit()
-                }
-            })
-            XposedBridge.log("$LOG_PREFIX WebDAV third account route hook installed")
+                })
+            }
+            XposedBridge.log("$LOG_PREFIX WebDAV third account route hook installed: ${methods.joinToString { it.name }}")
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to hook WebDAV third account route: ${it.stackTraceToString()}")
         }
@@ -2858,26 +2858,39 @@ class WebDavDriveHook(
 
     private fun hookThirdLoginWebDavRoute() {
         runCatching {
-            val method = cls(APP_KT_CLASS).declaredMethods.first {
-                it.name == THIRD_LOGIN_ROUTE_METHOD && it.parameterTypes.size == 5
-            }.apply { isAccessible = true }
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val backStackEntry = param.args?.getOrNull(2) ?: return
-                    val route = runCatching { navBackStackEntryToThirdLogin(backStackEntry) }.getOrNull() ?: return
-                    val type = route.javaClass.methods.firstOrNull { it.name == "getType" && it.parameterTypes.isEmpty() }
-                        ?.invoke(route) as? Number ?: return
-                    if (type.toInt() != BACKUP_TYPE_WEBDAV) return
-                    val navGraphScope = param.args?.getOrNull(0) ?: return
-                    val composer = param.args?.getOrNull(3) ?: return
-                    renderWebDavLoginRoute(navGraphScope, composer)
-                    param.result = targetUnit()
-                }
-            })
-            XposedBridge.log("$LOG_PREFIX WebDAV third login route hook installed")
+            val methods = routeMethods(THIRD_LOGIN_ROUTE_METHOD, THIRD_LOGIN_ROUTE_METHOD_LEGACY)
+            methods.forEach { method ->
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val backStackEntry = param.args?.getOrNull(2) ?: return
+                        val route = runCatching { navBackStackEntryToThirdLogin(backStackEntry) }.getOrNull() ?: return
+                        val type = route.javaClass.methods.firstOrNull { it.name == "getType" && it.parameterTypes.isEmpty() }
+                            ?.invoke(route) as? Number ?: return
+                        if (type.toInt() != BACKUP_TYPE_WEBDAV) return
+                        val navGraphScope = param.args?.getOrNull(0) ?: return
+                        val composer = param.args?.getOrNull(3) ?: return
+                        renderWebDavLoginRoute(navGraphScope, composer)
+                        param.result = targetUnit()
+                    }
+                })
+            }
+            XposedBridge.log("$LOG_PREFIX WebDAV third login route hook installed: ${methods.joinToString { it.name }}")
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to hook WebDAV third login route: ${it.stackTraceToString()}")
         }
+    }
+
+    private fun routeMethods(vararg names: String): List<Method> {
+        val appClass = cls(APP_KT_CLASS)
+        val methods = names.distinct().mapNotNull { name ->
+            appClass.declaredMethods.firstOrNull {
+                it.name == name && it.parameterTypes.size == 5
+            }?.apply { isAccessible = true }
+        }
+        if (methods.isEmpty()) {
+            error("No route methods found for ${names.joinToString()}")
+        }
+        return methods
     }
 
     private fun navBackStackEntryToThirdLogin(backStackEntry: Any): Any {
@@ -3488,6 +3501,13 @@ class WebDavDriveHook(
     private fun updateWebDavAccountAuthFlow() {
         val flow = synchronized(webDavAccountAuthLock) { webDavAccountAuthFlow }
         setMutableStateFlowValue(flow, webDavAuth())
+    }
+
+    private fun onWebDavLoginSaved() {
+        updateWebDavAccountAuthFlow()
+        val path = currentWebDavBrowseDir()
+        updateWebDavStorageTrees(path)
+        refreshWebDavLibraryAsync(path)
     }
 
     private fun updateLocalLibraryAccountAuthFlow() {
@@ -5572,6 +5592,7 @@ class WebDavDriveHook(
                             .putBoolean(KEY_AUTHORIZED, true)
                             .apply()
                         XposedBridge.log("$LOG_PREFIX WebDAV login saved: ${url.redactWebDavUrl()}")
+                        onWebDavLoginSaved()
                         context.toast("WebDAV 已保存")
                         onSaved()
                     }
@@ -6691,8 +6712,10 @@ class WebDavDriveHook(
         const val APP_KT_CLASS = "app.zhendong.reamicro.AppKt"
         const val NAV_GRAPH_SCOPE_CLASS = "app.zhendong.reamicro.NavGraphScope"
         const val NAVIGATE_METHOD = "navigate"
-        const val THIRD_LOGIN_ROUTE_METHOD = "setup\$lambda\$0\$16"
-        const val THIRD_ACCOUNT_ROUTE_METHOD = "setup\$lambda\$0\$17"
+        const val THIRD_LOGIN_ROUTE_METHOD = "setup\$lambda\$0\$17"
+        const val THIRD_LOGIN_ROUTE_METHOD_LEGACY = "setup\$lambda\$0\$16"
+        const val THIRD_ACCOUNT_ROUTE_METHOD = "setup\$lambda\$0\$18"
+        const val THIRD_ACCOUNT_ROUTE_METHOD_LEGACY = "setup\$lambda\$0\$17"
         const val ROUTE_HOME_CLASS = "app.zhendong.reamicro.Route\$Home"
         const val ROUTE_STORAGE_CLASS = "app.zhendong.reamicro.Route\$Storage"
         const val ROUTE_CLOUD_FOLDER_CLASS = "app.zhendong.reamicro.Route\$CloudFolder"
