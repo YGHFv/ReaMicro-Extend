@@ -4517,6 +4517,7 @@ class WebDavDriveHook(
             val detail = onlineRuleValue(node, rule.optString("bookUrl", ""), baseUrl)
             val cover = onlineRuleValue(node, rule.optString("coverUrl", ""), baseUrl)
             val intro = onlineRuleValue(node, rule.optString("intro", ""), baseUrl).cleanOnlineText()
+            val chapterCount = onlineJsonInt(node, "$.chapter_count", "chapter_count", "$.total_chapters", "total_chapters")
             OnlineBookSearchResult(
                 sourceName = source.name,
                 name = name,
@@ -4524,6 +4525,7 @@ class WebDavDriveHook(
                 coverUrl = resolveOnlineUrl(baseUrl, cover),
                 detailUrl = resolveOnlineUrl(baseUrl, detail),
                 intro = intro,
+                chapterCount = chapterCount,
             )
         }.distinctBy { "${it.name}|${it.author}|${it.detailUrl}" }
             .take(ONLINE_COMPLETION_RESULT_LIMIT)
@@ -4540,6 +4542,7 @@ class WebDavDriveHook(
         val detail = firstJsonString(json, "bookUrl", "detailUrl", "url", "href", "link")
         val cover = firstJsonString(json, "coverUrl", "cover", "img", "image", "bookCover")
         val intro = firstJsonString(json, "intro", "desc", "description", "bookDesc").cleanOnlineText()
+        val chapterCount = onlineJsonInt(json, "$.chapter_count", "chapter_count", "$.total_chapters", "total_chapters")
         return OnlineBookSearchResult(
             sourceName = source.name,
             name = name,
@@ -4547,6 +4550,7 @@ class WebDavDriveHook(
             coverUrl = resolveOnlineUrl(baseUrl, cover),
             detailUrl = resolveOnlineUrl(baseUrl, detail),
             intro = intro,
+            chapterCount = chapterCount,
         )
     }
 
@@ -4658,6 +4662,14 @@ class WebDavDriveHook(
 
     private fun onlineJsonString(node: Any?, rule: String): String =
         onlineJsonValues(node, rule).firstOrNull()?.let(::onlineJsonPrimitive).orEmpty()
+
+    private fun onlineJsonInt(node: Any?, vararg rules: String): Int =
+        rules.asSequence()
+            .map { onlineJsonString(node, it).trim() }
+            .firstOrNull { it.isNotBlank() && it != "null" }
+            ?.toDoubleOrNull()
+            ?.toInt()
+            ?: 0
 
     private fun onlineJsonRuleValues(node: Any?, rule: String): List<Any?> {
         if (node == null || rule.isBlank()) return emptyList()
@@ -6207,7 +6219,12 @@ class WebDavDriveHook(
         }
         val chapters = parseOnlineToc(target.source, target.result, toc.url, toc.body)
         if (chapters.isEmpty()) {
-            error("在线源目录为空，已停止导入：${target.source.name}")
+            val hint = if (target.result.chapterCount > 0) {
+                "，搜索结果标记 ${target.result.chapterCount} 章，可能未登录或源端未缓存章节"
+            } else {
+                ""
+            }
+            error("在线源目录为空$hint，已停止导入：${target.source.name}")
         }
         return OnlineTocSnapshot(detail = detail, toc = toc, chapters = chapters)
     }
@@ -9704,6 +9721,7 @@ img{max-width:100%;max-height:100%;height:auto;}
         val coverUrl: String,
         val detailUrl: String,
         val intro: String,
+        val chapterCount: Int = 0,
     )
 
     private data class OnlineDownloadTarget(
