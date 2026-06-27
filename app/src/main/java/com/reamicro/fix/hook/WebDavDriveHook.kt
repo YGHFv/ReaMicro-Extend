@@ -6204,7 +6204,8 @@ class WebDavDriveHook(
         fun running(progress: Int, message: String, force: Boolean = false): Boolean {
             val now = System.currentTimeMillis()
             val compactMessage = message.replace(Regex("\\s+"), " ").trim()
-            val progressChanged = progress != lastProgress
+            val displayProgress = onlineCompletionDisplayProgress(progress, compactMessage)
+            val progressChanged = displayProgress != lastProgress
             val phaseChanged = compactMessage != lastMessage &&
                 !compactMessage.startsWith("下载章节 ") &&
                 !compactMessage.startsWith("重试章节 ")
@@ -6212,18 +6213,18 @@ class WebDavDriveHook(
                 progressChanged ||
                 phaseChanged ||
                 now - lastNotificationAtMs >= ONLINE_COMPLETION_NOTIFICATION_MIN_INTERVAL_MS ||
-                progress >= 100
+                displayProgress >= 100
             if (!shouldSend) {
                 return true
             }
             lastNotificationAtMs = now
-            lastProgress = progress
+            lastProgress = displayProgress
             lastMessage = compactMessage
             if (tracker != null && workId != null) {
-                setTrackedWorkState(tracker, workId, "Running", progress, null, null, "$bookName：$compactMessage")
+                setTrackedWorkState(tracker, workId, "Running", displayProgress, null, null, "$bookName：$compactMessage")
             }
             logWebDav(
-                "online completion progress notify id=$notificationId progress=$progress " +
+                "online completion progress notify id=$notificationId progress=$displayProgress raw=$progress " +
                     "force=$force progressChanged=$progressChanged phaseChanged=$phaseChanged text=$compactMessage",
             )
             return updateOnlineCompletionNotification(
@@ -6233,7 +6234,7 @@ class WebDavDriveHook(
                 cancellable,
                 bookName,
                 compactMessage,
-                progress,
+                displayProgress,
                 false,
             )
         }
@@ -6273,6 +6274,14 @@ class WebDavDriveHook(
             logWebDav("online completion tracked task failed: ${it.message ?: it.javaClass.name}")
             null
         }
+
+    private fun onlineCompletionDisplayProgress(progress: Int, message: String): Int {
+        val match = ONLINE_COMPLETION_PROGRESS_CHAPTER_REGEX.find(message) ?: return progress.coerceIn(0, 100)
+        val current = match.groupValues.getOrNull(1)?.toIntOrNull() ?: return progress.coerceIn(0, 100)
+        val total = match.groupValues.getOrNull(2)?.toIntOrNull() ?: return progress.coerceIn(0, 100)
+        if (total <= 0) return progress.coerceIn(0, 100)
+        return ((current.coerceAtLeast(0) * 100L) / total).toInt().coerceIn(0, 100)
+    }
 
     private fun downloadOnlineCompletionBook(
         target: OnlineDownloadTarget,
@@ -6318,11 +6327,15 @@ class WebDavDriveHook(
         var firstBatchImported = false
         fun downloadedCount(): Int = downloaded.count { it != null }
 
-        fun maybeImportFirstBatch(progress: Int) {
+        fun maybeImportFirstBatch(progress: Int, processedCount: Int) {
             throwIfOnlineCompletionDownloadCancelled(task)
             if (!shouldImportFirstBatch || firstBatchImported) return
             val firstBatch = downloaded.take(ONLINE_COMPLETION_PARTIAL_IMPORT_CHAPTERS)
-            if (firstBatch.size < ONLINE_COMPLETION_PARTIAL_IMPORT_CHAPTERS || firstBatch.any { it == null }) return
+            if (
+                firstBatch.size < ONLINE_COMPLETION_PARTIAL_IMPORT_CHAPTERS ||
+                processedCount < ONLINE_COMPLETION_PARTIAL_IMPORT_CHAPTERS ||
+                firstBatch.all { it == null }
+            ) return
             firstBatchImported = true
             val partialFile = File(
                 outputFile.parentFile ?: outputFile.absoluteFile.parentFile ?: File("/data/local/tmp"),
@@ -6386,7 +6399,7 @@ class WebDavDriveHook(
             val progress = 5 + ((index + 1) * 78 / chapters.size.coerceAtLeast(1))
             onProgress(progress, "下载章节 ${index + 1}/${chapters.size}")
             attemptChapter(index, immediateRetry = true)
-            maybeImportFirstBatch(progress)
+            maybeImportFirstBatch(progress, index + 1)
         }
         if (failed.any { attempts[it] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }) {
             val retryCandidates = failed.filter { attempts[it] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }
@@ -6401,7 +6414,7 @@ class WebDavDriveHook(
                 val progress = 84 + ((retryIndex + 1) * 4 / retryCandidates.size.coerceAtLeast(1))
                 onProgress(progress, "重试章节 ${chapterIndex + 1}/${chapters.size}")
                 attemptChapter(chapterIndex, immediateRetry = false)
-                maybeImportFirstBatch(progress)
+                maybeImportFirstBatch(progress, chapters.size)
             }
         }
         val successCount = downloadedCount()
@@ -10909,6 +10922,8 @@ img{max-width:100%;max-height:100%;height:auto;}
             Regex("^(第\\s*[0-9０-９一二三四五六七八九十百千万〇零两]+\\s*[章节卷回集部篇])\\s*[:：/／、，,。.!！?？\\-—_；;]*\\s*(.+)$")
         val ONLINE_SPECIAL_HEADING_SPLIT_REGEX =
             Regex("^(番外|后日谈|后记|序章|楔子|终章)\\s*[:：/／、，,。.!！?？\\-—_；;]*\\s*(.+)$")
+        val ONLINE_COMPLETION_PROGRESS_CHAPTER_REGEX =
+            Regex("(?:下载|重试)?章节\\s*(\\d+)\\s*/\\s*(\\d+)")
         val ONLINE_COMPLETION_CHAPTER_FILE_REGEX = Regex("""chapter_(\d+)\.xhtml""", RegexOption.IGNORE_CASE)
         const val ONLINE_CHAPTER_TITLE_SCAN_LINES = 8
         val BOOK_EXTENSIONS = setOf(".epub", ".mobi", ".azw3", ".txt")

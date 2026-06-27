@@ -36,7 +36,10 @@ private fun onlineCompletionProgressLabel(progress: Int, status: String): String
     val compactStatus = compactNotificationStatus(status)
     val percent = progress.coerceIn(0, 100)
     chapterProgressRegex.find(compactStatus)?.let { match ->
-        return "${match.groupValues[1]}/${match.groupValues[2]} - $percent%"
+        val current = match.groupValues[1].toIntOrNull() ?: 0
+        val total = match.groupValues[2].toIntOrNull() ?: 0
+        val chapterPercent = chapterPercent(current, total).takeIf { total > 0 } ?: percent
+        return "${match.groupValues[1]}/${match.groupValues[2]} - $chapterPercent%"
     }
     return when {
         compactStatus.contains(STATUS_DONE) -> STATUS_DONE
@@ -56,6 +59,11 @@ private fun compactNotificationStatus(status: String): String =
     status.replace(Regex("\\s+"), " ").trim()
 
 private val chapterProgressRegex = Regex("(?:\u4e0b\u8f7d|\u91cd\u8bd5)?\u7ae0\u8282\\s*(\\d+)\\s*/\\s*(\\d+)")
+
+private fun chapterPercent(current: Int, total: Int): Int {
+    if (total <= 0) return 0
+    return ((current.coerceAtLeast(0) * 100L) / total).toInt().coerceIn(0, 100)
+}
 
 private const val DOWNLOAD_NOTIFICATION_PREFIX = "\u4e0b\u8f7d\uff1a"
 private const val ONLINE_COMPLETION_FALLBACK_TITLE = "\u5728\u7ebf\u8865\u5168"
