@@ -8416,7 +8416,7 @@ class WebDavDriveHook(
     private fun setOnlineCompletionSmallIcon(builder: Notification.Builder) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             runCatching {
-                builder.setSmallIcon(Icon.createWithResource(MODULE_PACKAGE_NAME, R.drawable.ic_stat_reamicro))
+                builder.setSmallIcon(Icon.createWithResource(MODULE_PACKAGE_NAME, R.drawable.ic_notification_reamicro))
             }.onSuccess {
                 return
             }.onFailure {

@@ -106,7 +106,7 @@ class OnlineCompletionNotificationService : Service() {
             Notification.Builder(this)
         }
         builder
-            .setSmallIcon(R.drawable.ic_stat_reamicro)
+            .setSmallIcon(R.drawable.ic_notification_reamicro)
             .setContentTitle(onlineCompletionDownloadTitle(progress, text))
             .setContentText(onlineCompletionDownloadText(title, text))
             .setStyle(Notification.BigTextStyle().bigText(onlineCompletionDownloadBigText(title, text, progress)))
