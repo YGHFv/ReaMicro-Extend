@@ -907,9 +907,16 @@ class WebDavDriveHook(
         book: Any,
         target: OnlineDownloadTarget,
     ): View {
-        val primary = context.resolveThemeColor(android.R.attr.textColorPrimary, Color.rgb(34, 34, 34))
-        val secondary = context.resolveThemeColor(android.R.attr.textColorSecondary, Color.rgb(102, 102, 102))
-        val tertiary = Color.rgb(132, 132, 132)
+        val dark = context.isNightMode()
+        val primary = context.resolveOpaqueThemeColor(
+            android.R.attr.textColorPrimary,
+            if (dark) Color.rgb(232, 234, 238) else Color.rgb(34, 34, 34),
+        )
+        val secondary = context.resolveOpaqueThemeColor(
+            android.R.attr.textColorSecondary,
+            if (dark) Color.rgb(181, 187, 196) else Color.rgb(102, 102, 102),
+        )
+        val tertiary = if (dark) Color.rgb(146, 153, 164) else Color.rgb(132, 132, 132)
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -975,7 +982,7 @@ class WebDavDriveHook(
                         parseOnlineHeaders(source.header).forEach { (name, value) ->
                             if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
                         }
-                        OnlineSourceAuth.requestHeaders(currentContext(), source).forEach { (name, value) ->
+                        OnlineSourceAuth.requestHeaders(currentApplicationContext() ?: currentContext(), source).forEach { (name, value) ->
                             if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
                         }
                     }
@@ -4805,7 +4812,7 @@ class WebDavDriveHook(
                     parseOnlineHeaders(source.header).forEach { (name, value) ->
                         if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
                     }
-                    OnlineSourceAuth.requestHeaders(currentContext(), source).forEach { (name, value) ->
+                    OnlineSourceAuth.requestHeaders(currentApplicationContext() ?: currentContext(), source).forEach { (name, value) ->
                         if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
                     }
                 }
@@ -4815,7 +4822,7 @@ class WebDavDriveHook(
                     val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
                     if (code in 200..299) return OnlineHttpResponse(connection.url.toString(), body)
                     if ((code == 401 || code == 403) && !authRetried && source.hasLoginConfig) {
-                        val login = OnlineSourceAuth.loginWithSavedCredentials(currentContext(), source)
+                        val login = OnlineSourceAuth.loginWithSavedCredentials(currentApplicationContext() ?: currentContext(), source)
                         logWebDav(
                             "online completion auth retry source=${source.name} code=$code " +
                                 "success=${login.success} message=${login.message}",
@@ -6240,8 +6247,9 @@ class WebDavDriveHook(
             showToast("无法启动章节更新：缺少 Context")
             return
         }
-        val source = info.source ?: currentContext()?.let { context ->
-            OnlineSourceStore.list(context).firstOrNull { source -> source.id == info.sourceId }
+        val appContext = context.applicationContext ?: context
+        val source = info.source ?: OnlineSourceStore.list(appContext).firstOrNull { source ->
+            source.id == info.sourceId
         }
         if (source == null) {
             showToast("在线补全源不可用：${info.sourceName}")
@@ -6263,7 +6271,7 @@ class WebDavDriveHook(
         val tracker = currentWorkTracker()
         val workId = tracker?.let { createOnlineCompletionTrackedTask(it, "$title 更新") }
         val progressNotifier = OnlineCompletionProgressNotifier(
-            context = context,
+            context = appContext,
             notificationId = notificationId,
             notificationKey = "update:$key",
             cancellable = false,
@@ -6309,13 +6317,13 @@ class WebDavDriveHook(
                 }
                 progressNotifier.finish(message, detailUrl, success = true)
                 Handler(Looper.getMainLooper()).post {
-                    Toast.makeText(context, "$message：$title", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(appContext, "$message：$title", Toast.LENGTH_SHORT).show()
                 }
             }.onFailure {
                 XposedBridge.log("$LOG_PREFIX online completion update failed: ${it.stackTraceToString()}")
                 progressNotifier.finish(it.message ?: "章节更新失败", null, success = false)
                 Handler(Looper.getMainLooper()).post {
-                    Toast.makeText(context, "章节更新失败：${it.message ?: title}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(appContext, "章节更新失败：${it.message ?: title}", Toast.LENGTH_SHORT).show()
                 }
             }.also {
                 onlineCompletionRunningUpdates.remove(key)
@@ -6726,7 +6734,8 @@ class WebDavDriveHook(
             showToast("无法启动在线补全下载：缺少 Context")
             return
         }
-        ensureOnlineCompletionCancelReceiver(context)
+        val appContext = context.applicationContext ?: context
+        ensureOnlineCompletionCancelReceiver(appContext)
         val key = "${target.source.id}|${target.result.detailUrl}|${target.result.name}"
         if (onlineCompletionRunningDownloads.containsKey(key)) {
             showToast("正在下载：${target.result.name}")
@@ -6736,7 +6745,7 @@ class WebDavDriveHook(
         val tracker = currentWorkTracker()
         val workId = tracker?.let { createOnlineCompletionTrackedTask(it, target.result.name) }
         val cacheDir = File(
-            context.cacheDir ?: File("/data/local/tmp"),
+            appContext.cacheDir ?: File("/data/local/tmp"),
             "$ONLINE_COMPLETION_CACHE_ROOT/${System.currentTimeMillis()}_${UUID.randomUUID()}",
         )
         val task = OnlineCompletionDownloadTask(
@@ -6870,21 +6879,21 @@ class WebDavDriveHook(
                         "size=${localFile.length()} importedDir=${task.importedBookDir}",
                 )
                 Handler(Looper.getMainLooper()).post {
-                    Toast.makeText(context, "已导入：${target.result.name}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(appContext, "已导入：${target.result.name}", Toast.LENGTH_SHORT).show()
                 }
                 cleanupOnlineCompletionDownloadTask(task)
             }.onFailure {
                 if (it is OnlineCompletionDownloadCancelledException || task.cancelRequested) {
                     cancelOnlineCompletionTrackedWork(task)
                     cleanupOnlineCompletionDownloadTask(task)
-                    cancelOnlineCompletionNotification(context, task.notificationId, task.key)
+                    cancelOnlineCompletionNotification(appContext, task.notificationId, task.key)
                     logWebDav("online completion download cancelled book=${target.result.name}")
                 } else {
                     XposedBridge.log("$LOG_PREFIX online completion download failed: ${it.stackTraceToString()}")
                     cleanupOnlineCompletionDownloadTask(task)
                     progressNotifier.finish(it.message ?: "下载失败", null, success = false)
                     Handler(Looper.getMainLooper()).post {
-                        Toast.makeText(context, "在线补全下载失败：${it.message ?: target.result.name}", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(appContext, "在线补全下载失败：${it.message ?: target.result.name}", Toast.LENGTH_SHORT).show()
                     }
                 }
             }.also {
@@ -7692,7 +7701,7 @@ class WebDavDriveHook(
                     parseOnlineHeaders(source.header).forEach { (name, value) ->
                         if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
                     }
-                    OnlineSourceAuth.requestHeaders(currentContext(), source).forEach { (name, value) ->
+                    OnlineSourceAuth.requestHeaders(currentApplicationContext() ?: currentContext(), source).forEach { (name, value) ->
                         if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
                     }
                 }
@@ -7706,7 +7715,7 @@ class WebDavDriveHook(
                         )
                     }
                     if ((code == 401 || code == 403) && !authRetried && source.hasLoginConfig) {
-                        val login = OnlineSourceAuth.loginWithSavedCredentials(currentContext(), source)
+                        val login = OnlineSourceAuth.loginWithSavedCredentials(currentApplicationContext() ?: currentContext(), source)
                         logWebDav(
                             "online completion binary auth retry source=${source.name} code=$code " +
                                 "success=${login.success} message=${login.message}",
@@ -8031,7 +8040,8 @@ class WebDavDriveHook(
     }
 
     private fun importOnlineCompletionBookLocked(file: File, target: OnlineDownloadTarget): OnlineCompletionImportResult {
-        val bookshelf = currentBookshelfRepository() ?: error("阅微导入服务暂不可用，请先打开书架后重试")
+        val bookshelf = awaitBookshelfRepository()
+            ?: error("阅微导入服务暂不可用，请先打开书架后重试")
         val sourceUrl = target.result.detailUrl.ifBlank { target.source.sourceUrl }
         val importUuid = onlineBookUuid(target)
         val importTitle = target.result.name
@@ -8961,6 +8971,20 @@ img{max-width:100%;max-height:100%;height:auto;}
             ?: cloudStorageRepositoryRef?.get()?.let { fieldValue(it, "bookshelfRepository") }
             ?: workerManagerRef?.get()?.let { fieldValue(it, "bookshelf") }
 
+    private fun awaitBookshelfRepository(timeoutMs: Long = ONLINE_COMPLETION_REPOSITORY_WAIT_TIMEOUT_MS): Any? {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var logged = false
+        while (true) {
+            currentBookshelfRepository()?.let { return it }
+            if (System.currentTimeMillis() >= deadline) return null
+            if (!logged) {
+                logWebDav("online completion waiting for bookshelf repository after activity recreation")
+                logged = true
+            }
+            Thread.sleep(ONLINE_COMPLETION_REPOSITORY_WAIT_STEP_MS)
+        }
+    }
+
     private fun currentWorkTracker(): Any? =
         workTrackerRef?.get()
             ?: workerManagerRef?.get()?.let { fieldValue(it, "tracker") }
@@ -9138,7 +9162,10 @@ img{max-width:100%;max-height:100%;height:auto;}
     }
 
     private fun currentContext(): Context? =
-        activityProvider() ?: runCatching {
+        activityProvider() ?: currentApplicationContext()
+
+    private fun currentApplicationContext(): Context? =
+        runCatching {
             Class.forName("android.app.ActivityThread")
                 .getDeclaredMethod("currentApplication")
                 .apply { isAccessible = true }
@@ -10708,6 +10735,15 @@ img{max-width:100%;max-height:100%;height:auto;}
         }
     }
 
+    private fun Context.resolveOpaqueThemeColor(attr: Int, fallback: Int): Int {
+        val color = resolveThemeColor(attr, fallback)
+        return if (Color.alpha(color) < 64) fallback else color
+    }
+
+    private fun Context.isNightMode(): Boolean =
+        (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+
     private fun pushWebDavIcon() {
         webDavIconDepth.set((webDavIconDepth.get() ?: 0) + 1)
     }
@@ -12119,6 +12155,8 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val ONLINE_COMPLETION_PARTIAL_IMPORT_THRESHOLD = 200
         const val ONLINE_COMPLETION_PARTIAL_IMPORT_CHAPTERS = 100
         const val ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT = 15
+        const val ONLINE_COMPLETION_REPOSITORY_WAIT_TIMEOUT_MS = 30_000L
+        const val ONLINE_COMPLETION_REPOSITORY_WAIT_STEP_MS = 400L
         const val ONLINE_COMPLETION_RETRY_DELAY_MS = 6_000L
         const val ONLINE_COMPLETION_RETRY_DELAY_MAX_MS = 60_000L
         const val ONLINE_COMPLETION_NOTIFICATION_MIN_INTERVAL_MS = 1_000L
