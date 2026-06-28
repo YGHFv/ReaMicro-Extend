@@ -879,11 +879,18 @@ class WebDavDriveHook(
     }
 
     private fun renderOnlineCompletionCloudBookSearchRow(book: Any, target: OnlineDownloadTarget, composer: Any) {
+        val textColors = onlineCompletionSearchTextColors(composer)
         val factory = functionProxy("OnlineCompletionSearchRowAndroidView", FUNCTION1_CLASS) { args ->
             val context = args?.getOrNull(0) as? Context
                 ?: activityProvider()
                 ?: error("No context for online completion search row")
-            createOnlineCompletionSearchRowView(context, book, target)
+            createOnlineCompletionSearchRowView(context, book, target, textColors)
+        }
+        val update = functionProxy("OnlineCompletionSearchRowUpdate", FUNCTION1_CLASS) { args ->
+            (args?.getOrNull(0) as? View)?.let { view ->
+                applyOnlineCompletionSearchRowColors(view, textColors)
+            }
+            targetUnit()
         }
         runCatching {
             cls(ANDROID_VIEW_KT_CLASS).declaredMethods.first {
@@ -892,10 +899,10 @@ class WebDavDriveHook(
                 null,
                 factory,
                 fillMaxWidthModifier(),
-                null,
+                update,
                 composer,
                 0,
-                4,
+                0,
             )
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to render online completion search row: ${it.stackTraceToString()}")
@@ -906,8 +913,8 @@ class WebDavDriveHook(
         context: Context,
         book: Any,
         target: OnlineDownloadTarget,
+        textColors: IntArray,
     ): View {
-        val initialColors = onlineCompletionSearchTextColors(context.isNightMode())
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -930,7 +937,7 @@ class WebDavDriveHook(
         }
         val titleView = TextView(context).apply {
             text = target.result.name.ifBlank { "未命名" }
-            setTextColor(initialColors[0])
+            setTextColor(textColors[0])
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
@@ -939,7 +946,7 @@ class WebDavDriveHook(
         texts.addView(titleView)
         val authorView = TextView(context).apply {
             text = target.result.author.ifBlank { "未知作者" }
-            setTextColor(initialColors[1])
+            setTextColor(textColors[1])
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
@@ -949,7 +956,7 @@ class WebDavDriveHook(
         texts.addView(authorView)
         val metaView = TextView(context).apply {
             text = onlineCompletionSearchMetaLine(target.result)
-            setTextColor(initialColors[2])
+            setTextColor(textColors[2])
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
@@ -958,21 +965,14 @@ class WebDavDriveHook(
         }
         texts.addView(metaView)
         row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        val applyReadableColors = {
-            val colors = onlineCompletionSearchTextColors(row.isOnDarkBackground(context))
-            titleView.setTextColor(colors[0])
-            authorView.setTextColor(colors[1])
-            metaView.setTextColor(colors[2])
-        }
-        row.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
-            override fun onViewAttachedToWindow(v: View) {
-                v.post { applyReadableColors() }
-            }
-
-            override fun onViewDetachedFromWindow(v: View) = Unit
-        })
-        row.post { applyReadableColors() }
         return row
+    }
+
+    private fun applyOnlineCompletionSearchRowColors(row: View, colors: IntArray) {
+        val textContainer = (row as? ViewGroup)?.getChildAt(1) as? ViewGroup ?: return
+        (textContainer.getChildAt(0) as? TextView)?.setTextColor(colors[0])
+        (textContainer.getChildAt(1) as? TextView)?.setTextColor(colors[1])
+        (textContainer.getChildAt(2) as? TextView)?.setTextColor(colors[2])
     }
 
     private fun loadOnlineCompletionSearchCover(imageView: ImageView, source: OnlineSourceEntry, coverUrl: String) {
@@ -10752,6 +10752,18 @@ img{max-width:100%;max-height:100%;height:auto;}
         (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES
 
+    private fun onlineCompletionSearchTextColors(composer: Any): IntArray =
+        runCatching {
+            val scheme = colorScheme(composer)
+            val title = composeColorToArgb(scheme.longMethod("getOnBackground"))
+            val author = runCatching { composeColorToArgb(scheme.longMethod("getOnSurfaceVariant")) }
+                .getOrElse { composeColorToArgb(themeOnBackgroundVariant(composer)) }
+            intArrayOf(title, author, withAlpha(author, 210))
+        }.getOrElse {
+            XposedBridge.log("$LOG_PREFIX failed to resolve online completion search theme colors: ${it.stackTraceToString()}")
+            onlineCompletionSearchTextColors(currentContext()?.isNightMode() ?: activityProvider()?.isNightMode() ?: false)
+        }
+
     private fun onlineCompletionSearchTextColors(dark: Boolean): IntArray =
         if (dark) {
             intArrayOf(
@@ -10761,11 +10773,17 @@ img{max-width:100%;max-height:100%;height:auto;}
             )
         } else {
             intArrayOf(
-                Color.rgb(122, 128, 138),
-                Color.rgb(108, 114, 124),
+                Color.rgb(34, 34, 34),
+                Color.rgb(92, 96, 104),
                 Color.rgb(132, 132, 132),
             )
         }
+
+    private fun composeColorToArgb(color: Long): Int =
+        method(COLOR_KT_CLASS, "toArgb-8_81llA", 1).invoke(null, color) as Int
+
+    private fun withAlpha(color: Int, alpha: Int): Int =
+        (color and 0x00FFFFFF) or ((alpha.coerceIn(0, 255)) shl 24)
 
     private fun View.isOnDarkBackground(context: Context): Boolean {
         var current: View? = this
