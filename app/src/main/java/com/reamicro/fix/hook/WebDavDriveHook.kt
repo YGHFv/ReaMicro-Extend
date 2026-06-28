@@ -162,6 +162,8 @@ class WebDavDriveHook(
     private val webDavCleartextAllowed = ThreadLocal<Boolean>()
     private val webDavCleartextAllowedHosts = ConcurrentHashMap<String, Boolean>()
     private val webDavCleartextAllowedLoggedHosts = ConcurrentHashMap<String, Boolean>()
+    private val alistTokenCache = ConcurrentHashMap<String, AlistTokenCache>()
+    private val alistUnsupportedUntil = ConcurrentHashMap<String, Long>()
     private val webDavStorageViewModels = mutableListOf<WeakReference<Any>>()
     private var cloudStorageRepositoryRef: WeakReference<Any>? = null
     private var bookshelfRepositoryRef: WeakReference<Any>? = null
@@ -4468,6 +4470,13 @@ class WebDavDriveHook(
     private fun searchWebDavBooks(query: String): List<Any> {
         val needle = query.trim()
         if (needle.isBlank()) return emptyList()
+        searchAlistBooks(needle)?.let { entries ->
+            logWebDav("OpenList/AList search query=$needle results=${entries.size}")
+            return entries
+                .distinctBy { normalizeWebDavPath(it.path) }
+                .let(::sortWebDavEntries)
+                .map { newCloudBook(it) }
+        }
         val queue = java.util.ArrayDeque<String>()
         val visited = mutableSetOf<String>()
         val results = mutableListOf<WebDavEntry>()
@@ -4490,6 +4499,96 @@ class WebDavDriveHook(
             .distinctBy { normalizeWebDavPath(it.path) }
             .let(::sortWebDavEntries)
             .map { newCloudBook(it) }
+    }
+
+    private fun searchAlistBooks(query: String): List<WebDavEntry>? =
+        runCatching {
+            val credentials = webDavCredentials() ?: return null
+            val endpoint = alistApiEndpoint(credentials.url) ?: return null
+            val cacheKey = alistCacheKey(endpoint, credentials)
+            if (isAlistUnsupported(cacheKey)) return null
+            val token = cachedAlistToken(endpoint, credentials, cacheKey) ?: return null
+            val results = mutableListOf<WebDavEntry>()
+            var page = 1
+            var total = Int.MAX_VALUE
+            while (results.size < HOME_SEARCH_RESULT_LIMIT && page <= ALIST_SEARCH_MAX_PAGES) {
+                val response = executeRawOkHttpRequest(
+                    url = "${endpoint.apiBase}/fs/search",
+                    method = "POST",
+                    headers = mapOf(
+                        "Authorization" to token,
+                        "Content-Type" to "application/json",
+                    ),
+                    requestBodyOverride = newOkHttpStringRequestBody(
+                        JSONObject()
+                            .put("parent", endpoint.rootPath)
+                            .put("keywords", query)
+                            .put("scope", 0)
+                            .put("page", page)
+                            .put("per_page", ALIST_SEARCH_PAGE_SIZE)
+                            .put("password", "")
+                            .toString(),
+                        "application/json; charset=utf-8",
+                    ),
+                )
+                if (response.code !in 200..299) {
+                    logWebDav("OpenList/AList search failed code=${response.code} body=${response.bodyString.orEmpty().take(160)}")
+                    markAlistUnsupported(cacheKey)
+                    return null
+                }
+                val body = response.bodyString.orEmpty()
+                val root = JSONObject(body)
+                if (!alistResponseOk(body) && root.optInt("code", 0) != 200) {
+                    logWebDav("OpenList/AList search rejected body=${body.take(160)}")
+                    markAlistUnsupported(cacheKey)
+                    return null
+                }
+                val data = root.optJSONObject("data") ?: run {
+                    markAlistUnsupported(cacheKey)
+                    return null
+                }
+                total = data.optInt("total", total)
+                val content = data.optJSONArray("content") ?: data.optJSONArray("files") ?: JSONArray()
+                if (content.length() == 0) break
+                for (index in 0 until content.length()) {
+                    val item = content.optJSONObject(index) ?: continue
+                    val entry = alistSearchEntry(item, endpoint.rootPath) ?: continue
+                    if (isSupportedBookFile(entry.name)) {
+                        results.add(entry)
+                    }
+                    if (results.size >= HOME_SEARCH_RESULT_LIMIT) break
+                }
+                if (page * ALIST_SEARCH_PAGE_SIZE >= total) break
+                page += 1
+            }
+            results
+        }.onFailure {
+            logWebDav("OpenList/AList search unavailable: ${it.message}")
+        }.getOrNull()
+
+    private fun alistSearchEntry(item: JSONObject, rootPath: String): WebDavEntry? {
+        val name = item.optString("name", "").trim()
+        if (name.isBlank() || name.startsWith(".")) return null
+        val isDirectory = item.optBoolean("is_dir", item.optBoolean("isDir", false))
+        if (isDirectory) return null
+        val rawPath = item.optString("path", "").trim()
+        val parent = item.optString("parent", "").trim()
+        val path = when {
+            rawPath.isNotBlank() && rawPath.substringAfterLast('/') == name -> rawPath
+            rawPath.isNotBlank() -> childWebDavPath(rawPath, name)
+            parent.isNotBlank() -> childWebDavPath(parent, name)
+            else -> childWebDavPath("/", name)
+        }
+        val relativePath = alistAbsoluteToWebDavPath(path, rootPath) ?: return null
+        return WebDavEntry(
+            name = name,
+            path = relativePath,
+            isDirectory = false,
+            size = item.optLong("size", 0L),
+            updatedAt = parseAlistDate(
+                item.optString("modified", "").ifBlank { item.optString("updated_at", "") },
+            ),
+        )
     }
 
     private fun searchLocalLibraryBooks(query: String): List<Any> {
@@ -9673,14 +9772,16 @@ img{max-width:100%;max-height:100%;height:auto;}
 
     private fun tryAlistUploadFallback(credentials: WebDavCredentials, path: String, file: File): Boolean =
         runCatching {
-            val apiBase = alistApiBaseUrl(credentials.url) ?: return false
-            val token = alistToken(apiBase, credentials.username, credentials.password) ?: return false
+            val endpoint = alistApiEndpoint(credentials.url) ?: return false
+            val cacheKey = alistCacheKey(endpoint, credentials)
+            if (isAlistUnsupported(cacheKey)) return false
+            val token = cachedAlistToken(endpoint, credentials, cacheKey) ?: return false
             val upload = executeRawOkHttpRequest(
-                url = "$apiBase/fs/put",
+                url = "${endpoint.apiBase}/fs/put",
                 method = "PUT",
                 headers = mapOf(
                     "Authorization" to token,
-                    "File-Path" to normalizeWebDavPath(path),
+                    "File-Path" to childWebDavPath(endpoint.rootPath, normalizeWebDavPath(path).trimStart('/')),
                     "As-Task" to "false",
                     "Content-Type" to EPUB_MIME_TYPE,
                 ),
@@ -9693,14 +9794,53 @@ img{max-width:100%;max-height:100%;height:auto;}
             logWebDav("AList upload fallback failed path=$path error=${it.message}")
         }.getOrDefault(false)
 
-    private fun alistApiBaseUrl(webDavUrl: String): String? =
+    private fun alistApiEndpoint(webDavUrl: String): AlistApiEndpoint? =
         runCatching {
             val uri = URI(webDavUrl.trimEnd('/'))
             val path = uri.path.orEmpty().trimEnd('/')
-            if (!path.endsWith("/dav", ignoreCase = true)) return null
-            val apiPath = path.removeSuffix("/dav").ifBlank { "" } + "/api"
-            URI(uri.scheme, uri.userInfo, uri.host, uri.port, apiPath, null, null).toString().trimEnd('/')
+            val marker = "/dav"
+            val markerIndex = path.lowercase(Locale.ROOT).lastIndexOf(marker)
+            if (markerIndex < 0) return null
+            val afterMarkerIndex = markerIndex + marker.length
+            if (path.length > afterMarkerIndex && path[afterMarkerIndex] != '/') return null
+            val apiPath = path.substring(0, markerIndex).ifBlank { "" } + "/api"
+            val rootPath = path.substring(afterMarkerIndex).ifBlank { "/" }
+            AlistApiEndpoint(
+                apiBase = URI(uri.scheme, uri.userInfo, uri.host, uri.port, apiPath, null, null).toString().trimEnd('/'),
+                rootPath = normalizeWebDavPath(rootPath),
+            )
         }.getOrNull()
+
+    private fun cachedAlistToken(endpoint: AlistApiEndpoint, credentials: WebDavCredentials, cacheKey: String): String? {
+        val now = System.currentTimeMillis()
+        alistTokenCache[cacheKey]?.takeIf { now < it.expiresAtMs }?.let { return it.token }
+        val token = alistToken(endpoint.apiBase, credentials.username, credentials.password)
+        if (token.isNullOrBlank()) {
+            markAlistUnsupported(cacheKey)
+            return null
+        }
+        alistTokenCache[cacheKey] = AlistTokenCache(
+            token = token,
+            expiresAtMs = now + ALIST_TOKEN_CACHE_TTL_MS,
+        )
+        alistUnsupportedUntil.remove(cacheKey)
+        return token
+    }
+
+    private fun alistCacheKey(endpoint: AlistApiEndpoint, credentials: WebDavCredentials): String =
+        "${endpoint.apiBase}|${endpoint.rootPath}|${credentials.username}|${credentials.password.hashCode()}"
+
+    private fun isAlistUnsupported(cacheKey: String): Boolean {
+        val until = alistUnsupportedUntil[cacheKey] ?: return false
+        if (System.currentTimeMillis() < until) return true
+        alistUnsupportedUntil.remove(cacheKey)
+        return false
+    }
+
+    private fun markAlistUnsupported(cacheKey: String) {
+        alistUnsupportedUntil[cacheKey] = System.currentTimeMillis() + ALIST_UNSUPPORTED_CACHE_TTL_MS
+        alistTokenCache.remove(cacheKey)
+    }
 
     private fun alistToken(apiBase: String, username: String, password: String): String? {
         val login = executeRawOkHttpRequest(
@@ -10009,6 +10149,18 @@ img{max-width:100%;max-height:100%;height:auto;}
         return normalized.substringBeforeLast('/', "").ifBlank { "/" }
     }
 
+    private fun alistAbsoluteToWebDavPath(path: String, rootPath: String): String? {
+        val normalizedPath = normalizeWebDavPath(path)
+        val normalizedRoot = normalizeWebDavPath(rootPath)
+        if (normalizedRoot == "/") return normalizedPath
+        return when {
+            normalizedPath == normalizedRoot -> "/"
+            normalizedPath.startsWith(normalizedRoot.trimEnd('/') + "/") ->
+                normalizeWebDavPath(normalizedPath.removePrefix(normalizedRoot))
+            else -> null
+        }
+    }
+
     private fun normalizeWebDavPath(path: String): String {
         val trimmed = path.trim()
         if (trimmed.isBlank() || trimmed == "root") return "/"
@@ -10021,6 +10173,21 @@ img{max-width:100%;max-height:100%;height:auto;}
                 timeZone = TimeZone.getTimeZone("GMT")
             }.parse(value)?.time ?: 0L
         }.getOrDefault(0L)
+
+    private fun parseAlistDate(value: String): Long {
+        val text = value.trim()
+        if (text.isBlank()) return 0L
+        return runCatching { java.time.Instant.parse(text).toEpochMilli() }
+            .getOrElse {
+                runCatching {
+                    SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", Locale.US).parse(text)?.time ?: 0L
+                }.getOrElse {
+                    runCatching {
+                        SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US).parse(text)?.time ?: 0L
+                    }.getOrDefault(0L)
+                }
+            }
+    }
 
     private fun Element.textOf(localName: String): String {
         val nodes = getElementsByTagNameNS("*", localName)
@@ -11178,6 +11345,16 @@ img{max-width:100%;max-height:100%;height:auto;}
         val password: String,
     )
 
+    private data class AlistApiEndpoint(
+        val apiBase: String,
+        val rootPath: String,
+    )
+
+    private data class AlistTokenCache(
+        val token: String,
+        val expiresAtMs: Long,
+    )
+
     private data class WebDavEntry(
         val name: String,
         val path: String,
@@ -11922,6 +12099,10 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val LOCAL_LIBRARY_ROOT_PATH = "/"
         const val LOCAL_LIBRARY_PATH_PREFIX = "local:"
         const val WEBDAV_SEARCH_MAX_DIRS = 300
+        const val ALIST_SEARCH_PAGE_SIZE = 100
+        const val ALIST_SEARCH_MAX_PAGES = 5
+        const val ALIST_TOKEN_CACHE_TTL_MS = 10 * 60_000L
+        const val ALIST_UNSUPPORTED_CACHE_TTL_MS = 10 * 60_000L
         const val LOCAL_LIBRARY_SEARCH_MAX_DIRS = 500
         const val LOCAL_LIBRARY_LIST_CACHE_TTL_MS = 30_000L
         const val LOCAL_LIBRARY_SEARCH_INDEX_TTL_MS = 5 * 60_000L
