@@ -280,7 +280,7 @@ class ReaMicroSettingsHook(
                     )
                 }
             }
-            if (settings.snapshot().canUseFontSettings) {
+            if (settings.snapshot().moduleEnabled) {
                 addLazyItem(lazyListScope, FONT_SETTINGS_ITEM_KEY) { composer ->
                     renderSettingsEntry(
                         title = FONT_SETTINGS_TITLE,
@@ -305,7 +305,7 @@ class ReaMicroSettingsHook(
     }
 
     private fun insertAccountSettingsItem(lazyListScope: Any) {
-        if (!settings.snapshot().canRunAccountCompletion) return
+        if (!settings.snapshot().moduleEnabled) return
         injectingModuleItem.set(true)
         runCatching {
             addLazyItem(lazyListScope, ACCOUNT_SETTINGS_ITEM_KEY) { composer ->
@@ -343,6 +343,28 @@ class ReaMicroSettingsHook(
             }
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to render settings entry: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun renderNestedSettingsEntry(
+        title: String,
+        callbackName: String,
+        route: InjectedRoute,
+        composer: Any,
+    ) {
+        runCatching {
+            val openSettings = functionProxy(callbackName, FUNCTION0_CLASS) {
+                openNestedInjectedRoute(route)
+                targetUnit()
+            }
+            settingsEntryTitleOverride.set(title)
+            try {
+                method(APP_ABOUT_CLASS, APP_ABOUT_METHOD, 3).invoke(null, openSettings, composer, 0)
+            } finally {
+                settingsEntryTitleOverride.set(null)
+            }
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX failed to render nested settings entry: ${it.stackTraceToString()}")
         }
     }
 
@@ -407,14 +429,23 @@ class ReaMicroSettingsHook(
 
     private fun handleNestedInjectedBack(): Boolean {
         val currentRoute = currentInjectedRoute()
-        if (currentRoute !is InjectedRoute.FontPicker && currentRoute != InjectedRoute.FontLibrary) return false
+        if (currentRoute !is InjectedRoute.FontPicker &&
+            currentRoute != InjectedRoute.FontLibrary &&
+            currentRoute !in MODULE_CHILD_ROUTES
+        ) return false
         if (currentRoute == InjectedRoute.FontLibrary) clearPendingDeleteFontSelection()
         val nextStack = injectedRouteStack.dropLast(1)
             .takeIf { it.isNotEmpty() }
-            ?: listOf(InjectedRoute.FontSettings)
+            ?: listOf(
+                if (currentRoute in MODULE_CHILD_ROUTES) {
+                    InjectedRoute.ModuleSettings
+                } else {
+                    InjectedRoute.FontSettings
+                },
+            )
         injectedRouteStack = nextStack
         setInjectedRouteState(nextStack.last())
-        XposedBridge.log("$LOG_PREFIX nested font settings back: $currentRoute -> ${nextStack.last()}")
+        XposedBridge.log("$LOG_PREFIX nested settings back: $currentRoute -> ${nextStack.last()}")
         return true
     }
 
@@ -456,6 +487,10 @@ class ReaMicroSettingsHook(
             val innerComposer = args.getOrNull(1) ?: return@composableLambda targetUnit()
             when (val currentRoute = routeStateValue(routeState) ?: route) {
                 InjectedRoute.ModuleSettings -> renderHostModuleSettingsContent(innerPaddings, innerComposer)
+                InjectedRoute.AssociationCompletionSettings -> renderAssociationCompletionSettingsContent(innerPaddings, innerComposer)
+                InjectedRoute.ReaderCompletionSettings -> renderReaderCompletionSettingsContent(innerPaddings, innerComposer)
+                InjectedRoute.CloudCompletionSettings -> renderCloudCompletionSettingsContent(innerPaddings, innerComposer)
+                InjectedRoute.RotationCompletionSettings -> renderRotationCompletionSettingsContent(innerPaddings, innerComposer)
                 InjectedRoute.AccountSwitch -> renderAccountSwitchContent(innerPaddings, innerComposer)
                 InjectedRoute.OnlineCompletionSettings -> renderOnlineCompletionSettingsContent(innerPaddings, innerComposer)
                 InjectedRoute.AiConfigSettings -> renderAiConfigSettingsContent(innerPaddings, innerComposer)
@@ -484,7 +519,7 @@ class ReaMicroSettingsHook(
     }
 
     private fun renderInjectedBackHandler(route: InjectedRoute, composer: Any) {
-        val enabled = route is InjectedRoute.FontPicker || route == InjectedRoute.FontLibrary
+        val enabled = route is InjectedRoute.FontPicker || route == InjectedRoute.FontLibrary || route in MODULE_CHILD_ROUTES
         val onBack = functionProxy("InjectedNestedBackHandler", FUNCTION0_CLASS) {
             handleNestedInjectedBack()
             targetUnit()
@@ -514,6 +549,39 @@ class ReaMicroSettingsHook(
         val listContent = functionProxy("ModuleSettingsList", FUNCTION1_CLASS) { args ->
             val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
             val snapshot = settings.snapshot()
+            addLazyItem(lazyListScope, ASSOCIATION_SWITCHES_ITEM_KEY) { itemComposer ->
+                renderNestedSettingsEntry(
+                    title = "\u5173\u8054\u8865\u5168",
+                    callbackName = "OpenAssociationCompletionSettings",
+                    route = InjectedRoute.AssociationCompletionSettings,
+                    composer = itemComposer,
+                )
+            }
+            addLazyItem(lazyListScope, READER_SWITCHES_ITEM_KEY) { itemComposer ->
+                renderNestedSettingsEntry(
+                    title = "\u9605\u8bfb\u8865\u5168",
+                    callbackName = "OpenReaderCompletionSettings",
+                    route = InjectedRoute.ReaderCompletionSettings,
+                    composer = itemComposer,
+                )
+            }
+            addLazyItem(lazyListScope, CLOUD_SWITCHES_ITEM_KEY) { itemComposer ->
+                renderNestedSettingsEntry(
+                    title = "\u4e91\u76d8\u8865\u5168",
+                    callbackName = "OpenCloudCompletionSettings",
+                    route = InjectedRoute.CloudCompletionSettings,
+                    composer = itemComposer,
+                )
+            }
+            addLazyItem(lazyListScope, ROTATION_SWITCHES_ITEM_KEY) { itemComposer ->
+                renderNestedSettingsEntry(
+                    title = "\u65cb\u8f6c\u8865\u5168",
+                    callbackName = "OpenRotationCompletionSettings",
+                    route = InjectedRoute.RotationCompletionSettings,
+                    composer = itemComposer,
+                )
+            }
+            return@functionProxy targetUnit()
             val associationExpandedState = associationExpandedState(snapshot.associationEnabled)
             val readerExpandedState = readerExpandedState(snapshot.readerEnabled)
             val fontExpandedState = fontExpandedState(snapshot.fontEnabled)
@@ -881,12 +949,381 @@ class ReaMicroSettingsHook(
         renderHostLazyColumn(innerPaddings, listContent, composer)
     }
 
+    private fun completionEntryRow(key: String, title: String, enabled: Boolean, route: InjectedRoute): ActionRow =
+        ActionRow(
+            key = key,
+            title = title,
+            subtitle = if (enabled) "\u5df2\u542f\u7528" else "\u672a\u542f\u7528",
+            trailing = "\u8bbe\u7f6e",
+            onClick = { openNestedInjectedRoute(route) },
+        )
+
+    private fun renderAssociationCompletionSettingsContent(innerPaddings: Any, composer: Any) {
+        val listContent = functionProxy("AssociationCompletionList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            val snapshot = settings.snapshot()
+            val expandedState = associationExpandedState(snapshot.associationEnabled)
+            val rows = buildList {
+                add(
+                    ToggleRow(
+                        key = ModuleSettings.KEY_ASSOCIATION_ENABLED,
+                        title = "\u5173\u8054\u8865\u5168",
+                        checked = snapshot.associationEnabled,
+                        checkedProvider = { booleanStateValue(expandedState) },
+                        onChanged = { checked, _ ->
+                            settings.setAssociationEnabled(checked)
+                            setBooleanState(expandedState, checked)
+                            checked
+                        },
+                    ),
+                )
+                add(
+                    ToggleRow(
+                        key = ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_ENABLED,
+                        title = "\u624b\u52a8\u7f16\u8f91",
+                        checked = snapshot.associationManualEditEnabled,
+                        visibleProvider = {
+                            booleanStateValue(expandedState) && hasManualEditFeature()
+                        },
+                        onChanged = { checked, _ ->
+                            settings.setAssociationManualEditEnabled(checked)
+                            checked
+                        },
+                    ),
+                )
+                add(
+                    ToggleRow(
+                        key = ModuleSettings.KEY_ASSOCIATION_UNLINK_ENABLED,
+                        title = "\u53d6\u6d88\u5173\u8054",
+                        checked = snapshot.associationUnlinkEnabled,
+                        visibleProvider = { booleanStateValue(expandedState) },
+                        onChanged = { checked, _ ->
+                            settings.setAssociationUnlinkEnabled(checked)
+                            checked
+                        },
+                    ),
+                )
+                add(
+                    ToggleRow(
+                        key = ModuleSettings.KEY_ASSOCIATION_COVER_FIX_ENABLED,
+                        title = "\u5c01\u9762\u4fee\u590d",
+                        checked = snapshot.associationCoverFixEnabled,
+                        visibleProvider = { booleanStateValue(expandedState) },
+                        onChanged = { checked, _ ->
+                            settings.setAssociationCoverFixEnabled(checked)
+                            checked
+                        },
+                    ),
+                )
+                visibleAssociationSearchSourceGroups().forEach { group ->
+                    add(
+                        ToggleRow(
+                            key = ModuleSettings.searchSourceKey(group.id),
+                            title = group.title,
+                            checked = snapshot.isSearchSourceGroupEnabled(group.id),
+                            visibleProvider = { booleanStateValue(expandedState) },
+                            onChanged = { checked, updateRow ->
+                                setAssociationSearchSourceEnabled(group.id, checked) { value ->
+                                    updateRow(ModuleSettings.searchSourceKey(group.id), value)
+                                }
+                            },
+                        ),
+                    )
+                }
+            }
+            addLazyItem(lazyListScope, ASSOCIATION_SWITCHES_ITEM_KEY) { itemComposer ->
+                renderHostSettingsCard(rows, itemComposer)
+            }
+            targetUnit()
+        }
+        renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    private fun renderReaderCompletionSettingsContent(innerPaddings: Any, composer: Any) {
+        val listContent = functionProxy("ReaderCompletionList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            val snapshot = settings.snapshot()
+            val expandedState = readerExpandedState(snapshot.readerEnabled)
+            val rows = listOf(
+                ToggleRow(
+                    key = ModuleSettings.KEY_READER_ENABLED,
+                    title = "\u9605\u8bfb\u8865\u5168",
+                    checked = snapshot.readerEnabled,
+                    checkedProvider = { booleanStateValue(expandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setReaderEnabled(checked)
+                        setBooleanState(expandedState, checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_READER_AUTO_PAGE_ENABLED,
+                    title = "\u81ea\u52a8\u9605\u8bfb",
+                    checked = snapshot.readerAutoPageEnabled,
+                    visibleProvider = { booleanStateValue(expandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setReaderAutoPageEnabled(checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_READER_KEEP_SCREEN_ON_ENABLED,
+                    title = "\u5c4f\u5e55\u5e38\u4eae",
+                    checked = snapshot.readerKeepScreenOnEnabled,
+                    visibleProvider = { booleanStateValue(expandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setReaderKeepScreenOnEnabled(checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_READER_OVERWRITE_CHECK_ENABLED,
+                    title = "\u8986\u76d6\u68c0\u67e5",
+                    checked = snapshot.readerOverwriteCheckEnabled,
+                    visibleProvider = { booleanStateValue(expandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setReaderOverwriteCheckEnabled(checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_EDIT_FILE_ENABLED,
+                    title = "\u6587\u4ef6\u7f16\u8f91",
+                    checked = snapshot.editFileEnabled,
+                    visibleProvider = { booleanStateValue(expandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setEditFileEnabled(checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_READER_EDIT_OVERWRITE_ENABLED,
+                    title = "\u7f16\u8f91\u8986\u5199",
+                    checked = snapshot.readerEditOverwriteEnabled,
+                    visibleProvider = { booleanStateValue(expandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setReaderEditOverwriteEnabled(checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_READER_DICTIONARY_ENABLED,
+                    title = "\u8bcd\u5178\u91ca\u4e49",
+                    checked = snapshot.readerDictionaryEnabled,
+                    visibleProvider = { booleanStateValue(expandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setReaderDictionaryEnabled(checked)
+                        checked
+                    },
+                ),
+            )
+            addLazyItem(lazyListScope, READER_SWITCHES_ITEM_KEY) { itemComposer ->
+                renderHostSettingsCard(rows, itemComposer)
+            }
+            targetUnit()
+        }
+        renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    private fun renderCloudCompletionSettingsContent(innerPaddings: Any, composer: Any) {
+        val listContent = functionProxy("CloudCompletionList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            val snapshot = settings.snapshot()
+            val expandedState = cloudExpandedState(snapshot.cloudEnabled)
+            val rows = listOf(
+                ToggleRow(
+                    key = ModuleSettings.KEY_CLOUD_ENABLED,
+                    title = "\u4e91\u76d8\u8865\u5168",
+                    checked = snapshot.cloudEnabled,
+                    checkedProvider = { booleanStateValue(expandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setCloudEnabled(checked)
+                        setBooleanState(expandedState, checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_CLOUD_WEBDAV_ENABLED,
+                    title = "WebDAV",
+                    checked = snapshot.cloudWebDavEnabled,
+                    visibleProvider = { booleanStateValue(expandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setCloudWebDavEnabled(checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_CLOUD_LOCAL_LIBRARY_ENABLED,
+                    title = "\u672c\u5730\u4e66\u5e93",
+                    checked = snapshot.cloudLocalLibraryEnabled,
+                    visibleProvider = { booleanStateValue(expandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setCloudLocalLibraryEnabled(checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_CLOUD_EXTENDED_DISPLAY_ENABLED,
+                    title = "\u6269\u5c55\u663e\u793a",
+                    checked = snapshot.cloudExtendedDisplayEnabled,
+                    visibleProvider = { booleanStateValue(expandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setCloudExtendedDisplayEnabled(checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_CLOUD_DOWNLOAD_CANCEL_ENABLED,
+                    title = "\u5141\u8bb8\u53d6\u6d88",
+                    checked = snapshot.cloudDownloadCancelEnabled,
+                    visibleProvider = { booleanStateValue(expandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setCloudDownloadCancelEnabled(checked)
+                        checked
+                    },
+                ),
+            )
+            addLazyItem(lazyListScope, CLOUD_SWITCHES_ITEM_KEY) { itemComposer ->
+                renderHostSettingsCard(rows, itemComposer)
+            }
+            targetUnit()
+        }
+        renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    private fun renderRotationCompletionSettingsContent(innerPaddings: Any, composer: Any) {
+        val listContent = functionProxy("RotationCompletionList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            val snapshot = settings.snapshot()
+            val expandedState = rotationExpandedState(snapshot.rotationEnabled)
+            val rotationState = RotationUiState.fromActivityOrientation(
+                activityProvider()?.requestedOrientation,
+                snapshot.rotationReverseEnabled,
+            ) ?: rotationUiState ?: RotationUiState.from(snapshot)
+            val rows = buildList {
+                add(
+                    ToggleRow(
+                        key = ModuleSettings.KEY_ROTATION_ENABLED,
+                        title = "\u65cb\u8f6c\u8865\u5168",
+                        checked = snapshot.rotationEnabled,
+                        checkedProvider = { booleanStateValue(expandedState) },
+                        onChanged = { checked, updateRow ->
+                            setBooleanState(expandedState, checked)
+                            setRotationEnabled(checked, rotationState, updateRow)
+                        },
+                    ),
+                )
+                add(
+                    ToggleRow(
+                        key = ModuleSettings.KEY_ROTATION_AUTO_ENABLED,
+                        title = "\u81ea\u52a8\u65cb\u8f6c",
+                        checked = rotationState.autoEnabled,
+                        checkedProvider = { currentRotationDisplayState().autoEnabled },
+                        visibleProvider = { booleanStateValue(expandedState) },
+                        syncWithSnapshot = true,
+                        onChanged = { checked, updateRow ->
+                            setRotationBaseEnabled(ModuleSettings.KEY_ROTATION_AUTO_ENABLED, checked, updateRow)
+                        },
+                    ),
+                )
+                add(
+                    ToggleRow(
+                        key = ModuleSettings.KEY_ROTATION_PORTRAIT_LOCK_ENABLED,
+                        title = "\u7ad6\u5411\u9501\u5b9a",
+                        checked = rotationState.portraitLockEnabled,
+                        checkedProvider = { currentRotationDisplayState().portraitLockEnabled },
+                        visibleProvider = { booleanStateValue(expandedState) },
+                        syncWithSnapshot = true,
+                        onChanged = { checked, updateRow ->
+                            setRotationBaseEnabled(ModuleSettings.KEY_ROTATION_PORTRAIT_LOCK_ENABLED, checked, updateRow)
+                        },
+                    ),
+                )
+                add(
+                    ToggleRow(
+                        key = ModuleSettings.KEY_ROTATION_LANDSCAPE_LOCK_ENABLED,
+                        title = "\u6a2a\u5411\u9501\u5b9a",
+                        checked = rotationState.landscapeLockEnabled,
+                        checkedProvider = { currentRotationDisplayState().landscapeLockEnabled },
+                        visibleProvider = { booleanStateValue(expandedState) },
+                        syncWithSnapshot = true,
+                        onChanged = { checked, updateRow ->
+                            setRotationBaseEnabled(ModuleSettings.KEY_ROTATION_LANDSCAPE_LOCK_ENABLED, checked, updateRow)
+                        },
+                    ),
+                )
+                add(
+                    ToggleRow(
+                        key = ModuleSettings.KEY_ROTATION_REVERSE_ENABLED,
+                        title = "\u53cd\u5411\u65cb\u8f6c",
+                        checked = rotationState.reverseEnabled,
+                        checkedProvider = { currentRotationDisplayState().reverseEnabled },
+                        visibleProvider = { booleanStateValue(expandedState) },
+                        syncWithSnapshot = true,
+                        onChanged = { checked, updateRow ->
+                            suppressRotationSnapshotSync()
+                            val nextState = currentRotationUiState().copy(reverseEnabled = checked)
+                            rotationUiState = nextState
+                            updateRow(ModuleSettings.KEY_ROTATION_REVERSE_ENABLED, checked)
+                            settings.setRotationReverseEnabled(checked)
+                            applyCurrentRotation()
+                            checked
+                        },
+                    ),
+                )
+            }
+            addLazyItem(lazyListScope, ROTATION_SWITCHES_ITEM_KEY) { itemComposer ->
+                renderHostSettingsCard(rows, itemComposer)
+            }
+            targetUnit()
+        }
+        renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
     private fun renderAccountSwitchContent(innerPaddings: Any, composer: Any) {
         val listContent = functionProxy("AccountSwitchList", FUNCTION1_CLASS) { args ->
             val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
             accountListVersionValue()
             val accounts = accountController.displayAccounts()
             val expandedState = accountSwitchExpandedState(accounts.isNotEmpty())
+            val snapshot = settings.snapshot()
+            val accountCompletionExpandedState = accountExpandedState(snapshot.accountEnabled)
+            val accountRows = listOf(
+                ToggleRow(
+                    key = ModuleSettings.KEY_ACCOUNT_ENABLED,
+                    title = "\u8d26\u53f7\u8865\u5168",
+                    checked = snapshot.accountEnabled,
+                    checkedProvider = { booleanStateValue(accountCompletionExpandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setAccountEnabled(checked)
+                        setBooleanState(accountCompletionExpandedState, checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_ACCOUNT_EXPORT_ENABLED,
+                    title = "\u5bfc\u51fa\u8865\u5168",
+                    checked = snapshot.accountExportEnabled,
+                    visibleProvider = { booleanStateValue(accountCompletionExpandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setAccountExportEnabled(checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_ACCOUNT_CACHE_CLEANUP_ENABLED,
+                    title = "\u7f13\u5b58\u6e05\u7406",
+                    checked = snapshot.accountCacheCleanupEnabled,
+                    visibleProvider = { booleanStateValue(accountCompletionExpandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setAccountCacheCleanupEnabled(checked)
+                        checked
+                    },
+                ),
+            )
+            addLazyItem(lazyListScope, ACCOUNT_COMPLETION_SWITCHES_ITEM_KEY) { itemComposer ->
+                renderHostSettingsCard(accountRows, itemComposer)
+            }
             addLazyItem(lazyListScope, ACCOUNT_EXPORT_ACTION_ITEM_KEY) { itemComposer ->
                 renderHostActionCard(
                     listOf(
@@ -1698,6 +2135,31 @@ class ReaMicroSettingsHook(
         val listContent = functionProxy("FontSettingsList", FUNCTION1_CLASS) { args ->
             val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
             fontLibraryVersionValue()
+            val snapshot = settings.snapshot()
+            val expandedState = fontExpandedState(snapshot.fontEnabled)
+            val switchRows = listOf(
+                ToggleRow(
+                    key = ModuleSettings.KEY_FONT_ENABLED,
+                    title = "\u5b57\u4f53\u8865\u5168",
+                    checked = snapshot.fontEnabled,
+                    checkedProvider = { booleanStateValue(expandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setFontEnabled(checked)
+                        setBooleanState(expandedState, checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_FONT_SETTINGS_ENABLED,
+                    title = "\u5b57\u4f53\u8bbe\u7f6e",
+                    checked = snapshot.fontSettingsEnabled,
+                    visibleProvider = { booleanStateValue(expandedState) },
+                    onChanged = { checked, _ ->
+                        settings.setFontSettingsEnabled(checked)
+                        checked
+                    },
+                ),
+            )
             val config = settings.fontSettings()
             val rows = listOf(
                 ActionRow(
@@ -1725,6 +2187,9 @@ class ReaMicroSettingsHook(
                     onClick = { openNestedInjectedRoute(InjectedRoute.FontLibrary) },
                 ),
             )
+            addLazyItem(lazyListScope, FONT_SWITCHES_ITEM_KEY) { itemComposer ->
+                renderHostSettingsCard(switchRows, itemComposer)
+            }
             addLazyItem(lazyListScope, FONT_SETTINGS_CONTENT_ITEM_KEY) { itemComposer ->
                 renderHostActionCard(rows, itemComposer)
             }
@@ -4085,6 +4550,10 @@ class ReaMicroSettingsHook(
 
     private sealed class InjectedRoute(val title: String) {
         object ModuleSettings : InjectedRoute(MODULE_ENTRY_TITLE)
+        object AssociationCompletionSettings : InjectedRoute("\u5173\u8054\u8865\u5168")
+        object ReaderCompletionSettings : InjectedRoute("\u9605\u8bfb\u8865\u5168")
+        object CloudCompletionSettings : InjectedRoute("\u4e91\u76d8\u8865\u5168")
+        object RotationCompletionSettings : InjectedRoute("\u65cb\u8f6c\u8865\u5168")
         object AccountSwitch : InjectedRoute(ACCOUNT_SWITCH_TITLE)
         object OnlineCompletionSettings : InjectedRoute(ONLINE_COMPLETION_TITLE)
         object AiConfigSettings : InjectedRoute(AI_CONFIG_TITLE)
@@ -4092,6 +4561,13 @@ class ReaMicroSettingsHook(
         data class FontPicker(val target: FontPickerTarget) : InjectedRoute(target.title)
         object FontLibrary : InjectedRoute(FONT_LIBRARY_TITLE)
     }
+
+    private val MODULE_CHILD_ROUTES = setOf(
+        InjectedRoute.AssociationCompletionSettings,
+        InjectedRoute.ReaderCompletionSettings,
+        InjectedRoute.CloudCompletionSettings,
+        InjectedRoute.RotationCompletionSettings,
+    )
 
     private data class RotationUiState(
         val autoEnabled: Boolean,
