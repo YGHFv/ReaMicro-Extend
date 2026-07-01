@@ -23,7 +23,9 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
@@ -38,6 +40,8 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import com.reamicro.fix.ai.AiApiConfig
+import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.association.model.BookSource
 import com.reamicro.fix.association.provider.AssociationSearchProviderRegistry
 import com.reamicro.fix.association.provider.ExternalSourceLoader
@@ -81,6 +85,7 @@ class ReaMicroSettingsHook(
     @Volatile private var injectedRouteUiState: Any? = null
     @Volatile private var fontLibraryVersionUiState: Any? = null
     @Volatile private var onlineSourceVersionUiState: Any? = null
+    @Volatile private var aiApiVersionUiState: Any? = null
     @Volatile private var pendingDeleteFontUiState: Any? = null
     @Volatile private var lastFontImportToken: String = ""
     @Volatile private var lastFontImportAtMs: Long = 0L
@@ -266,6 +271,14 @@ class ReaMicroSettingsHook(
                         composer = composer,
                     )
                 }
+                addLazyItem(lazyListScope, AI_CONFIG_SETTINGS_ITEM_KEY) { composer ->
+                    renderSettingsEntry(
+                        title = AI_CONFIG_TITLE,
+                        callbackName = "OpenAiConfigSettings",
+                        route = InjectedRoute.AiConfigSettings,
+                        composer = composer,
+                    )
+                }
             }
             if (settings.snapshot().canUseFontSettings) {
                 addLazyItem(lazyListScope, FONT_SETTINGS_ITEM_KEY) { composer ->
@@ -445,6 +458,7 @@ class ReaMicroSettingsHook(
                 InjectedRoute.ModuleSettings -> renderHostModuleSettingsContent(innerPaddings, innerComposer)
                 InjectedRoute.AccountSwitch -> renderAccountSwitchContent(innerPaddings, innerComposer)
                 InjectedRoute.OnlineCompletionSettings -> renderOnlineCompletionSettingsContent(innerPaddings, innerComposer)
+                InjectedRoute.AiConfigSettings -> renderAiConfigSettingsContent(innerPaddings, innerComposer)
                 InjectedRoute.FontSettings -> renderFontSettingsContent(innerPaddings, innerComposer)
                 is InjectedRoute.FontPicker -> renderFontPickerContent(currentRoute.target, innerPaddings, innerComposer)
                 InjectedRoute.FontLibrary -> renderFontLibraryContent(innerPaddings, innerComposer)
@@ -1888,6 +1902,200 @@ class ReaMicroSettingsHook(
             targetUnit()
         }
         renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    private fun renderAiConfigSettingsContent(innerPaddings: Any, composer: Any) {
+        val listContent = functionProxy("AiConfigList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            aiApiVersionValue()
+            val configs = listAiApiConfigs()
+            val rows = buildList {
+                add(
+                    ActionRow(
+                        key = "ai_api_add",
+                        title = "\u6dfb\u52a0 API",
+                        subtitle = "OpenAI \u517c\u5bb9\u63a5\u53e3\uff1abase_url\u3001api_key\u3001model",
+                        onClick = ::openAiApiConfigDialog,
+                    ),
+                )
+                if (configs.isEmpty()) {
+                    add(
+                        ActionRow(
+                            key = "ai_api_empty",
+                            title = "\u6682\u65e0 API",
+                            subtitle = "\u6dfb\u52a0\u5e76\u6d4b\u8bd5\u901a\u8fc7\u540e\u4f1a\u81ea\u52a8\u51fa\u73b0\u5728\u5217\u8868\u4e2d",
+                        ),
+                    )
+                } else {
+                    configs.forEach { config ->
+                        add(
+                            ActionRow(
+                                key = "ai_api_${config.id}",
+                                title = config.displayName.compactOnlineSourceLine(),
+                                subtitle = aiApiSubtitle(config),
+                                onClick = { showToast(config.baseUrl) },
+                                onLongClick = { removeAiApiConfig(config) },
+                            ),
+                        )
+                    }
+                }
+            }
+            addLazyItem(lazyListScope, AI_CONFIG_CONTENT_ITEM_KEY) { itemComposer ->
+                renderHostActionCard(rows, itemComposer)
+            }
+            targetUnit()
+        }
+        renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    private fun listAiApiConfigs(): List<AiApiConfig> =
+        AiApiStore.list(activityProvider()?.applicationContext)
+
+    private fun aiApiSubtitle(config: AiApiConfig): String =
+        "${config.baseUrl} \u00b7 ${AiApiStore.maskedKey(config.apiKey)}"
+
+    private fun removeAiApiConfig(config: AiApiConfig) {
+        val removed = AiApiStore.remove(activityProvider()?.applicationContext, config.id)
+        if (removed) {
+            bumpAiApiVersion()
+            showToast("\u5df2\u79fb\u9664 API\uff1a${config.displayName}")
+        }
+    }
+
+    private fun openAiApiConfigDialog() {
+        val activity = activityProvider() ?: return
+        activity.runOnUiThread {
+            runCatching {
+                val container = LinearLayout(activity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(48, 24, 48, 0)
+                }
+                val baseUrlInput = EditText(activity).apply {
+                    hint = "base_url"
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                    setSingleLine(true)
+                }
+                val apiKeyInput = EditText(activity).apply {
+                    hint = "api_key"
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    setSingleLine(true)
+                }
+                val modelInput = EditText(activity).apply {
+                    hint = "model"
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL
+                    setSingleLine(true)
+                }
+                val status = TextView(activity).apply {
+                    text = "\u586b\u5b8c\u540e\u5148\u70b9\u51fb\u6d4b\u8bd5"
+                    setPadding(0, 16, 0, 0)
+                }
+                val progress = ProgressBar(activity).apply {
+                    visibility = View.GONE
+                }
+                container.addView(baseUrlInput)
+                container.addView(apiKeyInput)
+                container.addView(modelInput)
+                container.addView(status)
+                container.addView(progress)
+
+                var testedBaseUrl = ""
+                var testedApiKey = ""
+                var testedModel = ""
+                var testing = false
+
+                val dialog = AlertDialog.Builder(activity)
+                    .setTitle("AI \u914d\u7f6e")
+                    .setView(container)
+                    .setPositiveButton("\u6d4b\u8bd5", null)
+                    .setNeutralButton("\u5b8c\u6210", null)
+                    .setNegativeButton("\u53d6\u6d88", null)
+                    .create()
+
+                fun values(): Triple<String, String, String> =
+                    Triple(
+                        baseUrlInput.text?.toString().orEmpty().trim(),
+                        apiKeyInput.text?.toString().orEmpty().trim(),
+                        modelInput.text?.toString().orEmpty().trim(),
+                    )
+
+                fun hasAllValues(): Boolean {
+                    val (baseUrl, apiKey, model) = values()
+                    return baseUrl.isNotBlank() && apiKey.isNotBlank() && model.isNotBlank()
+                }
+
+                fun testPassedForCurrentValues(): Boolean {
+                    val (baseUrl, apiKey, model) = values()
+                    return baseUrl == testedBaseUrl && apiKey == testedApiKey && model == testedModel
+                }
+
+                fun refreshButtons() {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.isEnabled = hasAllValues() && !testing
+                    dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.isEnabled = hasAllValues() && testPassedForCurrentValues() && !testing
+                }
+
+                val watcher = object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                        if (!testPassedForCurrentValues()) status.text = "\u914d\u7f6e\u5df2\u53d8\u66f4\uff0c\u9700\u8981\u91cd\u65b0\u6d4b\u8bd5"
+                        refreshButtons()
+                    }
+                    override fun afterTextChanged(s: Editable?) = Unit
+                }
+                baseUrlInput.addTextChangedListener(watcher)
+                apiKeyInput.addTextChangedListener(watcher)
+                modelInput.addTextChangedListener(watcher)
+
+                dialog.setOnShowListener {
+                    dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                    refreshButtons()
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val (baseUrl, apiKey, model) = values()
+                        if (baseUrl.isBlank() || apiKey.isBlank() || model.isBlank()) {
+                            Toast.makeText(activity, "\u8bf7\u5148\u586b\u5b8c\u5168\u90e8\u5b57\u6bb5", Toast.LENGTH_SHORT).show()
+                            return@setOnClickListener
+                        }
+                        testing = true
+                        status.text = "\u6b63\u5728\u6d4b\u8bd5\u8fde\u63a5..."
+                        progress.visibility = View.VISIBLE
+                        refreshButtons()
+                        Thread({
+                            val result = AiApiStore.test(baseUrl, apiKey, model)
+                            activity.runOnUiThread {
+                                testing = false
+                                progress.visibility = View.GONE
+                                status.text = result.message
+                                if (result.success) {
+                                    testedBaseUrl = baseUrl
+                                    testedApiKey = apiKey
+                                    testedModel = model
+                                } else {
+                                    testedBaseUrl = ""
+                                    testedApiKey = ""
+                                    testedModel = ""
+                                }
+                                refreshButtons()
+                            }
+                        }, "ReaMicroAiApiTest").start()
+                    }
+                    dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                        val (baseUrl, apiKey, model) = values()
+                        if (!testPassedForCurrentValues()) {
+                            Toast.makeText(activity, "\u8bf7\u5148\u6d4b\u8bd5\u901a\u8fc7", Toast.LENGTH_SHORT).show()
+                            return@setOnClickListener
+                        }
+                        val config = AiApiStore.add(activity.applicationContext, baseUrl, apiKey, model)
+                        bumpAiApiVersion()
+                        showToast("\u5df2\u6dfb\u52a0 API\uff1a${config.displayName}")
+                        dialog.dismiss()
+                    }
+                }
+                dialog.show()
+                dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX failed to open AI API config dialog: ${it.stackTraceToString()}")
+                showToast("\u65e0\u6cd5\u6253\u5f00 AI \u914d\u7f6e")
+            }
+        }
     }
 
     private fun onlineSourceSubtitle(source: OnlineSourceEntry): String {
@@ -3451,6 +3659,22 @@ class ReaMicroSettingsHook(
             ?.invoke(state, value + 1)
     }
 
+    private fun aiApiVersionState(): Any {
+        aiApiVersionUiState?.let { return it }
+        return mutableState(0).also { aiApiVersionUiState = it }
+    }
+
+    private fun aiApiVersionValue(): Int =
+        (aiApiVersionState().method0("getValue") as? Number)?.toInt() ?: 0
+
+    private fun bumpAiApiVersion() {
+        val state = aiApiVersionState()
+        val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
+        state.javaClass.methods
+            .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+            ?.invoke(state, value + 1)
+    }
+
     private fun accountListVersionState(): Any {
         accountListVersionUiState?.let { return it }
         return mutableState(0).also { accountListVersionUiState = it }
@@ -3809,6 +4033,7 @@ class ReaMicroSettingsHook(
         object ModuleSettings : InjectedRoute(MODULE_ENTRY_TITLE)
         object AccountSwitch : InjectedRoute(ACCOUNT_SWITCH_TITLE)
         object OnlineCompletionSettings : InjectedRoute(ONLINE_COMPLETION_TITLE)
+        object AiConfigSettings : InjectedRoute(AI_CONFIG_TITLE)
         object FontSettings : InjectedRoute(FONT_SETTINGS_TITLE)
         data class FontPicker(val target: FontPickerTarget) : InjectedRoute(target.title)
         object FontLibrary : InjectedRoute(FONT_LIBRARY_TITLE)
@@ -4017,6 +4242,8 @@ class ReaMicroSettingsHook(
         const val ACCOUNT_IMPORT_ACTION_ITEM_KEY = 0x524D4668
         const val ACCOUNT_SWITCH_ACTION_ITEM_KEY = 0x524D4669
         const val ONLINE_COMPLETION_CONTENT_ITEM_KEY = 0x524D466A
+        const val AI_CONFIG_SETTINGS_ITEM_KEY = 0x524D466B
+        const val AI_CONFIG_CONTENT_ITEM_KEY = 0x524D466C
         const val ACCOUNT_CREDENTIAL_DOCUMENT_REQUEST_CODE = 0x524D47
         const val ACCOUNT_DATA_DOCUMENT_REQUEST_CODE = 0x524D48
         const val ONLINE_SOURCE_DOCUMENT_REQUEST_CODE = 0x524D49
@@ -4031,6 +4258,7 @@ class ReaMicroSettingsHook(
         const val FAMILY_SYSTEM = "system"
         const val FAMILY_SOURCE_HAN_SERIF = "serif"
         const val ONLINE_COMPLETION_TITLE = "在线补全"
+        const val AI_CONFIG_TITLE = "AI \u914d\u7f6e"
         const val HOST_ABOUT_TITLE = "关于阅微"
         const val MODULE_ENTRY_TITLE = "补全计划"
         const val FONT_SETTINGS_TITLE = "字体设置"
