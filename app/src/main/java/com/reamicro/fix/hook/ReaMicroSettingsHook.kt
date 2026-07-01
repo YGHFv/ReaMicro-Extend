@@ -262,34 +262,6 @@ class ReaMicroSettingsHook(
     private fun insertModuleSettingsItem(lazyListScope: Any) {
         injectingModuleItem.set(true)
         runCatching {
-            if (settings.snapshot().moduleEnabled) {
-                addLazyItem(lazyListScope, ONLINE_COMPLETION_SETTINGS_ITEM_KEY) { composer ->
-                    renderSettingsEntry(
-                        title = ONLINE_COMPLETION_TITLE,
-                        callbackName = "OpenOnlineCompletionSettings",
-                        route = InjectedRoute.OnlineCompletionSettings,
-                        composer = composer,
-                    )
-                }
-                addLazyItem(lazyListScope, AI_CONFIG_SETTINGS_ITEM_KEY) { composer ->
-                    renderSettingsEntry(
-                        title = AI_CONFIG_TITLE,
-                        callbackName = "OpenAiConfigSettings",
-                        route = InjectedRoute.AiConfigSettings,
-                        composer = composer,
-                    )
-                }
-            }
-            if (settings.snapshot().moduleEnabled) {
-                addLazyItem(lazyListScope, FONT_SETTINGS_ITEM_KEY) { composer ->
-                    renderSettingsEntry(
-                        title = FONT_SETTINGS_TITLE,
-                        callbackName = "OpenFontSettings",
-                        route = InjectedRoute.FontSettings,
-                        composer = composer,
-                    )
-                }
-            }
             addLazyItem(lazyListScope, MODULE_SETTINGS_ITEM_KEY) { composer ->
                 renderSettingsEntry(
                     title = MODULE_ENTRY_TITLE,
@@ -578,6 +550,30 @@ class ReaMicroSettingsHook(
                     title = "\u65cb\u8f6c\u8865\u5168",
                     callbackName = "OpenRotationCompletionSettings",
                     route = InjectedRoute.RotationCompletionSettings,
+                    composer = itemComposer,
+                )
+            }
+            addLazyItem(lazyListScope, ONLINE_COMPLETION_SETTINGS_ITEM_KEY) { itemComposer ->
+                renderNestedSettingsEntry(
+                    title = ONLINE_COMPLETION_TITLE,
+                    callbackName = "OpenOnlineCompletionSettings",
+                    route = InjectedRoute.OnlineCompletionSettings,
+                    composer = itemComposer,
+                )
+            }
+            addLazyItem(lazyListScope, AI_CONFIG_SETTINGS_ITEM_KEY) { itemComposer ->
+                renderNestedSettingsEntry(
+                    title = AI_CONFIG_TITLE,
+                    callbackName = "OpenAiConfigSettings",
+                    route = InjectedRoute.AiConfigSettings,
+                    composer = itemComposer,
+                )
+            }
+            addLazyItem(lazyListScope, FONT_SETTINGS_ITEM_KEY) { itemComposer ->
+                renderNestedSettingsEntry(
+                    title = "\u5b57\u4f53\u8865\u5168",
+                    callbackName = "OpenFontSettings",
+                    route = InjectedRoute.FontSettings,
                     composer = itemComposer,
                 )
             }
@@ -2135,31 +2131,6 @@ class ReaMicroSettingsHook(
         val listContent = functionProxy("FontSettingsList", FUNCTION1_CLASS) { args ->
             val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
             fontLibraryVersionValue()
-            val snapshot = settings.snapshot()
-            val expandedState = fontExpandedState(snapshot.fontEnabled)
-            val switchRows = listOf(
-                ToggleRow(
-                    key = ModuleSettings.KEY_FONT_ENABLED,
-                    title = "\u5b57\u4f53\u8865\u5168",
-                    checked = snapshot.fontEnabled,
-                    checkedProvider = { booleanStateValue(expandedState) },
-                    onChanged = { checked, _ ->
-                        settings.setFontEnabled(checked)
-                        setBooleanState(expandedState, checked)
-                        checked
-                    },
-                ),
-                ToggleRow(
-                    key = ModuleSettings.KEY_FONT_SETTINGS_ENABLED,
-                    title = "\u5b57\u4f53\u8bbe\u7f6e",
-                    checked = snapshot.fontSettingsEnabled,
-                    visibleProvider = { booleanStateValue(expandedState) },
-                    onChanged = { checked, _ ->
-                        settings.setFontSettingsEnabled(checked)
-                        checked
-                    },
-                ),
-            )
             val config = settings.fontSettings()
             val rows = listOf(
                 ActionRow(
@@ -2187,9 +2158,6 @@ class ReaMicroSettingsHook(
                     onClick = { openNestedInjectedRoute(InjectedRoute.FontLibrary) },
                 ),
             )
-            addLazyItem(lazyListScope, FONT_SWITCHES_ITEM_KEY) { itemComposer ->
-                renderHostSettingsCard(switchRows, itemComposer)
-            }
             addLazyItem(lazyListScope, FONT_SETTINGS_CONTENT_ITEM_KEY) { itemComposer ->
                 renderHostActionCard(rows, itemComposer)
             }
@@ -4567,6 +4535,9 @@ class ReaMicroSettingsHook(
         InjectedRoute.ReaderCompletionSettings,
         InjectedRoute.CloudCompletionSettings,
         InjectedRoute.RotationCompletionSettings,
+        InjectedRoute.OnlineCompletionSettings,
+        InjectedRoute.AiConfigSettings,
+        InjectedRoute.FontSettings,
     )
 
     private data class RotationUiState(
