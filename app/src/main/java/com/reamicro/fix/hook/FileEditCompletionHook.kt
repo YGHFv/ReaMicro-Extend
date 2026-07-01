@@ -114,7 +114,6 @@ class FileEditCompletionHook(
                 onClickName = "EditBookTitle",
                 onClick = { invokeFunction0(onEditTitle) },
                 trailing = editImageVector(),
-                valueWeight = true,
             )
             renderDetailsDivider(innerComposer)
             renderDetailsActionRow(
@@ -124,7 +123,6 @@ class FileEditCompletionHook(
                 onClickName = "EditBookAuthor",
                 onClick = { invokeFunction0(onEditAuthor) },
                 trailing = editImageVector(),
-                valueWeight = true,
             )
             if (displayText.isNotBlank()) {
                 renderDetailsDivider(innerComposer)
@@ -193,11 +191,12 @@ class FileEditCompletionHook(
             renderDetailsDivider(innerComposer)
             renderDetailsActionRow(
                 label = "\u540c\u6b65",
-                value = syncSizeDisplayText(book),
+                value = syncSizeValueText(book),
                 composer = innerComposer,
                 onClickName = "OpenBookSync",
                 onClick = { invokeFunction0(onOpenSync) },
-                leadingValueIcon = syncStorageImageVector(book),
+                afterValueIcon = syncStorageImageVector(book),
+                secondaryValue = backupTypeName(book),
                 trailing = navigateNextImageVector(),
             )
             targetUnit()
@@ -205,31 +204,25 @@ class FileEditCompletionHook(
     }
 
     private fun bookIdentifierDisplayText(book: Any): String =
-        callString(book, "getUuid")
-            .ifBlank { callLong(book, "getUid").takeIf { it > 0L }?.let { "UID $it" }.orEmpty() }
-            .ifBlank { callLong(book, "getId").takeIf { it > 0L }?.let { "ID $it" }.orEmpty() }
-            .ifBlank { callString(book, "getBackupCode") }
-            .ifBlank { callString(book, "getUri") }
+        middleEllipsizeIdentifier(bookIdentifierRawText(book))
 
-    private fun bookIdentifierClipboardText(book: Any): String =
-        buildList {
-            fun addText(label: String, value: String) {
-                if (value.isNotBlank()) add("$label: $value")
-            }
-            fun addLong(label: String, value: Long) {
-                if (value > 0L) add("$label: $value")
-            }
-            addLong("id", callLong(book, "getId"))
-            addLong("uid", callLong(book, "getUid"))
-            addText("uuid", callString(book, "getUuid"))
-            addText("uri", callString(book, "getUri"))
-            addText("backupId", callString(book, "getBackupId"))
-            addText("backupCode", callString(book, "getBackupCode"))
-            addText("cloudId", callString(book, "getCloudId"))
-        }.joinToString("\n")
+    private fun bookIdentifierRawText(book: Any): String =
+        callString(book, "getUuid").trim()
+            .takeIf { it.isUuidOrMd5Identifier() }
+            .orEmpty()
 
-    private fun syncSizeDisplayText(book: Any): String =
-        "${backupTypeName(book)} ${formatFileSize(callLong(book, "getSize")).replace(" ", "")}"
+    private fun middleEllipsizeIdentifier(identifier: String): String {
+        if (identifier.length <= IDENTIFIER_DISPLAY_MAX_CHARS) return identifier
+        return identifier.take(IDENTIFIER_DISPLAY_EDGE_CHARS) +
+            "..." +
+            identifier.takeLast(IDENTIFIER_DISPLAY_EDGE_CHARS)
+    }
+
+    private fun String.isUuidOrMd5Identifier(): Boolean =
+        UUID_IDENTIFIER_REGEX.matches(this) || MD5_IDENTIFIER_REGEX.matches(this)
+
+    private fun syncSizeValueText(book: Any): String =
+        formatFileSize(callLong(book, "getSize")).replace(" ", "")
 
     private fun backupTypeName(book: Any): String =
         runCatching {
@@ -241,7 +234,7 @@ class FileEditCompletionHook(
 
     private fun copyBookIdentifiers(book: Any) {
         val activity = activityProvider() ?: return
-        val text = bookIdentifierClipboardText(book).ifBlank { bookIdentifierDisplayText(book) }
+        val text = bookIdentifierRawText(book)
         if (text.isBlank()) return
         val copy = {
             val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
@@ -1085,6 +1078,8 @@ class FileEditCompletionHook(
         onClick: () -> Unit,
         trailing: Any?,
         leadingValueIcon: Any? = null,
+        afterValueIcon: Any? = null,
+        secondaryValue: String? = null,
         valueWeight: Boolean = false,
     ) {
         val modifier = fillMaxWidthModifier(
@@ -1124,6 +1119,24 @@ class FileEditCompletionHook(
                 color = colorScheme(innerComposer).longMethod("getOnBackground"),
                 composer = innerComposer,
             )
+            afterValueIcon?.let { image ->
+                renderFixedWidthSpacer(width = 8, composer = innerComposer)
+                renderIcon(
+                    image = image,
+                    modifier = sizeModifier(modifierInstance(), 18),
+                    tint = syncIconTint(innerComposer),
+                    composer = innerComposer,
+                )
+            }
+            secondaryValue?.takeIf { it.isNotBlank() }?.let { text ->
+                renderFixedWidthSpacer(width = 4, composer = innerComposer)
+                renderDetailsText(
+                    text = text,
+                    modifier = null,
+                    color = colorScheme(innerComposer).longMethod("getOnBackground"),
+                    composer = innerComposer,
+                )
+            }
             trailing?.let { image ->
                 renderIcon(
                     image = image,
@@ -1534,6 +1547,8 @@ class FileEditCompletionHook(
         const val TEXT_DEFAULT_MASK_WITH_MODIFIER = 131064
         const val TEXT_SECONDARY_SINGLE_LINE_MASK = 110586
         const val TEXT_SECONDARY_SINGLE_LINE_MASK_WITH_MODIFIER = 110584
+        const val IDENTIFIER_DISPLAY_MAX_CHARS = 34
+        const val IDENTIFIER_DISPLAY_EDGE_CHARS = 15
         const val FILE_EDIT_TITLE_KEY = 0x524D4701
         const val FILE_EDIT_SUPPORTING_KEY = 0x524D4702
         const val FILE_EDIT_LEADING_KEY = 0x524D4703
@@ -1553,6 +1568,8 @@ class FileEditCompletionHook(
             "svg",
             "md",
         )
+        val UUID_IDENTIFIER_REGEX = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+        val MD5_IDENTIFIER_REGEX = Regex("^[0-9a-fA-F]{32}$")
     }
 }
 
