@@ -379,18 +379,18 @@ class WebDavDriveHook(
     private fun hookOnlineCompletionBookLocalSheet() {
         runCatching {
             val sheetClass = cls(BOOK_LOCAL_SHEET_CLASS)
-            sheetClass.declaredMethods
-                .filter { method ->
-                    (method.name == BOOK_LOCAL_SHEET_METHOD && method.parameterTypes.size == 5) ||
-                        (method.name == BOOK_LOCAL_SHEET_CONTENT_METHOD &&
-                            method.parameterTypes.firstOrNull()?.name == BOOK_CLASS)
-                }
-                .forEach { method ->
+            val localSheetContextMethods = sheetClass.declaredMethods
+                .filter { method -> isBookLocalSheetBookContextMethod(method) }
+            localSheetContextMethods.forEach { method ->
                     method.isAccessible = true
                     XposedBridge.hookMethod(method, object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             onlineCompletionLocalSheetDepth.set((onlineCompletionLocalSheetDepth.get() ?: 0) + 1)
                             onlineCompletionLocalSheetBook.set(param.args?.getOrNull(0))
+                            logWebDav(
+                                "online completion local sheet book captured via=${method.name} " +
+                                    "title=${param.args?.getOrNull(0)?.callString("getTitle").orEmpty()}",
+                            )
                         }
 
                         override fun afterHookedMethod(param: MethodHookParam) {
@@ -404,29 +404,76 @@ class WebDavDriveHook(
             val fileBackupMethods = sheetClass.declaredMethods.filter {
                 it.name == FILE_BACKUP_METHOD && it.parameterTypes.size == 5
             }
-            fileBackupMethods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (onlineCompletionUpdateRowInjecting.get() == true) return
-                        val book = onlineCompletionLocalSheetBook.get() ?: return
-                        val info = onlineImportedBookSourceInfo(book) ?: return
-                        val composer = param.args?.getOrNull(3) ?: return
-                        onlineCompletionUpdateRowInjecting.set(true)
-                        runCatching {
-                            renderOnlineCompletionUpdateDivider(composer)
-                            renderOnlineCompletionUpdateRow(book, info, composer)
-                        }.onFailure {
-                            XposedBridge.log("$LOG_PREFIX online completion update row render failed: ${it.stackTraceToString()}")
+            if (fileBackupMethods.isNotEmpty()) {
+                fileBackupMethods.forEach { method ->
+                    method.isAccessible = true
+                    XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            renderOnlineCompletionUpdateRowFromLocalSheet(param.args?.getOrNull(3))
                         }
-                        onlineCompletionUpdateRowInjecting.remove()
-                    }
-                })
+                    })
+                }
+            } else {
+                val communityMethods = sheetClass.declaredMethods.filter {
+                    it.name == BOOK_COMMUNITY_METHOD && it.parameterTypes.size == 4
+                }
+                communityMethods.forEach { method ->
+                    method.isAccessible = true
+                    XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            logWebDav(
+                                "online completion BookCommunity after composer=${param.args?.getOrNull(2)?.javaClass?.name.orEmpty()} " +
+                                    "book=${onlineCompletionLocalSheetBook.get()?.callString("getTitle").orEmpty()}",
+                            )
+                            renderOnlineCompletionUpdateRowFromLocalSheet(param.args?.getOrNull(2))
+                        }
+                    })
+                }
             }
-            logWebDav("online completion local sheet hook installed backups=${fileBackupMethods.size}")
+            logWebDav(
+                "online completion local sheet hook installed " +
+                    "contexts=${localSheetContextMethods.size} backups=${fileBackupMethods.size}",
+            )
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to hook online completion local sheet: ${it.stackTraceToString()}")
         }
+    }
+
+    private fun isBookLocalSheetBookContextMethod(method: Method): Boolean {
+        if (method.name == BOOK_LOCAL_SHEET_METHOD && method.parameterTypes.size == 5) return true
+        // A14 moved the sheet body into a generated lambda; hook any BookLocalSheet lambda that carries Book + Composer.
+        return method.name.startsWith("BookLocalSheet\$lambda\$") &&
+            method.parameterTypes.firstOrNull()?.name == BOOK_CLASS &&
+            method.parameterTypes.any { it.name == COMPOSER_CLASS }
+    }
+
+    private fun renderOnlineCompletionUpdateRowFromLocalSheet(composer: Any?) {
+        if (onlineCompletionUpdateRowInjecting.get() == true) return
+        val book = onlineCompletionLocalSheetBook.get() ?: run {
+            logWebDav("online completion update row skipped: no local sheet book composer=${composer != null}")
+            return
+        }
+        val info = onlineImportedBookSourceInfo(book) ?: run {
+            logWebDav(
+                "online completion update row skipped title=${book.callString("getTitle")} " +
+                    "backupId=${bookBackupIdOf(book)} backupCode=${book.callString("getBackupCode")} " +
+                    "uri=${book.callString("getUri")} publisher=${book.callString("getPublisher")}",
+            )
+            return
+        }
+        composer ?: run {
+            logWebDav("online completion update row skipped title=${book.callString("getTitle")}: no composer")
+            return
+        }
+        onlineCompletionUpdateRowInjecting.set(true)
+        runCatching {
+            renderOnlineCompletionUpdateDivider(composer)
+            renderOnlineCompletionUpdateRow(book, info, composer)
+            logWebDav("online completion update row rendered title=${book.callString("getTitle")} source=${info.sourceName}")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX online completion update row render failed: ${it.stackTraceToString()}")
+        }
+        onlineCompletionUpdateRowInjecting.remove()
     }
 
     private fun renderOnlineCompletionUpdateRow(book: Any, info: OnlineImportedBookSourceInfo, composer: Any) {
@@ -6376,29 +6423,51 @@ class WebDavDriveHook(
     private fun isOnlineCompletionUuid(uuid: String): Boolean =
         uuid.startsWith(ONLINE_COMPLETION_UUID_PREFIX)
 
+    private fun hasOnlineCompletionGeneratedEpubMetadata(book: Any): Boolean =
+        runCatching {
+            val contentOpf = File(bookDirectory(book).canonicalFile, "OEBPS/content.opf")
+            if (!contentOpf.isFile) return@runCatching false
+            contentOpf.useLines { lines ->
+                lines.take(320).any { line ->
+                    line.contains("reamicro-online-source-id") ||
+                        line.contains("reamicro-online-detail-url")
+                }
+            }
+        }.getOrDefault(false)
+
     private fun onlineImportedBookSourceInfo(book: Any): OnlineImportedBookSourceInfo? {
-        if (!isOnlineCompletionLocalBook(book)) return null
         val context = currentContext()
+        val sources = context?.let { appContext -> OnlineSourceStore.list(appContext) }.orEmpty()
         val backupId = bookBackupIdOf(book)
         val backupCode = book.callString("getBackupCode")
         val uuid = book.callString("getUuid")
+        val publisher = book.callString("getPublisher")
+        val uri = book.callString("getUri")
         val sourceId = onlineSourceIdFromEncodedValue(backupCode)
             .ifBlank { onlineSourceIdFromEncodedValue(backupId) }
             .ifBlank { onlineSourceIdFromUuid(uuid) }
-        val sourceById = context?.let { appContext ->
-            OnlineSourceStore.list(appContext).firstOrNull { source -> source.id == sourceId }
+        val sourceById = sources.firstOrNull { source -> source.id == sourceId }
+        val sourceByPublisher = sources.firstOrNull { source ->
+            source.name == publisher || source.id == publisher
         }
         val detailUrl = onlineCompletionQueryParameter(backupId, "detail")
-            .ifBlank { book.callString("getUri").takeIf { it.startsWith("http", ignoreCase = true) }.orEmpty() }
-        val sourceName = sourceById?.name.orEmpty()
+            .ifBlank { uri.takeIf { it.startsWith("http", ignoreCase = true) }.orEmpty() }
+        // Incremental updates only work for EPUBs generated by this module; weak DB markers can exist on normal books.
+        val hasOnlineCompletionMarker = hasOnlineCompletionGeneratedEpubMetadata(book) &&
+            (isOnlineCompletionLocalBook(book) ||
+                sourceId.isNotBlank() ||
+                onlineCompletionQueryParameter(backupId, "detail").isNotBlank())
+        if (!hasOnlineCompletionMarker) return null
+        val source = sourceById ?: sourceByPublisher
+        val sourceName = source?.name.orEmpty()
             .ifBlank { onlineCompletionQueryParameter(backupId, "name") }
-            .ifBlank { book.callString("getPublisher") }
+            .ifBlank { publisher }
             .ifBlank { sourceId }
         return OnlineImportedBookSourceInfo(
-            sourceId = sourceId,
+            sourceId = source?.id ?: sourceId,
             sourceName = sourceName.ifBlank { "未知源" },
             detailUrl = detailUrl,
-            source = sourceById,
+            source = source,
         )
     }
 
@@ -12144,6 +12213,7 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val BOOK_LOCAL_SHEET_METHOD = "BookLocalSheet"
         const val BOOK_LOCAL_SHEET_CONTENT_METHOD = "BookLocalSheet\$lambda\$2"
         const val FILE_BACKUP_METHOD = "FileBackup"
+        const val BOOK_COMMUNITY_METHOD = "BookCommunity"
         const val FOOTER_CLASS = "app.zhendong.reamicro.arch.components.item.FooterKt"
         const val FOOTER_METHOD = "footer"
         const val CLOUD_BOOK_LIST_CLASS = "app.zhendong.reamicro.ui.storage.components.CloudBookListKt"
@@ -12246,6 +12316,7 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val FUNCTION0_CLASS = "kotlin.jvm.functions.Function0"
         const val FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
         const val FUNCTION3_CLASS = "kotlin.jvm.functions.Function3"
+        const val COMPOSER_CLASS = "androidx.compose.runtime.Composer"
         const val KOTLIN_PAIR_CLASS = "kotlin.Pair"
         const val ROW_KT_CLASS = "androidx.compose.foundation.layout.RowKt"
         const val ROW_METHOD = "Row"

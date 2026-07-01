@@ -52,9 +52,108 @@ class FileEditCompletionHook(
     private val injectingRow = ThreadLocal.withInitial { false }
 
     fun install() {
-        hookBookLocalSheet()
-        hookFileBackup()
+        hookBookDetailsSyncSizeItem()
         hookActivityResultFor(Activity::class.java)
+    }
+
+    private fun hookBookDetailsSyncSizeItem() {
+        runCatching {
+            val itemsClass = cls(BOOK_OVERVIEW_ITEMS_CLASS)
+            val methods = itemsClass.declaredMethods.filter { method ->
+                method.name == BOOK_SYNC_SIZE_ITEM_METHOD &&
+                    method.parameterTypes.size == 5 &&
+                    method.parameterTypes.getOrNull(1)?.name == BOOK_CLASS
+            }
+            if (methods.isEmpty()) error("BookSyncSizeItem composable not found")
+            methods.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (injectingRow.get() == true) return
+                        if (!settingsProvider().canUseFileEdit) return
+                        val lazyItemScope = param.args?.getOrNull(0) ?: return
+                        val book = param.args?.getOrNull(1) ?: return
+                        val composer = param.args?.getOrNull(3) ?: return
+                        injectingRow.set(true)
+                        runCatching {
+                            renderFileEditDetailsItem(lazyItemScope, book, composer)
+                        }.onFailure {
+                            XposedBridge.log("$LOG_PREFIX file edit details row render failed: ${it.stackTraceToString()}")
+                        }
+                        injectingRow.set(false)
+                    }
+                })
+            }
+            XposedBridge.log("$LOG_PREFIX file edit BookSyncSizeItem hook installed: ${methods.size}")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX file edit BookSyncSizeItem hook failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun renderFileEditDetailsItem(lazyItemScope: Any, book: Any, composer: Any) {
+        val shape = roundedShape()
+        val cardModifier = clickableModifier(
+            backgroundModifier(
+                borderModifier(
+                    clipModifier(
+                        lazyAnimateItemModifier(lazyItemScope, fillMaxWidthModifier(modifierInstance())),
+                        shape,
+                    ),
+                    0.4f,
+                    colorScheme(composer).longMethod("getSurfaceContainerHighest"),
+                    shape,
+                ),
+                themeBackgroundAuto(composer),
+            ),
+            "OpenFileEditDetails",
+        ) {
+            openFileEditor(book)
+        }
+        val modifier = paddingModifier(cardModifier, start = 16, top = 15, end = 16, bottom = 15)
+        val content = functionProxy("FileEditDetailsRowContent", FUNCTION3_CLASS) { args ->
+            val rowScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            val innerComposer = args.getOrNull(1) ?: return@functionProxy targetUnit()
+            // Match the host sync row: label on the left, flexible spacer, value and arrow on the right.
+            renderDetailsText(
+                text = "\u7f16\u8f91",
+                modifier = null,
+                color = themeOnBackgroundVariant(innerComposer),
+                composer = innerComposer,
+            )
+            renderWeightedSpacer(rowScope, innerComposer)
+            renderDetailsText(
+                text = "\u56fe\u4e66\u7ed3\u6784",
+                modifier = null,
+                color = colorScheme(innerComposer).longMethod("getOnBackground"),
+                composer = innerComposer,
+            )
+            navigateNextImageVector()?.let { image ->
+                renderIcon(
+                    image = image,
+                    modifier = paddingModifier(
+                        modifierInstance(),
+                        start = 4,
+                        top = 2,
+                        end = 0,
+                        bottom = 0,
+                    ),
+                    tint = colorScheme(innerComposer).longMethod("getSurfaceContainerHighest"),
+                    composer = innerComposer,
+                )
+            }
+            targetUnit()
+        }
+        renderVerticalSpacer(height = 12, composer = composer)
+        method(ROW_KT_CLASS, ROW_METHOD, 7).invoke(
+            null,
+            modifier,
+            arrangementStart(),
+            alignmentCenterVertically(),
+            content,
+            composer,
+            384,
+            0,
+        )
     }
 
     private fun hookBookLocalSheet() {
@@ -769,6 +868,34 @@ class FileEditCompletionHook(
         )
     }
 
+    private fun renderDetailsText(text: String, modifier: Any?, color: Long, composer: Any) {
+        method(TEXT_KT_CLASS, TEXT_METHOD, 22).invoke(
+            null,
+            text,
+            modifier,
+            color,
+            null,
+            0L,
+            null,
+            null,
+            null,
+            0L,
+            null,
+            null,
+            0L,
+            textOverflowEllipsis(),
+            false,
+            1,
+            0,
+            null,
+            typography(composer).method0("getBodyLarge"),
+            composer,
+            0,
+            24960,
+            TEXT_SECONDARY_SINGLE_LINE_MASK,
+        )
+    }
+
     private fun renderIcon(image: Any, modifier: Any, tint: Long, composer: Any) {
         iconImageVectorMethod().invoke(
             null,
@@ -818,6 +945,39 @@ class FileEditCompletionHook(
         rowScope.javaClass.methods.first {
             it.name == "weight" && it.parameterTypes.size == 3
         }.invoke(rowScope, modifier, 1f, true)
+
+    private fun renderWeightedSpacer(rowScope: Any, composer: Any) {
+        method(SPACER_KT_CLASS, SPACER_METHOD, 3).invoke(
+            null,
+            rowWeightModifier(rowScope, startPaddingModifier(modifierInstance(), 12)),
+            composer,
+            0,
+        )
+    }
+
+    private fun renderVerticalSpacer(height: Int, composer: Any) {
+        method(SPACER_KT_CLASS, SPACER_METHOD, 3).invoke(
+            null,
+            heightModifier(modifierInstance(), height),
+            composer,
+            0,
+        )
+    }
+
+    private fun startPaddingModifier(baseModifier: Any, start: Int): Any =
+        method(PADDING_KT_CLASS, PADDING_ABSOLUTE_DEFAULT_METHOD, 7).invoke(
+            null,
+            baseModifier,
+            udp(start),
+            0f,
+            0f,
+            0f,
+            14,
+            null,
+        )
+
+    private fun heightModifier(baseModifier: Any, height: Int): Any =
+        method(SIZE_KT_CLASS, HEIGHT_METHOD, 2).invoke(null, baseModifier, udp(height))
 
     private fun sizeModifier(baseModifier: Any, size: Int): Any =
         method(SIZE_KT_CLASS, SIZE_METHOD, 2).invoke(null, baseModifier, udp(size))
@@ -879,6 +1039,32 @@ class FileEditCompletionHook(
 
     private fun textOverflowEllipsis(): Int =
         staticObject(TEXT_OVERFLOW_CLASS, "INSTANCE").method0("getEllipsis") as Int
+
+    private fun fillMaxWidthModifier(baseModifier: Any): Any =
+        method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, 4).invoke(null, baseModifier, 0f, 1, null)
+
+    private fun lazyAnimateItemModifier(lazyItemScope: Any, baseModifier: Any): Any =
+        runCatching {
+            lazyItemScope.javaClass.methods.firstOrNull {
+                it.name == LAZY_ANIMATE_ITEM_DEFAULT_METHOD && it.parameterTypes.size == 6
+            }?.invoke(null, lazyItemScope, baseModifier, null, null, null, 7, null)
+                ?: baseModifier
+        }.getOrDefault(baseModifier)
+
+    private fun clipModifier(baseModifier: Any, shape: Any): Any =
+        method(CLIP_KT_CLASS, CLIP_METHOD, 2).invoke(null, baseModifier, shape)
+
+    private fun borderModifier(baseModifier: Any, width: Float, color: Long, shape: Any): Any =
+        method(BORDER_KT_CLASS, BORDER_METHOD, 4).invoke(null, baseModifier, width, color, shape)
+
+    private fun backgroundModifier(baseModifier: Any, color: Long): Any =
+        method(BACKGROUND_KT_CLASS, BACKGROUND_DEFAULT_METHOD, 5).invoke(null, baseModifier, color, null, 2, null)
+
+    private fun roundedShape(): Any =
+        method(SHAPE_KT_CLASS, ROUNDED_SHAPE_METHOD, 0).invoke(null)
+
+    private fun themeBackgroundAuto(composer: Any): Long =
+        method(THEME_KT_CLASS, BACKGROUND_AUTO_METHOD, 1).invoke(null, colorScheme(composer)) as Long
 
     private fun colorScheme(composer: Any): Any {
         val materialTheme = staticObject(MATERIAL_THEME_CLASS, "INSTANCE")
@@ -1002,13 +1188,17 @@ class FileEditCompletionHook(
     private companion object {
         const val LOG_PREFIX = "ReaMicro LSP"
         const val BOOK_LOCAL_SHEET_CLASS = "app.zhendong.reamicro.ui.home.components.BookLocalSheetKt"
+        const val BOOK_OVERVIEW_ITEMS_CLASS = "app.zhendong.reamicro.ui.home.components.BookOverviewItemsKt"
         const val BOOK_CLASS = "app.zhendong.reamicro.data.db.entity.Book"
         const val BOOK_LOCAL_SHEET_METHOD = "BookLocalSheet"
         const val BOOK_LOCAL_SHEET_CONTENT_METHOD = "BookLocalSheet\$lambda\$2"
         const val FILE_BACKUP_METHOD = "FileBackup"
+        const val BOOK_SYNC_SIZE_ITEM_METHOD = "BookSyncSizeItem"
 
         const val ROW_KT_CLASS = "androidx.compose.foundation.layout.RowKt"
         const val ROW_METHOD = "Row"
+        const val SPACER_KT_CLASS = "androidx.compose.foundation.layout.SpacerKt"
+        const val SPACER_METHOD = "Spacer"
         const val ARRANGEMENT_CLASS = "androidx.compose.foundation.layout.Arrangement"
         const val ALIGNMENT_CLASS = "androidx.compose.ui.Alignment"
         const val LIST_ITEM_KT_CLASS = "androidx.compose.material3.ListItemKt"
@@ -1029,16 +1219,27 @@ class FileEditCompletionHook(
         const val SIZE_KT_CLASS = "androidx.compose.foundation.layout.SizeKt"
         const val HEIGHT_METHOD = "height-3ABfNKs"
         const val SIZE_METHOD = "size-3ABfNKs"
+        const val FILL_MAX_WIDTH_DEFAULT_METHOD = "fillMaxWidth\$default"
         const val PADDING_KT_CLASS = "androidx.compose.foundation.layout.PaddingKt"
         const val PADDING_METHOD = "padding-qDBjuR0"
         const val PADDING_ABSOLUTE_DEFAULT_METHOD = "padding-qDBjuR0\$default"
         const val CLICKABLE_KT_CLASS = "androidx.compose.foundation.ClickableKt"
         const val CLICKABLE_DEFAULT_METHOD = "clickable-O2vRcR0\$default"
+        const val CLIP_KT_CLASS = "androidx.compose.ui.draw.ClipKt"
+        const val CLIP_METHOD = "clip"
+        const val BORDER_KT_CLASS = "androidx.compose.foundation.BorderKt"
+        const val BORDER_METHOD = "border-xT4_qwU"
+        const val BACKGROUND_KT_CLASS = "androidx.compose.foundation.BackgroundKt"
+        const val BACKGROUND_DEFAULT_METHOD = "background-bw27NRU\$default"
         const val MATERIAL_THEME_CLASS = "androidx.compose.material3.MaterialTheme"
         const val THEME_KT_CLASS = "app.zhendong.reamicro.arch.theme.ThemeKt"
+        const val SHAPE_KT_CLASS = "app.zhendong.reamicro.arch.components.ShapeKt"
+        const val ROUNDED_SHAPE_METHOD = "getRoundedShape"
+        const val BACKGROUND_AUTO_METHOD = "getBackgroundAuto"
         const val COLOR_CLASS = "androidx.compose.ui.graphics.Color"
         const val COLOR_TRANSPARENT_METHOD = "getTransparent-0d7_KjU"
         const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
+        const val LAZY_ANIMATE_ITEM_DEFAULT_METHOD = "animateItem\$default"
         const val UNIT_EXT_KT_CLASS = "app.zhendong.reamicro.arch.extensions.UnitExtKt"
         const val UDP_METHOD = "getUdp"
         const val COMPOSABLE_LAMBDA_KT_CLASS = "androidx.compose.runtime.internal.ComposableLambdaKt"
