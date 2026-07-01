@@ -134,6 +134,7 @@ class FileEditCompletionHook(
                     onClick = { copyBookIdentifiers(book) },
                     trailing = contentCopyImageVector(),
                     valueWeight = true,
+                    middleEllipsis = true,
                 )
             }
             targetUnit()
@@ -204,19 +205,12 @@ class FileEditCompletionHook(
     }
 
     private fun bookIdentifierDisplayText(book: Any): String =
-        middleEllipsizeIdentifier(bookIdentifierRawText(book))
+        bookIdentifierRawText(book)
 
     private fun bookIdentifierRawText(book: Any): String =
         callString(book, "getUuid").trim()
             .takeIf { it.isUuidOrMd5Identifier() }
             .orEmpty()
-
-    private fun middleEllipsizeIdentifier(identifier: String): String {
-        if (identifier.length <= IDENTIFIER_DISPLAY_MAX_CHARS) return identifier
-        return identifier.take(IDENTIFIER_DISPLAY_EDGE_CHARS) +
-            "..." +
-            identifier.takeLast(IDENTIFIER_DISPLAY_EDGE_CHARS)
-    }
 
     private fun String.isUuidOrMd5Identifier(): Boolean =
         UUID_IDENTIFIER_REGEX.matches(this) || MD5_IDENTIFIER_REGEX.matches(this)
@@ -961,7 +955,13 @@ class FileEditCompletionHook(
         )
     }
 
-    private fun renderDetailsText(text: String, modifier: Any?, color: Long, composer: Any) {
+    private fun renderDetailsText(
+        text: String,
+        modifier: Any?,
+        color: Long,
+        composer: Any,
+        overflow: Int = textOverflowEllipsis(),
+    ) {
         method(TEXT_KT_CLASS, TEXT_METHOD, 22).invoke(
             null,
             text,
@@ -976,7 +976,7 @@ class FileEditCompletionHook(
             null,
             null,
             0L,
-            textOverflowEllipsis(),
+            overflow,
             false,
             1,
             0,
@@ -1081,6 +1081,7 @@ class FileEditCompletionHook(
         afterValueIcon: Any? = null,
         secondaryValue: String? = null,
         valueWeight: Boolean = false,
+        middleEllipsis: Boolean = false,
     ) {
         val modifier = fillMaxWidthModifier(
             paddingModifier(
@@ -1117,6 +1118,7 @@ class FileEditCompletionHook(
                 text = value,
                 modifier = if (valueWeight) rowWeightModifier(rowScope, modifierInstance()) else null,
                 color = colorScheme(innerComposer).longMethod("getOnBackground"),
+                overflow = if (middleEllipsis) textOverflowMiddleEllipsis() else textOverflowEllipsis(),
                 composer = innerComposer,
             )
             afterValueIcon?.let { image ->
@@ -1322,6 +1324,9 @@ class FileEditCompletionHook(
 
     private fun textOverflowEllipsis(): Int =
         staticObject(TEXT_OVERFLOW_CLASS, "INSTANCE").method0("getEllipsis") as Int
+
+    private fun textOverflowMiddleEllipsis(): Int =
+        staticObject(TEXT_OVERFLOW_CLASS, "INSTANCE").method0("getMiddleEllipsis") as Int
 
     private fun fillMaxWidthModifier(baseModifier: Any): Any =
         method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, 4).invoke(null, baseModifier, 0f, 1, null)
@@ -1547,8 +1552,6 @@ class FileEditCompletionHook(
         const val TEXT_DEFAULT_MASK_WITH_MODIFIER = 131064
         const val TEXT_SECONDARY_SINGLE_LINE_MASK = 110586
         const val TEXT_SECONDARY_SINGLE_LINE_MASK_WITH_MODIFIER = 110584
-        const val IDENTIFIER_DISPLAY_MAX_CHARS = 34
-        const val IDENTIFIER_DISPLAY_EDGE_CHARS = 15
         const val FILE_EDIT_TITLE_KEY = 0x524D4701
         const val FILE_EDIT_SUPPORTING_KEY = 0x524D4702
         const val FILE_EDIT_LEADING_KEY = 0x524D4703
