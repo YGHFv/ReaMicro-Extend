@@ -76,6 +76,10 @@ class XposedModuleSettings(
         putBoolean(ModuleSettings.KEY_READER_EDIT_OVERWRITE_ENABLED, enabled)
     }
 
+    fun setReaderDictionaryEnabled(enabled: Boolean) {
+        putBoolean(ModuleSettings.KEY_READER_DICTIONARY_ENABLED, enabled)
+    }
+
     fun setFontEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_FONT_ENABLED, enabled)
     }
@@ -252,6 +256,10 @@ class XposedModuleSettings(
             ModuleSettings.KEY_READER_EDIT_OVERWRITE_ENABLED,
             ModuleSettings.DEFAULT_READER_EDIT_OVERWRITE_ENABLED,
         )
+        val readerDictionaryEnabled = prefs.getBoolean(
+            ModuleSettings.KEY_READER_DICTIONARY_ENABLED,
+            ModuleSettings.DEFAULT_READER_DICTIONARY_ENABLED,
+        )
         val editFileEnabled = prefs.getBoolean(
             ModuleSettings.KEY_EDIT_FILE_ENABLED,
             ModuleSettings.DEFAULT_EDIT_FILE_ENABLED,
@@ -307,6 +315,7 @@ class XposedModuleSettings(
             readerKeepScreenOnEnabled = readerKeepScreenOnEnabled,
             readerOverwriteCheckEnabled = readerOverwriteCheckEnabled,
             readerEditOverwriteEnabled = readerEditOverwriteEnabled,
+            readerDictionaryEnabled = readerDictionaryEnabled,
             fontEnabled = prefs.getBoolean(
                 ModuleSettings.KEY_FONT_ENABLED,
                 ModuleSettings.DEFAULT_FONT_ENABLED,
@@ -403,6 +412,7 @@ class XposedModuleSettings(
             snapshot.readerKeepScreenOnEnabled,
             snapshot.readerOverwriteCheckEnabled,
             snapshot.readerEditOverwriteEnabled,
+            snapshot.readerDictionaryEnabled,
             snapshot.fontEnabled,
             snapshot.fontSettingsEnabled,
             snapshot.accountEnabled,
@@ -436,6 +446,7 @@ class XposedModuleSettings(
                     "readerKeepScreenOn=${snapshot.readerKeepScreenOnEnabled}, " +
                     "readerOverwriteCheck=${snapshot.readerOverwriteCheckEnabled}, " +
                     "readerEditOverwrite=${snapshot.readerEditOverwriteEnabled}, " +
+                    "readerDictionary=${snapshot.readerDictionaryEnabled}, " +
                     "font=${snapshot.fontEnabled}, " +
                     "fontSettings=${snapshot.fontSettingsEnabled}, " +
                     "account=${snapshot.accountEnabled}, " +

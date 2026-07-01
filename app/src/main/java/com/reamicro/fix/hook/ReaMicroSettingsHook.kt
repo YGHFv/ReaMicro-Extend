@@ -657,6 +657,16 @@ class ReaMicroSettingsHook(
                             checked
                         },
                     ),
+                    ToggleRow(
+                        key = ModuleSettings.KEY_READER_DICTIONARY_ENABLED,
+                        title = "\u8bcd\u5178\u91ca\u4e49",
+                        checked = snapshot.readerDictionaryEnabled,
+                        visibleProvider = { booleanStateValue(readerExpandedState) },
+                        onChanged = { checked, _ ->
+                            settings.setReaderDictionaryEnabled(checked)
+                            checked
+                        },
+                    ),
                 )
                 renderHostSettingsCard(
                     readerRows,

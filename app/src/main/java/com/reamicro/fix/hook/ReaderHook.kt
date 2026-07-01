@@ -109,6 +109,9 @@ class ReaderHook(
     private fun canEditReaderSelection(): Boolean =
         settingsProvider().canEditReaderSelection
 
+    private fun canShowReaderDictionary(): Boolean =
+        settingsProvider().canShowReaderDictionary
+
     private fun canRunFullTextSearch(): Boolean {
         val snapshot = settingsProvider()
         return snapshot.moduleEnabled && snapshot.readerEnabled
@@ -1053,7 +1056,7 @@ class ReaderHook(
                         val original = (param.args?.getOrNull(0) as? List<*>) ?: return
                         val next = ArrayList<Any>(original.filterNotNull())
                         val fallbackIcon = original.firstNotNullOfOrNull { callNoArg(it, "getIcon") }
-                        if (original.none { callString(it, "getTitle") == "\u8bcd\u5178" }) {
+                        if (canShowReaderDictionary() && original.none { callString(it, "getTitle") == "\u8bcd\u5178" }) {
                             val action = (dictionaryImageVector() ?: fallbackIcon)?.let(::createNativeDictionaryAction)
                             if (action != null) next.add(action)
                         }
@@ -1440,6 +1443,7 @@ class ReaderHook(
 
     private fun openNativeSelectionDictionary() {
         val activity = activityProvider() ?: return
+        if (!canShowReaderDictionary()) return
         val (_, quote) = currentNativeSelectionText()
         if (quote.isBlank()) {
             Toast.makeText(activity, "\u672a\u83b7\u53d6\u5230\u9009\u4e2d\u6587\u672c", Toast.LENGTH_SHORT).show()
