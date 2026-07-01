@@ -34,6 +34,9 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import com.reamicro.fix.ai.AiApiConfig
+import com.reamicro.fix.ai.AiApiStore
+import com.reamicro.fix.ai.AiApiTestResult
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -1047,12 +1050,18 @@ class ReaderHook(
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (!canEditReaderSelection()) return
                         val original = (param.args?.getOrNull(0) as? List<*>) ?: return
-                        if (original.any { callString(it, "getTitle") == "\u7f16\u8f91" }) return
-                        val icon = editImageVector() ?: original.firstNotNullOfOrNull { callNoArg(it, "getIcon") } ?: return
-                        val action = createNativeEditAction(icon) ?: return
-                        param.args[0] = ArrayList<Any>(original.filterNotNull()).apply { add(action) }
+                        val next = ArrayList<Any>(original.filterNotNull())
+                        val fallbackIcon = original.firstNotNullOfOrNull { callNoArg(it, "getIcon") }
+                        if (original.none { callString(it, "getTitle") == "\u8bcd\u5178" }) {
+                            val action = (dictionaryImageVector() ?: fallbackIcon)?.let(::createNativeDictionaryAction)
+                            if (action != null) next.add(action)
+                        }
+                        if (canEditReaderSelection() && original.none { callString(it, "getTitle") == "\u7f16\u8f91" }) {
+                            val action = (editImageVector() ?: fallbackIcon)?.let(::createNativeEditAction)
+                            if (action != null) next.add(action)
+                        }
+                        if (next.size != original.size) param.args[0] = next
                     }
                 })
             }
@@ -1079,6 +1088,23 @@ class ReaderHook(
             XposedBridge.log("$LOG_PREFIX create native edit action failed: ${it.stackTraceToString()}")
         }.getOrNull()
 
+    private fun createNativeDictionaryAction(icon: Any): Any? =
+        runCatching {
+            val actionClass = classLoader.loadClass("org.epub.ui.SelectionMenuAction")
+            val constructor = actionClass.declaredConstructors.firstOrNull { it.parameterTypes.size == 3 }
+                ?: return@runCatching null
+            constructor.isAccessible = true
+            constructor.newInstance(
+                "\u8bcd\u5178",
+                icon,
+                nativeFunction0 {
+                    openNativeSelectionDictionary()
+                },
+            )
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX create native dictionary action failed: ${it.stackTraceToString()}")
+        }.getOrNull()
+
     private fun editImageVector(): Any? =
         runCatching {
             val outlined = classLoader.loadClass(ICONS_OUTLINED_CLASS).getField("INSTANCE").get(null)
@@ -1086,6 +1112,24 @@ class ReaderHook(
                 it.name == "getEdit" && it.parameterTypes.size == 1
             }?.apply { isAccessible = true }?.invoke(null, outlined)
         }.getOrNull()
+
+    private fun dictionaryImageVector(): Any? {
+        val outlined = runCatching {
+            classLoader.loadClass(ICONS_OUTLINED_CLASS).getField("INSTANCE").get(null)
+        }.getOrNull() ?: return null
+        return listOf(
+            DICTIONARY_ICON_TRANSLATE_CLASS to "getTranslate",
+            DICTIONARY_ICON_MENU_BOOK_CLASS to "getMenuBook",
+            DICTIONARY_ICON_AUTO_STORIES_CLASS to "getAutoStories",
+            DICTIONARY_ICON_BOOK_CLASS to "getBook",
+        ).firstNotNullOfOrNull { (className, methodName) ->
+            runCatching {
+                classLoader.loadClass(className).declaredMethods.firstOrNull {
+                    it.name == methodName && it.parameterTypes.size == 1
+                }?.apply { isAccessible = true }?.invoke(null, outlined)
+            }.getOrNull()
+        }
+    }
 
     private fun nativeFunction0(block: () -> Unit): Any {
         val function0Class = classLoader.loadClass("kotlin.jvm.functions.Function0")
@@ -1370,9 +1414,7 @@ class ReaderHook(
     private fun openNativeSelectionEditor() {
         val activity = activityProvider() ?: return
         if (!canEditReaderSelection()) return
-        val controller = currentSelectionControllerRef?.get()
-        val payload = callNoArg(controller, "selectedPayload")
-        val quote = callString(payload, "getQuote").ifBlank { callString(controller, "selectedText") }
+        val (controller, quote) = currentNativeSelectionText()
         if (quote.isBlank()) {
             Toast.makeText(activity, "\u672a\u83b7\u53d6\u5230\u9009\u4e2d\u6587\u672c", Toast.LENGTH_SHORT).show()
             return
@@ -1394,6 +1436,42 @@ class ReaderHook(
                 }
             }
         }
+    }
+
+    private fun openNativeSelectionDictionary() {
+        val activity = activityProvider() ?: return
+        val (_, quote) = currentNativeSelectionText()
+        if (quote.isBlank()) {
+            Toast.makeText(activity, "\u672a\u83b7\u53d6\u5230\u9009\u4e2d\u6587\u672c", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val config = AiApiStore.enabled(activity.applicationContext)
+        if (config == null) {
+            Toast.makeText(activity, "\u8bf7\u5148\u5728 AI \u914d\u7f6e\u4e2d\u542f\u7528 API", Toast.LENGTH_SHORT).show()
+            return
+        }
+        activity.runOnUiThread {
+            val handle = showDictionaryDialog(activity, quote, config)
+            Thread({
+                val result = runCatching { AiApiStore.dictionary(config, quote) }
+                    .onFailure { XposedBridge.log("$LOG_PREFIX dictionary request failed: ${it.stackTraceToString()}") }
+                    .getOrElse { error -> AiApiTestResult(false, error.message ?: error.javaClass.simpleName) }
+                activity.runOnUiThread {
+                    if (!activity.isFinishing &&
+                        (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN_MR1 || !activity.isDestroyed)
+                    ) {
+                        updateDictionaryDialog(handle, result.success, result.message)
+                    }
+                }
+            }, "ReaMicroDictionary").start()
+        }
+    }
+
+    private fun currentNativeSelectionText(): Pair<Any?, String> {
+        val controller = currentSelectionControllerRef?.get()
+        val payload = callNoArg(controller, "selectedPayload")
+        val quote = callString(payload, "getQuote").ifBlank { callString(controller, "selectedText") }
+        return controller to quote.trim()
     }
 
     private fun renderSearchResults(
@@ -3379,6 +3457,103 @@ class ReaderHook(
         focusEditorAndShowKeyboard(activity, editor)
     }
 
+    private fun showDictionaryDialog(
+        activity: Activity,
+        selectedText: String,
+        config: AiApiConfig,
+    ): DictionaryDialogHandle {
+        val colors = DialogColors(activity)
+        val dialog = Dialog(activity)
+        val density = activity.resources.displayMetrics.density
+        fun dp(value: Int): Int = (value * density).toInt()
+        val title = TextView(activity).apply {
+            text = selectedText
+            textSize = 20f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(colors.primaryText)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        val body = TextView(activity).apply {
+            text = "\u6b63\u5728\u89e3\u6790..."
+            textSize = 16f
+            setLineSpacing(dp(3).toFloat(), 1.0f)
+            setTextColor(colors.primaryText)
+            setTextIsSelectable(true)
+        }
+        val footerLabel = TextView(activity).apply {
+            text = "\u8bcd\u5178\u91ca\u4e49"
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(colors.accent)
+        }
+        val model = TextView(activity).apply {
+            text = config.displayName
+            textSize = 13f
+            setTextColor(colors.secondaryText)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            gravity = Gravity.END
+        }
+        val card = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(18), dp(20), dp(14))
+            background = GradientDrawable().apply {
+                setColor(colors.cardBackground)
+                cornerRadius = dp(22).toFloat()
+                setStroke(dp(1), colors.stroke)
+            }
+            addView(title, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+            addView(ScrollView(activity).apply {
+                setPadding(0, dp(12), 0, dp(10))
+                addView(body, ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ))
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(168),
+            ))
+            addView(LinearLayout(activity).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                addView(footerLabel)
+                addView(model, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+        val root = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(10), dp(16), dp(14))
+            addView(card, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        dialog.setContentView(root)
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setGravity(Gravity.BOTTOM)
+            decorView.setPadding(0, 0, 0, 0)
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        return DictionaryDialogHandle(dialog, body, colors)
+    }
+
+    private fun updateDictionaryDialog(handle: DictionaryDialogHandle, success: Boolean, message: String) {
+        if (!handle.dialog.isShowing) return
+        handle.body.text = message.ifBlank { "\u672a\u83b7\u53d6\u5230\u8bcd\u5178\u7ed3\u679c" }
+        handle.body.setTextColor(if (success) handle.colors.primaryText else handle.colors.accent)
+    }
+
     private fun createThoughtStyleEditor(
         activity: Activity,
         text: String,
@@ -3588,6 +3763,10 @@ class ReaderHook(
         const val MARK_CLASS = "app.zhendong.reamicro.data.db.entity.Mark"
         const val CATALOG_CHAPTER_ITEM_CLASS = "app.zhendong.reamicro.ui.reader.CatalogChapterItem"
         const val EDIT_ICON_CLASS = "androidx.compose.material.icons.outlined.EditKt"
+        const val DICTIONARY_ICON_TRANSLATE_CLASS = "androidx.compose.material.icons.outlined.TranslateKt"
+        const val DICTIONARY_ICON_MENU_BOOK_CLASS = "androidx.compose.material.icons.outlined.MenuBookKt"
+        const val DICTIONARY_ICON_AUTO_STORIES_CLASS = "androidx.compose.material.icons.outlined.AutoStoriesKt"
+        const val DICTIONARY_ICON_BOOK_CLASS = "androidx.compose.material.icons.outlined.BookKt"
         const val ICONS_OUTLINED_CLASS = "androidx.compose.material.icons.Icons\$Outlined"
         const val LOG_PREFIX = "ReaMicro LSP"
         const val FLIP_STYLE_TRANSLATE = 0
@@ -3789,6 +3968,12 @@ class ReaderHook(
         val snippetMatchStart: Int,
         val snippetMatchEnd: Int,
         val matchText: String,
+    )
+
+    private data class DictionaryDialogHandle(
+        val dialog: Dialog,
+        val body: TextView,
+        val colors: DialogColors,
     )
 
     private class SearchMenuButtonView(context: Context) : View(context) {

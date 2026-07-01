@@ -1935,6 +1935,9 @@ class ReaMicroSettingsHook(
                                 subtitle = aiApiSubtitle(config),
                                 onClick = { showToast(config.baseUrl) },
                                 onLongClick = { removeAiApiConfig(config) },
+                                trailingContent = { itemComposer ->
+                                    renderAiApiSwitch(config, itemComposer)
+                                },
                             ),
                         )
                     }
@@ -1952,7 +1955,48 @@ class ReaMicroSettingsHook(
         AiApiStore.list(activityProvider()?.applicationContext)
 
     private fun aiApiSubtitle(config: AiApiConfig): String =
-        "${config.baseUrl} \u00b7 ${AiApiStore.maskedKey(config.apiKey)}"
+        (if (config.enabled) "\u5df2\u542f\u7528 \u00b7 " else "") +
+            "${config.baseUrl} \u00b7 ${AiApiStore.maskedKey(config.apiKey)}"
+
+    private fun renderAiApiSwitch(config: AiApiConfig, composer: Any) {
+        val latest = listAiApiConfigs().firstOrNull { it.id == config.id } ?: config
+        val targetChecked = latest.enabled
+        val state = rememberBooleanState(composer, targetChecked)
+        fun updateChecked(value: Boolean) {
+            state.javaClass.methods.firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+                ?.invoke(state, value)
+        }
+        val rememberedChecked = state.method0("getValue") as? Boolean ?: targetChecked
+        val checked = if (rememberedChecked != targetChecked) {
+            updateChecked(targetChecked)
+            targetChecked
+        } else {
+            rememberedChecked
+        }
+        val onCheckedChange = functionProxy("AiApiSwitch${config.id}", FUNCTION1_CLASS) { args ->
+            val enabled = args?.getOrNull(0) as? Boolean ?: return@functionProxy targetUnit()
+            if (AiApiStore.setEnabled(activityProvider()?.applicationContext, config.id, enabled)) {
+                updateChecked(enabled)
+                bumpAiApiVersion()
+            } else {
+                updateChecked(targetChecked)
+            }
+            targetUnit()
+        }
+        method(SWITCH_KT_CLASS, SWITCH_METHOD, 10).invoke(
+            null,
+            checked,
+            onCheckedChange,
+            switchModifier(),
+            null,
+            false,
+            switchColors(composer),
+            null,
+            composer,
+            0,
+            88,
+        )
+    }
 
     private fun removeAiApiConfig(config: AiApiConfig) {
         val removed = AiApiStore.remove(activityProvider()?.applicationContext, config.id)
