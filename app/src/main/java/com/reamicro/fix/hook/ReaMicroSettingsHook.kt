@@ -13,6 +13,7 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -26,10 +27,12 @@ import android.provider.OpenableColumns
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.Window
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebView
@@ -38,6 +41,7 @@ import android.widget.FrameLayout
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.reamicro.fix.ai.AiApiConfig
@@ -2674,6 +2678,207 @@ class ReaMicroSettingsHook(
             AiImagePresetTarget.Banner -> settings.bannerPresetId
         }
 
+    private enum class SettingsDialogButtonRole {
+        Primary,
+        Neutral,
+        Destructive,
+    }
+
+    private inner class SettingsDialogColors(context: Context) {
+        private val dark = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+        val card: Int = if (dark) Color.rgb(30, 34, 40) else Color.WHITE
+        val border: Int = if (dark) Color.rgb(62, 69, 78) else Color.rgb(226, 230, 236)
+        val title: Int = if (dark) Color.WHITE else Color.rgb(29, 33, 39)
+        val body: Int = if (dark) Color.rgb(190, 198, 208) else Color.rgb(86, 94, 106)
+        val field: Int = if (dark) Color.rgb(39, 44, 51) else Color.rgb(246, 248, 251)
+        val primary: Int = settingsThemeColor(context, android.R.attr.colorAccent, Color.rgb(45, 135, 120))
+        val primarySoft: Int = if (dark) Color.rgb(36, 70, 64) else Color.rgb(230, 244, 241)
+        val primaryText: Int = if (dark) Color.rgb(166, 224, 212) else primary
+        val neutralSoft: Int = if (dark) Color.rgb(43, 48, 55) else Color.rgb(242, 244, 247)
+        val neutralText: Int = if (dark) Color.rgb(218, 223, 230) else Color.rgb(74, 82, 94)
+        val destructiveSoft: Int = if (dark) Color.rgb(82, 39, 42) else Color.rgb(253, 236, 236)
+        val destructiveText: Int = if (dark) Color.rgb(255, 172, 172) else Color.rgb(214, 69, 69)
+    }
+
+    private fun settingsDialogCard(context: Context, colors: SettingsDialogColors): LinearLayout =
+        LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(
+                settingsDp(context, 20),
+                settingsDp(context, 20),
+                settingsDp(context, 20),
+                settingsDp(context, 18),
+            )
+            background = settingsRoundedRect(colors.card, settingsDp(context, 22), colors.border)
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+        }
+
+    private fun settingsDialogTitle(
+        context: Context,
+        title: String,
+        colors: SettingsDialogColors,
+    ): TextView =
+        TextView(context).apply {
+            text = title
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+            includeFontPadding = false
+            setTextColor(colors.title)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = settingsDp(context, 14) }
+        }
+
+    private fun settingsDialogInput(
+        context: Context,
+        hintText: String,
+        singleLine: Boolean,
+        colors: SettingsDialogColors,
+    ): EditText =
+        EditText(context).apply {
+            hint = hintText
+            textSize = 14f
+            setSingleLine(singleLine)
+            minHeight = settingsDp(context, 46)
+            setTextColor(colors.title)
+            setHintTextColor(colors.body)
+            setPadding(
+                settingsDp(context, 12),
+                settingsDp(context, 8),
+                settingsDp(context, 12),
+                settingsDp(context, 8),
+            )
+            background = settingsRoundedRect(colors.field, settingsDp(context, 12), colors.border)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = settingsDp(context, 10) }
+        }
+
+    private fun settingsDialogStatus(
+        context: Context,
+        message: String,
+        colors: SettingsDialogColors,
+    ): TextView =
+        TextView(context).apply {
+            text = message
+            textSize = 13f
+            setTextColor(colors.body)
+            includeFontPadding = false
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = settingsDp(context, 10) }
+        }
+
+    private fun settingsDialogActions(context: Context): LinearLayout =
+        LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = settingsDp(context, 4) }
+        }
+
+    private fun settingsDialogButton(
+        context: Context,
+        title: String,
+        colors: SettingsDialogColors,
+        role: SettingsDialogButtonRole = SettingsDialogButtonRole.Primary,
+    ): TextView =
+        TextView(context).apply {
+            text = title
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setSingleLine(true)
+            minHeight = settingsDp(context, 44)
+            setPadding(settingsDp(context, 8), settingsDp(context, 10), settingsDp(context, 8), settingsDp(context, 10))
+            when (role) {
+                SettingsDialogButtonRole.Primary -> {
+                    setTextColor(colors.primaryText)
+                    background = settingsRoundedRect(colors.primarySoft, settingsDp(context, 12), colors.border)
+                }
+                SettingsDialogButtonRole.Neutral -> {
+                    setTextColor(colors.neutralText)
+                    background = settingsRoundedRect(colors.neutralSoft, settingsDp(context, 12), colors.border)
+                }
+                SettingsDialogButtonRole.Destructive -> {
+                    setTextColor(colors.destructiveText)
+                    background = settingsRoundedRect(colors.destructiveSoft, settingsDp(context, 12), colors.border)
+                }
+            }
+        }
+
+    private fun settingsDialogButtonParams(context: Context): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            leftMargin = settingsDp(context, 4)
+            rightMargin = settingsDp(context, 4)
+        }
+
+    private fun settingsDialogProgressParams(context: Context): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            bottomMargin = settingsDp(context, 10)
+        }
+
+    private fun settingsDialogScroll(context: Context, card: LinearLayout): ScrollView =
+        ScrollView(context).apply {
+            isFillViewport = false
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            addView(card)
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+        }
+
+    private fun showSettingsDialog(dialog: Dialog, content: View, activity: Activity, widthRatio: Float = 0.9f) {
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        dialog.setContentView(content)
+        dialog.window?.let { window ->
+            window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            window.setDimAmount(0.46f)
+            window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        }
+        dialog.show()
+        dialog.window?.let { window ->
+            window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            window.setDimAmount(0.46f)
+            window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            window.setLayout(
+                (activity.resources.displayMetrics.widthPixels * widthRatio).toInt(),
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        }
+    }
+
+    private fun settingsRoundedRect(fill: Int, radiusPx: Int, stroke: Int = Color.TRANSPARENT): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(fill)
+            cornerRadius = radiusPx.toFloat()
+            if (stroke != Color.TRANSPARENT) setStroke(1, stroke)
+        }
+
+    private fun settingsDp(context: Context, value: Int): Int =
+        (value * context.resources.displayMetrics.density).toInt()
+
+    private fun settingsThemeColor(context: Context, attr: Int, fallback: Int): Int {
+        val value = TypedValue()
+        return if (context.theme.resolveAttribute(attr, value, true)) value.data else fallback
+    }
+
     private fun openDictionaryPresetDialog() {
         openDictionaryPresetDialog(existing = null)
     }
@@ -2682,57 +2887,41 @@ class ReaMicroSettingsHook(
         val activity = activityProvider() ?: return
         activity.runOnUiThread {
             runCatching {
-                val container = LinearLayout(activity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(48, 24, 48, 0)
-                }
-                val nameInput = EditText(activity).apply {
-                    hint = "\u9884\u8bbe\u540d\u79f0"
+                val colors = SettingsDialogColors(activity)
+                val dialog = Dialog(activity)
+                val card = settingsDialogCard(activity, colors)
+                val nameInput = settingsDialogInput(activity, "\u9884\u8bbe\u540d\u79f0", singleLine = true, colors = colors).apply {
                     inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL
-                    setSingleLine(true)
                     setText(existing?.name.orEmpty())
                 }
-                val promptInput = EditText(activity).apply {
-                    hint = "\u63d0\u793a\u8bcd\u5185\u5bb9\uff0c\u53ef\u7528 {{text}} \u4ee3\u8868\u9009\u4e2d\u6587\u672c"
+                val promptInput = settingsDialogInput(
+                    activity,
+                    "\u63d0\u793a\u8bcd\u5185\u5bb9\uff0c\u53ef\u7528 {{text}} \u4ee3\u8868\u9009\u4e2d\u6587\u672c",
+                    singleLine = false,
+                    colors = colors,
+                ).apply {
                     inputType = InputType.TYPE_CLASS_TEXT or
                         InputType.TYPE_TEXT_FLAG_MULTI_LINE or
                         InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
                     minLines = 5
                     maxLines = 8
                     gravity = Gravity.TOP or Gravity.START
-                    setSingleLine(false)
                     setText(existing?.prompt.orEmpty())
                 }
-                fun actionButton(title: String, color: Int): TextView =
-                    TextView(activity).apply {
-                        text = title
-                        setTextColor(color)
-                        gravity = Gravity.CENTER
-                        setSingleLine(true)
-                        textSize = 16f
-                        setPadding(0, 24, 0, 8)
-                        layoutParams = LinearLayout.LayoutParams(
-                            0,
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                            1f,
-                        )
-                    }
-                val primaryColor = Color.rgb(45, 135, 120)
-                val finishButton = actionButton("\u5b8c\u6210", primaryColor)
+                val finishButton = settingsDialogButton(activity, "\u5b8c\u6210", colors)
                 val deleteButton = existing?.takeUnless { it.builtIn }?.let {
-                    actionButton("\u5220\u9664", Color.parseColor("#D64545"))
+                    settingsDialogButton(activity, "\u5220\u9664", colors, SettingsDialogButtonRole.Destructive)
                 }
-                val cancelButton = actionButton("\u53d6\u6d88", primaryColor)
-                val actionRow = LinearLayout(activity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    addView(finishButton)
-                    if (deleteButton != null) addView(deleteButton)
-                    addView(cancelButton)
+                val cancelButton = settingsDialogButton(activity, "\u53d6\u6d88", colors, SettingsDialogButtonRole.Neutral)
+                val actionRow = settingsDialogActions(activity).apply {
+                    addView(finishButton, settingsDialogButtonParams(activity))
+                    if (deleteButton != null) addView(deleteButton, settingsDialogButtonParams(activity))
+                    addView(cancelButton, settingsDialogButtonParams(activity))
                 }
-                container.addView(nameInput)
-                container.addView(promptInput)
-                container.addView(actionRow)
+                card.addView(settingsDialogTitle(activity, "\u8bcd\u5178\u9884\u8bbe", colors))
+                card.addView(nameInput)
+                card.addView(promptInput)
+                card.addView(actionRow)
 
                 fun hasAllValues(): Boolean =
                     nameInput.text?.toString()?.trim()?.isNotBlank() == true &&
@@ -2754,50 +2943,40 @@ class ReaMicroSettingsHook(
                 nameInput.addTextChangedListener(watcher)
                 promptInput.addTextChangedListener(watcher)
 
-                val dialog = AlertDialog.Builder(activity)
-                    .setTitle("\u8bcd\u5178\u9884\u8bbe")
-                    .setView(container)
-                    .create()
-                dialog.setOnShowListener {
-                    dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-                    refreshButtons()
-                    deleteButton?.setOnClickListener {
-                        val target = existing ?: return@setOnClickListener
-                        if (AiApiStore.removeDictionaryPreset(activity.applicationContext, target.id)) {
-                            bumpAiApiVersion()
-                            showToast("\u5df2\u5220\u9664\u9884\u8bbe\uff1a${target.name}")
-                        }
-                        dialog.dismiss()
+                deleteButton?.setOnClickListener {
+                    val target = existing ?: return@setOnClickListener
+                    if (AiApiStore.removeDictionaryPreset(activity.applicationContext, target.id)) {
+                        bumpAiApiVersion()
+                        showToast("\u5df2\u5220\u9664\u9884\u8bbe\uff1a${target.name}")
                     }
-                    finishButton.setOnClickListener {
-                        val name = nameInput.text?.toString().orEmpty()
-                        val prompt = promptInput.text?.toString().orEmpty()
-                        runCatching {
+                    dialog.dismiss()
+                }
+                finishButton.setOnClickListener {
+                    val name = nameInput.text?.toString().orEmpty()
+                    val prompt = promptInput.text?.toString().orEmpty()
+                    runCatching {
+                        if (existing == null) {
+                            AiApiStore.addDictionaryPreset(activity.applicationContext, name, prompt)
+                        } else {
+                            AiApiStore.updateDictionaryPreset(activity.applicationContext, existing.id, name, prompt)
+                        }
+                    }.onSuccess { preset ->
+                        bumpAiApiVersion()
+                        showToast(
                             if (existing == null) {
-                                AiApiStore.addDictionaryPreset(activity.applicationContext, name, prompt)
+                                "\u5df2\u6dfb\u52a0\u9884\u8bbe\uff1a${preset.name}"
                             } else {
-                                AiApiStore.updateDictionaryPreset(activity.applicationContext, existing.id, name, prompt)
-                            }
-                        }.onSuccess { preset ->
-                            bumpAiApiVersion()
-                            showToast(
-                                if (existing == null) {
-                                    "\u5df2\u6dfb\u52a0\u9884\u8bbe\uff1a${preset.name}"
-                                } else {
-                                    "\u5df2\u66f4\u65b0\u9884\u8bbe\uff1a${preset.name}"
-                                },
-                            )
-                            dialog.dismiss()
-                        }.onFailure { error ->
-                            Toast.makeText(activity, error.message ?: "\u65e0\u6cd5\u4fdd\u5b58\u9884\u8bbe", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                    cancelButton.setOnClickListener {
+                                "\u5df2\u66f4\u65b0\u9884\u8bbe\uff1a${preset.name}"
+                            },
+                        )
                         dialog.dismiss()
+                    }.onFailure { error ->
+                        Toast.makeText(activity, error.message ?: "\u65e0\u6cd5\u4fdd\u5b58\u9884\u8bbe", Toast.LENGTH_SHORT).show()
                     }
                 }
-                dialog.show()
-                dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                cancelButton.setOnClickListener { dialog.dismiss() }
+                refreshButtons()
+                showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
             }.onFailure {
                 XposedBridge.log("$LOG_PREFIX failed to open dictionary preset dialog: ${it.stackTraceToString()}")
                 showToast("\u65e0\u6cd5\u6253\u5f00\u8bcd\u5178\u9884\u8bbe")
@@ -2814,57 +2993,41 @@ class ReaMicroSettingsHook(
         activity.runOnUiThread {
             runCatching {
                 val actualTarget = existing?.target ?: target
-                val container = LinearLayout(activity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(48, 24, 48, 0)
-                }
-                val nameInput = EditText(activity).apply {
-                    hint = "\u9884\u8bbe\u540d\u79f0"
+                val colors = SettingsDialogColors(activity)
+                val dialog = Dialog(activity)
+                val card = settingsDialogCard(activity, colors)
+                val nameInput = settingsDialogInput(activity, "\u9884\u8bbe\u540d\u79f0", singleLine = true, colors = colors).apply {
                     inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL
-                    setSingleLine(true)
                     setText(existing?.name.orEmpty())
                 }
-                val promptInput = EditText(activity).apply {
-                    hint = "\u751f\u56fe\u63d0\u793a\u8bcd\uff0c\u53ef\u7528 {{text}} \u4ee3\u8868\u751f\u6210\u4e3b\u9898"
+                val promptInput = settingsDialogInput(
+                    activity,
+                    "\u751f\u56fe\u63d0\u793a\u8bcd\uff0c\u53ef\u7528 {{text}} \u4ee3\u8868\u751f\u6210\u4e3b\u9898",
+                    singleLine = false,
+                    colors = colors,
+                ).apply {
                     inputType = InputType.TYPE_CLASS_TEXT or
                         InputType.TYPE_TEXT_FLAG_MULTI_LINE or
                         InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
                     minLines = 5
                     maxLines = 8
                     gravity = Gravity.TOP or Gravity.START
-                    setSingleLine(false)
                     setText(existing?.prompt.orEmpty())
                 }
-                fun actionButton(title: String, color: Int): TextView =
-                    TextView(activity).apply {
-                        text = title
-                        setTextColor(color)
-                        gravity = Gravity.CENTER
-                        setSingleLine(true)
-                        textSize = 16f
-                        setPadding(0, 24, 0, 8)
-                        layoutParams = LinearLayout.LayoutParams(
-                            0,
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                            1f,
-                        )
-                    }
-                val primaryColor = Color.rgb(45, 135, 120)
-                val finishButton = actionButton("\u5b8c\u6210", primaryColor)
+                val finishButton = settingsDialogButton(activity, "\u5b8c\u6210", colors)
                 val deleteButton = existing?.takeUnless { it.builtIn }?.let {
-                    actionButton("\u5220\u9664", Color.parseColor("#D64545"))
+                    settingsDialogButton(activity, "\u5220\u9664", colors, SettingsDialogButtonRole.Destructive)
                 }
-                val cancelButton = actionButton("\u53d6\u6d88", primaryColor)
-                val actionRow = LinearLayout(activity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    addView(finishButton)
-                    if (deleteButton != null) addView(deleteButton)
-                    addView(cancelButton)
+                val cancelButton = settingsDialogButton(activity, "\u53d6\u6d88", colors, SettingsDialogButtonRole.Neutral)
+                val actionRow = settingsDialogActions(activity).apply {
+                    addView(finishButton, settingsDialogButtonParams(activity))
+                    if (deleteButton != null) addView(deleteButton, settingsDialogButtonParams(activity))
+                    addView(cancelButton, settingsDialogButtonParams(activity))
                 }
-                container.addView(nameInput)
-                container.addView(promptInput)
-                container.addView(actionRow)
+                card.addView(settingsDialogTitle(activity, actualTarget.title, colors))
+                card.addView(nameInput)
+                card.addView(promptInput)
+                card.addView(actionRow)
 
                 fun hasAllValues(): Boolean =
                     nameInput.text?.toString()?.trim()?.isNotBlank() == true &&
@@ -2886,50 +3049,40 @@ class ReaMicroSettingsHook(
                 nameInput.addTextChangedListener(watcher)
                 promptInput.addTextChangedListener(watcher)
 
-                val dialog = AlertDialog.Builder(activity)
-                    .setTitle(actualTarget.title)
-                    .setView(container)
-                    .create()
-                dialog.setOnShowListener {
-                    dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-                    refreshButtons()
-                    deleteButton?.setOnClickListener {
-                        val targetPreset = existing ?: return@setOnClickListener
-                        if (AiApiStore.removeImagePreset(activity.applicationContext, targetPreset.id)) {
-                            bumpAiApiVersion()
-                            showToast("\u5df2\u5220\u9664\u9884\u8bbe\uff1a${targetPreset.name}")
-                        }
-                        dialog.dismiss()
+                deleteButton?.setOnClickListener {
+                    val targetPreset = existing ?: return@setOnClickListener
+                    if (AiApiStore.removeImagePreset(activity.applicationContext, targetPreset.id)) {
+                        bumpAiApiVersion()
+                        showToast("\u5df2\u5220\u9664\u9884\u8bbe\uff1a${targetPreset.name}")
                     }
-                    finishButton.setOnClickListener {
-                        val name = nameInput.text?.toString().orEmpty()
-                        val prompt = promptInput.text?.toString().orEmpty()
-                        runCatching {
+                    dialog.dismiss()
+                }
+                finishButton.setOnClickListener {
+                    val name = nameInput.text?.toString().orEmpty()
+                    val prompt = promptInput.text?.toString().orEmpty()
+                    runCatching {
+                        if (existing == null) {
+                            AiApiStore.addImagePreset(activity.applicationContext, actualTarget, name, prompt)
+                        } else {
+                            AiApiStore.updateImagePreset(activity.applicationContext, existing.id, name, prompt)
+                        }
+                    }.onSuccess { preset ->
+                        bumpAiApiVersion()
+                        showToast(
                             if (existing == null) {
-                                AiApiStore.addImagePreset(activity.applicationContext, actualTarget, name, prompt)
+                                "\u5df2\u6dfb\u52a0\u9884\u8bbe\uff1a${preset.name}"
                             } else {
-                                AiApiStore.updateImagePreset(activity.applicationContext, existing.id, name, prompt)
-                            }
-                        }.onSuccess { preset ->
-                            bumpAiApiVersion()
-                            showToast(
-                                if (existing == null) {
-                                    "\u5df2\u6dfb\u52a0\u9884\u8bbe\uff1a${preset.name}"
-                                } else {
-                                    "\u5df2\u66f4\u65b0\u9884\u8bbe\uff1a${preset.name}"
-                                },
-                            )
-                            dialog.dismiss()
-                        }.onFailure { error ->
-                            Toast.makeText(activity, error.message ?: "\u65e0\u6cd5\u4fdd\u5b58\u9884\u8bbe", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                    cancelButton.setOnClickListener {
+                                "\u5df2\u66f4\u65b0\u9884\u8bbe\uff1a${preset.name}"
+                            },
+                        )
                         dialog.dismiss()
+                    }.onFailure { error ->
+                        Toast.makeText(activity, error.message ?: "\u65e0\u6cd5\u4fdd\u5b58\u9884\u8bbe", Toast.LENGTH_SHORT).show()
                     }
                 }
-                dialog.show()
-                dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                cancelButton.setOnClickListener { dialog.dismiss() }
+                refreshButtons()
+                showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
             }.onFailure {
                 XposedBridge.log("$LOG_PREFIX failed to open image preset dialog: ${it.stackTraceToString()}")
                 showToast("\u65e0\u6cd5\u6253\u5f00\u751f\u56fe\u9884\u8bbe")
@@ -2991,82 +3144,59 @@ class ReaMicroSettingsHook(
         val activity = activityProvider() ?: return
         activity.runOnUiThread {
             runCatching {
-                val container = LinearLayout(activity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(48, 24, 48, 0)
-                }
-                val baseUrlInput = EditText(activity).apply {
-                    hint = "base_url"
+                val colors = SettingsDialogColors(activity)
+                val dialog = Dialog(activity)
+                val card = settingsDialogCard(activity, colors)
+                val baseUrlInput = settingsDialogInput(activity, "base_url", singleLine = true, colors = colors).apply {
                     inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-                    setSingleLine(true)
                     setText(existing?.baseUrl.orEmpty())
                 }
-                val apiKeyInput = EditText(activity).apply {
-                    hint = "api_key"
+                val apiKeyInput = settingsDialogInput(activity, "api_key", singleLine = true, colors = colors).apply {
                     inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                    setSingleLine(true)
                     setText(existing?.apiKey.orEmpty())
                 }
-                val modelInput = EditText(activity).apply {
-                    hint = "model"
+                val modelInput = settingsDialogInput(activity, "model", singleLine = true, colors = colors).apply {
                     inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL
-                    setSingleLine(true)
                     setText(existing?.model.orEmpty())
                 }
-                val status = TextView(activity).apply {
-                    text = if (existing == null) {
+                val status = settingsDialogStatus(
+                    activity,
+                    if (existing == null) {
                         "\u586b\u5b8c\u540e\u5148\u70b9\u51fb\u6d4b\u8bd5"
                     } else {
                         "\u5f53\u524d\u914d\u7f6e\u53ef\u76f4\u63a5\u5b8c\u6210\uff0c\u4fee\u6539\u540e\u9700\u8981\u91cd\u65b0\u6d4b\u8bd5"
-                    }
-                    setPadding(0, 16, 0, 0)
-                }
+                    },
+                    colors,
+                )
                 val progress = ProgressBar(activity).apply {
                     visibility = View.GONE
+                    isIndeterminate = true
                 }
-                fun actionButton(title: String, color: Int): TextView =
-                    TextView(activity).apply {
-                        text = title
-                        setTextColor(color)
-                        gravity = Gravity.CENTER
-                        setSingleLine(true)
-                        textSize = 16f
-                        setPadding(0, 24, 0, 8)
-                        layoutParams = LinearLayout.LayoutParams(
-                            0,
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                            1f,
-                        )
-                    }
-                val primaryColor = Color.rgb(45, 135, 120)
-                val finishButton = actionButton("\u5b8c\u6210", primaryColor)
-                val deleteButton = existing?.let { actionButton("\u5220\u9664", Color.parseColor("#D64545")) }
-                val cancelButton = actionButton("\u53d6\u6d88", primaryColor)
-                val testButton = actionButton("\u6d4b\u8bd5", primaryColor)
-                val actionRow = LinearLayout(activity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    addView(finishButton)
-                    if (deleteButton != null) addView(deleteButton)
-                    addView(cancelButton)
-                    addView(testButton)
+                val finishButton = settingsDialogButton(activity, "\u5b8c\u6210", colors)
+                val deleteButton = existing?.let {
+                    settingsDialogButton(activity, "\u5220\u9664", colors, SettingsDialogButtonRole.Destructive)
                 }
-                container.addView(baseUrlInput)
-                container.addView(apiKeyInput)
-                container.addView(modelInput)
-                container.addView(status)
-                container.addView(progress)
-                container.addView(actionRow)
+                val cancelButton = settingsDialogButton(activity, "\u53d6\u6d88", colors, SettingsDialogButtonRole.Neutral)
+                val testButton = settingsDialogButton(activity, "\u6d4b\u8bd5", colors)
+                val actionRow = settingsDialogActions(activity).apply {
+                    addView(finishButton, settingsDialogButtonParams(activity))
+                    if (deleteButton != null) addView(deleteButton, settingsDialogButtonParams(activity))
+                    addView(cancelButton, settingsDialogButtonParams(activity))
+                    addView(testButton, settingsDialogButtonParams(activity))
+                }
+                card.addView(settingsDialogTitle(activity, "API \u914d\u7f6e", colors))
+                card.addView(baseUrlInput)
+                card.addView(apiKeyInput)
+                card.addView(modelInput)
+                card.addView(status)
+                card.addView(progress, settingsDialogProgressParams(activity))
+                card.addView(actionRow)
 
                 var testedBaseUrl = existing?.baseUrl.orEmpty()
                 var testedApiKey = existing?.apiKey.orEmpty()
                 var testedModel = existing?.model.orEmpty()
                 var testing = false
 
-                val dialog = AlertDialog.Builder(activity)
-                    .setTitle("API \u914d\u7f6e")
-                    .setView(container)
-                    .create()
                 deleteButton?.setOnClickListener {
                     val target = existing ?: return@setOnClickListener
                     if (AiApiStore.remove(activity.applicationContext, target.id)) {
@@ -3118,65 +3248,59 @@ class ReaMicroSettingsHook(
                 apiKeyInput.addTextChangedListener(watcher)
                 modelInput.addTextChangedListener(watcher)
 
-                dialog.setOnShowListener {
-                    dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                testButton.setOnClickListener {
+                    val (baseUrl, apiKey, model) = values()
+                    if (baseUrl.isBlank() || apiKey.isBlank() || model.isBlank()) {
+                        Toast.makeText(activity, "\u8bf7\u5148\u586b\u5b8c\u5168\u90e8\u5b57\u6bb5", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                    testing = true
+                    status.text = "\u6b63\u5728\u6d4b\u8bd5\u8fde\u63a5..."
+                    progress.visibility = View.VISIBLE
                     refreshButtons()
-                    testButton.setOnClickListener {
-                        val (baseUrl, apiKey, model) = values()
-                        if (baseUrl.isBlank() || apiKey.isBlank() || model.isBlank()) {
-                            Toast.makeText(activity, "\u8bf7\u5148\u586b\u5b8c\u5168\u90e8\u5b57\u6bb5", Toast.LENGTH_SHORT).show()
-                            return@setOnClickListener
-                        }
-                        testing = true
-                        status.text = "\u6b63\u5728\u6d4b\u8bd5\u8fde\u63a5..."
-                        progress.visibility = View.VISIBLE
-                        refreshButtons()
-                        Thread({
-                            val result = AiApiStore.test(baseUrl, apiKey, model)
-                            activity.runOnUiThread {
-                                testing = false
-                                progress.visibility = View.GONE
-                                status.text = result.message
-                                if (result.success) {
-                                    testedBaseUrl = baseUrl
-                                    testedApiKey = apiKey
-                                    testedModel = model
-                                } else {
-                                    testedBaseUrl = ""
-                                    testedApiKey = ""
-                                    testedModel = ""
-                                }
-                                refreshButtons()
-                            }
-                        }, "ReaMicroAiApiTest").start()
-                    }
-                    finishButton.setOnClickListener {
-                        val (baseUrl, apiKey, model) = values()
-                        if (!testPassedForCurrentValues()) {
-                            Toast.makeText(activity, "\u8bf7\u5148\u6d4b\u8bd5\u901a\u8fc7", Toast.LENGTH_SHORT).show()
-                            return@setOnClickListener
-                        }
-                        val config = if (existing == null) {
-                            AiApiStore.add(activity.applicationContext, baseUrl, apiKey, model)
-                        } else {
-                            AiApiStore.update(activity.applicationContext, existing.id, baseUrl, apiKey, model)
-                        }
-                        bumpAiApiVersion()
-                        showToast(
-                            if (existing == null) {
-                                "\u5df2\u6dfb\u52a0 API\uff1a${config.displayName}"
+                    Thread({
+                        val result = AiApiStore.test(baseUrl, apiKey, model)
+                        activity.runOnUiThread {
+                            testing = false
+                            progress.visibility = View.GONE
+                            status.text = result.message
+                            if (result.success) {
+                                testedBaseUrl = baseUrl
+                                testedApiKey = apiKey
+                                testedModel = model
                             } else {
-                                "\u5df2\u66f4\u65b0 API\uff1a${config.displayName}"
-                            },
-                        )
-                        dialog.dismiss()
-                    }
-                    cancelButton.setOnClickListener {
-                        dialog.dismiss()
-                    }
+                                testedBaseUrl = ""
+                                testedApiKey = ""
+                                testedModel = ""
+                            }
+                            refreshButtons()
+                        }
+                    }, "ReaMicroAiApiTest").start()
                 }
-                dialog.show()
-                dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                finishButton.setOnClickListener {
+                    val (baseUrl, apiKey, model) = values()
+                    if (!testPassedForCurrentValues()) {
+                        Toast.makeText(activity, "\u8bf7\u5148\u6d4b\u8bd5\u901a\u8fc7", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                    val config = if (existing == null) {
+                        AiApiStore.add(activity.applicationContext, baseUrl, apiKey, model)
+                    } else {
+                        AiApiStore.update(activity.applicationContext, existing.id, baseUrl, apiKey, model)
+                    }
+                    bumpAiApiVersion()
+                    showToast(
+                        if (existing == null) {
+                            "\u5df2\u6dfb\u52a0 API\uff1a${config.displayName}"
+                        } else {
+                            "\u5df2\u66f4\u65b0 API\uff1a${config.displayName}"
+                        },
+                    )
+                    dialog.dismiss()
+                }
+                cancelButton.setOnClickListener { dialog.dismiss() }
+                refreshButtons()
+                showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
             }.onFailure {
                 XposedBridge.log("$LOG_PREFIX failed to open AI API config dialog: ${it.stackTraceToString()}")
                 showToast("\u65e0\u6cd5\u6253\u5f00 API \u914d\u7f6e")

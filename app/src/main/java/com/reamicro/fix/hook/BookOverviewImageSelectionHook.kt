@@ -951,11 +951,15 @@ class BookOverviewImageSelectionHook(
 private fun dialogCard(context: Context, colors: BookOverviewImageSelectionHook.DialogColors): LinearLayout =
     LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(context, 20), dp(context, 20), dp(context, 20), dp(context, 16))
+        setPadding(dp(context, 18), dp(context, 18), dp(context, 18), dp(context, 10))
         background = GradientDrawable().apply {
             setColor(colors.card)
             cornerRadius = dp(context, 22).toFloat()
         }
+        layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        )
     }
 
 private fun dialogTitle(context: Context, title: String): TextView =
@@ -968,7 +972,7 @@ private fun dialogTitle(context: Context, title: String): TextView =
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { bottomMargin = dp(context, 12) }
+        ).apply { bottomMargin = dp(context, 10) }
     }
 
 private fun dialogMessage(
@@ -997,14 +1001,14 @@ private fun actionRow(
         text = if (subtitle.isBlank()) title else "$title\n$subtitle"
         textSize = if (subtitle.isBlank()) 15f else 14f
         setTextColor(if (subtitle.isBlank()) colors.neutralText else colors.title)
-        setPadding(dp(context, 16), dp(context, 13), dp(context, 16), dp(context, 13))
+        setPadding(dp(context, 14), dp(context, 12), dp(context, 14), dp(context, 12))
         background = rounded(colors.neutralSoft, colors.border, dp(context, 12))
         gravity = Gravity.CENTER_VERTICAL
         setOnClickListener { onClick() }
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { bottomMargin = dp(context, 10) }
+        ).apply { bottomMargin = dp(context, 8) }
     }
 
 private fun fieldLabel(
