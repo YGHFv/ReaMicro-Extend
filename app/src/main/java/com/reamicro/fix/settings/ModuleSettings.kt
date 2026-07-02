@@ -13,7 +13,6 @@ object ModuleSettings {
     const val KEY_READER_ENABLED = "reader_enabled"
     const val KEY_READER_LONG_PRESS_ENABLED = "reader_long_press_enabled"
     const val KEY_READER_AUTO_PAGE_ENABLED = "reader_auto_page_enabled"
-    const val KEY_READER_KEEP_SCREEN_ON_ENABLED = "reader_keep_screen_on_enabled"
     const val KEY_READER_OVERWRITE_CHECK_ENABLED = "reader_overwrite_check_enabled"
     const val KEY_READER_EDIT_OVERWRITE_ENABLED = "reader_edit_overwrite_enabled"
     const val KEY_READER_DICTIONARY_ENABLED = "reader_dictionary_enabled"
@@ -46,7 +45,6 @@ object ModuleSettings {
     const val DEFAULT_READER_ENABLED = true
     const val DEFAULT_READER_LONG_PRESS_ENABLED = false
     const val DEFAULT_READER_AUTO_PAGE_ENABLED = false
-    const val DEFAULT_READER_KEEP_SCREEN_ON_ENABLED = true
     const val DEFAULT_READER_OVERWRITE_CHECK_ENABLED = false
     const val DEFAULT_READER_EDIT_OVERWRITE_ENABLED = false
     const val DEFAULT_READER_DICTIONARY_ENABLED = true
@@ -124,7 +122,6 @@ data class ModuleSettingsSnapshot(
     val readerEnabled: Boolean = ModuleSettings.DEFAULT_READER_ENABLED,
     val readerLongPressEnabled: Boolean = ModuleSettings.DEFAULT_READER_LONG_PRESS_ENABLED,
     val readerAutoPageEnabled: Boolean = ModuleSettings.DEFAULT_READER_AUTO_PAGE_ENABLED,
-    val readerKeepScreenOnEnabled: Boolean = ModuleSettings.DEFAULT_READER_KEEP_SCREEN_ON_ENABLED,
     val readerOverwriteCheckEnabled: Boolean = ModuleSettings.DEFAULT_READER_OVERWRITE_CHECK_ENABLED,
     val readerEditOverwriteEnabled: Boolean = ModuleSettings.DEFAULT_READER_EDIT_OVERWRITE_ENABLED,
     val readerDictionaryEnabled: Boolean = ModuleSettings.DEFAULT_READER_DICTIONARY_ENABLED,
@@ -166,9 +163,6 @@ data class ModuleSettingsSnapshot(
 
     val canRunReaderAutoPage: Boolean
         get() = moduleEnabled && readerAutoPageEnabled
-
-    val canKeepScreenOnDuringAutoPage: Boolean
-        get() = canRunReaderAutoPage && readerKeepScreenOnEnabled
 
     val canRunReaderOverwriteCheck: Boolean
         get() = moduleEnabled && readerOverwriteCheckEnabled

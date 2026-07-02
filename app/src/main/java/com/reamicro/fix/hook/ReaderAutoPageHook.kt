@@ -6,7 +6,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
-import android.view.WindowManager
 import android.widget.Toast
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import de.robv.android.xposed.XC_MethodHook
@@ -42,8 +41,6 @@ class ReaderAutoPageHook(
     private var autoPageEnabled: Boolean = false
     private var pausedForReaderExit: Boolean = false
     private var pausedRemainingMs: Long = Long.MAX_VALUE
-    @Volatile private var keepScreenOnApplied: Boolean = false
-    @Volatile private var keepScreenOnActivityRef: WeakReference<Activity>? = null
 
     fun install() {
         hookReaderViewModel()
@@ -483,7 +480,6 @@ class ReaderAutoPageHook(
             Long.MAX_VALUE
         }
         setState(runningState, true)
-        syncKeepScreenOn()
         scheduleNextTurn(intervalSeconds.coerceIn(MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS))
         if (closeSettings) closeReaderSettings()
         if (showToast) {
@@ -496,7 +492,6 @@ class ReaderAutoPageHook(
     private fun scheduleNextTurn(intervalSeconds: Int) {
         val runnable = Runnable {
             if (!isRunning() || pausedForReaderExit) return@Runnable
-            syncKeepScreenOn()
             if (!canRunAutoPage()) {
                 log("auto page stopped because module setting is disabled")
                 stopAutoPage(updateUiState = true, showToast = false)
@@ -522,7 +517,6 @@ class ReaderAutoPageHook(
         autoPageEnabled = false
         pausedForReaderExit = false
         pausedRemainingMs = Long.MAX_VALUE
-        syncKeepScreenOn()
         if (updateUiState) setState(runningState, false)
         if (showToast) {
             activityProvider()?.let {
@@ -579,7 +573,6 @@ class ReaderAutoPageHook(
         pausedForReaderExit = true
         mainHandler.removeCallbacksAndMessages(AUTO_PAGE_TOKEN)
         autoPageRunnable = null
-        syncKeepScreenOn()
         log("auto page paused for reader exit remaining=$pausedRemainingMs")
     }
 
@@ -597,35 +590,8 @@ class ReaderAutoPageHook(
         }
         pausedRemainingMs = Long.MAX_VALUE
         setState(runningState, true)
-        syncKeepScreenOn()
         scheduleNextTurn(intervalSeconds().coerceIn(MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS))
         log("auto page resumed after reader return interval=${intervalSeconds()}")
-    }
-
-    private fun syncKeepScreenOn() {
-        val activity = activityProvider()
-        mainHandler.post {
-            val target = activityProvider() ?: activity
-            val shouldKeepOn = autoPageEnabled &&
-                !pausedForReaderExit &&
-                settingsProvider().canKeepScreenOnDuringAutoPage
-            when {
-                shouldKeepOn && target != null -> {
-                    target.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    keepScreenOnApplied = true
-                    keepScreenOnActivityRef = WeakReference(target)
-                }
-                keepScreenOnApplied -> {
-                    val appliedActivity = keepScreenOnActivityRef?.get()
-                    appliedActivity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    if (appliedActivity !== target) {
-                        target?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    }
-                    keepScreenOnApplied = false
-                    keepScreenOnActivityRef = null
-                }
-            }
-        }
     }
 
     private fun setState(state: Any?, value: Any) {

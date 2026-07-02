@@ -675,16 +675,6 @@ class ReaMicroSettingsHook(
                         },
                     ),
                     ToggleRow(
-                        key = ModuleSettings.KEY_READER_KEEP_SCREEN_ON_ENABLED,
-                        title = "\u5c4f\u5e55\u5e38\u4eae",
-                        checked = snapshot.readerKeepScreenOnEnabled,
-                        visibleProvider = { booleanStateValue(readerExpandedState) },
-                        onChanged = { checked, _ ->
-                            settings.setReaderKeepScreenOnEnabled(checked)
-                            checked
-                        },
-                    ),
-                    ToggleRow(
                         key = ModuleSettings.KEY_READER_OVERWRITE_CHECK_ENABLED,
                         title = "\u8986\u76d6\u68c0\u67e5",
                         checked = snapshot.readerOverwriteCheckEnabled,
@@ -998,15 +988,6 @@ class ReaMicroSettingsHook(
                     checked = snapshot.readerAutoPageEnabled,
                     onChanged = { checked, _ ->
                         settings.setReaderAutoPageEnabled(checked)
-                        checked
-                    },
-                ),
-                ToggleRow(
-                    key = ModuleSettings.KEY_READER_KEEP_SCREEN_ON_ENABLED,
-                    title = "\u5c4f\u5e55\u5e38\u4eae",
-                    checked = snapshot.readerKeepScreenOnEnabled,
-                    onChanged = { checked, _ ->
-                        settings.setReaderKeepScreenOnEnabled(checked)
                         checked
                     },
                 ),

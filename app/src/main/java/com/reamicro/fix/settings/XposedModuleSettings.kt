@@ -64,10 +64,6 @@ class XposedModuleSettings(
         putBoolean(ModuleSettings.KEY_READER_AUTO_PAGE_ENABLED, enabled)
     }
 
-    fun setReaderKeepScreenOnEnabled(enabled: Boolean) {
-        putBoolean(ModuleSettings.KEY_READER_KEEP_SCREEN_ON_ENABLED, enabled)
-    }
-
     fun setReaderOverwriteCheckEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_READER_OVERWRITE_CHECK_ENABLED, enabled)
     }
@@ -249,10 +245,6 @@ class XposedModuleSettings(
             ModuleSettings.KEY_READER_AUTO_PAGE_ENABLED,
             ModuleSettings.DEFAULT_READER_AUTO_PAGE_ENABLED,
         )
-        val readerKeepScreenOnEnabled = prefs.getBoolean(
-            ModuleSettings.KEY_READER_KEEP_SCREEN_ON_ENABLED,
-            ModuleSettings.DEFAULT_READER_KEEP_SCREEN_ON_ENABLED,
-        )
         val readerOverwriteCheckEnabled = prefs.getBoolean(
             ModuleSettings.KEY_READER_OVERWRITE_CHECK_ENABLED,
             ModuleSettings.DEFAULT_READER_OVERWRITE_CHECK_ENABLED,
@@ -321,7 +313,6 @@ class XposedModuleSettings(
             ),
             readerLongPressEnabled = readerLongPressEnabled,
             readerAutoPageEnabled = readerAutoPageEnabled,
-            readerKeepScreenOnEnabled = readerKeepScreenOnEnabled,
             readerOverwriteCheckEnabled = readerOverwriteCheckEnabled,
             readerEditOverwriteEnabled = readerEditOverwriteEnabled,
             readerDictionaryEnabled = readerDictionaryEnabled,
@@ -430,7 +421,6 @@ class XposedModuleSettings(
             snapshot.readerEnabled,
             snapshot.readerLongPressEnabled,
             snapshot.readerAutoPageEnabled,
-            snapshot.readerKeepScreenOnEnabled,
             snapshot.readerOverwriteCheckEnabled,
             snapshot.readerEditOverwriteEnabled,
             snapshot.readerDictionaryEnabled,
@@ -465,7 +455,6 @@ class XposedModuleSettings(
                     "reader=${snapshot.readerEnabled}, " +
                     "readerLongPress=${snapshot.readerLongPressEnabled}, " +
                     "readerAutoPage=${snapshot.readerAutoPageEnabled}, " +
-                    "readerKeepScreenOn=${snapshot.readerKeepScreenOnEnabled}, " +
                     "readerOverwriteCheck=${snapshot.readerOverwriteCheckEnabled}, " +
                     "readerEditOverwrite=${snapshot.readerEditOverwriteEnabled}, " +
                     "readerDictionary=${snapshot.readerDictionaryEnabled}, " +
