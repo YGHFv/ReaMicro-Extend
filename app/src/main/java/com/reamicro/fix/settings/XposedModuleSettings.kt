@@ -80,6 +80,10 @@ class XposedModuleSettings(
         putBoolean(ModuleSettings.KEY_READER_DICTIONARY_ENABLED, enabled)
     }
 
+    fun setReaderCompactSelectionMenuEnabled(enabled: Boolean) {
+        putBoolean(ModuleSettings.KEY_READER_COMPACT_SELECTION_MENU_ENABLED, enabled)
+    }
+
     fun setFontEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_FONT_ENABLED, enabled)
     }
@@ -261,6 +265,10 @@ class XposedModuleSettings(
             ModuleSettings.KEY_READER_DICTIONARY_ENABLED,
             ModuleSettings.DEFAULT_READER_DICTIONARY_ENABLED,
         )
+        val readerCompactSelectionMenuEnabled = prefs.getBoolean(
+            ModuleSettings.KEY_READER_COMPACT_SELECTION_MENU_ENABLED,
+            ModuleSettings.DEFAULT_READER_COMPACT_SELECTION_MENU_ENABLED,
+        )
         val editFileEnabled = prefs.getBoolean(
             ModuleSettings.KEY_EDIT_FILE_ENABLED,
             ModuleSettings.DEFAULT_EDIT_FILE_ENABLED,
@@ -317,6 +325,7 @@ class XposedModuleSettings(
             readerOverwriteCheckEnabled = readerOverwriteCheckEnabled,
             readerEditOverwriteEnabled = readerEditOverwriteEnabled,
             readerDictionaryEnabled = readerDictionaryEnabled,
+            readerCompactSelectionMenuEnabled = readerCompactSelectionMenuEnabled,
             fontEnabled = prefs.getBoolean(
                 ModuleSettings.KEY_FONT_ENABLED,
                 ModuleSettings.DEFAULT_FONT_ENABLED,
@@ -425,6 +434,7 @@ class XposedModuleSettings(
             snapshot.readerOverwriteCheckEnabled,
             snapshot.readerEditOverwriteEnabled,
             snapshot.readerDictionaryEnabled,
+            snapshot.readerCompactSelectionMenuEnabled,
             snapshot.fontEnabled,
             snapshot.fontSettingsEnabled,
             snapshot.accountEnabled,
@@ -459,6 +469,7 @@ class XposedModuleSettings(
                     "readerOverwriteCheck=${snapshot.readerOverwriteCheckEnabled}, " +
                     "readerEditOverwrite=${snapshot.readerEditOverwriteEnabled}, " +
                     "readerDictionary=${snapshot.readerDictionaryEnabled}, " +
+                    "readerCompactMenu=${snapshot.readerCompactSelectionMenuEnabled}, " +
                     "font=${snapshot.fontEnabled}, " +
                     "fontSettings=${snapshot.fontSettingsEnabled}, " +
                     "account=${snapshot.accountEnabled}, " +

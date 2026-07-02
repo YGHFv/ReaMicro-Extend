@@ -17,6 +17,7 @@ object ModuleSettings {
     const val KEY_READER_OVERWRITE_CHECK_ENABLED = "reader_overwrite_check_enabled"
     const val KEY_READER_EDIT_OVERWRITE_ENABLED = "reader_edit_overwrite_enabled"
     const val KEY_READER_DICTIONARY_ENABLED = "reader_dictionary_enabled"
+    const val KEY_READER_COMPACT_SELECTION_MENU_ENABLED = "reader_compact_selection_menu_enabled"
     const val KEY_FONT_ENABLED = "font_enabled"
     const val KEY_FONT_SETTINGS_ENABLED = "font_settings_enabled"
     const val KEY_ACCOUNT_ENABLED = "account_enabled"
@@ -49,6 +50,7 @@ object ModuleSettings {
     const val DEFAULT_READER_OVERWRITE_CHECK_ENABLED = false
     const val DEFAULT_READER_EDIT_OVERWRITE_ENABLED = false
     const val DEFAULT_READER_DICTIONARY_ENABLED = true
+    const val DEFAULT_READER_COMPACT_SELECTION_MENU_ENABLED = false
     const val DEFAULT_FONT_ENABLED = true
     const val DEFAULT_FONT_SETTINGS_ENABLED = false
     const val DEFAULT_ACCOUNT_ENABLED = true
@@ -126,6 +128,7 @@ data class ModuleSettingsSnapshot(
     val readerOverwriteCheckEnabled: Boolean = ModuleSettings.DEFAULT_READER_OVERWRITE_CHECK_ENABLED,
     val readerEditOverwriteEnabled: Boolean = ModuleSettings.DEFAULT_READER_EDIT_OVERWRITE_ENABLED,
     val readerDictionaryEnabled: Boolean = ModuleSettings.DEFAULT_READER_DICTIONARY_ENABLED,
+    val readerCompactSelectionMenuEnabled: Boolean = ModuleSettings.DEFAULT_READER_COMPACT_SELECTION_MENU_ENABLED,
     val fontEnabled: Boolean = ModuleSettings.DEFAULT_FONT_ENABLED,
     val fontSettingsEnabled: Boolean = ModuleSettings.DEFAULT_FONT_SETTINGS_ENABLED,
     val accountEnabled: Boolean = ModuleSettings.DEFAULT_ACCOUNT_ENABLED,
@@ -175,6 +178,9 @@ data class ModuleSettingsSnapshot(
 
     val canShowReaderDictionary: Boolean
         get() = moduleEnabled && readerDictionaryEnabled
+
+    val canUseCompactReaderSelectionMenu: Boolean
+        get() = moduleEnabled && readerCompactSelectionMenuEnabled
 
     val canRunFontCompletion: Boolean
         get() = moduleEnabled

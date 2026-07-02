@@ -1083,6 +1083,15 @@ class ReaMicroSettingsHook(
                         checked
                     },
                 ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_READER_COMPACT_SELECTION_MENU_ENABLED,
+                    title = "\u7b80\u6d01\u83dc\u5355",
+                    checked = snapshot.readerCompactSelectionMenuEnabled,
+                    onChanged = { checked, _ ->
+                        settings.setReaderCompactSelectionMenuEnabled(checked)
+                        checked
+                    },
+                ),
             )
             addLazyItem(lazyListScope, READER_SWITCHES_ITEM_KEY) { itemComposer ->
                 renderHostSettingsCard(rows, itemComposer)
@@ -2270,15 +2279,15 @@ class ReaMicroSettingsHook(
             val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
             aiApiVersionValue()
             val configs = listAiApiConfigs()
+            val dictionaryRows = listOf(
+                ActionRow(
+                    key = "dictionary_settings",
+                    title = DICTIONARY_SETTINGS_TITLE,
+                    subtitle = dictionarySettingsSummary(),
+                    onClick = { openNestedInjectedRoute(InjectedRoute.DictionarySettings) },
+                ),
+            )
             val rows = buildList {
-                add(
-                    ActionRow(
-                        key = "dictionary_settings",
-                        title = DICTIONARY_SETTINGS_TITLE,
-                        subtitle = dictionarySettingsSummary(),
-                        onClick = { openNestedInjectedRoute(InjectedRoute.DictionarySettings) },
-                    ),
-                )
                 add(
                     ActionRow(
                         key = "ai_api_add",
@@ -2311,6 +2320,9 @@ class ReaMicroSettingsHook(
                         )
                     }
                 }
+            }
+            addLazyItem(lazyListScope, DICTIONARY_SETTINGS_CONTENT_ITEM_KEY) { itemComposer ->
+                renderHostActionCard(dictionaryRows, itemComposer)
             }
             addLazyItem(lazyListScope, AI_CONFIG_CONTENT_ITEM_KEY) { itemComposer ->
                 renderHostActionCard(rows, itemComposer)

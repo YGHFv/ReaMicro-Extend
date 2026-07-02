@@ -139,11 +139,13 @@ class ModuleSettingsTest {
             readerLongPressEnabled = true,
             readerAutoPageEnabled = true,
             editFileEnabled = true,
+            readerCompactSelectionMenuEnabled = true,
         )
 
         assertTrue(snapshot.canRunReaderLongPress)
         assertTrue(snapshot.canRunReaderAutoPage)
         assertTrue(snapshot.canUseFileEdit)
+        assertTrue(snapshot.canUseCompactReaderSelectionMenu)
     }
 
     @Test

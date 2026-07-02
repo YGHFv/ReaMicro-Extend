@@ -1064,7 +1064,12 @@ class ReaderHook(
                             val action = (editImageVector() ?: fallbackIcon)?.let(::createNativeEditAction)
                             if (action != null) next.add(action)
                         }
-                        if (next.size != original.size) param.args[0] = next
+                        val compact = if (settingsProvider().canUseCompactReaderSelectionMenu) {
+                            compactSelectionMenuActions(next)
+                        } else {
+                            next
+                        }
+                        if (next.size != original.size || compact !== next) param.args[0] = compact
                     }
                 })
             }
@@ -1074,38 +1079,74 @@ class ReaderHook(
         }
     }
 
+    private fun compactSelectionMenuActions(actions: List<Any>): List<Any> {
+        val compact = actions.map { action -> compactSelectionMenuAction(action) ?: action }
+        return if (compact.indices.any { index -> compact[index] !== actions[index] }) {
+            ArrayList(compact)
+        } else {
+            actions
+        }
+    }
+
+    private fun compactSelectionMenuAction(action: Any): Any? {
+        val title = callString(action, "getTitle")
+        if (title.isBlank()) return null
+        val icon = callNoArg(action, "getIcon") ?: return null
+        val callback = selectionMenuActionCallback(action) ?: return null
+        return createSelectionMenuAction("", icon, callback, "compact native selection action")
+    }
+
+    private fun selectionMenuActionCallback(action: Any): Any? {
+        val function0Class = runCatching { classLoader.loadClass(KOTLIN_FUNCTION0_CLASS) }.getOrNull() ?: return null
+        val preferredNames = listOf("getOnClick", "getOnTap", "getAction", "getCallback", "component3")
+        preferredNames.forEach { name ->
+            callNoArg(action, name)?.takeIf { function0Class.isInstance(it) }?.let { return it }
+        }
+        return (action.javaClass.methods.asSequence() + action.javaClass.declaredMethods.asSequence())
+            .filter { method ->
+                method.parameterTypes.isEmpty() && function0Class.isAssignableFrom(method.returnType)
+            }
+            .firstNotNullOfOrNull { method ->
+                runCatching {
+                    method.isAccessible = true
+                    method.invoke(action)
+                }.getOrNull()?.takeIf { function0Class.isInstance(it) }
+            }
+    }
+
     private fun createNativeEditAction(icon: Any): Any? =
-        runCatching {
-            val actionClass = classLoader.loadClass("org.epub.ui.SelectionMenuAction")
-            val constructor = actionClass.declaredConstructors.firstOrNull { it.parameterTypes.size == 3 }
-                ?: return@runCatching null
-            constructor.isAccessible = true
-            constructor.newInstance(
-                "\u7f16\u8f91",
-                icon,
-                nativeFunction0 {
-                    openNativeSelectionEditor()
-                },
-            )
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX create native edit action failed: ${it.stackTraceToString()}")
-        }.getOrNull()
+        createSelectionMenuAction(
+            if (settingsProvider().canUseCompactReaderSelectionMenu) "" else "\u7f16\u8f91",
+            icon,
+            nativeFunction0 {
+                openNativeSelectionEditor()
+            },
+            "create native edit action",
+        )
 
     private fun createNativeDictionaryAction(icon: Any): Any? =
+        createSelectionMenuAction(
+            if (settingsProvider().canUseCompactReaderSelectionMenu) "" else "\u8bcd\u5178",
+            icon,
+            nativeFunction0 {
+                openNativeSelectionDictionary()
+            },
+            "create native dictionary action",
+        )
+
+    private fun createSelectionMenuAction(title: String, icon: Any, callback: Any, logLabel: String): Any? =
         runCatching {
             val actionClass = classLoader.loadClass("org.epub.ui.SelectionMenuAction")
             val constructor = actionClass.declaredConstructors.firstOrNull { it.parameterTypes.size == 3 }
                 ?: return@runCatching null
             constructor.isAccessible = true
             constructor.newInstance(
-                "\u8bcd\u5178",
+                title,
                 icon,
-                nativeFunction0 {
-                    openNativeSelectionDictionary()
-                },
+                callback,
             )
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX create native dictionary action failed: ${it.stackTraceToString()}")
+            XposedBridge.log("$LOG_PREFIX $logLabel failed: ${it.stackTraceToString()}")
         }.getOrNull()
 
     private fun editImageVector(): Any? =
