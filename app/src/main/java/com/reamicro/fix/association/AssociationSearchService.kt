@@ -2,6 +2,7 @@ package com.reamicro.fix.association
 
 import com.reamicro.fix.association.model.BookSearchResult
 import com.reamicro.fix.association.model.BookSource
+import com.reamicro.fix.association.model.ManualAssociationDraft
 import com.reamicro.fix.association.model.withAllowedAssociationPlatform
 import com.reamicro.fix.association.provider.AssociationSearchProviderRegistry
 import com.reamicro.fix.association.provider.BookAssociationSearchProvider
@@ -18,15 +19,18 @@ class AssociationSearchService(
         AssociationSearchProviderRegistry.providers()
     },
     private val enabledSourcesProvider: () -> Set<BookSource>? = { null },
+    private val manualAssociationService: ManualAssociationService = ManualAssociationService(),
     private val onProviderError: (BookSource, Throwable) -> Unit = { _, _ -> },
 ) {
     constructor(
         providers: List<BookAssociationSearchProvider>,
         enabledSourcesProvider: () -> Set<BookSource>? = { null },
+        manualAssociationService: ManualAssociationService = ManualAssociationService(),
         onProviderError: (BookSource, Throwable) -> Unit = { _, _ -> },
     ) : this(
         providersProvider = { providers },
         enabledSourcesProvider = enabledSourcesProvider,
+        manualAssociationService = manualAssociationService,
         onProviderError = onProviderError,
     )
 
@@ -127,6 +131,18 @@ class AssociationSearchService(
             isDaemon = true
             start()
         }
+    }
+
+    fun searchWithManualCandidate(
+        keyword: String,
+        manualDraft: ManualAssociationDraft?,
+        limitPerSource: Int = 10,
+    ): List<BookSearchResult> {
+        val results = search(keyword, limitPerSource).toMutableList()
+        if (manualDraft != null && manualAssociationService.validate(manualDraft).isValid) {
+            results.add(0, manualAssociationService.buildCandidate(manualDraft).toSearchResult())
+        }
+        return results.distinctBy { it.stableId }
     }
 
     private fun activeProviders(): List<BookAssociationSearchProvider> {
