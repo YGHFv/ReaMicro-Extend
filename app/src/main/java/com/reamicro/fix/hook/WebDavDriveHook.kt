@@ -67,8 +67,10 @@ import com.reamicro.fix.webdav.NativeCloudDownload
 import com.reamicro.fix.webdav.OnlineCompletionDownloadCancelledException
 import com.reamicro.fix.webdav.OnlineCompletionDownloadTask
 import com.reamicro.fix.webdav.OnlineDownloadedChapter
+import com.reamicro.fix.webdav.WebDavBackupSnapshot
 import com.reamicro.fix.webdav.WebDavCredentials
 import com.reamicro.fix.webdav.WebDavHttpException
+import com.reamicro.fix.webdav.WebDavImportSource
 import com.reamicro.fix.webdav.WebDavRemoteClient
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -11223,11 +11225,6 @@ img{max-width:100%;max-height:100%;height:auto;}
         val url: String,
     )
 
-    private data class WebDavBackupSnapshot(
-        val book: Any,
-        val backup: Any,
-    )
-
     private data class WebDavEntry(
         val name: String,
         val path: String,
@@ -11268,11 +11265,6 @@ img{max-width:100%;max-height:100%;height:auto;}
         val extensionLabel: String,
         var textIndex: Int = 0,
         var extensionSuppressed: Boolean = false,
-    )
-
-    private data class WebDavImportSource(
-        val sourceUrl: String,
-        val sourceSize: Long?,
     )
 
     private class WebDavBackButton(context: Context) : View(context) {
