@@ -2,7 +2,6 @@ package com.reamicro.fix.hook
 
 import android.app.Activity
 import android.widget.Toast
-import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
@@ -16,7 +15,6 @@ import java.util.concurrent.CountDownLatch
 class BookDetailsAssociationActionHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
-    private val settingsProvider: () -> ModuleSettingsSnapshot,
 ) {
     private val localBooksById = ConcurrentHashMap<Long, Any>()
     private val localBooksByCloudId = ConcurrentHashMap<Long, Any>()
@@ -30,12 +28,8 @@ class BookDetailsAssociationActionHook(
         hookNavigationBackCleanup()
     }
 
-    fun canFixCurrentCover(): Boolean =
-        settingsProvider().canUseAssociationCoverFix && currentDetailsContext != null
-
     fun requestCoverFixForCurrentDetails(): Boolean {
         val details = currentDetailsContext ?: return false
-        if (!settingsProvider().canUseAssociationCoverFix) return false
         fixAssociationCover(details.bookId)
         return true
     }
@@ -142,7 +136,6 @@ class BookDetailsAssociationActionHook(
         val details = currentDetailsContext
         Thread {
             val result = runCatching {
-                if (!settingsProvider().canUseAssociationCoverFix) error("Association cover fix disabled")
                 if (details == null || details.bookId != bookId) error("Book details unavailable")
                 val repository = details.repositoryRef.get() ?: error("BookRepository unavailable")
                 val bookshelf = fieldValue(repository, "bookshelfRepository") ?: error("BookshelfRepository unavailable")

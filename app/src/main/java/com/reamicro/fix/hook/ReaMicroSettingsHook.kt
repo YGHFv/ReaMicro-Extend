@@ -629,18 +629,6 @@ class ReaMicroSettingsHook(
                         },
                     ),
                 )
-                add(
-                    ToggleRow(
-                        key = ModuleSettings.KEY_ASSOCIATION_COVER_FIX_ENABLED,
-                        title = "\u5c01\u9762\u4fee\u590d",
-                        checked = snapshot.associationCoverFixEnabled,
-                        visibleProvider = { booleanStateValue(associationExpandedState) },
-                        onChanged = { checked, _ ->
-                            settings.setAssociationCoverFixEnabled(checked)
-                            checked
-                        },
-                    ),
-                )
                 visibleAssociationSearchSourceGroups().forEach { group ->
                     add(
                         ToggleRow(
@@ -972,17 +960,6 @@ class ReaMicroSettingsHook(
                         visibleProvider = { hasManualEditFeature() },
                         onChanged = { checked, _ ->
                             settings.setAssociationManualEditEnabled(checked)
-                            checked
-                        },
-                    ),
-                )
-                add(
-                    ToggleRow(
-                        key = ModuleSettings.KEY_ASSOCIATION_COVER_FIX_ENABLED,
-                        title = "\u5c01\u9762\u4fee\u590d",
-                        checked = snapshot.associationCoverFixEnabled,
-                        onChanged = { checked, _ ->
-                            settings.setAssociationCoverFixEnabled(checked)
                             checked
                         },
                     ),

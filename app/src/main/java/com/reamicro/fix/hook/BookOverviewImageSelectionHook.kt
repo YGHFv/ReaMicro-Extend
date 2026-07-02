@@ -48,7 +48,6 @@ import org.json.JSONObject
 class BookOverviewImageSelectionHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
-    private val canRequestCoverFix: () -> Boolean = { false },
     private val requestCoverFix: () -> Boolean = { false },
 ) {
     private val contextStack = ThreadLocal.withInitial { mutableListOf<BookImageContext>() }
@@ -148,7 +147,7 @@ class BookOverviewImageSelectionHook(
             val colors = DialogColors(activity)
             val dialog = imageDialog(activity)
             val card = dialogCard(activity, colors)
-            card.addView(dialogTitle(activity, "${target.label}图片"))
+            card.addView(dialogTitle(activity, "${target.label}图片", colors))
             card.addView(actionRow(activity, "选取图片", "使用阅微原来的本地图片选择", colors) {
                 dialog.dismiss()
                 invokeFunction0(originalOnPick)
@@ -171,7 +170,7 @@ class BookOverviewImageSelectionHook(
                     invokeFunction0(secondaryAction)
                 })
             }
-            if (target == ImageTarget.Cover && canRequestCoverFix()) {
+            if (target == ImageTarget.Cover) {
                 card.addView(actionRow(activity, "封面修复", "上传当前关联封面到书库", colors) {
                     dialog.dismiss()
                     if (!requestCoverFix()) {
@@ -197,7 +196,7 @@ class BookOverviewImageSelectionHook(
             val card = dialogCard(activity, colors)
             var previewBytes: ByteArray? = null
 
-            card.addView(dialogTitle(activity, "在线图片"))
+            card.addView(dialogTitle(activity, "在线图片", colors))
             val input = editText(activity, "图片链接", singleLine = false).apply {
                 minLines = 2
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
@@ -288,7 +287,7 @@ class BookOverviewImageSelectionHook(
             val card = dialogCard(activity, colors)
             var generatedBytes: ByteArray? = null
 
-            card.addView(dialogTitle(activity, "生成${target.label}"))
+            card.addView(dialogTitle(activity, "生成${target.label}", colors))
             card.addView(dialogMessage(activity, "当前模型：${config?.displayName ?: "未配置"}", colors))
             card.addView(dialogMessage(activity, "参考图片：生成时自动读取当前封面并上传", colors))
 
@@ -1014,7 +1013,7 @@ class BookOverviewImageSelectionHook(
 private fun dialogCard(context: Context, colors: BookOverviewImageSelectionHook.DialogColors): LinearLayout =
     LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(context, 16), dp(context, 12), dp(context, 16), dp(context, 14))
+        setPadding(dp(context, 16), dp(context, 10), dp(context, 16), dp(context, 14))
         background = GradientDrawable().apply {
             setColor(colors.card)
             cornerRadius = dp(context, 22).toFloat()
@@ -1025,17 +1024,21 @@ private fun dialogCard(context: Context, colors: BookOverviewImageSelectionHook.
         )
     }
 
-private fun dialogTitle(context: Context, title: String): TextView =
+private fun dialogTitle(
+    context: Context,
+    title: String,
+    colors: BookOverviewImageSelectionHook.DialogColors,
+): TextView =
     TextView(context).apply {
         text = title
-        textSize = 19f
+        textSize = 18f
         typeface = Typeface.DEFAULT_BOLD
         includeFontPadding = false
-        setTextColor(themeColor(context, android.R.attr.textColorPrimary, Color.rgb(30, 34, 40)))
+        setTextColor(colors.title)
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { bottomMargin = dp(context, 8) }
+        ).apply { bottomMargin = dp(context, 6) }
     }
 
 private fun dialogMessage(
