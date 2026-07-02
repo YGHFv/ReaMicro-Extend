@@ -2,7 +2,6 @@ package com.reamicro.fix.association
 
 import com.reamicro.fix.association.model.BookSearchResult
 import com.reamicro.fix.association.model.BookSource
-import com.reamicro.fix.association.model.ManualAssociationDraft
 import com.reamicro.fix.association.model.withAllowedAssociationPlatform
 import com.reamicro.fix.association.provider.AssociationSearchProviderRegistry
 import com.reamicro.fix.association.provider.BookAssociationSearchProvider
@@ -10,29 +9,32 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReferenceArray
 
+/**
+ * Runs all enabled association providers in parallel and normalizes their results before
+ * they are injected into the host BookPublish screen.
+ */
 class AssociationSearchService(
     private val providersProvider: () -> List<BookAssociationSearchProvider> = {
         AssociationSearchProviderRegistry.providers()
     },
     private val enabledSourcesProvider: () -> Set<BookSource>? = { null },
-    private val manualAssociationService: ManualAssociationService = ManualAssociationService(),
     private val onProviderError: (BookSource, Throwable) -> Unit = { _, _ -> },
 ) {
     constructor(
         providers: List<BookAssociationSearchProvider>,
         enabledSourcesProvider: () -> Set<BookSource>? = { null },
-        manualAssociationService: ManualAssociationService = ManualAssociationService(),
         onProviderError: (BookSource, Throwable) -> Unit = { _, _ -> },
     ) : this(
         providersProvider = { providers },
         enabledSourcesProvider = enabledSourcesProvider,
-        manualAssociationService = manualAssociationService,
         onProviderError = onProviderError,
     )
 
     fun search(keyword: String, limitPerSource: Int = 10): List<BookSearchResult> {
         val activeProviders = activeProviders()
         if (activeProviders.isEmpty()) return emptyList()
+        // Preserve provider order in the final merge while still letting slow/failing sources
+        // run independently.
         val resultsByProvider = AtomicReferenceArray<List<BookSearchResult>>(activeProviders.size)
         val latch = CountDownLatch(activeProviders.size)
         activeProviders.forEachIndexed { index, provider ->
@@ -125,18 +127,6 @@ class AssociationSearchService(
             isDaemon = true
             start()
         }
-    }
-
-    fun searchWithManualCandidate(
-        keyword: String,
-        manualDraft: ManualAssociationDraft?,
-        limitPerSource: Int = 10,
-    ): List<BookSearchResult> {
-        val results = search(keyword, limitPerSource).toMutableList()
-        if (manualDraft != null && manualAssociationService.validate(manualDraft).isValid) {
-            results.add(0, manualAssociationService.buildCandidate(manualDraft).toSearchResult())
-        }
-        return results.distinctBy { it.stableId }
     }
 
     private fun activeProviders(): List<BookAssociationSearchProvider> {

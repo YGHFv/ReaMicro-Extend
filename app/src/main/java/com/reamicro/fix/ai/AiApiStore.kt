@@ -17,6 +17,7 @@ data class AiApiConfig(
     val enabled: Boolean = true,
     val name: String = "",
 ) {
+    // name was added after the original API config format; blank keeps old JSON display-compatible.
     val displayName: String
         get() = name.ifBlank { model.ifBlank { baseUrl } }
 }
@@ -65,6 +66,12 @@ data class AiImageSettings(
     val bannerPresetId: String = AiApiStore.DEFAULT_IMAGE_BANNER_PRESET_ID,
 )
 
+/**
+ * File-backed AI configuration store.
+ *
+ * The module runs inside the host app, so simple JSON files under filesDir are easier to
+ * migrate than SharedPreferences keys scattered across multiple feature hooks.
+ */
 object AiApiStore {
     private const val CONFIG_FILE_NAME = "reamicro_ai_apis.json"
     private const val DICTIONARY_SETTINGS_FILE_NAME = "reamicro_dictionary_settings.json"
@@ -823,6 +830,7 @@ object AiApiStore {
             else -> "$baseUrl/v1/images/generations"
         }
 
+    // Accept full OpenAI-compatible endpoints and reduce them to the sibling /models route.
     private fun modelsUrl(baseUrl: String): String =
         when {
             baseUrl.endsWith("/models", ignoreCase = true) -> baseUrl
@@ -958,6 +966,7 @@ object AiApiStore {
             error.optString("message")
         }.getOrDefault("")
 
+    // Provider gateways are not consistent: OpenAI uses data[], some mirrors use models[] or items[].
     private fun parseModelIds(text: String): List<String> {
         val ids = linkedSetOf<String>()
         fun addModelId(value: String) {

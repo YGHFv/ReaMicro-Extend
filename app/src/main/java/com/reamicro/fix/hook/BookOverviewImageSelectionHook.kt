@@ -45,11 +45,17 @@ import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
 
+/**
+ * Extends the host cover/banner bottom sheets with online image, AI generation, and cover-fix
+ * actions while preserving the host's original local image picker callback.
+ */
 class BookOverviewImageSelectionHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
     private val requestCoverFix: () -> Boolean = { false },
 ) {
+    // The host passes book/update callbacks through composable parameters, then opens the
+    // bottom sheet from a later callback. A per-thread stack bridges those two moments.
     private val contextStack = ThreadLocal.withInitial { mutableListOf<BookImageContext>() }
     private val activeSourceDialogs = Collections.synchronizedSet(mutableSetOf<String>())
 

@@ -14,6 +14,12 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import java.lang.ref.WeakReference
 
+/**
+ * Single Xposed entry point for the ReaMicro host process.
+ *
+ * Keep feature hooks installed from here so activity tracking, settings snapshots, and
+ * optional external feature APIs all share the same host Activity reference.
+ */
 class ReaMicroHookEntry {
     private var currentActivityRef: WeakReference<Activity>? = null
     private val moduleSettings = XposedModuleSettings { currentActivityRef?.get() }
@@ -122,6 +128,9 @@ class ReaMicroHookEntry {
     private fun hookMainActivity(classLoader: ClassLoader, webDavDriveHook: WebDavDriveHook) {
         runCatching {
             val mainActivityClass = XposedHelpers.findClass("app.zhendong.reamicro.MainActivity", classLoader)
+            // Most feature hooks need a live Activity for Compose state, storage, and toasts.
+            // Capture it both before and after onCreate so early hooks and post-create work
+            // can use the same settings context.
             XposedHelpers.findAndHookMethod(
                 mainActivityClass,
                 "onCreate",

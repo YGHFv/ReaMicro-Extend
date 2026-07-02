@@ -100,12 +100,21 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.w3c.dom.Element
 
+/**
+ * Cloud/local-library integration hook.
+ *
+ * This class is intentionally broad because it coordinates host cloud UI injection,
+ * WebDAV/Alist access, import/export jobs, and online-completion downloads that share
+ * the same reflected host repositories and notification flow.
+ */
 class WebDavDriveHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
     private val settingsProvider: () -> ModuleSettingsSnapshot = { ModuleSettingsSnapshot() },
 ) {
     private val methodCache = mutableMapOf<String, Method>()
+    // Compose renders nested lambdas without passing enough host context to later hooks.
+    // ThreadLocal render contexts mark the current host row/screen while its children compose.
     private val syncAuthCardRender = ThreadLocal<SyncAuthCardRenderContext?>()
     private val importUnauthRender = ThreadLocal<ImportUnauthRenderContext?>()
     private val importLocalLibraryRow = ThreadLocal<ImportLocalLibraryRowContext?>()

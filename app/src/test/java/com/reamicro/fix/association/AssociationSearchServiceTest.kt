@@ -2,7 +2,6 @@ package com.reamicro.fix.association
 
 import com.reamicro.fix.association.model.BookSearchResult
 import com.reamicro.fix.association.model.BookSource
-import com.reamicro.fix.association.model.ManualAssociationDraft
 import com.reamicro.fix.association.provider.BookAssociationSearchProvider
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
@@ -26,23 +25,6 @@ class AssociationSearchServiceTest {
         val results = service.search("keyword")
 
         assertEquals(listOf("1", "2"), results.map { it.sourceBookId })
-    }
-
-    @Test
-    fun searchWithManualCandidatePrependsValidManualDraft() {
-        val service = AssociationSearchService(providers = listOf(resultProvider("remote")))
-
-        val results = service.searchWithManualCandidate(
-            keyword = "keyword",
-            manualDraft = ManualAssociationDraft(
-                title = "手动书",
-                author = "手动作者",
-                source = BookSource.QiDian,
-            ),
-        )
-
-        assertEquals("手动书", results.first().title)
-        assertEquals("remote", results[1].sourceBookId)
     }
 
     @Test
@@ -76,14 +58,14 @@ class AssociationSearchServiceTest {
 
     @Test
     fun searchRanksExactTitleIntoLimitedResultsAfterFetchingExtraRows() {
-        val keyword = "我真没想重生啊"
+        val keyword = "Exact Title"
         val provider = object : BookAssociationSearchProvider {
             override val source: BookSource = BookSource.WanFengLi
 
             override fun search(keyword: String, limit: Int): List<BookSearchResult> =
                 (1..10).map { index ->
                     result(
-                        title = "作者命中结果$index",
+                        title = "Related Title $index",
                         author = keyword,
                         id = "author-$index",
                         displaySourceName = BookSource.SFAcg.displayName,
@@ -92,7 +74,7 @@ class AssociationSearchServiceTest {
                 }.plus(
                     result(
                         title = keyword,
-                        author = "柳岸花又明",
+                        author = "Exact Author",
                         id = "1015648531",
                         displaySourceName = BookSource.QiDian.displayName,
                         source = source,
@@ -156,9 +138,7 @@ class AssociationSearchServiceTest {
     private fun failingProvider(): BookAssociationSearchProvider = object : BookAssociationSearchProvider {
         override val source: BookSource = BookSource.Ciyuanji
 
-        override fun search(keyword: String, limit: Int): List<BookSearchResult> {
-            error("network failed")
-        }
+        override fun search(keyword: String, limit: Int) = error("network failed")
     }
 
     private fun delayedProvider(id: String, delayMs: Long): BookAssociationSearchProvider = object : BookAssociationSearchProvider {

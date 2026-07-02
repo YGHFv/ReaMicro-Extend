@@ -38,6 +38,7 @@ import com.reamicro.fix.ai.AiApiConfig
 import com.reamicro.fix.ai.AiDictionaryPreset
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.ai.AiApiTestResult
+import com.reamicro.fix.reader.SearchHighlightPlanner
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -53,6 +54,10 @@ import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import org.xmlpull.v1.XmlPullParser
 
+/**
+ * Reader-surface hooks: selection actions, dictionary lookup, full-text search, and
+ * defensive compatibility fixes for host reader regressions.
+ */
 class ReaderHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
@@ -73,6 +78,8 @@ class ReaderHook(
     private var searchOverlayThemeCallbacksActivityRef: WeakReference<Activity>? = null
     private var bottomSearchReceiverRef: WeakReference<Any>? = null
     private var bottomSearchBookRef: WeakReference<Any>? = null
+    // Rendering hooks run on the host reader pipeline. ThreadLocal keeps the current page
+    // available to downstream text/cfi hooks without leaking it across concurrent renders.
     private val renderingEpubPage = ThreadLocal<Any?>()
     @Volatile private var lastCatalogContext: CatalogContext? = null
     @Volatile private var lastSearchState: SearchState? = null
@@ -177,6 +184,8 @@ class ReaderHook(
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val session = currentSessionRef?.get()
+                        // If the previous process died while ScrollPager was entering render,
+                        // switch back to translate paging before letting ScrollPager compose again.
                         if (isPreviousScrollCrashPending()) {
                             session?.let { restoreTranslateFlipStyleIfScrollCrashed(it, "ScrollPager") }
                             param.result = null
@@ -267,6 +276,8 @@ class ReaderHook(
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val error = param.throwable ?: return
                         if (!isUninitializedContentDomParent(error)) return
+                        // Host a11 can call ContentDom width before parent is initialized.
+                        // The text layout width is enough for pagination, so recover from it.
                         val fallback = fallbackRenderTextWidthDp(param.thisObject) ?: return
                         param.result = fallback
                         XposedBridge.log("$LOG_PREFIX ContentDom parent fallback render width=$fallback")
@@ -1263,6 +1274,8 @@ class ReaderHook(
             val sharedStateClass = classLoader.loadClass(READER_SHARED_STATE_CLASS)
             XposedBridge.hookAllMethods(sharedStateClass, "getMarks", object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
+                    // a11 moved visible reader marks into ReaderSharedState; append the active
+                    // search highlight here so normal mark loading does not need to know about it.
                     val original = (param.result as? List<*>) ?: return
                     val nextMarks = appendActiveSearchHighlightMark(original, "ReaderSharedState") ?: return
                     param.result = nextMarks
@@ -2147,18 +2160,21 @@ class ReaderHook(
     }
 
     private fun createSearchResultHighlightMark(result: FullTextSearchResult, resultIndex: Int): Any? {
-        val startCfi = result.startCfi?.takeIf { it.isNotBlank() } ?: result.cfi?.takeIf { it.isNotBlank() } ?: return null
-        val endCfi = result.endCfi
-            ?.takeIf { it.isNotBlank() && it != startCfi }
-            ?: searchHighlightEndCfi(startCfi, result.matchText.length)
-            ?: result.cfi?.takeIf { it.isNotBlank() && it != startCfi }
-            ?: return null
-        return createReaderMark(
-            id = SEARCH_HIGHLIGHT_MARK_ID_BASE + resultIndex.coerceAtLeast(0),
+        val draft = SearchHighlightPlanner.markDraft(
+            resultIndex = resultIndex,
             chapter = result.chapterTitle,
-            startCfi = startCfi,
-            endCfi = endCfi,
-            quote = result.matchText,
+            startCfi = result.startCfi,
+            fallbackCfi = result.cfi,
+            endCfi = result.endCfi,
+            matchText = result.matchText,
+            base = SEARCH_HIGHLIGHT_MARK_ID_BASE,
+        ) ?: return null
+        return createReaderMark(
+            id = draft.id,
+            chapter = draft.chapter,
+            startCfi = draft.startCfi,
+            endCfi = draft.endCfi,
+            quote = draft.quote,
             style = MARK_STYLE_FILL,
             color = MARK_COLOR_YELLOW,
         )
@@ -2178,6 +2194,8 @@ class ReaderHook(
             val now = System.currentTimeMillis()
             val bookId = (callNoArg(lastCatalogContext?.book, "getId") as? Number)?.toLong() ?: 0L
             val constructors = markClass.declaredConstructors.onEach { it.isAccessible = true }
+            // Host Mark gained cloudId in rm2-a11. Try the new constructor first and fall back so
+            // one module build can still run against older compatible hosts.
             val newCtor = constructors.firstOrNull { ctor ->
                 val params = ctor.parameterTypes
                 params.size == 14 &&
@@ -2486,21 +2504,13 @@ class ReaderHook(
     }
 
     private fun searchHighlightCorrectionDirection(): Boolean? {
-        val targetNumber = activeSearchHighlightPageNumber
-        val currentNumber = currentVisiblePageNumber
-        if (targetNumber != null && currentNumber != null) {
-            return when {
-                targetNumber > currentNumber -> true
-                targetNumber < currentNumber -> false
-                else -> null
-            }
-        }
-        val targetKey = targetSearchHighlightPageKey()
-        val currentKey = currentVisibleSearchPageKey()
-        if (targetKey != null && currentKey != null) {
-            return if (targetKey != currentKey) true else null
-        }
-        return if (activeSearchHighlightVisibleId != idOrNull(activeSearchHighlightMark)) true else null
+        return SearchHighlightPlanner.correctionDirection(
+            targetNumber = activeSearchHighlightPageNumber,
+            currentNumber = currentVisiblePageNumber,
+            targetKey = targetSearchHighlightPageKey(),
+            currentKey = currentVisibleSearchPageKey(),
+            activeVisibleMatches = activeSearchHighlightVisibleId == idOrNull(activeSearchHighlightMark),
+        )
     }
 
     private fun idOrNull(mark: Any?): Long? =
@@ -2572,15 +2582,16 @@ class ReaderHook(
                 ?: (baseOffset + content.length))
             val windowStart = (visibleStart - baseOffset).coerceIn(0, content.length)
             val windowEnd = (visibleEnd - baseOffset).coerceIn(windowStart, content.length)
-            val expectedLocalStart = cfiCharacterOffset(callString(mark, "getStartCfi"))
+            val expectedLocalStart = SearchHighlightPlanner.cfiCharacterOffset(callString(mark, "getStartCfi"))
                 ?.let { it - baseOffset }
                 ?.takeIf { it in 0..content.length }
-            val matchStart = searchHighlightQuoteStart(
+            val matchStart = SearchHighlightPlanner.quoteStart(
                 content = content,
                 quote = quote,
                 windowStart = windowStart,
                 windowEnd = windowEnd,
                 expectedLocalStart = expectedLocalStart,
+                tolerance = SEARCH_HIGHLIGHT_OFFSET_TOLERANCE,
             ) ?: return@runCatching null
             val matchEnd = (matchStart + quote.length).coerceAtMost(content.length)
             val localStart = (baseOffset + matchStart - visibleStart).coerceIn(0, renderedTextLength)
@@ -2624,49 +2635,6 @@ class ReaderHook(
                 ?: (annotated as? CharSequence)?.toString()
                 ?: annotated.toString()
         }.getOrDefault("")
-
-    private fun searchHighlightEndCfi(startCfi: String, length: Int): String? {
-        if (length <= 0) return null
-        val match = Regex(""":(\d+)\)?$""").find(startCfi) ?: return null
-        val start = match.groupValues.getOrNull(1)?.toIntOrNull() ?: return null
-        val end = start + length.coerceAtLeast(1)
-        return startCfi.replaceRange(match.groups[1]!!.range, end.toString())
-    }
-
-    private fun searchHighlightQuoteStart(
-        content: String,
-        quote: String,
-        windowStart: Int,
-        windowEnd: Int,
-        expectedLocalStart: Int?,
-    ): Int? {
-        if (expectedLocalStart != null) {
-            if (expectedLocalStart !in windowStart..windowEnd || expectedLocalStart + quote.length > windowEnd) {
-                return null
-            }
-            if (content.regionMatches(expectedLocalStart, quote, 0, quote.length)) {
-                return expectedLocalStart
-            }
-            val nearbyStart = (expectedLocalStart - SEARCH_HIGHLIGHT_OFFSET_TOLERANCE).coerceAtLeast(windowStart)
-            val nearbyEnd = (expectedLocalStart + SEARCH_HIGHLIGHT_OFFSET_TOLERANCE)
-                .coerceAtMost(windowEnd - quote.length)
-            if (nearbyEnd >= nearbyStart) {
-                val nearbyMatches = generateSequence(content.indexOf(quote, nearbyStart)) { previous ->
-                    content.indexOf(quote, previous + 1)
-                }.takeWhile { it >= 0 && it <= nearbyEnd }.toList()
-                return nearbyMatches.minByOrNull { kotlin.math.abs(it - expectedLocalStart) }
-            }
-            return null
-        }
-        val matches = generateSequence(content.indexOf(quote, windowStart)) { previous ->
-            content.indexOf(quote, previous + 1)
-        }.takeWhile { it >= 0 && it + quote.length <= windowEnd }.toList()
-        if (matches.isEmpty()) return null
-        return matches.first()
-    }
-
-    private fun cfiCharacterOffset(cfi: String): Int? =
-        Regex(""":(\d+)\)?$""").find(cfi)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
     private fun textRange(start: Int, end: Int): Long? =
         runCatching {
@@ -2782,12 +2750,12 @@ class ReaderHook(
 
     private fun isSearchResultHighlightMark(mark: Any): Boolean {
         val id = searchResultHighlightMarkId(mark) ?: return false
-        return id >= SEARCH_HIGHLIGHT_MARK_ID_BASE && id < SEARCH_HIGHLIGHT_MARK_ID_BASE + SEARCH_HIGHLIGHT_MARK_ID_RANGE
+        return SearchHighlightPlanner.isHighlightId(id, SEARCH_HIGHLIGHT_MARK_ID_BASE, SEARCH_HIGHLIGHT_MARK_ID_RANGE)
     }
 
     private fun searchResultHighlightMarkId(mark: Any): Long? {
         val id = (callNoArg(mark, "getId") as? Number)?.toLong() ?: return null
-        return if (id >= SEARCH_HIGHLIGHT_MARK_ID_BASE && id < SEARCH_HIGHLIGHT_MARK_ID_BASE + SEARCH_HIGHLIGHT_MARK_ID_RANGE) {
+        return if (SearchHighlightPlanner.isHighlightId(id, SEARCH_HIGHLIGHT_MARK_ID_BASE, SEARCH_HIGHLIGHT_MARK_ID_RANGE)) {
             id
         } else {
             null
@@ -2796,7 +2764,7 @@ class ReaderHook(
 
     private fun searchResultHighlightResolvedMarkId(mark: Any): Long? {
         val id = (callNoArg(mark, "getId") as? Number)?.toLong() ?: return null
-        return if (id >= SEARCH_HIGHLIGHT_MARK_ID_BASE && id < SEARCH_HIGHLIGHT_MARK_ID_BASE + SEARCH_HIGHLIGHT_MARK_ID_RANGE) {
+        return if (SearchHighlightPlanner.isHighlightId(id, SEARCH_HIGHLIGHT_MARK_ID_BASE, SEARCH_HIGHLIGHT_MARK_ID_RANGE)) {
             id
         } else {
             null

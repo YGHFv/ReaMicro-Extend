@@ -71,6 +71,12 @@ import java.util.Date
 import java.util.Locale
 import kotlin.system.exitProcess
 
+/**
+ * Injects the module settings UI into the host About/Settings surface.
+ *
+ * The host is Compose, but this module cannot compile against host internals, so most UI is
+ * created through reflected Compose calls and small value objects kept in this class.
+ */
 class ReaMicroSettingsHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
@@ -160,6 +166,8 @@ class ReaMicroSettingsHook(
             })
             XposedBridge.hookAllMethods(navGraphScopeClass, "popBackStack", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
+                    // Injected module pages reuse the host About route, so back navigation must
+                    // consume our nested stack before the host NavController pops its own route.
                     if (poppingInjectedRoute.get() == true) return
                     if (handleNestedInjectedBack()) {
                         param.result = true
@@ -219,6 +227,8 @@ class ReaMicroSettingsHook(
             val buildMethod = method(SETTINGS_SCREEN_CLASS, SETTINGS_LIST_BUILDER_METHOD, 4)
             XposedBridge.hookMethod(buildMethod, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
+                    // Track the host settings LazyColumn build so injected rows appear at a
+                    // stable position even when upstream adds or removes nearby settings.
                     currentSettingsNavGraphScope = param.args?.firstOrNull { it?.javaClass?.name == NAV_GRAPH_SCOPE_CLASS }
                         ?: param.args?.getOrNull(0)
                     currentSettingsNavController = runCatching {
@@ -4390,6 +4400,8 @@ class ReaMicroSettingsHook(
         val supporting = row.subtitle?.takeIf { it.isNotBlank() }?.let { subtitle ->
             composableLambda(row.key.hashCode() xor ACTION_SUPPORTING_KEY_MASK, FUNCTION2_CLASS) { args ->
                 val innerComposer = args?.getOrNull(0) ?: return@composableLambda targetUnit()
+                // Preset prompt previews must be single-line; ordinary explanatory rows keep
+                // host defaults so settings copy can still wrap naturally.
                 renderHostSupportingText(subtitle, innerComposer, row.singleLineSubtitle)
                 targetUnit()
             }
