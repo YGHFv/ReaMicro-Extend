@@ -1257,13 +1257,6 @@ class ReaMicroSettingsHook(
                             onClick = ::exportCurrentAccountCredential,
                             onLongClick = ::exportAllAccountCredentials,
                         ),
-                    ),
-                    itemComposer,
-                )
-            }
-            addLazyItem(lazyListScope, ACCOUNT_IMPORT_ACTION_ITEM_KEY) { itemComposer ->
-                renderHostActionCard(
-                    listOf(
                         ActionRow(
                             key = "account_import",
                             title = "\u5bfc\u5165\u51ed\u8bc1",

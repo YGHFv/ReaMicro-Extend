@@ -348,17 +348,7 @@ object AiApiStore {
             .put("temperature", 0.2)
             .put("max_tokens", DICTIONARY_MAX_TOKENS)
             .put("stream", false)
-        if (disableThinking) {
-            body.put("reasoning_effort", "minimal")
-        }
-        val first = requestChatCompletion(config.baseUrl, config.apiKey, body)
-        val response = if (disableThinking && !first.success && first.message.contains("reasoning", ignoreCase = true)) {
-            requestChatCompletion(config.baseUrl, config.apiKey, JSONObject(body.toString()).apply {
-                remove("reasoning_effort")
-            })
-        } else {
-            first
-        }
+        val response = requestChatCompletion(config.baseUrl, config.apiKey, body)
         if (!response.success) return response
         val content = runCatching { extractAssistantContent(JSONObject(response.message)) }
             .getOrDefault("")

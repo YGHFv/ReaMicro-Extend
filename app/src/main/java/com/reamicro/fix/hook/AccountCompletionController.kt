@@ -54,6 +54,12 @@ private const val ANDROID_KOIN_SCOPE_EXT_CLASS = "org.koin.android.ext.android.A
 private const val KOTLIN_REFLECTION_CLASS = "kotlin.jvm.internal.Reflection"
 private const val WEBDAV_PREFS = "reamicro_fix_webdav"
 private const val LOCAL_LIBRARY_PREFS = "reamicro_fix_local_library"
+private const val MODULE_SETTINGS_PREFS = "reamicro_fix_module_settings"
+private const val READER_AUTO_PAGE_PREFS = "reamicro_reader_auto_page"
+private const val AI_API_CONFIG_FILE = "reamicro_ai_apis.json"
+private const val AI_DICTIONARY_SETTINGS_FILE = "reamicro_dictionary_settings.json"
+private const val ONLINE_SOURCE_DIR = "reamicro_online_sources"
+private const val ASSOCIATION_SOURCE_DIR = "reamicro_sources"
 private const val WEBDAV_KEY_URL = "url"
 private const val WEBDAV_KEY_USERNAME = "username"
 private const val WEBDAV_KEY_PASSWORD = "password"
@@ -66,6 +72,21 @@ private val PORTABLE_WEBDAV_KEYS = setOf(
     WEBDAV_KEY_USERNAME,
     WEBDAV_KEY_PASSWORD,
     WEBDAV_KEY_AUTHORIZED,
+)
+
+private val MODULE_BACKUP_PREFS = setOf(
+    MODULE_SETTINGS_PREFS,
+    READER_AUTO_PAGE_PREFS,
+)
+
+private val MODULE_BACKUP_FILES = setOf(
+    AI_API_CONFIG_FILE,
+    AI_DICTIONARY_SETTINGS_FILE,
+)
+
+private val MODULE_BACKUP_DIRS = setOf(
+    ONLINE_SOURCE_DIR,
+    ASSOCIATION_SOURCE_DIR,
 )
 
 class AccountCompletionController(
@@ -651,6 +672,8 @@ class AccountCompletionController(
                 put("database/book_chapter.json")
                 put("database/book_reading.json")
                 put("files/${account.accountId}/")
+                put("module/shared_prefs.json")
+                put("module/files/")
             })
         }
 
@@ -685,12 +708,40 @@ class AccountCompletionController(
             .asSequence()
             .filter { it.key.startsWith(filePrefix) }
             .associate { (path, content) -> path.removePrefix(filePrefix) to content }
+        val moduleEntries = decodeModuleGlobalEntries(entries)
         return DecodedAccountDataBundle(
             manifest = manifest,
             account = account,
             database = dbEntries,
             files = files,
+            module = moduleEntries,
         )
+    }
+
+    private fun decodeModuleGlobalEntries(entries: Map<String, ByteArray>): ModuleGlobalEntries {
+        val prefs = entries["module/shared_prefs.json"]?.let { bytes ->
+            val json = JSONObject(String(bytes, Charsets.UTF_8))
+            buildMap {
+                val iterator = json.keys()
+                while (iterator.hasNext()) {
+                    val prefsName = iterator.next()
+                    if (prefsName in MODULE_BACKUP_PREFS) {
+                        put(prefsName, SharedPrefsSnapshot.fromJson(json.optJSONObject(prefsName)))
+                    }
+                }
+            }
+        }.orEmpty()
+        val filePrefix = "module/files/"
+        val files = entries.entries
+            .asSequence()
+            .filter { (path, _) -> path.startsWith(filePrefix) }
+            .mapNotNull { (path, bytes) ->
+                val relativePath = normalizeModuleBackupPath(path.removePrefix(filePrefix)) ?: return@mapNotNull null
+                relativePath to bytes
+            }
+            .filter { (relativePath, _) -> isAllowedModuleBackupFile(relativePath) }
+            .toMap()
+        return ModuleGlobalEntries(prefs = prefs, files = files)
     }
 
     private fun decodeJsonArray(bytes: ByteArray?): List<JSONObject> {
@@ -707,6 +758,7 @@ class AccountCompletionController(
     private fun restoreAccountDataBundle(activity: Activity, bundle: DecodedAccountDataBundle) {
         restoreHostDatabaseEntries(activity, bundle)
         restoreUserFiles(activity, bundle)
+        restoreModuleGlobalEntries(activity, bundle.module)
     }
 
     private fun restoreHostDatabaseEntries(activity: Activity, bundle: DecodedAccountDataBundle) {
@@ -751,6 +803,30 @@ class AccountCompletionController(
         root.mkdirs()
         bundle.files.forEach { (relativePath, bytes) ->
             val target = File(root, relativePath)
+            target.parentFile?.mkdirs()
+            FileOutputStream(target).use { output ->
+                output.write(bytes)
+            }
+        }
+    }
+
+    private fun restoreModuleGlobalEntries(activity: Activity, module: ModuleGlobalEntries) {
+        module.prefs.forEach { (prefsName, snapshot) ->
+            if (prefsName in MODULE_BACKUP_PREFS) {
+                restoreSharedPrefs(activity, prefsName, snapshot)
+            }
+        }
+        if (module.files.isEmpty()) return
+        val root = activity.filesDir.canonicalFile
+        MODULE_BACKUP_FILES.forEach { fileName ->
+            runCatching { File(root, fileName).delete() }
+        }
+        MODULE_BACKUP_DIRS.forEach { dirName ->
+            runCatching { File(root, dirName).deleteRecursively() }
+        }
+        module.files.forEach { (relativePath, bytes) ->
+            val target = File(root, relativePath).canonicalFile
+            if (!target.path.startsWith(root.path + File.separator)) return@forEach
             target.parentFile?.mkdirs()
             FileOutputStream(target).use { output ->
                 output.write(bytes)
@@ -1008,6 +1084,44 @@ class AccountCompletionController(
             }
     }
 
+    private fun writeModuleGlobalEntries(zip: ZipOutputStream, activity: Activity) {
+        val appContext = activity.applicationContext
+        val prefsJson = JSONObject()
+        MODULE_BACKUP_PREFS.forEach { prefsName ->
+            val snapshot = SharedPrefsSnapshot.fromPreferences(
+                appContext.getSharedPreferences(prefsName, Context.MODE_PRIVATE),
+            )
+            prefsJson.put(prefsName, snapshot.toJson())
+        }
+        writeJsonEntry(zip, "module/shared_prefs.json", prefsJson)
+
+        val root = activity.filesDir
+        MODULE_BACKUP_FILES.forEach { fileName ->
+            val file = File(root, fileName)
+            if (file.isFile) {
+                addFileEntry(zip, file, "module/files/$fileName")
+            }
+        }
+        MODULE_BACKUP_DIRS.forEach { dirName ->
+            val dir = File(root, dirName)
+            if (dir.isDirectory) {
+                writeModuleDirectory(zip, dir, dirName)
+            }
+        }
+    }
+
+    private fun writeModuleDirectory(zip: ZipOutputStream, dir: File, dirName: String) {
+        dir.walkTopDown()
+            .filter { it.isFile }
+            .forEach { file ->
+                val relativePath = dir.toPath()
+                    .relativize(file.toPath())
+                    .toString()
+                    .replace('\\', '/')
+                addFileEntry(zip, file, "module/files/$dirName/$relativePath")
+            }
+    }
+
     private fun writeAccountDataZip(output: OutputStream, activity: Activity, account: StoredAccount) {
         ZipOutputStream(output).use { zip ->
             writeJsonEntry(zip, "manifest.json", buildAccountExportManifest(activity, account))
@@ -1017,7 +1131,21 @@ class AccountCompletionController(
             writeJsonEntry(zip, "account/local_library_prefs.json", account.localLibraryPrefs.toJson())
             writeHostDatabaseEntries(zip, activity, account)
             writeUserFiles(zip, activity, account.accountId)
+            writeModuleGlobalEntries(zip, activity)
         }
+    }
+
+    private fun normalizeModuleBackupPath(path: String): String? {
+        val normalized = path.replace('\\', '/').trim('/')
+        if (normalized.isBlank()) return null
+        if (normalized.split('/').any { it.isBlank() || it == "." || it == ".." }) return null
+        return normalized
+    }
+
+    private fun isAllowedModuleBackupFile(relativePath: String): Boolean {
+        if (relativePath in MODULE_BACKUP_FILES) return true
+        val root = relativePath.substringBefore('/')
+        return root in MODULE_BACKUP_DIRS && relativePath.contains('/')
     }
 
     private fun queryRows(database: SQLiteDatabase, sql: String, selectionArgs: Array<String>): List<JSONObject> =
@@ -1648,11 +1776,17 @@ class AccountCompletionController(
         val bookReading: List<JSONObject>,
     )
 
+    private data class ModuleGlobalEntries(
+        val prefs: Map<String, SharedPrefsSnapshot> = emptyMap(),
+        val files: Map<String, ByteArray> = emptyMap(),
+    )
+
     private data class DecodedAccountDataBundle(
         val manifest: JSONObject,
         val account: StoredAccount,
         val database: DatabaseEntries,
         val files: Map<String, ByteArray>,
+        val module: ModuleGlobalEntries,
     )
 
     private data class StoredAccount(
