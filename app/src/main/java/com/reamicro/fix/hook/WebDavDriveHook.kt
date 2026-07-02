@@ -59,7 +59,14 @@ import com.reamicro.fix.notification.onlineCompletionDownloadText
 import com.reamicro.fix.notification.onlineCompletionDownloadTitle
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
+import com.reamicro.fix.webdav.CacheDeleteStat
 import com.reamicro.fix.webdav.CleartextScope
+import com.reamicro.fix.webdav.CloudDownloadCancelledException
+import com.reamicro.fix.webdav.CancellableWebDavDownload
+import com.reamicro.fix.webdav.NativeCloudDownload
+import com.reamicro.fix.webdav.OnlineCompletionDownloadCancelledException
+import com.reamicro.fix.webdav.OnlineCompletionDownloadTask
+import com.reamicro.fix.webdav.OnlineDownloadedChapter
 import com.reamicro.fix.webdav.WebDavCredentials
 import com.reamicro.fix.webdav.WebDavHttpException
 import com.reamicro.fix.webdav.WebDavRemoteClient
@@ -87,7 +94,6 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -11198,13 +11204,6 @@ img{max-width:100%;max-height:100%;height:auto;}
         val level: Int = 0,
     )
 
-    private data class OnlineDownloadedChapter(
-        val title: String,
-        val content: String,
-        val volumeTitle: String = "",
-        val level: Int = 0,
-    )
-
     private data class OnlineFailedChapter(
         val index: Int,
         val title: String,
@@ -11275,52 +11274,6 @@ img{max-width:100%;max-height:100%;height:auto;}
         val sourceUrl: String,
         val sourceSize: Long?,
     )
-
-    private class CancellableWebDavDownload(
-        val id: String,
-        val key: String,
-        val name: String,
-        val tracker: Any,
-        val localFile: File,
-        val createdAtMs: Long,
-    ) {
-        @Volatile var cancelRequested: Boolean = false
-        @Volatile var thread: Thread? = null
-    }
-
-    private class NativeCloudDownload(
-        val id: String,
-        val key: String,
-        val name: String,
-        val type: Int,
-        val tracker: Any,
-        val cacheDir: File,
-    ) {
-        @Volatile var cancelRequested: Boolean = false
-    }
-
-    private class OnlineCompletionDownloadTask(
-        val notificationId: Int,
-        val key: String,
-        val name: String,
-        val cacheDir: File,
-        val tracker: Any?,
-        val workId: String?,
-    ) {
-        @Volatile var cancelRequested: Boolean = false
-        @Volatile var thread: Thread? = null
-        @Volatile var importedBookDir: File? = null
-        val downloadedChapters = ConcurrentHashMap<Int, OnlineDownloadedChapter>()
-        val bookDirWriteLock = ReentrantLock()
-    }
-
-    private class CacheDeleteStat(
-        var files: Int = 0,
-        var bytes: Long = 0L,
-    )
-
-    private class CloudDownloadCancelledException : CancellationException("download cancelled")
-    private class OnlineCompletionDownloadCancelledException : CancellationException("online completion download cancelled")
 
     private class WebDavBackButton(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
