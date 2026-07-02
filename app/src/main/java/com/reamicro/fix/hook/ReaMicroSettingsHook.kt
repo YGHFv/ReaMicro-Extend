@@ -2333,13 +2333,13 @@ class ReaMicroSettingsHook(
             val rows = listOf(
                 ActionRow(
                     key = "dictionary_api_picker",
-                    title = "\u0041\u0050\u0049 \u914d\u7f6e\u9009\u62e9",
+                    title = "\u0041\u0050\u0049 \u914d\u7f6e",
                     subtitle = dictionaryApiSelectionSummary(),
                     onClick = { openNestedInjectedRoute(InjectedRoute.DictionaryApiPicker) },
                 ),
                 ActionRow(
                     key = "dictionary_preset_picker",
-                    title = "\u8bcd\u5178\u9884\u8bbe\u9009\u62e9",
+                    title = "\u8bcd\u5178\u9884\u8bbe",
                     subtitle = dictionaryPresetSelectionSummary(),
                     onClick = { openNestedInjectedRoute(InjectedRoute.DictionaryPresetPicker) },
                 ),
@@ -2356,6 +2356,16 @@ class ReaMicroSettingsHook(
                             checked = dictionarySettings.disableThinking,
                             onChanged = { checked, _ ->
                                 AiApiStore.setDictionaryDisableThinking(activityProvider()?.applicationContext, checked)
+                                bumpAiApiVersion()
+                                checked
+                            },
+                        ),
+                        ToggleRow(
+                            key = "dictionary_single_use_preset",
+                            title = "\u5355\u6b21\u5207\u6362",
+                            checked = dictionarySettings.singleUsePreset,
+                            onChanged = { checked, _ ->
+                                AiApiStore.setDictionarySingleUsePreset(activityProvider()?.applicationContext, checked)
                                 bumpAiApiVersion()
                                 checked
                             },
@@ -2380,8 +2390,8 @@ class ReaMicroSettingsHook(
                 add(
                     ActionRow(
                         key = "dictionary_api_follow",
-                        title = "\u8ddf\u968f AI \u914d\u7f6e",
-                        subtitle = "\u4f7f\u7528 AI \u914d\u7f6e\u9875\u4e2d\u542f\u7528\u7684 API",
+                        title = "\u8ddf\u968f API \u914d\u7f6e",
+                        subtitle = "\u4f7f\u7528 API \u914d\u7f6e\u9875\u4e2d\u542f\u7528\u7684 API",
                         trailing = if (dictionarySettings.apiId.isBlank()) "\u5f53\u524d" else null,
                         onClick = {
                             AiApiStore.setDictionaryApiId(context, "")
@@ -2395,7 +2405,7 @@ class ReaMicroSettingsHook(
                         ActionRow(
                             key = "dictionary_api_empty",
                             title = "\u6682\u65e0 API",
-                            subtitle = "\u8bf7\u5148\u5728 AI \u914d\u7f6e\u9875\u6dfb\u52a0 API",
+                            subtitle = "\u8bf7\u5148\u5728 API \u914d\u7f6e\u9875\u6dfb\u52a0 API",
                         ),
                     )
                 } else {
@@ -2480,7 +2490,7 @@ class ReaMicroSettingsHook(
         val config = AiApiStore.dictionaryApi(context)
         return when {
             config == null -> "\u672a\u9009\u62e9 API"
-            dictionarySettings.apiId.isBlank() -> "\u8ddf\u968f AI \u914d\u7f6e\uff1a${config.displayName}"
+            dictionarySettings.apiId.isBlank() -> "\u8ddf\u968f API \u914d\u7f6e\uff1a${config.displayName}"
             else -> config.displayName
         }
     }
@@ -2749,7 +2759,7 @@ class ReaMicroSettingsHook(
                 var testing = false
 
                 val dialog = AlertDialog.Builder(activity)
-                    .setTitle("AI \u914d\u7f6e")
+                    .setTitle("API \u914d\u7f6e")
                     .setView(container)
                     .create()
                 deleteButton?.setOnClickListener {
@@ -2864,7 +2874,7 @@ class ReaMicroSettingsHook(
                 dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
             }.onFailure {
                 XposedBridge.log("$LOG_PREFIX failed to open AI API config dialog: ${it.stackTraceToString()}")
-                showToast("\u65e0\u6cd5\u6253\u5f00 AI \u914d\u7f6e")
+                showToast("\u65e0\u6cd5\u6253\u5f00 API \u914d\u7f6e")
             }
         }
     }
@@ -4810,8 +4820,8 @@ class ReaMicroSettingsHook(
         object OnlineCompletionSettings : InjectedRoute(ONLINE_COMPLETION_TITLE)
         object AiConfigSettings : InjectedRoute(AI_CONFIG_TITLE)
         object DictionarySettings : InjectedRoute(DICTIONARY_SETTINGS_TITLE)
-        object DictionaryApiPicker : InjectedRoute("\u0041\u0050\u0049 \u914d\u7f6e\u9009\u62e9")
-        object DictionaryPresetPicker : InjectedRoute("\u8bcd\u5178\u9884\u8bbe\u9009\u62e9")
+        object DictionaryApiPicker : InjectedRoute("\u0041\u0050\u0049 \u914d\u7f6e")
+        object DictionaryPresetPicker : InjectedRoute("\u8bcd\u5178\u9884\u8bbe")
         object FontSettings : InjectedRoute(FONT_SETTINGS_TITLE)
         data class FontPicker(val target: FontPickerTarget) : InjectedRoute(target.title)
         object FontLibrary : InjectedRoute(FONT_LIBRARY_TITLE)
@@ -5056,7 +5066,7 @@ class ReaMicroSettingsHook(
         const val FAMILY_SYSTEM = "system"
         const val FAMILY_SOURCE_HAN_SERIF = "serif"
         const val ONLINE_COMPLETION_TITLE = "在线补全"
-        const val AI_CONFIG_TITLE = "AI \u914d\u7f6e"
+        const val AI_CONFIG_TITLE = "API \u914d\u7f6e"
         const val DICTIONARY_SETTINGS_TITLE = "\u8bcd\u5178\u7ba1\u7406"
         const val HOST_ABOUT_TITLE = "关于阅微"
         const val MODULE_ENTRY_TITLE = "补全计划"

@@ -1493,13 +1493,17 @@ class ReaderHook(
         }
         val config = AiApiStore.dictionaryApi(activity.applicationContext)
         if (config == null) {
-            Toast.makeText(activity, "\u8bf7\u5148\u5728 AI \u914d\u7f6e\u4e2d\u6dfb\u52a0\u6216\u9009\u62e9 API", Toast.LENGTH_SHORT).show()
+            Toast.makeText(activity, "\u8bf7\u5148\u5728 API \u914d\u7f6e\u4e2d\u6dfb\u52a0\u6216\u9009\u62e9 API", Toast.LENGTH_SHORT).show()
             return
         }
         val settings = AiApiStore.dictionarySettings(activity.applicationContext)
         val initialPreset = AiApiStore.dictionaryPreset(activity.applicationContext, settings.presetId)
         activity.runOnUiThread {
             val handle = showDictionaryDialog(activity, quote, config, initialPreset) { dialogHandle, selectedPreset ->
+                val latestSettings = AiApiStore.dictionarySettings(activity.applicationContext)
+                if (!latestSettings.singleUsePreset) {
+                    AiApiStore.setDictionaryPresetId(activity.applicationContext, selectedPreset.id)
+                }
                 requestDictionaryPreset(activity, config, quote, selectedPreset, dialogHandle)
             }
             requestDictionaryPreset(activity, config, quote, initialPreset, handle)

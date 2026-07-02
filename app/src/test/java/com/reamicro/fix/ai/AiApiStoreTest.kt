@@ -11,6 +11,7 @@ class AiApiStoreTest {
         val settings = AiApiStore.dictionarySettings(null)
 
         assertTrue(settings.disableThinking)
+        assertTrue(settings.singleUsePreset)
         assertEquals(AiApiStore.DEFAULT_DICTIONARY_PRESET_ID, settings.presetId)
     }
 

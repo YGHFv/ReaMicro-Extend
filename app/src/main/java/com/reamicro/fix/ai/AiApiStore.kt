@@ -36,6 +36,7 @@ data class AiDictionarySettings(
     val apiId: String = "",
     val presetId: String = AiApiStore.DEFAULT_DICTIONARY_PRESET_ID,
     val disableThinking: Boolean = true,
+    val singleUsePreset: Boolean = true,
 )
 
 object AiApiStore {
@@ -242,6 +243,13 @@ object AiApiStore {
         context ?: return false
         val state = readDictionaryState(context)
         writeDictionaryState(context, state.copy(settings = state.settings.copy(disableThinking = disabled)))
+        return true
+    }
+
+    fun setDictionarySingleUsePreset(context: Context?, enabled: Boolean): Boolean {
+        context ?: return false
+        val state = readDictionaryState(context)
+        writeDictionaryState(context, state.copy(settings = state.settings.copy(singleUsePreset = enabled)))
         return true
     }
 
@@ -463,6 +471,11 @@ object AiApiStore {
                 } else {
                     true
                 },
+                singleUsePreset = if (json.has("single_use_preset")) {
+                    json.optBoolean("single_use_preset", true)
+                } else {
+                    true
+                },
             )
             val customPresets = buildList {
                 val array = json.optJSONArray("custom_presets") ?: JSONArray()
@@ -512,6 +525,7 @@ object AiApiStore {
             .put("api_id", state.settings.apiId)
             .put("preset_id", presetId)
             .put("disable_thinking", state.settings.disableThinking)
+            .put("single_use_preset", state.settings.singleUsePreset)
             .put("custom_presets", array)
         dictionarySettingsFile(context).writeText(json.toString(2), Charsets.UTF_8)
     }
