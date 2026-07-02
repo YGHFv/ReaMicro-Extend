@@ -2404,9 +2404,7 @@ class ReaMicroSettingsHook(
                         ActionRow(
                             key = "dictionary_preset_${preset.id}",
                             title = preset.name.compactOnlineSourceLine(),
-                            subtitle = preset.prompt.compactOnlineSourceLine().let { line ->
-                                if (line.length > 72) line.take(72) + "..." else line
-                            },
+                            subtitle = presetPromptPreview(preset.prompt),
                             trailing = if (dictionarySettings.presetId == preset.id) "\u5f53\u524d" else null,
                             onClick = {
                                 AiApiStore.setDictionaryPresetId(context, preset.id)
@@ -2536,9 +2534,7 @@ class ReaMicroSettingsHook(
                         ActionRow(
                             key = "image_${target.id}_preset_${preset.id}",
                             title = preset.name.compactOnlineSourceLine(),
-                            subtitle = preset.prompt.compactOnlineSourceLine().let { line ->
-                                if (line.length > 72) line.take(72) + "..." else line
-                            },
+                            subtitle = presetPromptPreview(preset.prompt),
                             trailing = if (selectedPresetId == preset.id) "\u5f53\u524d" else null,
                             onClick = {
                                 AiApiStore.setImagePresetId(context, target, preset.id)
@@ -2798,6 +2794,51 @@ class ReaMicroSettingsHook(
         }
     }
 
+    private fun showAiModelSelectionDialog(
+        activity: Activity,
+        models: List<String>,
+        colors: SettingsDialogColors,
+        onSelected: (String) -> Unit,
+    ) {
+        val dialog = Dialog(activity)
+        val card = settingsDialogCard(activity, colors)
+        card.addView(settingsDialogTitle(activity, "\u9009\u62e9\u6a21\u578b", colors))
+        models.forEach { model ->
+            card.addView(
+                settingsDialogChoiceRow(activity, model, colors) {
+                    onSelected(model)
+                    dialog.dismiss()
+                },
+            )
+        }
+        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, 0.92f)
+    }
+
+    private fun settingsDialogChoiceRow(
+        context: Context,
+        title: String,
+        colors: SettingsDialogColors,
+        onClick: () -> Unit,
+    ): TextView =
+        TextView(context).apply {
+            text = title
+            textSize = 14f
+            setTextColor(colors.title)
+            setSingleLine(false)
+            setPadding(
+                settingsDp(context, 12),
+                settingsDp(context, 10),
+                settingsDp(context, 12),
+                settingsDp(context, 10),
+            )
+            background = settingsRoundedRect(colors.field, settingsDp(context, 12), colors.border)
+            setOnClickListener { onClick() }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = settingsDp(context, 8) }
+        }
+
     private fun settingsRoundedRect(fill: Int, radiusPx: Int, stroke: Int = Color.TRANSPARENT): GradientDrawable =
         GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
@@ -3029,7 +3070,23 @@ class ReaMicroSettingsHook(
         AiApiStore.list(activityProvider()?.applicationContext)
 
     private fun aiApiSubtitle(config: AiApiConfig): String =
-        config.baseUrl
+        config.model
+
+    private fun presetPromptPreview(prompt: String): String =
+        prompt.compactOnlineSourceLine().let { line ->
+            if (line.length > PRESET_PROMPT_PREVIEW_MAX_CHARS) {
+                line.take(PRESET_PROMPT_PREVIEW_MAX_CHARS).trimEnd() + "..."
+            } else {
+                line
+            }
+        }
+
+    private data class AiApiDialogValues(
+        val name: String,
+        val baseUrl: String,
+        val apiKey: String,
+        val model: String,
+    )
 
     private fun renderAiApiSwitch(config: AiApiConfig, composer: Any) {
         val latest = listAiApiConfigs().firstOrNull { it.id == config.id } ?: config
@@ -3082,6 +3139,10 @@ class ReaMicroSettingsHook(
                 val colors = SettingsDialogColors(activity)
                 val dialog = Dialog(activity)
                 val card = settingsDialogCard(activity, colors)
+                val nameInput = settingsDialogInput(activity, "\u540d\u79f0\uff08\u9ed8\u8ba4\u6a21\u578b\u540d\uff09", singleLine = true, colors = colors).apply {
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL
+                    setText(existing?.name.orEmpty())
+                }
                 val baseUrlInput = settingsDialogInput(activity, "base_url", singleLine = true, colors = colors).apply {
                     inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
                     setText(existing?.baseUrl.orEmpty())
@@ -3113,6 +3174,10 @@ class ReaMicroSettingsHook(
                 }
                 val cancelButton = settingsDialogButton(activity, "\u53d6\u6d88", colors, SettingsDialogButtonRole.Neutral)
                 val testButton = settingsDialogButton(activity, "\u6d4b\u8bd5", colors)
+                val fetchModelsButton = settingsDialogButton(activity, "\u83b7\u53d6\u6a21\u578b", colors, SettingsDialogButtonRole.Neutral)
+                val fetchRow = settingsDialogActions(activity).apply {
+                    addView(fetchModelsButton, settingsDialogButtonParams(activity))
+                }
                 val actionRow = settingsDialogActions(activity).apply {
                     addView(finishButton, settingsDialogButtonParams(activity))
                     if (deleteButton != null) addView(deleteButton, settingsDialogButtonParams(activity))
@@ -3120,9 +3185,11 @@ class ReaMicroSettingsHook(
                     addView(testButton, settingsDialogButtonParams(activity))
                 }
                 card.addView(settingsDialogTitle(activity, "API \u914d\u7f6e", colors))
+                card.addView(nameInput)
                 card.addView(baseUrlInput)
                 card.addView(apiKeyInput)
                 card.addView(modelInput)
+                card.addView(fetchRow)
                 card.addView(status)
                 card.addView(progress, settingsDialogProgressParams(activity))
                 card.addView(actionRow)
@@ -3131,6 +3198,7 @@ class ReaMicroSettingsHook(
                 var testedApiKey = existing?.apiKey.orEmpty()
                 var testedModel = existing?.model.orEmpty()
                 var testing = false
+                var fetchingModels = false
 
                 deleteButton?.setOnClickListener {
                     val target = existing ?: return@setOnClickListener
@@ -3141,34 +3209,44 @@ class ReaMicroSettingsHook(
                     dialog.dismiss()
                 }
 
-                fun values(): Triple<String, String, String> =
-                    Triple(
+                fun values(): AiApiDialogValues =
+                    AiApiDialogValues(
+                        nameInput.text?.toString().orEmpty().trim(),
                         baseUrlInput.text?.toString().orEmpty().trim(),
                         apiKeyInput.text?.toString().orEmpty().trim(),
                         modelInput.text?.toString().orEmpty().trim(),
                     )
 
+                fun hasBaseAndKey(): Boolean {
+                    val values = values()
+                    return values.baseUrl.isNotBlank() && values.apiKey.isNotBlank()
+                }
+
                 fun hasAllValues(): Boolean {
-                    val (baseUrl, apiKey, model) = values()
-                    return baseUrl.isNotBlank() && apiKey.isNotBlank() && model.isNotBlank()
+                    val values = values()
+                    return values.baseUrl.isNotBlank() && values.apiKey.isNotBlank() && values.model.isNotBlank()
                 }
 
                 fun testPassedForCurrentValues(): Boolean {
-                    val (baseUrl, apiKey, model) = values()
-                    return baseUrl == testedBaseUrl && apiKey == testedApiKey && model == testedModel
+                    val values = values()
+                    return values.baseUrl == testedBaseUrl && values.apiKey == testedApiKey && values.model == testedModel
                 }
 
                 fun refreshButtons() {
-                    val canTest = hasAllValues() && !testing
-                    val canFinish = hasAllValues() && testPassedForCurrentValues() && !testing
+                    val busy = testing || fetchingModels
+                    val canFetchModels = hasBaseAndKey() && !busy
+                    val canTest = hasAllValues() && !busy
+                    val canFinish = hasAllValues() && testPassedForCurrentValues() && !busy
+                    fetchModelsButton.isEnabled = canFetchModels
+                    fetchModelsButton.alpha = if (canFetchModels) 1f else 0.38f
                     testButton.isEnabled = canTest
                     testButton.alpha = if (canTest) 1f else 0.38f
                     finishButton.isEnabled = canFinish
                     finishButton.alpha = if (canFinish) 1f else 0.38f
-                    deleteButton?.isEnabled = !testing
-                    deleteButton?.alpha = if (testing) 0.38f else 1f
-                    cancelButton.isEnabled = !testing
-                    cancelButton.alpha = if (testing) 0.38f else 1f
+                    deleteButton?.isEnabled = !busy
+                    deleteButton?.alpha = if (busy) 0.38f else 1f
+                    cancelButton.isEnabled = !busy
+                    cancelButton.alpha = if (busy) 0.38f else 1f
                 }
 
                 val watcher = object : TextWatcher {
@@ -3183,9 +3261,38 @@ class ReaMicroSettingsHook(
                 apiKeyInput.addTextChangedListener(watcher)
                 modelInput.addTextChangedListener(watcher)
 
+                fetchModelsButton.setOnClickListener {
+                    val values = values()
+                    if (values.baseUrl.isBlank() || values.apiKey.isBlank()) {
+                        Toast.makeText(activity, "\u8bf7\u5148\u586b\u5199 base_url \u548c api_key", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                    fetchingModels = true
+                    status.text = "\u6b63\u5728\u83b7\u53d6\u6a21\u578b\u5217\u8868..."
+                    progress.visibility = View.VISIBLE
+                    refreshButtons()
+                    Thread({
+                        val result = AiApiStore.fetchModels(values.baseUrl, values.apiKey)
+                        activity.runOnUiThread {
+                            fetchingModels = false
+                            progress.visibility = View.GONE
+                            status.text = result.message
+                            refreshButtons()
+                            if (result.success && result.models.isNotEmpty()) {
+                                showAiModelSelectionDialog(activity, result.models, colors) { model ->
+                                    modelInput.setText(model)
+                                    modelInput.setSelection(modelInput.text?.length ?: 0)
+                                    status.text = "\u5df2\u9009\u62e9\u6a21\u578b\uff0c\u8bf7\u6d4b\u8bd5\u8fde\u63a5"
+                                    refreshButtons()
+                                }
+                            }
+                        }
+                    }, "ReaMicroAiModelFetch").start()
+                }
+
                 testButton.setOnClickListener {
-                    val (baseUrl, apiKey, model) = values()
-                    if (baseUrl.isBlank() || apiKey.isBlank() || model.isBlank()) {
+                    val values = values()
+                    if (values.baseUrl.isBlank() || values.apiKey.isBlank() || values.model.isBlank()) {
                         Toast.makeText(activity, "\u8bf7\u5148\u586b\u5b8c\u5168\u90e8\u5b57\u6bb5", Toast.LENGTH_SHORT).show()
                         return@setOnClickListener
                     }
@@ -3194,15 +3301,15 @@ class ReaMicroSettingsHook(
                     progress.visibility = View.VISIBLE
                     refreshButtons()
                     Thread({
-                        val result = AiApiStore.test(baseUrl, apiKey, model)
+                        val result = AiApiStore.test(values.baseUrl, values.apiKey, values.model)
                         activity.runOnUiThread {
                             testing = false
                             progress.visibility = View.GONE
                             status.text = result.message
                             if (result.success) {
-                                testedBaseUrl = baseUrl
-                                testedApiKey = apiKey
-                                testedModel = model
+                                testedBaseUrl = values.baseUrl
+                                testedApiKey = values.apiKey
+                                testedModel = values.model
                             } else {
                                 testedBaseUrl = ""
                                 testedApiKey = ""
@@ -3213,15 +3320,15 @@ class ReaMicroSettingsHook(
                     }, "ReaMicroAiApiTest").start()
                 }
                 finishButton.setOnClickListener {
-                    val (baseUrl, apiKey, model) = values()
+                    val values = values()
                     if (!testPassedForCurrentValues()) {
                         Toast.makeText(activity, "\u8bf7\u5148\u6d4b\u8bd5\u901a\u8fc7", Toast.LENGTH_SHORT).show()
                         return@setOnClickListener
                     }
                     val config = if (existing == null) {
-                        AiApiStore.add(activity.applicationContext, baseUrl, apiKey, model)
+                        AiApiStore.add(activity.applicationContext, values.baseUrl, values.apiKey, values.model, values.name)
                     } else {
-                        AiApiStore.update(activity.applicationContext, existing.id, baseUrl, apiKey, model)
+                        AiApiStore.update(activity.applicationContext, existing.id, values.baseUrl, values.apiKey, values.model, values.name)
                     }
                     bumpAiApiVersion()
                     showToast(
@@ -5437,6 +5544,7 @@ class ReaMicroSettingsHook(
         const val ACTION_TRAILING_KEY_MASK = 0x0F0F0F0F
         const val TEXT_DEFAULT_MASK = 131066
         const val TEXT_WITH_FONT_FAMILY_MASK = 130938
+        const val PRESET_PROMPT_PREVIEW_MAX_CHARS = 32
         const val FAMILY_SYSTEM = "system"
         const val FAMILY_SOURCE_HAN_SERIF = "serif"
         const val ONLINE_COMPLETION_TITLE = "在线补全"

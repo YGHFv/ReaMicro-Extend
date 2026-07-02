@@ -197,7 +197,7 @@ class BookOverviewImageSelectionHook(
             var previewBytes: ByteArray? = null
 
             card.addView(dialogTitle(activity, "在线图片", colors))
-            val input = editText(activity, "图片链接", singleLine = false).apply {
+            val input = editText(activity, "图片链接", singleLine = false, colors = colors).apply {
                 minLines = 2
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             }
@@ -291,14 +291,14 @@ class BookOverviewImageSelectionHook(
             card.addView(dialogMessage(activity, "当前模型：${config?.displayName ?: "未配置"}", colors))
             card.addView(dialogMessage(activity, "参考图片：生成时自动读取当前封面并上传", colors))
 
-            val prompt = editText(activity, "提示词内容", singleLine = false).apply {
+            val prompt = editText(activity, "提示词内容", singleLine = false, colors = colors).apply {
                 minLines = 4
                 setText(preset.prompt)
                 gravity = Gravity.TOP or Gravity.START
             }
             card.addView(prompt)
 
-            val size = editText(activity, "图片尺寸", singleLine = true).apply {
+            val size = editText(activity, "图片尺寸", singleLine = true, colors = colors).apply {
                 setText(DEFAULT_IMAGE_SIZE)
             }
             card.addView(size)
@@ -678,6 +678,7 @@ class BookOverviewImageSelectionHook(
             ?: error("图片无法预览")
         imageView.setImageBitmap(bitmap)
         imageView.visibility = View.VISIBLE
+        imageView.requestLayout()
     }
 
     private fun validateImageBytes(bytes: ByteArray) {
@@ -1095,24 +1096,21 @@ private fun fieldLabel(
         }
     }
 
-private fun editText(context: Context, hintText: String, singleLine: Boolean): EditText =
+private fun editText(
+    context: Context,
+    hintText: String,
+    singleLine: Boolean,
+    colors: BookOverviewImageSelectionHook.DialogColors,
+): EditText =
     EditText(context).apply {
         hint = hintText
         textSize = 14f
         setSingleLine(singleLine)
         minHeight = dp(context, 46)
+        setTextColor(colors.title)
+        setHintTextColor(colors.body)
         setPadding(dp(context, 12), dp(context, 8), dp(context, 12), dp(context, 8))
-        background = rounded(
-            if ((context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-                Configuration.UI_MODE_NIGHT_YES
-            ) {
-                Color.rgb(38, 43, 50)
-            } else {
-                Color.rgb(246, 248, 251)
-            },
-            themeColor(context, android.R.attr.divider, Color.rgb(224, 228, 235)),
-            dp(context, 12),
-        )
+        background = rounded(colors.field, colors.border, dp(context, 12))
         layoutParams = fieldParams(context)
     }
 
@@ -1121,22 +1119,15 @@ private fun previewImageView(context: Context, target: BookOverviewImageSelectio
         visibility = View.GONE
         adjustViewBounds = true
         scaleType = ImageView.ScaleType.FIT_CENTER
-        background = rounded(
-            if ((context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-                Configuration.UI_MODE_NIGHT_YES
-            ) {
-                Color.rgb(38, 43, 50)
-            } else {
-                Color.rgb(246, 248, 251)
-            },
-            themeColor(context, android.R.attr.divider, Color.rgb(224, 228, 235)),
-            dp(context, 12),
-        )
-        val height = if (target.name == "Banner") dp(context, 180) else dp(context, 260)
+        background = null
+        setBackgroundColor(Color.TRANSPARENT)
+        maxWidth = context.resources.displayMetrics.widthPixels - dp(context, 48)
+        maxHeight = if (target.name == "Banner") dp(context, 240) else dp(context, 360)
         layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            height,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
             topMargin = dp(context, 10)
             bottomMargin = dp(context, 10)
         }

@@ -15,14 +15,21 @@ data class AiApiConfig(
     val apiKey: String,
     val model: String,
     val enabled: Boolean = true,
+    val name: String = "",
 ) {
     val displayName: String
-        get() = model.ifBlank { baseUrl }
+        get() = name.ifBlank { model.ifBlank { baseUrl } }
 }
 
 data class AiApiTestResult(
     val success: Boolean,
     val message: String,
+)
+
+data class AiApiModelFetchResult(
+    val success: Boolean,
+    val message: String,
+    val models: List<String> = emptyList(),
 )
 
 data class AiDictionaryPreset(
@@ -128,10 +135,11 @@ object AiApiStore {
         }.getOrElse { emptyList() }
     }
 
-    fun add(context: Context, baseUrl: String, apiKey: String, model: String): AiApiConfig {
+    fun add(context: Context, baseUrl: String, apiKey: String, model: String, name: String = ""): AiApiConfig {
         val normalizedBaseUrl = normalizeBaseUrl(baseUrl)
         val normalizedApiKey = apiKey.trim()
         val normalizedModel = model.trim()
+        val normalizedName = name.trim()
         require(normalizedBaseUrl.isNotBlank()) { "Base URL \u4e0d\u80fd\u4e3a\u7a7a" }
         require(normalizedApiKey.isNotBlank()) { "API Key \u4e0d\u80fd\u4e3a\u7a7a" }
         require(normalizedModel.isNotBlank()) { "Model \u4e0d\u80fd\u4e3a\u7a7a" }
@@ -140,6 +148,7 @@ object AiApiStore {
             baseUrl = normalizedBaseUrl,
             apiKey = normalizedApiKey,
             model = normalizedModel,
+            name = normalizedName,
         )
         val next = (list(context).filterNot { it.id == config.id } + config)
             .sortedBy { it.displayName.lowercase() }
@@ -156,10 +165,11 @@ object AiApiStore {
         return true
     }
 
-    fun update(context: Context, id: String, baseUrl: String, apiKey: String, model: String): AiApiConfig {
+    fun update(context: Context, id: String, baseUrl: String, apiKey: String, model: String, name: String = ""): AiApiConfig {
         val normalizedBaseUrl = normalizeBaseUrl(baseUrl)
         val normalizedApiKey = apiKey.trim()
         val normalizedModel = model.trim()
+        val normalizedName = name.trim()
         require(normalizedBaseUrl.isNotBlank()) { "Base URL \u4e0d\u80fd\u4e3a\u7a7a" }
         require(normalizedApiKey.isNotBlank()) { "API Key \u4e0d\u80fd\u4e3a\u7a7a" }
         require(normalizedModel.isNotBlank()) { "Model \u4e0d\u80fd\u4e3a\u7a7a" }
@@ -171,12 +181,50 @@ object AiApiStore {
             apiKey = normalizedApiKey,
             model = normalizedModel,
             enabled = previous?.enabled ?: true,
+            name = normalizedName,
         )
         // Editing can change the stable id, so remove both the old row and any row with the new id.
         val next = (configs.filterNot { it.id == id || it.id == updated.id } + updated)
             .sortedBy { it.displayName.lowercase() }
         write(context, next)
         return updated
+    }
+
+    fun fetchModels(baseUrl: String, apiKey: String): AiApiModelFetchResult {
+        val normalizedBaseUrl = normalizeBaseUrl(baseUrl)
+        val normalizedApiKey = apiKey.trim()
+        if (normalizedBaseUrl.isBlank() || normalizedApiKey.isBlank()) {
+            return AiApiModelFetchResult(false, "\u8bf7\u5148\u586b\u5199 base_url \u548c api_key")
+        }
+        return runCatching {
+            val connection = (URL(modelsUrl(normalizedBaseUrl)).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = CONNECT_TIMEOUT_MS
+                readTimeout = READ_TIMEOUT_MS
+                setRequestProperty("Authorization", "Bearer $normalizedApiKey")
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("User-Agent", "ReaMicro-Extend/ai-config")
+            }
+            try {
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val text = stream?.use { it.readBytes().toString(Charsets.UTF_8) }.orEmpty()
+                if (code in 200..299) {
+                    val models = parseModelIds(text)
+                    if (models.isEmpty()) {
+                        AiApiModelFetchResult(false, "\u63a5\u53e3\u8fd4\u56de\u6210\u529f\uff0c\u4f46\u6ca1\u6709\u627e\u5230\u53ef\u9009\u6a21\u578b")
+                    } else {
+                        AiApiModelFetchResult(true, "\u5df2\u83b7\u53d6 ${models.size} \u4e2a\u6a21\u578b", models)
+                    }
+                } else {
+                    AiApiModelFetchResult(false, "HTTP $code: ${extractError(text).ifBlank { text.take(160) }}")
+                }
+            } finally {
+                connection.disconnect()
+            }
+        }.getOrElse { error ->
+            AiApiModelFetchResult(false, error.message ?: error.javaClass.simpleName)
+        }
     }
 
     fun test(baseUrl: String, apiKey: String, model: String): AiApiTestResult {
@@ -565,6 +613,7 @@ object AiApiStore {
             apiKey = json.optString("api_key").trim(),
             model = json.optString("model").trim(),
             enabled = if (json.has("enabled")) json.optBoolean("enabled", true) else true,
+            name = json.optString("name").trim(),
         )
 
     private fun write(context: Context, configs: List<AiApiConfig>) {
@@ -576,7 +625,8 @@ object AiApiStore {
                     .put("base_url", config.baseUrl)
                     .put("api_key", config.apiKey)
                     .put("model", config.model)
-                    .put("enabled", config.enabled),
+                    .put("enabled", config.enabled)
+                    .put("name", config.name),
             )
         }
         configFile(context).writeText(array.toString(2), Charsets.UTF_8)
@@ -773,6 +823,18 @@ object AiApiStore {
             else -> "$baseUrl/v1/images/generations"
         }
 
+    private fun modelsUrl(baseUrl: String): String =
+        when {
+            baseUrl.endsWith("/models", ignoreCase = true) -> baseUrl
+            baseUrl.endsWith("/chat/completions", ignoreCase = true) ->
+                baseUrl.removeSuffixIgnoreCase("/chat/completions") + "/models"
+            baseUrl.endsWith("/images/generations", ignoreCase = true) ->
+                baseUrl.removeSuffixIgnoreCase("/images/generations") + "/models"
+            baseUrl.endsWith("/v1", ignoreCase = true) || isVersionedApiBaseUrl(baseUrl) ->
+                "$baseUrl/models"
+            else -> "$baseUrl/v1/models"
+        }
+
     private fun isVersionedApiBaseUrl(baseUrl: String): Boolean =
         Regex(""".*/api/v\d+$""", RegexOption.IGNORE_CASE).matches(baseUrl)
 
@@ -895,6 +957,43 @@ object AiApiStore {
             val error = json.optJSONObject("error") ?: return@runCatching ""
             error.optString("message")
         }.getOrDefault("")
+
+    private fun parseModelIds(text: String): List<String> {
+        val ids = linkedSetOf<String>()
+        fun addModelId(value: String) {
+            val id = value.trim()
+            if (id.isNotBlank()) ids.add(id)
+        }
+        fun addArray(array: JSONArray) {
+            for (index in 0 until array.length()) {
+                when (val item = array.opt(index)) {
+                    is JSONObject -> addModelId(
+                        item.optString("id")
+                            .ifBlank { item.optString("name") }
+                            .ifBlank { item.optString("model") },
+                    )
+                    is String -> addModelId(item)
+                }
+            }
+        }
+        return runCatching {
+            val trimmed = text.trim()
+            if (trimmed.startsWith("[")) {
+                addArray(JSONArray(trimmed))
+            } else {
+                val json = JSONObject(trimmed)
+                listOf("data", "models", "items").forEach { key ->
+                    json.optJSONArray(key)?.let { addArray(it) }
+                }
+                json.optJSONObject("data")?.let { data ->
+                    listOf("models", "items").forEach { key ->
+                        data.optJSONArray(key)?.let { addArray(it) }
+                    }
+                }
+            }
+            ids.sortedBy { it.lowercase() }
+        }.getOrDefault(emptyList())
+    }
 
     private fun stableId(value: String): String =
         "ai_" + MessageDigest.getInstance("SHA-256")
