@@ -35,6 +35,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.reamicro.fix.ai.AiApiConfig
+import com.reamicro.fix.ai.AiDictionaryPreset
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.ai.AiApiTestResult
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
@@ -1495,21 +1496,41 @@ class ReaderHook(
             Toast.makeText(activity, "\u8bf7\u5148\u5728 AI \u914d\u7f6e\u4e2d\u6dfb\u52a0\u6216\u9009\u62e9 API", Toast.LENGTH_SHORT).show()
             return
         }
+        val settings = AiApiStore.dictionarySettings(activity.applicationContext)
+        val initialPreset = AiApiStore.dictionaryPreset(activity.applicationContext, settings.presetId)
         activity.runOnUiThread {
-            val handle = showDictionaryDialog(activity, quote, config)
-            Thread({
-                val result = runCatching { AiApiStore.dictionary(activity.applicationContext, config, quote) }
-                    .onFailure { XposedBridge.log("$LOG_PREFIX dictionary request failed: ${it.stackTraceToString()}") }
-                    .getOrElse { error -> AiApiTestResult(false, error.message ?: error.javaClass.simpleName) }
-                activity.runOnUiThread {
-                    if (!activity.isFinishing &&
-                        (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN_MR1 || !activity.isDestroyed)
-                    ) {
-                        updateDictionaryDialog(handle, result.success, result.message)
-                    }
-                }
-            }, "ReaMicroDictionary").start()
+            val handle = showDictionaryDialog(activity, quote, config, initialPreset) { dialogHandle, selectedPreset ->
+                requestDictionaryPreset(activity, config, quote, selectedPreset, dialogHandle)
+            }
+            requestDictionaryPreset(activity, config, quote, initialPreset, handle)
         }
+    }
+
+    private fun requestDictionaryPreset(
+        activity: Activity,
+        config: AiApiConfig,
+        quote: String,
+        preset: AiDictionaryPreset,
+        handle: DictionaryDialogHandle,
+    ) {
+        val requestId = ++handle.requestId
+        handle.currentPresetId = preset.id
+        handle.footerLabel.text = preset.name
+        handle.body.text = "\u6b63\u5728\u89e3\u6790..."
+        handle.body.setTextColor(handle.colors.primaryText)
+        Thread({
+            val result = runCatching { AiApiStore.dictionary(activity.applicationContext, config, quote, preset) }
+                .onFailure { XposedBridge.log("$LOG_PREFIX dictionary request failed: ${it.stackTraceToString()}") }
+                .getOrElse { error -> AiApiTestResult(false, error.message ?: error.javaClass.simpleName) }
+            activity.runOnUiThread {
+                if (!activity.isFinishing &&
+                    (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN_MR1 || !activity.isDestroyed) &&
+                    requestId == handle.requestId
+                ) {
+                    updateDictionaryDialog(handle, result.success, result.message)
+                }
+            }
+        }, "ReaMicroDictionary").start()
     }
 
     private fun currentNativeSelectionText(): Pair<Any?, String> {
@@ -3506,6 +3527,8 @@ class ReaderHook(
         activity: Activity,
         selectedText: String,
         config: AiApiConfig,
+        initialPreset: AiDictionaryPreset,
+        onPresetSelected: (DictionaryDialogHandle, AiDictionaryPreset) -> Unit,
     ): DictionaryDialogHandle {
         val colors = DialogColors(activity)
         val dialog = Dialog(activity)
@@ -3527,10 +3550,13 @@ class ReaderHook(
             setTextIsSelectable(true)
         }
         val footerLabel = TextView(activity).apply {
-            text = "\u8bcd\u5178\u91ca\u4e49"
+            text = initialPreset.name
             textSize = 13f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(colors.accent)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            setPadding(0, dp(6), dp(12), dp(6))
         }
         val model = TextView(activity).apply {
             text = config.displayName
@@ -3564,7 +3590,7 @@ class ReaderHook(
             ))
             addView(LinearLayout(activity).apply {
                 gravity = Gravity.CENTER_VERTICAL
-                addView(footerLabel)
+                addView(footerLabel, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 addView(model, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3590,13 +3616,83 @@ class ReaderHook(
             decorView.setPadding(0, 0, 0, 0)
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
-        return DictionaryDialogHandle(dialog, body, colors)
+        val handle = DictionaryDialogHandle(dialog, body, footerLabel, colors, initialPreset.id)
+        footerLabel.setOnClickListener {
+            showDictionaryPresetPicker(activity, handle) { preset ->
+                onPresetSelected(handle, preset)
+            }
+        }
+        return handle
     }
 
     private fun updateDictionaryDialog(handle: DictionaryDialogHandle, success: Boolean, message: String) {
         if (!handle.dialog.isShowing) return
         handle.body.text = message.ifBlank { "\u672a\u83b7\u53d6\u5230\u8bcd\u5178\u7ed3\u679c" }
         handle.body.setTextColor(if (success) handle.colors.primaryText else handle.colors.accent)
+    }
+
+    private fun showDictionaryPresetPicker(
+        activity: Activity,
+        handle: DictionaryDialogHandle,
+        onSelected: (AiDictionaryPreset) -> Unit,
+    ) {
+        val presets = AiApiStore.dictionaryPresets(activity.applicationContext)
+        if (presets.isEmpty()) return
+        val colors = handle.colors
+        val dialog = Dialog(activity)
+        val density = activity.resources.displayMetrics.density
+        fun dp(value: Int): Int = (value * density).toInt()
+        val currentPresetId = handle.currentPresetId
+        val list = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(16), dp(20), dp(16))
+            background = GradientDrawable().apply {
+                setColor(colors.cardBackground)
+                cornerRadius = dp(18).toFloat()
+                setStroke(dp(1), colors.stroke)
+            }
+        }
+        presets.forEach { preset ->
+            list.addView(TextView(activity).apply {
+                val selected = preset.id == currentPresetId
+                text = if (selected) "\u2713 ${preset.name}" else preset.name
+                textSize = 16f
+                setTextColor(if (selected) colors.accent else colors.primaryText)
+                typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(12), 0, dp(12))
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                setOnClickListener {
+                    dialog.dismiss()
+                    if (handle.dialog.isShowing && preset.id != currentPresetId) {
+                        onSelected(preset)
+                    }
+                }
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+        val root = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(10), dp(16), dp(14))
+            addView(list, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        dialog.setContentView(root)
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setGravity(Gravity.BOTTOM)
+            decorView.setPadding(0, 0, 0, 0)
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
     }
 
     private fun createThoughtStyleEditor(
@@ -4018,8 +4114,12 @@ class ReaderHook(
     private data class DictionaryDialogHandle(
         val dialog: Dialog,
         val body: TextView,
+        val footerLabel: TextView,
         val colors: DialogColors,
-    )
+        var currentPresetId: String,
+    ) {
+        var requestId: Long = 0L
+    }
 
     private class SearchMenuButtonView(context: Context) : View(context) {
         private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {

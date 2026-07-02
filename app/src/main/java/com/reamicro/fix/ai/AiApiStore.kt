@@ -318,6 +318,11 @@ object AiApiStore {
         return dictionary(config, text, dictionaryPreset(context, settings.presetId), settings.disableThinking)
     }
 
+    fun dictionary(context: Context?, config: AiApiConfig, text: String, preset: AiDictionaryPreset): AiApiTestResult {
+        val settings = dictionarySettings(context)
+        return dictionary(config, text, preset, settings.disableThinking)
+    }
+
     private fun dictionary(
         config: AiApiConfig,
         text: String,
