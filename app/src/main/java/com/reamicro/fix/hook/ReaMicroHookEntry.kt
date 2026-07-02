@@ -74,6 +74,10 @@ class ReaMicroHookEntry {
             activityProvider = { currentActivityRef?.get() },
             settingsProvider = moduleSettings::snapshot,
         ).install()
+        BookOverviewImageSelectionHook(
+            classLoader = classLoader,
+            activityProvider = { currentActivityRef?.get() },
+        ).install()
         LocalExportHook(
             classLoader = classLoader,
             activityProvider = { currentActivityRef?.get() },

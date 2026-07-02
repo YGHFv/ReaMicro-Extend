@@ -64,6 +64,7 @@ object AiApiStore {
     private const val IMAGE_SETTINGS_FILE_NAME = "reamicro_image_settings.json"
     private const val CONNECT_TIMEOUT_MS = 12_000
     private const val READ_TIMEOUT_MS = 25_000
+    private const val IMAGE_READ_TIMEOUT_MS = 90_000
     private const val DICTIONARY_MAX_TOKENS = 300
     const val DEFAULT_DICTIONARY_PRESET_ID = "dictionary_short"
     const val DEFAULT_IMAGE_COVER_PRESET_ID = "image_cover_default"
@@ -96,14 +97,14 @@ object AiApiStore {
             id = DEFAULT_IMAGE_COVER_PRESET_ID,
             target = AiImagePresetTarget.Cover,
             name = "\u9ed8\u8ba4\u5c01\u9762",
-            prompt = "\u6839\u636e\u300c{{text}}\u300d\u751f\u6210\u4e00\u5f20\u7ad6\u7248\u5c0f\u8bf4\u5c01\u9762\uff0c\u4e3b\u4f53\u660e\u786e\uff0c\u753b\u9762\u5e72\u51c0\uff0c\u9002\u5408\u4e2d\u6587\u4e66\u7c4d\u5c01\u9762\u3002",
+            prompt = "\u5e2e\u6211\u5236\u4f5c\u5c0f\u8bf4\u300a{title}\u300b\u7684\u7ad6\u7248\u5c01\u9762\uff0c\u6bd4\u4f8b\u4e3a3:4\uff0c\u53ef\u4ee5\u53c2\u8003\u539f\u4e66\u7c4d\u5c01\u9762\u3002\u753b\u9762\u9002\u5408\u5c0f\u8bf4\u9605\u8bfb \u5e94\u7528\u9996\u9875\u6a2a\u5e45\uff0c\u4fdd\u7559\u4e66\u7c4d\u6c14\u8d28\uff0c\u7cbe\u81f4\u3001\u6e05\u6670\u3001\u65e0\u6c34\u5370\u3002",
             builtIn = true,
         ),
         AiImagePreset(
             id = DEFAULT_IMAGE_BANNER_PRESET_ID,
             target = AiImagePresetTarget.Banner,
             name = "\u9ed8\u8ba4\u6a2a\u5e45",
-            prompt = "\u6839\u636e\u300c{{text}}\u300d\u751f\u6210\u4e00\u5f20\u6a2a\u5e45\u56fe\uff0c\u5bbd\u5c4f\u6784\u56fe\uff0c\u4e3b\u4f53\u660e\u786e\uff0c\u9002\u5408\u6a2a\u5411\u5c55\u793a\u3002",
+            prompt = "\u5e2e\u6211\u5236\u4f5c\u5c0f\u8bf4\u300a{title}\u300b\u7684\u6a2a\u5e45\u5c01\u9762\uff0c\u6bd4\u4f8b\u4e3a2:1\uff0c\u53ef\u4ee5\u53c2\u8003\u539f\u4e66\u7c4d\u5c01\u9762\u3002\u753b\u9762\u9002\u5408\u5c0f\u8bf4\u9605\u8bfb \u5e94\u7528\u9996\u9875\u6a2a\u5e45\uff0c\u4fdd\u7559\u4e66\u7c4d\u6c14\u8d28\uff0c\u7cbe\u81f4\u3001\u6e05\u6670\u3001\u65e0\u6c34\u5370\u3002",
             builtIn = true,
         ),
     )
@@ -196,6 +197,13 @@ object AiApiStore {
             return AiApiTestResult(false, "\u8bf7\u5148\u586b\u5b8c base_url\u3001api_key \u548c model")
         }
         return runCatching {
+            if (isImageGenerationApi(normalizedBaseUrl, normalizedModel)) {
+                val response = testImageGeneration(normalizedBaseUrl, normalizedApiKey, normalizedModel)
+                if (!response.success) {
+                    return AiApiTestResult(false, response.message)
+                }
+                return AiApiTestResult(true, "\u751f\u56fe\u6a21\u578b\u6d4b\u8bd5\u901a\u8fc7")
+            }
             val body = JSONObject()
                 .put("model", normalizedModel)
                 .put(
@@ -762,9 +770,39 @@ object AiApiStore {
     private fun completionUrl(baseUrl: String): String =
         when {
             baseUrl.endsWith("/chat/completions", ignoreCase = true) -> baseUrl
-            baseUrl.endsWith("/v1", ignoreCase = true) -> "$baseUrl/chat/completions"
+            baseUrl.endsWith("/images/generations", ignoreCase = true) ->
+                baseUrl.removeSuffixIgnoreCase("/images/generations") + "/chat/completions"
+            baseUrl.endsWith("/v1", ignoreCase = true) || isVersionedApiBaseUrl(baseUrl) ->
+                "$baseUrl/chat/completions"
             else -> "$baseUrl/v1/chat/completions"
         }
+
+    private fun imageGenerationUrl(baseUrl: String): String =
+        when {
+            baseUrl.endsWith("/images/generations", ignoreCase = true) -> baseUrl
+            baseUrl.endsWith("/chat/completions", ignoreCase = true) ->
+                baseUrl.removeSuffixIgnoreCase("/chat/completions") + "/images/generations"
+            baseUrl.endsWith("/v1", ignoreCase = true) || isVersionedApiBaseUrl(baseUrl) ->
+                "$baseUrl/images/generations"
+            else -> "$baseUrl/v1/images/generations"
+        }
+
+    private fun isVersionedApiBaseUrl(baseUrl: String): Boolean =
+        Regex(""".*/api/v\d+$""", RegexOption.IGNORE_CASE).matches(baseUrl)
+
+    private fun String.removeSuffixIgnoreCase(suffix: String): String =
+        if (endsWith(suffix, ignoreCase = true)) dropLast(suffix.length) else this
+
+    private fun isImageGenerationApi(baseUrl: String, model: String): Boolean {
+        val lowerUrl = baseUrl.lowercase()
+        val lowerModel = model.lowercase()
+        return lowerUrl.endsWith("/images/generations") ||
+            lowerModel.contains("seedream") ||
+            lowerModel.contains("gpt-image") ||
+            lowerModel.contains("dall-e") ||
+            lowerModel.contains("imagen") ||
+            lowerModel.contains("flux")
+    }
 
     private fun requestChatCompletion(baseUrl: String, apiKey: String, body: JSONObject): AiApiTestResult {
         val connection = (URL(completionUrl(baseUrl)).openConnection() as HttpURLConnection).apply {
@@ -784,6 +822,71 @@ object AiApiStore {
             val text = stream?.use { it.readBytes().toString(Charsets.UTF_8) }.orEmpty()
             if (code in 200..299) {
                 AiApiTestResult(true, text)
+            } else {
+                AiApiTestResult(false, "HTTP $code: ${extractError(text).ifBlank { text.take(160) }}")
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun testImageGeneration(baseUrl: String, apiKey: String, model: String): AiApiTestResult {
+        val candidates = listOf(
+            JSONObject()
+                .put("model", model)
+                .put("prompt", "test")
+                .put("n", 1)
+                .put("size", "1024x1024")
+                .put("response_format", "url"),
+            JSONObject()
+                .put("model", model)
+                .put("prompt", "test")
+                .put("n", 1)
+                .put("size", "1024x1024"),
+            JSONObject()
+                .put("model", model)
+                .put("prompt", "test")
+                .put("n", 1),
+        )
+        var last = AiApiTestResult(false, "\u751f\u56fe\u6d4b\u8bd5\u5931\u8d25")
+        for (body in candidates) {
+            val result = requestImageGeneration(baseUrl, apiKey, body)
+            if (result.success) return result
+            last = result
+            val lower = result.message.lowercase()
+            if (
+                !lower.contains("size") &&
+                !lower.contains("response_format") &&
+                !lower.contains("unsupported") &&
+                !lower.contains("invalid") &&
+                !lower.contains("unknown") &&
+                !lower.contains("unrecognized")
+            ) {
+                break
+            }
+        }
+        return last
+    }
+
+    private fun requestImageGeneration(baseUrl: String, apiKey: String, body: JSONObject): AiApiTestResult {
+        val connection = (URL(imageGenerationUrl(baseUrl)).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = IMAGE_READ_TIMEOUT_MS
+            doOutput = true
+            setRequestProperty("Authorization", "Bearer ${apiKey.trim()}")
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("Accept", "application/json,image/*")
+            setRequestProperty("User-Agent", "ReaMicro-Extend/ai-config")
+        }
+        return try {
+            connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val bytes = stream?.use { it.readBytes() } ?: ByteArray(0)
+            val text = bytes.toString(Charsets.UTF_8)
+            if (code in 200..299) {
+                AiApiTestResult(true, text.ifBlank { connection.contentType.orEmpty() })
             } else {
                 AiApiTestResult(false, "HTTP $code: ${extractError(text).ifBlank { text.take(160) }}")
             }
