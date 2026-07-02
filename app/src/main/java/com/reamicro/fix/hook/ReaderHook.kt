@@ -1449,15 +1449,15 @@ class ReaderHook(
             Toast.makeText(activity, "\u672a\u83b7\u53d6\u5230\u9009\u4e2d\u6587\u672c", Toast.LENGTH_SHORT).show()
             return
         }
-        val config = AiApiStore.enabled(activity.applicationContext)
+        val config = AiApiStore.dictionaryApi(activity.applicationContext)
         if (config == null) {
-            Toast.makeText(activity, "\u8bf7\u5148\u5728 AI \u914d\u7f6e\u4e2d\u542f\u7528 API", Toast.LENGTH_SHORT).show()
+            Toast.makeText(activity, "\u8bf7\u5148\u5728 AI \u914d\u7f6e\u4e2d\u6dfb\u52a0\u6216\u9009\u62e9 API", Toast.LENGTH_SHORT).show()
             return
         }
         activity.runOnUiThread {
             val handle = showDictionaryDialog(activity, quote, config)
             Thread({
-                val result = runCatching { AiApiStore.dictionary(config, quote) }
+                val result = runCatching { AiApiStore.dictionary(activity.applicationContext, config, quote) }
                     .onFailure { XposedBridge.log("$LOG_PREFIX dictionary request failed: ${it.stackTraceToString()}") }
                     .getOrElse { error -> AiApiTestResult(false, error.message ?: error.javaClass.simpleName) }
                 activity.runOnUiThread {

@@ -42,6 +42,7 @@ import android.widget.TextView
 import android.widget.Toast
 import com.reamicro.fix.ai.AiApiConfig
 import com.reamicro.fix.ai.AiApiStore
+import com.reamicro.fix.ai.AiDictionaryPreset
 import com.reamicro.fix.association.model.BookSource
 import com.reamicro.fix.association.provider.AssociationSearchProviderRegistry
 import com.reamicro.fix.association.provider.ExternalSourceLoader
@@ -403,16 +404,17 @@ class ReaMicroSettingsHook(
         val currentRoute = currentInjectedRoute()
         if (currentRoute !is InjectedRoute.FontPicker &&
             currentRoute != InjectedRoute.FontLibrary &&
-            currentRoute !in MODULE_CHILD_ROUTES
+            currentRoute !in MODULE_CHILD_ROUTES &&
+            currentRoute !in AI_CHILD_ROUTES
         ) return false
         if (currentRoute == InjectedRoute.FontLibrary) clearPendingDeleteFontSelection()
         val nextStack = injectedRouteStack.dropLast(1)
             .takeIf { it.isNotEmpty() }
             ?: listOf(
-                if (currentRoute in MODULE_CHILD_ROUTES) {
-                    InjectedRoute.ModuleSettings
-                } else {
-                    InjectedRoute.FontSettings
+                when {
+                    currentRoute in MODULE_CHILD_ROUTES -> InjectedRoute.ModuleSettings
+                    currentRoute in AI_CHILD_ROUTES -> InjectedRoute.AiConfigSettings
+                    else -> InjectedRoute.FontSettings
                 },
             )
         injectedRouteStack = nextStack
@@ -466,6 +468,9 @@ class ReaMicroSettingsHook(
                 InjectedRoute.AccountSwitch -> renderAccountSwitchContent(innerPaddings, innerComposer)
                 InjectedRoute.OnlineCompletionSettings -> renderOnlineCompletionSettingsContent(innerPaddings, innerComposer)
                 InjectedRoute.AiConfigSettings -> renderAiConfigSettingsContent(innerPaddings, innerComposer)
+                InjectedRoute.DictionarySettings -> renderDictionarySettingsContent(innerPaddings, innerComposer)
+                InjectedRoute.DictionaryApiPicker -> renderDictionaryApiPickerContent(innerPaddings, innerComposer)
+                InjectedRoute.DictionaryPresetPicker -> renderDictionaryPresetPickerContent(innerPaddings, innerComposer)
                 InjectedRoute.FontSettings -> renderFontSettingsContent(innerPaddings, innerComposer)
                 is InjectedRoute.FontPicker -> renderFontPickerContent(currentRoute.target, innerPaddings, innerComposer)
                 InjectedRoute.FontLibrary -> renderFontLibraryContent(innerPaddings, innerComposer)
@@ -491,7 +496,10 @@ class ReaMicroSettingsHook(
     }
 
     private fun renderInjectedBackHandler(route: InjectedRoute, composer: Any) {
-        val enabled = route is InjectedRoute.FontPicker || route == InjectedRoute.FontLibrary || route in MODULE_CHILD_ROUTES
+        val enabled = route is InjectedRoute.FontPicker ||
+            route == InjectedRoute.FontLibrary ||
+            route in MODULE_CHILD_ROUTES ||
+            route in AI_CHILD_ROUTES
         val onBack = functionProxy("InjectedNestedBackHandler", FUNCTION0_CLASS) {
             handleNestedInjectedBack()
             targetUnit()
@@ -2265,6 +2273,14 @@ class ReaMicroSettingsHook(
             val rows = buildList {
                 add(
                     ActionRow(
+                        key = "dictionary_settings",
+                        title = DICTIONARY_SETTINGS_TITLE,
+                        subtitle = dictionarySettingsSummary(),
+                        onClick = { openNestedInjectedRoute(InjectedRoute.DictionarySettings) },
+                    ),
+                )
+                add(
+                    ActionRow(
                         key = "ai_api_add",
                         title = "\u6dfb\u52a0 API",
                         subtitle = "OpenAI \u517c\u5bb9\u63a5\u53e3\uff1abase_url\u3001api_key\u3001model",
@@ -2302,6 +2318,303 @@ class ReaMicroSettingsHook(
             targetUnit()
         }
         renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    private fun renderDictionarySettingsContent(innerPaddings: Any, composer: Any) {
+        val listContent = functionProxy("DictionarySettingsList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            aiApiVersionValue()
+            val dictionarySettings = AiApiStore.dictionarySettings(activityProvider()?.applicationContext)
+            val rows = listOf(
+                ActionRow(
+                    key = "dictionary_api_picker",
+                    title = "\u0041\u0050\u0049 \u914d\u7f6e\u9009\u62e9",
+                    subtitle = dictionaryApiSelectionSummary(),
+                    onClick = { openNestedInjectedRoute(InjectedRoute.DictionaryApiPicker) },
+                ),
+                ActionRow(
+                    key = "dictionary_preset_picker",
+                    title = "\u8bcd\u5178\u9884\u8bbe\u9009\u62e9",
+                    subtitle = dictionaryPresetSelectionSummary(),
+                    onClick = { openNestedInjectedRoute(InjectedRoute.DictionaryPresetPicker) },
+                ),
+            )
+            addLazyItem(lazyListScope, DICTIONARY_SETTINGS_CONTENT_ITEM_KEY) { itemComposer ->
+                renderHostActionCard(rows, itemComposer)
+            }
+            addLazyItem(lazyListScope, DICTIONARY_THINKING_SWITCH_ITEM_KEY) { itemComposer ->
+                renderHostSettingsCard(
+                    listOf(
+                        ToggleRow(
+                            key = "dictionary_disable_thinking",
+                            title = "\u7981\u7528\u601d\u8003",
+                            checked = dictionarySettings.disableThinking,
+                            onChanged = { checked, _ ->
+                                AiApiStore.setDictionaryDisableThinking(activityProvider()?.applicationContext, checked)
+                                bumpAiApiVersion()
+                                checked
+                            },
+                        ),
+                    ),
+                    itemComposer,
+                )
+            }
+            targetUnit()
+        }
+        renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    private fun renderDictionaryApiPickerContent(innerPaddings: Any, composer: Any) {
+        val listContent = functionProxy("DictionaryApiPickerList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            aiApiVersionValue()
+            val context = activityProvider()?.applicationContext
+            val dictionarySettings = AiApiStore.dictionarySettings(context)
+            val configs = listAiApiConfigs()
+            val rows = buildList {
+                add(
+                    ActionRow(
+                        key = "dictionary_api_follow",
+                        title = "\u8ddf\u968f AI \u914d\u7f6e",
+                        subtitle = "\u4f7f\u7528 AI \u914d\u7f6e\u9875\u4e2d\u542f\u7528\u7684 API",
+                        trailing = if (dictionarySettings.apiId.isBlank()) "\u5f53\u524d" else null,
+                        onClick = {
+                            AiApiStore.setDictionaryApiId(context, "")
+                            bumpAiApiVersion()
+                            navigateBackFromInjectedRoute()
+                        },
+                    ),
+                )
+                if (configs.isEmpty()) {
+                    add(
+                        ActionRow(
+                            key = "dictionary_api_empty",
+                            title = "\u6682\u65e0 API",
+                            subtitle = "\u8bf7\u5148\u5728 AI \u914d\u7f6e\u9875\u6dfb\u52a0 API",
+                        ),
+                    )
+                } else {
+                    configs.forEach { config ->
+                        add(
+                            ActionRow(
+                                key = "dictionary_api_${config.id}",
+                                title = config.displayName.compactOnlineSourceLine(),
+                                subtitle = config.baseUrl,
+                                trailing = if (dictionarySettings.apiId == config.id) "\u5f53\u524d" else null,
+                                onClick = {
+                                    AiApiStore.setDictionaryApiId(context, config.id)
+                                    bumpAiApiVersion()
+                                    navigateBackFromInjectedRoute()
+                                },
+                            ),
+                        )
+                    }
+                }
+            }
+            addLazyItem(lazyListScope, DICTIONARY_API_PICKER_CONTENT_ITEM_KEY) { itemComposer ->
+                renderHostActionCard(rows, itemComposer)
+            }
+            targetUnit()
+        }
+        renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    private fun renderDictionaryPresetPickerContent(innerPaddings: Any, composer: Any) {
+        val listContent = functionProxy("DictionaryPresetPickerList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            aiApiVersionValue()
+            val context = activityProvider()?.applicationContext
+            val dictionarySettings = AiApiStore.dictionarySettings(context)
+            val rows = buildList {
+                add(
+                    ActionRow(
+                        key = "dictionary_preset_add",
+                        title = "\u6dfb\u52a0\u9884\u8bbe",
+                        subtitle = "\u586b\u5199\u9884\u8bbe\u540d\u79f0\u548c\u63d0\u793a\u8bcd\u5185\u5bb9",
+                        onClick = { openDictionaryPresetDialog() },
+                    ),
+                )
+                AiApiStore.dictionaryPresets(context).forEach { preset ->
+                    add(
+                        ActionRow(
+                            key = "dictionary_preset_${preset.id}",
+                            title = preset.name.compactOnlineSourceLine(),
+                            subtitle = preset.prompt.compactOnlineSourceLine().let { line ->
+                                if (line.length > 72) line.take(72) + "..." else line
+                            },
+                            trailing = if (dictionarySettings.presetId == preset.id) "\u5f53\u524d" else null,
+                            onClick = {
+                                AiApiStore.setDictionaryPresetId(context, preset.id)
+                                bumpAiApiVersion()
+                                navigateBackFromInjectedRoute()
+                            },
+                            onLongClick = if (preset.builtIn) null else {
+                                { openDictionaryPresetDialog(preset) }
+                            },
+                        ),
+                    )
+                }
+            }
+            addLazyItem(lazyListScope, DICTIONARY_PRESET_PICKER_CONTENT_ITEM_KEY) { itemComposer ->
+                renderHostActionCard(rows, itemComposer)
+            }
+            targetUnit()
+        }
+        renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    private fun dictionarySettingsSummary(): String {
+        val preset = dictionaryPresetSelectionSummary()
+        val api = dictionaryApiSelectionSummary()
+        return "$preset / $api"
+    }
+
+    private fun dictionaryApiSelectionSummary(): String {
+        val context = activityProvider()?.applicationContext
+        val dictionarySettings = AiApiStore.dictionarySettings(context)
+        val config = AiApiStore.dictionaryApi(context)
+        return when {
+            config == null -> "\u672a\u9009\u62e9 API"
+            dictionarySettings.apiId.isBlank() -> "\u8ddf\u968f AI \u914d\u7f6e\uff1a${config.displayName}"
+            else -> config.displayName
+        }
+    }
+
+    private fun dictionaryPresetSelectionSummary(): String {
+        val context = activityProvider()?.applicationContext
+        val dictionarySettings = AiApiStore.dictionarySettings(context)
+        return AiApiStore.dictionaryPreset(context, dictionarySettings.presetId).name
+    }
+
+    private fun openDictionaryPresetDialog() {
+        openDictionaryPresetDialog(existing = null)
+    }
+
+    private fun openDictionaryPresetDialog(existing: AiDictionaryPreset?) {
+        val activity = activityProvider() ?: return
+        activity.runOnUiThread {
+            runCatching {
+                val container = LinearLayout(activity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(48, 24, 48, 0)
+                }
+                val nameInput = EditText(activity).apply {
+                    hint = "\u9884\u8bbe\u540d\u79f0"
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL
+                    setSingleLine(true)
+                    setText(existing?.name.orEmpty())
+                }
+                val promptInput = EditText(activity).apply {
+                    hint = "\u63d0\u793a\u8bcd\u5185\u5bb9\uff0c\u53ef\u7528 {{text}} \u4ee3\u8868\u9009\u4e2d\u6587\u672c"
+                    inputType = InputType.TYPE_CLASS_TEXT or
+                        InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                        InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                    minLines = 5
+                    maxLines = 8
+                    gravity = Gravity.TOP or Gravity.START
+                    setSingleLine(false)
+                    setText(existing?.prompt.orEmpty())
+                }
+                fun actionButton(title: String, color: Int): TextView =
+                    TextView(activity).apply {
+                        text = title
+                        setTextColor(color)
+                        gravity = Gravity.CENTER
+                        setSingleLine(true)
+                        textSize = 16f
+                        setPadding(0, 24, 0, 8)
+                        layoutParams = LinearLayout.LayoutParams(
+                            0,
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            1f,
+                        )
+                    }
+                val primaryColor = Color.rgb(45, 135, 120)
+                val finishButton = actionButton("\u5b8c\u6210", primaryColor)
+                val deleteButton = existing?.takeUnless { it.builtIn }?.let {
+                    actionButton("\u5220\u9664", Color.parseColor("#D64545"))
+                }
+                val cancelButton = actionButton("\u53d6\u6d88", primaryColor)
+                val actionRow = LinearLayout(activity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(finishButton)
+                    if (deleteButton != null) addView(deleteButton)
+                    addView(cancelButton)
+                }
+                container.addView(nameInput)
+                container.addView(promptInput)
+                container.addView(actionRow)
+
+                fun hasAllValues(): Boolean =
+                    nameInput.text?.toString()?.trim()?.isNotBlank() == true &&
+                        promptInput.text?.toString()?.trim()?.isNotBlank() == true
+
+                fun refreshButtons() {
+                    val canFinish = hasAllValues()
+                    finishButton.isEnabled = canFinish
+                    finishButton.alpha = if (canFinish) 1f else 0.38f
+                }
+
+                val watcher = object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                        refreshButtons()
+                    }
+                    override fun afterTextChanged(s: Editable?) = Unit
+                }
+                nameInput.addTextChangedListener(watcher)
+                promptInput.addTextChangedListener(watcher)
+
+                val dialog = AlertDialog.Builder(activity)
+                    .setTitle("\u8bcd\u5178\u9884\u8bbe")
+                    .setView(container)
+                    .create()
+                dialog.setOnShowListener {
+                    dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                    refreshButtons()
+                    deleteButton?.setOnClickListener {
+                        val target = existing ?: return@setOnClickListener
+                        if (AiApiStore.removeDictionaryPreset(activity.applicationContext, target.id)) {
+                            bumpAiApiVersion()
+                            showToast("\u5df2\u5220\u9664\u9884\u8bbe\uff1a${target.name}")
+                        }
+                        dialog.dismiss()
+                    }
+                    finishButton.setOnClickListener {
+                        val name = nameInput.text?.toString().orEmpty()
+                        val prompt = promptInput.text?.toString().orEmpty()
+                        runCatching {
+                            if (existing == null) {
+                                AiApiStore.addDictionaryPreset(activity.applicationContext, name, prompt)
+                            } else {
+                                AiApiStore.updateDictionaryPreset(activity.applicationContext, existing.id, name, prompt)
+                            }
+                        }.onSuccess { preset ->
+                            bumpAiApiVersion()
+                            showToast(
+                                if (existing == null) {
+                                    "\u5df2\u6dfb\u52a0\u9884\u8bbe\uff1a${preset.name}"
+                                } else {
+                                    "\u5df2\u66f4\u65b0\u9884\u8bbe\uff1a${preset.name}"
+                                },
+                            )
+                            dialog.dismiss()
+                        }.onFailure { error ->
+                            Toast.makeText(activity, error.message ?: "\u65e0\u6cd5\u4fdd\u5b58\u9884\u8bbe", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    cancelButton.setOnClickListener {
+                        dialog.dismiss()
+                    }
+                }
+                dialog.show()
+                dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX failed to open dictionary preset dialog: ${it.stackTraceToString()}")
+                showToast("\u65e0\u6cd5\u6253\u5f00\u8bcd\u5178\u9884\u8bbe")
+            }
+        }
     }
 
     private fun listAiApiConfigs(): List<AiApiConfig> =
@@ -4491,6 +4804,9 @@ class ReaMicroSettingsHook(
         object AccountSwitch : InjectedRoute(ACCOUNT_SWITCH_TITLE)
         object OnlineCompletionSettings : InjectedRoute(ONLINE_COMPLETION_TITLE)
         object AiConfigSettings : InjectedRoute(AI_CONFIG_TITLE)
+        object DictionarySettings : InjectedRoute(DICTIONARY_SETTINGS_TITLE)
+        object DictionaryApiPicker : InjectedRoute("\u0041\u0050\u0049 \u914d\u7f6e\u9009\u62e9")
+        object DictionaryPresetPicker : InjectedRoute("\u8bcd\u5178\u9884\u8bbe\u9009\u62e9")
         object FontSettings : InjectedRoute(FONT_SETTINGS_TITLE)
         data class FontPicker(val target: FontPickerTarget) : InjectedRoute(target.title)
         object FontLibrary : InjectedRoute(FONT_LIBRARY_TITLE)
@@ -4504,6 +4820,12 @@ class ReaMicroSettingsHook(
         InjectedRoute.OnlineCompletionSettings,
         InjectedRoute.AiConfigSettings,
         InjectedRoute.FontSettings,
+    )
+
+    private val AI_CHILD_ROUTES = setOf(
+        InjectedRoute.DictionarySettings,
+        InjectedRoute.DictionaryApiPicker,
+        InjectedRoute.DictionaryPresetPicker,
     )
 
     private data class RotationUiState(
@@ -4711,6 +5033,10 @@ class ReaMicroSettingsHook(
         const val ONLINE_COMPLETION_CONTENT_ITEM_KEY = 0x524D466A
         const val AI_CONFIG_SETTINGS_ITEM_KEY = 0x524D466B
         const val AI_CONFIG_CONTENT_ITEM_KEY = 0x524D466C
+        const val DICTIONARY_SETTINGS_CONTENT_ITEM_KEY = 0x524D466D
+        const val DICTIONARY_THINKING_SWITCH_ITEM_KEY = 0x524D466E
+        const val DICTIONARY_API_PICKER_CONTENT_ITEM_KEY = 0x524D466F
+        const val DICTIONARY_PRESET_PICKER_CONTENT_ITEM_KEY = 0x524D4670
         const val ACCOUNT_CREDENTIAL_DOCUMENT_REQUEST_CODE = 0x524D47
         const val ACCOUNT_DATA_DOCUMENT_REQUEST_CODE = 0x524D48
         const val ONLINE_SOURCE_DOCUMENT_REQUEST_CODE = 0x524D49
@@ -4726,6 +5052,7 @@ class ReaMicroSettingsHook(
         const val FAMILY_SOURCE_HAN_SERIF = "serif"
         const val ONLINE_COMPLETION_TITLE = "在线补全"
         const val AI_CONFIG_TITLE = "AI \u914d\u7f6e"
+        const val DICTIONARY_SETTINGS_TITLE = "\u8bcd\u5178\u7ba1\u7406"
         const val HOST_ABOUT_TITLE = "关于阅微"
         const val MODULE_ENTRY_TITLE = "补全计划"
         const val FONT_SETTINGS_TITLE = "字体设置"
