@@ -1565,7 +1565,11 @@ class ReaMicroSettingsHook(
             bumpReaderHighlightVersion()
             showToast(
                 if (imported.reeden) {
-                    "\u5df2\u5bfc\u5165 Reeden \u914d\u7f6e\uff1a${imported.styles.size} \u4e2a\u6837\u5f0f / ${imported.rules.size} \u6761\u89c4\u5219"
+                    if (imported.skippedDuplicates > 0) {
+                        "\u5df2\u5bfc\u5165 Reeden \u9ad8\u4eae\u6837\u5f0f\uff1a${imported.styles.size} \u4e2a\uff0c\u8df3\u8fc7 ${imported.skippedDuplicates} \u4e2a\u91cd\u590d"
+                    } else {
+                        "\u5df2\u5bfc\u5165 Reeden \u9ad8\u4eae\u6837\u5f0f\uff1a${imported.styles.size} \u4e2a"
+                    }
                 } else if (imported.styles.size == 1) {
                     "\u5df2\u5bfc\u5165\u9ad8\u4eae\u6837\u5f0f\uff1a${imported.styles.first().name}"
                 } else {
@@ -1652,11 +1656,12 @@ class ReaMicroSettingsHook(
         val root = JSONObject(json)
         if (root.optString("type") != "highlightRule") error("not a Reeden highlight rule file")
         val data = root.optJSONArray("data") ?: JSONArray()
-        val existingIds = settings.highlightSettings().styles.map { it.id }.toMutableSet()
-        val existingRuleIds = settings.highlightSettings().rules.map { it.id }.toMutableSet()
+        val existingStyles = settings.highlightSettings().styles
+        val existingIds = existingStyles.map { it.id }.toMutableSet()
+        val existingKeys = existingStyles.mapNotNull(::readerHighlightStyleImportKey).toMutableSet()
         val imagePathByHash = HashMap<String, String>()
         val styles = ArrayList<ReaderHighlightStyle>()
-        val rules = ArrayList<ReaderHighlightRule>()
+        var skippedDuplicates = 0
         for (index in 0 until data.length()) {
             val item = data.optJSONObject(index) ?: continue
             val css = item.optString("styleCssText")
@@ -1666,6 +1671,11 @@ class ReaMicroSettingsHook(
                 GZIPInputStream(Base64.decode(imageData, Base64.DEFAULT).inputStream()).use { it.readBytes() }
             }.getOrNull() ?: continue
             val hash = md5Hex(imageBytes)
+            val importKey = readerHighlightStyleImportKey(css, hash)
+            if (!existingKeys.add(importKey)) {
+                skippedDuplicates++
+                continue
+            }
             val imagePath = imagePathByHash.getOrPut(hash) {
                 writeReaderHighlightImage(activity, imageBytes, "$hash.png").absolutePath
             }
@@ -1686,35 +1696,22 @@ class ReaMicroSettingsHook(
                     ninePatchSlice = reedenNineSlice(css),
                 ),
             )
-            reedenRuleFromItem(item, id, index, existingRuleIds)?.let(rules::add)
         }
-        if (styles.isEmpty()) error("no Reeden highlight styles found")
-        return ReaderHighlightImport(styles = styles, rules = rules, reeden = true)
+        if (styles.isEmpty() && skippedDuplicates == 0) error("no Reeden highlight styles found")
+        return ReaderHighlightImport(styles = styles, rules = emptyList(), reeden = true, skippedDuplicates = skippedDuplicates)
     }
 
-    private fun reedenRuleFromItem(
-        item: JSONObject,
-        styleId: String,
-        index: Int,
-        existingRuleIds: MutableSet<String>,
-    ): ReaderHighlightRule? {
-        val pattern = item.optString("keyword")
-        if (pattern.isBlank()) return null
-        var ruleId: String
-        var suffix = 0
-        do {
-            ruleId = "rule_reeden_${System.currentTimeMillis()}_${index}_$suffix"
-            suffix++
-        } while (!existingRuleIds.add(ruleId))
-        return ReaderHighlightRule(
-            id = ruleId,
-            name = item.optString("name").ifBlank { "Reeden \u9ad8\u4eae\u89c4\u5219 ${index + 1}" },
-            type = if (item.optBoolean("isRegex", false)) ReaderHighlightRuleType.Regex else ReaderHighlightRuleType.FixedText,
-            styleId = styleId,
-            enabled = item.optBoolean("enabled", true),
-            pattern = pattern,
-        )
+    private fun readerHighlightStyleImportKey(style: ReaderHighlightStyle): String? {
+        val path = style.ninePatchPath.trim()
+        if (style.css.isBlank() || path.isBlank()) return null
+        val file = File(path)
+        if (!file.isFile) return null
+        val hash = runCatching { md5Hex(file.readBytes()) }.getOrNull() ?: return null
+        return readerHighlightStyleImportKey(style.css, hash)
     }
+
+    private fun readerHighlightStyleImportKey(css: String, imageHash: String): String =
+        "${css.trim()}|${imageHash.uppercase()}"
 
     private fun copyHighlightNinePatchUri(activity: Activity, uri: Uri): File {
         val rawName = queryDisplayName(activity, uri) ?: uri.lastPathSegment.orEmpty()
@@ -6517,6 +6514,7 @@ class ReaMicroSettingsHook(
         val styles: List<ReaderHighlightStyle>,
         val rules: List<ReaderHighlightRule>,
         val reeden: Boolean,
+        val skippedDuplicates: Int = 0,
     )
 
     private enum class FontPickerTarget(

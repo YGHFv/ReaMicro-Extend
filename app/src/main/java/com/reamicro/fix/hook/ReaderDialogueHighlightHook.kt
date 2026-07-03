@@ -378,13 +378,34 @@ class ReaderDialogueHighlightHook(
     }
 
     private fun composeColor(value: String): Long {
-        val argb = runCatching { Color.parseColor(value) }.getOrDefault(Color.parseColor(DEFAULT_DIALOGUE_COLOR))
+        val argb = parseAndroidColor(value) ?: Color.parseColor(DEFAULT_DIALOGUE_COLOR)
         val packedArgb = argb.toLong() and 0xFFFFFFFFL
         return cls(COLOR_KT_CLASS).declaredMethods.firstOrNull { method ->
             method.name == "Color" &&
                 method.parameterTypes.size == 1 &&
                 method.parameterTypes[0] == Long::class.javaPrimitiveType
         }?.apply { isAccessible = true }?.invoke(null, packedArgb) as? Long ?: 0L
+    }
+
+    private fun parseAndroidColor(value: String): Int? {
+        val trimmed = value.trim()
+        if (trimmed.isBlank()) return null
+        runCatching { Color.parseColor(trimmed) }.getOrNull()?.let { return it }
+        val groups = Regex("""rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*([0-9.]+))?\s*\)""")
+            .find(trimmed)
+            ?.groupValues
+            ?: return null
+        val alpha = groups.getOrNull(4)
+            ?.takeIf { it.isNotBlank() }
+            ?.toFloatOrNull()
+            ?.let { if (it <= 1f) (it * 255).toInt() else it.toInt() }
+            ?: 255
+        return Color.argb(
+            alpha.coerceIn(0, 255),
+            groups[1].toInt().coerceIn(0, 255),
+            groups[2].toInt().coerceIn(0, 255),
+            groups[3].toInt().coerceIn(0, 255),
+        )
     }
 
     private fun createAnnotatedRange(item: Any, start: Int, endExclusive: Int): Any? {
@@ -564,6 +585,8 @@ class ReaderDialogueHighlightHook(
             lineRects(layout, range.start, range.end, horizontalPadding, verticalPadding).forEach { rect ->
                 if (nineSlice != null) {
                     drawNineSlice(canvas, image.bitmap, nineSlice, rect)
+                } else if (image.bitmap.ninePatchChunk == null) {
+                    drawCoverBitmap(canvas, image.bitmap, rect)
                 } else {
                     image.drawable.bounds = rect
                     image.drawable.draw(canvas)
@@ -680,6 +703,22 @@ class ReaderDialogueHighlightHook(
                 }
             }
         }
+    }
+
+    private fun drawCoverBitmap(canvas: android.graphics.Canvas, bitmap: android.graphics.Bitmap, dst: Rect) {
+        if (dst.width() <= 0 || dst.height() <= 0 || bitmap.width <= 0 || bitmap.height <= 0) return
+        val srcAspect = bitmap.width.toFloat() / bitmap.height.toFloat()
+        val dstAspect = dst.width().toFloat() / dst.height().toFloat()
+        val src = if (srcAspect > dstAspect) {
+            val width = (bitmap.height * dstAspect).toInt().coerceIn(1, bitmap.width)
+            val left = (bitmap.width - width) / 2
+            Rect(left, 0, left + width, bitmap.height)
+        } else {
+            val height = (bitmap.width / dstAspect).toInt().coerceIn(1, bitmap.height)
+            val top = (bitmap.height - height) / 2
+            Rect(0, top, bitmap.width, top + height)
+        }
+        canvas.drawBitmap(bitmap, src, dst, null)
     }
 
     private fun reedenNineSlice(css: String): String =

@@ -673,7 +673,7 @@ class XposedModuleSettings(
                 for (index in 0 until array.length()) {
                     val item = array.optJSONObject(index) ?: continue
                     val id = item.optString("id")
-                    if (id.isBlank()) continue
+                    if (id.isBlank() || id.startsWith("rule_reeden_")) continue
                     val type = runCatching {
                         ReaderHighlightRuleType.valueOf(item.optString("type"))
                     }.getOrNull() ?: defaults.firstOrNull { it.id == id }?.type ?: continue
