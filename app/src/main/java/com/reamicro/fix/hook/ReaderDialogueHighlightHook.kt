@@ -4,7 +4,10 @@ import android.app.Activity
 import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.NinePatchDrawable
@@ -104,10 +107,11 @@ class ReaderDialogueHighlightHook(
                 val style = createHighlightSpanStyle(highlightStyle, dark) ?: return@flatMap emptyList()
                 val ninePatchPath = highlightStyle.ninePatchPathForTheme(dark).trim()
                 if (ninePatchPath.isNotBlank()) {
+                    val highlightCss = highlightStyle.cssForTheme(dark)
                     val ninePatchSlice = highlightStyle.ninePatchSliceForTheme(dark)
-                        .ifBlank { reedenNineSlice(highlightStyle.cssForTheme(dark)) }
+                        .ifBlank { reedenNineSlice(highlightCss) }
                     ranges.forEach { range ->
-                        ninePatchAnnotations.add(NinePatchAnnotation(ninePatchPath, ninePatchSlice, range.first, range.last))
+                        ninePatchAnnotations.add(NinePatchAnnotation(ninePatchPath, ninePatchSlice, highlightCss, range.first, range.last))
                     }
                 }
                 ranges.mapNotNull { range -> createAnnotatedRange(style, range.first, range.last) }
@@ -495,7 +499,7 @@ class ReaderDialogueHighlightHook(
                 addStringAnnotation.invoke(
                     builder,
                     NINE_PATCH_ANNOTATION_TAG,
-                    annotation.path + NINE_PATCH_ANNOTATION_SEPARATOR + annotation.slice,
+                    listOf(annotation.path, annotation.slice, annotation.css).joinToString(NINE_PATCH_ANNOTATION_SEPARATOR),
                     annotation.start,
                     annotation.end,
                 )
@@ -640,11 +644,13 @@ class ReaderDialogueHighlightHook(
         return annotations.mapNotNull { range ->
             range ?: return@mapNotNull null
             val value = callNoArg(range, "getItem")?.toString().orEmpty()
-            val path = value.substringBefore(NINE_PATCH_ANNOTATION_SEPARATOR).trim()
-            val slice = value.substringAfter(NINE_PATCH_ANNOTATION_SEPARATOR, "").trim()
+            val parts = value.split(NINE_PATCH_ANNOTATION_SEPARATOR, limit = 3)
+            val path = parts.getOrNull(0).orEmpty().trim()
+            val slice = parts.getOrNull(1).orEmpty().trim()
+            val css = parts.getOrNull(2).orEmpty()
             val start = callNoArg(range, "getStart") as? Int ?: return@mapNotNull null
             val end = callNoArg(range, "getEnd") as? Int ?: return@mapNotNull null
-            if (path.isBlank() || end <= start) null else NinePatchRange(start, end, path, slice)
+            if (path.isBlank() || end <= start) null else NinePatchRange(start, end, path, slice, css)
         }
     }
 
@@ -665,25 +671,36 @@ class ReaderDialogueHighlightHook(
         val layout = state.textLayoutResult ?: return
         val canvas = nativeCanvas(drawScope) ?: return
         val density = activityProvider()?.resources?.displayMetrics?.density ?: 1f
-        val horizontalPadding = (3f * density).toInt().coerceAtLeast(2)
-        val verticalPadding = (1.5f * density).toInt().coerceAtLeast(1)
         state.ranges.forEach { range ->
             val image = imageForNinePatch(range.path) ?: return@forEach
+            val box = reedenBoxStyle(range.css, density)
             val nineSlice = parseNineSlice(range.slice, image.bitmap.width, image.bitmap.height)
-            lineRects(layout, range.start, range.end, horizontalPadding, verticalPadding).forEach { rect ->
+            lineRects(layout, range.start, range.end, box).forEach { rect ->
+                val saveCount = if (box.radiusPx > 0f) {
+                    val path = Path().apply {
+                        addRoundRect(RectF(rect), box.radiusPx, box.radiusPx, Path.Direction.CW)
+                    }
+                    val count = canvas.save()
+                    canvas.clipPath(path)
+                    count
+                } else {
+                    -1
+                }
                 if (nineSlice != null) {
                     drawNineSlice(canvas, image.bitmap, nineSlice, rect)
                 } else if (image.bitmap.ninePatchChunk == null) {
-                    drawCoverBitmap(canvas, image.bitmap, rect)
+                    drawBitmapByBackgroundSize(canvas, image.bitmap, rect, box.backgroundSize)
                 } else {
                     image.drawable.bounds = rect
                     image.drawable.draw(canvas)
                 }
+                if (saveCount >= 0) canvas.restoreToCount(saveCount)
+                drawCssBorder(canvas, rect, box)
             }
         }
     }
 
-    private fun lineRects(layout: Any, start: Int, end: Int, horizontalPadding: Int, verticalPadding: Int): List<Rect> {
+    private fun lineRects(layout: Any, start: Int, end: Int, box: ReedenBoxStyle): List<Rect> {
         val lineForOffset = layout.javaClass.methods.firstOrNull {
             it.name == "getLineForOffset" && it.parameterTypes.size == 1
         } ?: return emptyList()
@@ -700,10 +717,10 @@ class ReaderDialogueHighlightHook(
             val top = callFloat(layout, "getLineTop", line) ?: charRect(layout, localStart)?.top ?: return@mapNotNull null
             val bottom = callFloat(layout, "getLineBottom", line) ?: charRect(layout, localStart)?.bottom ?: return@mapNotNull null
             Rect(
-                (left - horizontalPadding).toInt(),
-                (top - verticalPadding).toInt(),
-                (right + horizontalPadding).toInt(),
-                (bottom + verticalPadding).toInt(),
+                (left - box.paddingLeftPx - box.marginLeftPx).toInt(),
+                (top - box.paddingTopPx - box.marginTopPx).toInt(),
+                (right + box.paddingRightPx + box.marginRightPx).toInt(),
+                (bottom + box.paddingBottomPx + box.marginBottomPx).toInt(),
             )
         }
     }
@@ -793,6 +810,21 @@ class ReaderDialogueHighlightHook(
         }
     }
 
+    private fun drawBitmapByBackgroundSize(
+        canvas: android.graphics.Canvas,
+        bitmap: android.graphics.Bitmap,
+        dst: Rect,
+        backgroundSize: String,
+    ) {
+        if (backgroundSize.contains("100% 100%", ignoreCase = true) ||
+            backgroundSize.contains("stretch", ignoreCase = true)
+        ) {
+            canvas.drawBitmap(bitmap, null, dst, null)
+            return
+        }
+        drawCoverBitmap(canvas, bitmap, dst)
+    }
+
     private fun drawCoverBitmap(canvas: android.graphics.Canvas, bitmap: android.graphics.Bitmap, dst: Rect) {
         if (dst.width() <= 0 || dst.height() <= 0 || bitmap.width <= 0 || bitmap.height <= 0) return
         val srcAspect = bitmap.width.toFloat() / bitmap.height.toFloat()
@@ -807,6 +839,101 @@ class ReaderDialogueHighlightHook(
             Rect(0, top, bitmap.width, top + height)
         }
         canvas.drawBitmap(bitmap, src, dst, null)
+    }
+
+    private fun drawCssBorder(canvas: android.graphics.Canvas, rect: Rect, box: ReedenBoxStyle) {
+        if (box.borderWidthPx <= 0f || box.borderColor == null || rect.width() <= 0 || rect.height() <= 0) return
+        val inset = box.borderWidthPx / 2f
+        val borderRect = RectF(rect).apply { inset(inset, inset) }
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = box.borderWidthPx
+            color = box.borderColor
+        }
+        if (box.radiusPx > 0f) {
+            canvas.drawRoundRect(borderRect, box.radiusPx, box.radiusPx, paint)
+        } else {
+            canvas.drawRect(borderRect, paint)
+        }
+    }
+
+    private fun reedenBoxStyle(css: String, density: Float): ReedenBoxStyle {
+        val values = cssProperties(css)
+        val padding = cssBoxEdges(values, "padding", density)
+        val margin = cssBoxEdges(values, "margin", density)
+        val border = values["border"].orEmpty()
+        val borderWidth = values["border-width"]?.let { cssSizePx(it, density) }
+            ?: Regex("""(\d+(?:\.\d+)?)px""").find(border)?.groupValues?.getOrNull(1)?.toFloatOrNull()?.let { it * density }
+            ?: 0f
+        val borderColor = parseCssColor(values["border-color"].orEmpty())
+            ?: Regex("""rgba?\([^)]+\)|#[0-9a-fA-F]{6,8}""").find(border)?.value?.let(::parseCssColor)
+        return ReedenBoxStyle(
+            paddingLeftPx = padding.left,
+            paddingTopPx = padding.top,
+            paddingRightPx = padding.right,
+            paddingBottomPx = padding.bottom,
+            marginLeftPx = margin.left,
+            marginTopPx = margin.top,
+            marginRightPx = margin.right,
+            marginBottomPx = margin.bottom,
+            borderWidthPx = borderWidth,
+            borderColor = borderColor,
+            radiusPx = values["border-radius"]?.let { cssSizePx(it, density) } ?: 0f,
+            backgroundSize = values["background-size"].orEmpty(),
+        )
+    }
+
+    private fun cssProperties(css: String): Map<String, String> =
+        css.split(';')
+            .mapNotNull { part ->
+                val index = part.indexOf(':')
+                if (index <= 0) null else part.substring(0, index).trim().lowercase() to part.substring(index + 1).trim()
+            }
+            .toMap()
+
+    private fun cssBoxEdges(values: Map<String, String>, prefix: String, density: Float): BoxEdges {
+        val shorthand = values[prefix].orEmpty()
+            .split(Regex("\\s+"))
+            .filter { it.isNotBlank() }
+            .map { cssSizePx(it, density) }
+        val top = values["$prefix-top"]?.let { cssSizePx(it, density) } ?: shorthand.getOrNull(0) ?: 0f
+        val right = values["$prefix-right"]?.let { cssSizePx(it, density) } ?: shorthand.getOrNull(1) ?: shorthand.getOrNull(0) ?: 0f
+        val bottom = values["$prefix-bottom"]?.let { cssSizePx(it, density) } ?: shorthand.getOrNull(2) ?: shorthand.getOrNull(0) ?: 0f
+        val left = values["$prefix-left"]?.let { cssSizePx(it, density) } ?: shorthand.getOrNull(3) ?: shorthand.getOrNull(1) ?: shorthand.getOrNull(0) ?: 0f
+        return BoxEdges(left = left, top = top, right = right, bottom = bottom)
+    }
+
+    private fun cssSizePx(value: String, density: Float): Float {
+        val trimmed = value.trim().lowercase()
+        val number = Regex("""-?\d+(?:\.\d+)?""").find(trimmed)?.value?.toFloatOrNull() ?: return 0f
+        return when {
+            trimmed.endsWith("px") -> number * density
+            trimmed.endsWith("dp") -> number * density
+            trimmed.endsWith("em") -> number * 16f * density
+            trimmed.endsWith("rem") -> number * 16f * density
+            else -> number * density
+        }.coerceAtLeast(0f)
+    }
+
+    private fun parseCssColor(value: String): Int? {
+        val trimmed = value.trim()
+        if (trimmed.isBlank()) return null
+        runCatching { Color.parseColor(trimmed) }.getOrNull()?.let { return it }
+        val groups = Regex("""rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*([0-9.]+))?\s*\)""")
+            .find(trimmed)
+            ?.groupValues
+            ?: return null
+        val alpha = groups.getOrNull(4)
+            ?.takeIf { it.isNotBlank() }
+            ?.toFloatOrNull()
+            ?.let { if (it <= 1f) (it * 255).toInt() else it.toInt() }
+            ?: 255
+        return Color.argb(
+            alpha.coerceIn(0, 255),
+            groups[1].toInt().coerceIn(0, 255),
+            groups[2].toInt().coerceIn(0, 255),
+            groups[3].toInt().coerceIn(0, 255),
+        )
     }
 
     private fun reedenNineSlice(css: String): String =
@@ -1113,6 +1240,7 @@ class ReaderDialogueHighlightHook(
     private data class NinePatchAnnotation(
         val path: String,
         val slice: String,
+        val css: String,
         val start: Int,
         val end: Int,
     )
@@ -1122,6 +1250,7 @@ class ReaderDialogueHighlightHook(
         val end: Int,
         val path: String,
         val slice: String,
+        val css: String,
     )
 
     private data class NinePatchDrawState(
@@ -1141,6 +1270,28 @@ class ReaderDialogueHighlightHook(
         val top: Int,
         val right: Int,
         val bottom: Int,
+    )
+
+    private data class BoxEdges(
+        val left: Float,
+        val top: Float,
+        val right: Float,
+        val bottom: Float,
+    )
+
+    private data class ReedenBoxStyle(
+        val paddingLeftPx: Float,
+        val paddingTopPx: Float,
+        val paddingRightPx: Float,
+        val paddingBottomPx: Float,
+        val marginLeftPx: Float,
+        val marginTopPx: Float,
+        val marginRightPx: Float,
+        val marginBottomPx: Float,
+        val borderWidthPx: Float,
+        val borderColor: Int?,
+        val radiusPx: Float,
+        val backgroundSize: String,
     )
 
     private data class CachedImage(
