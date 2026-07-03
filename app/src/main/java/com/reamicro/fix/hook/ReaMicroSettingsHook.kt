@@ -59,6 +59,7 @@ import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.OnlineSourceStore
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ReaderHighlightBookContext
+import com.reamicro.fix.settings.ReaderHighlightSettingsSnapshot
 import com.reamicro.fix.settings.ReaderHighlightRule
 import com.reamicro.fix.settings.ReaderHighlightRuleType
 import com.reamicro.fix.settings.ReaderHighlightStyle
@@ -1174,7 +1175,7 @@ class ReaMicroSettingsHook(
             val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
             readerHighlightVersionValue()
             val highlight = settings.highlightSettings()
-            val rows = buildList {
+            val globalRows = buildList {
                 add(
                     ActionRow(
                         key = "reader_highlight_rule_add",
@@ -1206,40 +1207,41 @@ class ReaMicroSettingsHook(
                         ),
                     )
                 }
-                val bookGroups = buildList {
-                    addAll(highlight.bookRuleGroups().map { group ->
-                        Triple(group.bookKey, group.bookTitle, "${group.enabledCount} / ${group.totalCount} \u6761\u672c\u4e66\u89c4\u5219")
-                    })
-                    val currentBookKey = ReaderHighlightBookContext.bookKey
-                    if (currentBookKey.isNotBlank() && none { it.first == currentBookKey }) {
-                        add(
-                            Triple(
-                                currentBookKey,
-                                ReaderHighlightBookContext.bookTitle.ifBlank { "\u672c\u4e66" },
-                                "\u6682\u65e0\u672c\u4e66\u89c4\u5219",
-                            ),
-                        )
-                    }
-                }
-                bookGroups.forEach { (bookKey, bookTitle, subtitle) ->
+            }
+            val bookRows = buildList {
+                val bookGroups = readerHighlightBookGroups(highlight)
+                bookGroups.forEach { group ->
                     add(
                         ActionRow(
-                            key = "reader_highlight_book_${bookKey.hashCode()}",
-                            title = bookTitle,
-                            subtitle = subtitle,
+                            key = "reader_highlight_book_${group.bookKey.hashCode()}",
+                            title = group.bookTitle,
+                            subtitle = group.subtitle,
                             trailing = "\u672c\u4e66",
                             singleLineSubtitle = true,
                             onClick = {
                                 openNestedInjectedRoute(
-                                    InjectedRoute.ReaderBookHighlightRules(bookKey, bookTitle),
+                                    InjectedRoute.ReaderBookHighlightRules(group.bookKey, group.bookTitle),
                                 )
                             },
                         ),
                     )
                 }
+                if (isEmpty()) {
+                    add(
+                        ActionRow(
+                            key = "reader_highlight_book_empty",
+                            title = "\u6682\u65e0\u5355\u4e66\u89c4\u5219",
+                            subtitle = "\u5728\u9605\u8bfb\u9875\u9009\u4e2d\u6587\u672c\u540e\u53ef\u6dfb\u52a0\u672c\u4e66\u9ad8\u4eae",
+                            singleLineSubtitle = true,
+                        ),
+                    )
+                }
             }
             addLazyItem(lazyListScope, READER_HIGHLIGHT_TEXT_ITEM_KEY) { itemComposer ->
-                renderHostActionCard(rows, itemComposer)
+                renderHostActionCard(globalRows, itemComposer)
+            }
+            addLazyItem(lazyListScope, READER_HIGHLIGHT_BOOK_GROUPS_ITEM_KEY) { itemComposer ->
+                renderHostActionCard(bookRows, itemComposer)
             }
             targetUnit()
         }
@@ -4813,6 +4815,58 @@ class ReaMicroSettingsHook(
         return "${highlight.styles.size} \u4e2a\u6837\u5f0f / ${highlight.rules.count { it.enabled }} \u6761\u89c4\u5219"
     }
 
+    private fun readerHighlightBookGroups(highlight: ReaderHighlightSettingsSnapshot): List<ReaderHighlightBookGroupRow> =
+        buildList {
+            highlight.bookRuleGroups().forEach { group ->
+                add(
+                    ReaderHighlightBookGroupRow(
+                        bookKey = group.bookKey,
+                        bookTitle = displayReaderBookTitle(group.bookKey, group.bookTitle),
+                        subtitle = "${group.enabledCount} / ${group.totalCount} \u6761\u672c\u4e66\u89c4\u5219",
+                    ),
+                )
+            }
+            val currentBookKey = ReaderHighlightBookContext.bookKey
+            if (currentBookKey.isNotBlank() && none { it.bookKey == currentBookKey }) {
+                add(
+                    ReaderHighlightBookGroupRow(
+                        bookKey = currentBookKey,
+                        bookTitle = displayReaderBookTitle(currentBookKey, ReaderHighlightBookContext.bookTitle),
+                        subtitle = "\u6682\u65e0\u672c\u4e66\u89c4\u5219",
+                    ),
+                )
+            }
+        }.sortedBy { it.bookTitle }
+
+    private fun displayReaderBookTitle(bookKey: String, storedTitle: String): String {
+        val candidates = buildList {
+            add(storedTitle)
+            if (ReaderHighlightBookContext.bookKey == bookKey) add(ReaderHighlightBookContext.bookTitle)
+            addAll(bookKey.split('|'))
+        }
+        return candidates
+            .asSequence()
+            .map(::cleanReaderBookTitle)
+            .firstOrNull { it.isNotBlank() && !isInternalReaderBookTitle(it) }
+            ?: "\u672c\u4e66"
+    }
+
+    private fun cleanReaderBookTitle(value: String): String {
+        val trimmed = value.trim()
+        if (trimmed.isBlank()) return ""
+        return trimmed
+            .substringAfterLast('/')
+            .substringAfterLast('\\')
+            .removeSuffix(".epub")
+            .removeSuffix(".EPUB")
+            .trim()
+    }
+
+    private fun isInternalReaderBookTitle(value: String): Boolean =
+        value.contains('|') ||
+            value.matches(Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")) ||
+            value.matches(Regex("^[0-9a-fA-F]{16,}$"))
+
     private fun highlightStyleSummary(style: ReaderHighlightStyle): String =
         listOfNotNull(
             "\u6d45\u8272 ${dialogueHighlightColorSummary(style.color)}",
@@ -6186,6 +6240,12 @@ class ReaMicroSettingsHook(
         val title: String,
     )
 
+    private data class ReaderHighlightBookGroupRow(
+        val bookKey: String,
+        val bookTitle: String,
+        val subtitle: String,
+    )
+
     private enum class FontPickerTarget(
         val title: String,
         val clearTitle: String,
@@ -6484,6 +6544,7 @@ class ReaMicroSettingsHook(
         const val READER_HIGHLIGHT_CONFIG_ITEM_KEY = 0x524D4677
         const val READER_HIGHLIGHT_TEXT_ITEM_KEY = 0x524D4678
         const val READER_HIGHLIGHT_BOOK_RULES_ITEM_KEY = 0x524D4679
+        const val READER_HIGHLIGHT_BOOK_GROUPS_ITEM_KEY = 0x524D467A
         const val ACCOUNT_CREDENTIAL_DOCUMENT_REQUEST_CODE = 0x524D47
         const val ACCOUNT_DATA_DOCUMENT_REQUEST_CODE = 0x524D48
         const val ONLINE_SOURCE_DOCUMENT_REQUEST_CODE = 0x524D49

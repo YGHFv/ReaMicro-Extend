@@ -104,6 +104,7 @@ class ReaderHook(
     @Volatile private var activeSearchHighlightPageNumber: Int? = null
     @Volatile private var activeSearchHighlightRenderLogId: Long? = null
     @Volatile private var activeSearchHighlightRenderLogCount: Int = 0
+    @Volatile private var activeSelectionHighlightMark: Any? = null
     @Volatile private var pendingSearchOriginRestore: Boolean = false
     @Volatile private var scrollCrashMarkerOwnedByThisProcess: Boolean = false
 
@@ -449,6 +450,7 @@ class ReaderHook(
         activeSearchPageToken = 0L
         activeSearchPageUpdate = null
         clearSearchResultHighlight()
+        clearSelectionInjectedHighlight()
         bottomSearchReceiverRef = null
         bottomSearchBookRef = null
         lastCatalogContext = null
@@ -1513,7 +1515,9 @@ class ReaderHook(
     private fun openNativeSelectionEditor() {
         val activity = activityProvider() ?: return
         if (!canEditReaderSelection()) return
-        val (controller, quote) = currentNativeSelectionText()
+        val selection = currentNativeSelectionPayload()
+        val controller = selection.controller
+        val quote = selection.quote
         if (quote.isBlank()) {
             Toast.makeText(activity, "\u672a\u83b7\u53d6\u5230\u9009\u4e2d\u6587\u672c", Toast.LENGTH_SHORT).show()
             return
@@ -1540,7 +1544,7 @@ class ReaderHook(
     private fun openNativeSelectionDictionary() {
         val activity = activityProvider() ?: return
         if (!canShowReaderDictionary()) return
-        val (_, quote) = currentNativeSelectionText()
+        val quote = currentNativeSelectionPayload().quote
         if (quote.isBlank()) {
             Toast.makeText(activity, "\u672a\u83b7\u53d6\u5230\u9009\u4e2d\u6587\u672c", Toast.LENGTH_SHORT).show()
             return
@@ -1567,7 +1571,9 @@ class ReaderHook(
     private fun highlightNativeSelection() {
         val activity = activityProvider() ?: return
         if (!canHighlightReaderSelection()) return
-        val (controller, quote) = currentNativeSelectionText()
+        val selection = currentNativeSelectionPayload()
+        val controller = selection.controller
+        val quote = selection.quote
         if (quote.isBlank()) {
             Toast.makeText(activity, "\u672a\u83b7\u53d6\u5230\u9009\u4e2d\u6587\u672c", Toast.LENGTH_SHORT).show()
             return
@@ -1582,6 +1588,7 @@ class ReaderHook(
             Toast.makeText(activity, "\u6dfb\u52a0\u9ad8\u4eae\u89c4\u5219\u5931\u8d25", Toast.LENGTH_SHORT).show()
             return
         }
+        applySelectionHighlightMark(selection)
         callNoArg(controller, "clearSelection")
         Toast.makeText(activity, "\u5df2\u6dfb\u52a0\u672c\u4e66\u9ad8\u4eae", Toast.LENGTH_SHORT).show()
     }
@@ -1613,11 +1620,16 @@ class ReaderHook(
         }, "ReaMicroDictionary").start()
     }
 
-    private fun currentNativeSelectionText(): Pair<Any?, String> {
+    private fun currentNativeSelectionPayload(): NativeSelectionPayload {
         val controller = currentSelectionControllerRef?.get()
         val payload = callNoArg(controller, "selectedPayload")
         val quote = callString(payload, "getQuote").ifBlank { callString(controller, "selectedText") }
-        return controller to quote.trim()
+        return NativeSelectionPayload(
+            controller = controller,
+            quote = quote.trim(),
+            startCfi = callString(payload, "getStartCfi"),
+            endCfi = callString(payload, "getEndCfi"),
+        )
     }
 
     private fun renderSearchResults(
@@ -2243,6 +2255,20 @@ class ReaderHook(
         )
     }
 
+    private fun createSelectionHighlightMark(selection: NativeSelectionPayload): Any? {
+        val startCfi = selection.startCfi.ifBlank { return null }
+        val endCfi = selection.endCfi.ifBlank { startCfi }
+        return createReaderMark(
+            id = SELECTION_HIGHLIGHT_MARK_ID_BASE + (System.currentTimeMillis() % SELECTION_HIGHLIGHT_MARK_ID_RANGE),
+            chapter = fallbackCurrentChapterTitle().ifBlank { "\u672c\u4e66\u9ad8\u4eae" },
+            startCfi = startCfi,
+            endCfi = endCfi,
+            quote = selection.quote,
+            style = MARK_STYLE_FILL,
+            color = MARK_COLOR_YELLOW,
+        )
+    }
+
     private fun createReaderMark(
         id: Long,
         chapter: String,
@@ -2312,6 +2338,50 @@ class ReaderHook(
             XposedBridge.log("$LOG_PREFIX create search highlight mark failed: ${it.stackTraceToString()}")
         }.getOrNull()
 
+    private fun applySelectionHighlightMark(selection: NativeSelectionPayload) {
+        val mark = createSelectionHighlightMark(selection) ?: return
+        activeSelectionHighlightMark = mark
+        injectSelectionHighlightMark(currentViewModelRef?.get(), mark)
+        scheduleSelectionHighlightRefresh(mark, 300L)
+        scheduleSelectionHighlightRefresh(mark, 900L)
+    }
+
+    private fun scheduleSelectionHighlightRefresh(mark: Any, delayMs: Long) {
+        val view = activityProvider()?.window?.decorView
+        val block = {
+            if (activeSelectionHighlightMark === mark) {
+                injectSelectionHighlightMark(currentViewModelRef?.get(), mark)
+            }
+        }
+        if (view != null) {
+            view.postDelayed(block, delayMs)
+        } else {
+            Thread {
+                runCatching {
+                    Thread.sleep(delayMs)
+                    block()
+                }
+            }.apply {
+                name = "ReaMicroSelectionHighlight"
+                isDaemon = true
+                start()
+            }
+        }
+    }
+
+    private fun injectSelectionHighlightMark(viewModel: Any?, mark: Any): Boolean =
+        updateSearchMarks(viewModel, "selection-inject") { marks ->
+            marks.filterNot(::isSelectionInjectedHighlightMark) + mark
+        }
+
+    private fun clearSelectionInjectedHighlight(viewModel: Any? = currentViewModelRef?.get()): Boolean {
+        activeSelectionHighlightMark = null
+        return updateSearchMarks(viewModel, "selection-clear") { marks ->
+            val filtered = marks.filterNot(::isSelectionInjectedHighlightMark)
+            if (filtered.size == marks.size) marks else filtered
+        }
+    }
+
     private fun applySearchResultHighlight(viewModel: Any?, mark: Any) {
         val id = searchResultHighlightMarkId(mark) ?: return
         activeSearchHighlightId = id
@@ -2370,14 +2440,21 @@ class ReaderHook(
     }
 
     private fun appendActiveSearchHighlightMark(original: List<*>, label: String? = null): List<Any>? {
-        val mark = activeSearchHighlightMark ?: return null
-        val cleanMarks = original.filterNotNull().filterNot(::isSearchResultHighlightMark)
-        if (cleanMarks.size == original.size && cleanMarks.any { it === mark }) return null
-        return ArrayList<Any>(cleanMarks.size + 1).apply {
+        val searchMark = activeSearchHighlightMark
+        val selectionMark = activeSelectionHighlightMark
+        if (searchMark == null && selectionMark == null) return null
+        val cleanMarks = original
+            .filterNotNull()
+            .filterNot(::isSearchResultHighlightMark)
+            .filterNot(::isSelectionInjectedHighlightMark)
+        return ArrayList<Any>(cleanMarks.size + 2).apply {
             addAll(cleanMarks)
-            add(mark)
+            searchMark?.let(::add)
+            selectionMark?.let(::add)
         }.also { next ->
-            label?.let { logSearchHighlightRenderInput(it, original.size, next.size, mark) }
+            if (searchMark != null) {
+                label?.let { logSearchHighlightRenderInput(it, original.size, next.size, searchMark) }
+            }
         }
     }
 
@@ -2814,6 +2891,12 @@ class ReaderHook(
     private fun isSearchResultHighlightMark(mark: Any): Boolean {
         val id = searchResultHighlightMarkId(mark) ?: return false
         return SearchHighlightPlanner.isHighlightId(id, SEARCH_HIGHLIGHT_MARK_ID_BASE, SEARCH_HIGHLIGHT_MARK_ID_RANGE)
+    }
+
+    private fun isSelectionInjectedHighlightMark(mark: Any): Boolean {
+        val id = (callNoArg(mark, "getId") as? Number)?.toLong() ?: return false
+        return id >= SELECTION_HIGHLIGHT_MARK_ID_BASE &&
+            id < SELECTION_HIGHLIGHT_MARK_ID_BASE + SELECTION_HIGHLIGHT_MARK_ID_RANGE
     }
 
     private fun searchResultHighlightMarkId(mark: Any): Long? {
@@ -3456,7 +3539,11 @@ class ReaderHook(
         value.replace('\\', '/').trimStart('/')
 
     private fun bookTitle(context: CatalogContext): String =
-        callString(context.book, "getTitle")
+        readableBookTitle(
+            callString(currentPageRef?.get(), "getBookTitle"),
+            callString(context.book, "getTitle"),
+            titleFromCurrentEpubRoot(),
+        )
 
     private fun currentHighlightBookIdentity(): Pair<String, String>? {
         lastCatalogContext?.let { context ->
@@ -3464,7 +3551,11 @@ class ReaderHook(
             if (key.isNotBlank()) return key to bookTitle(context).ifBlank { fallbackCurrentBookTitle() }
         }
         bottomSearchBookRef?.get()?.let { book ->
-            val title = callString(book, "getTitle").ifBlank { fallbackCurrentBookTitle() }
+            val title = readableBookTitle(
+                callString(currentPageRef?.get(), "getBookTitle"),
+                callString(book, "getTitle"),
+                titleFromCurrentEpubRoot(),
+            ).ifBlank { fallbackCurrentBookTitle() }
             val key = listOf(
                 currentEpubRoot()?.absolutePath.orEmpty(),
                 callString(book, "getId"),
@@ -3482,10 +3573,49 @@ class ReaderHook(
     }
 
     private fun fallbackCurrentBookTitle(): String {
+        val title = readableBookTitle(
+            callString(currentPageRef?.get(), "getBookTitle"),
+            titleFromCurrentEpubRoot(),
+        )
+        if (title.isNotBlank()) return title
+        return fallbackCurrentChapterTitle()
+    }
+
+    private fun fallbackCurrentChapterTitle(): String {
         val page = currentPageRef?.get()
         return callString(callNoArg(page, "getChapter"), "getTitle")
             .ifBlank { callString(page, "getTitle") }
     }
+
+    private fun titleFromCurrentEpubRoot(): String =
+        currentEpubRoot()
+            ?.nameWithoutExtension
+            ?.takeIf { it.isNotBlank() }
+            .orEmpty()
+
+    private fun readableBookTitle(vararg candidates: String): String =
+        candidates
+            .map { cleanBookTitleCandidate(it) }
+            .firstOrNull { it.isNotBlank() && !isInternalBookTitle(it) }
+            .orEmpty()
+
+    private fun cleanBookTitleCandidate(value: String): String {
+        val trimmed = value.trim()
+        if (trimmed.isBlank()) return ""
+        val segment = trimmed
+            .substringAfterLast('|')
+            .substringAfterLast('/')
+            .substringAfterLast('\\')
+            .removeSuffix(".epub")
+            .removeSuffix(".EPUB")
+            .trim()
+        return segment
+    }
+
+    private fun isInternalBookTitle(value: String): Boolean =
+        value.matches(Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")) ||
+            value.matches(Regex("^[0-9a-fA-F]{16,}$")) ||
+            value.contains('|')
 
     private fun isDifferentSearchBook(previous: CatalogContext, next: CatalogContext): Boolean {
         val previousKey = searchBookIdentity(previous)
@@ -4021,6 +4151,8 @@ class ReaderHook(
         const val MARK_COLOR_YELLOW = "yellow"
         const val SEARCH_HIGHLIGHT_MARK_ID_BASE = -9_223_372_036_854_000_000L
         const val SEARCH_HIGHLIGHT_MARK_ID_RANGE = 100_000L
+        const val SELECTION_HIGHLIGHT_MARK_ID_BASE = -9_223_372_036_853_800_000L
+        const val SELECTION_HIGHLIGHT_MARK_ID_RANGE = 100_000L
         val BLOCK_SEARCH_TAGS = setOf(
             "p", "div", "section", "article", "li", "blockquote", "pre",
             "h1", "h2", "h3", "h4", "h5", "h6",
@@ -4041,6 +4173,13 @@ class ReaderHook(
         val bookKey: String,
         val keyword: String,
         val results: List<FullTextSearchResult>,
+    )
+
+    private data class NativeSelectionPayload(
+        val controller: Any?,
+        val quote: String,
+        val startCfi: String,
+        val endCfi: String,
     )
 
     private data class SearchIndexState(
