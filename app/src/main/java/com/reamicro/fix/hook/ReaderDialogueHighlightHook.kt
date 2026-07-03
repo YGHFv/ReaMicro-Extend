@@ -34,13 +34,14 @@ class ReaderDialogueHighlightHook(
     private val fontFamilyCache = HashMap<String, Any>()
     private val failedFontFamilyLogKeys = HashSet<String>()
     private val ninePatchDrawableCache = HashMap<String, CachedImage>()
-    private val rememberedNinePatchRanges = object : LinkedHashMap<String, List<NinePatchRange>>(32, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<NinePatchRange>>?): Boolean =
+    private val rememberedNinePatchRanges = object : LinkedHashMap<String, RememberedNinePatchText>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, RememberedNinePatchText>?): Boolean =
             size > MAX_REMEMBERED_NINE_PATCH_TEXTS
     }
     @Volatile private var ninePatchDrawHookInstalled: Boolean = false
     @Volatile private var basicTextDrawHookInstalled: Boolean = false
     @Volatile private var selectionRectPaddingHookInstalled: Boolean = false
+    @Volatile private var selectionPathPaddingHookInstalled: Boolean = false
     @Volatile private var lastNinePatchLogKey: String = ""
     @Volatile private var lastAppliedLogKey: String = ""
 
@@ -49,6 +50,7 @@ class ReaderDialogueHighlightHook(
         hookJustifyTextNinePatchDraw()
         hookBasicTextNinePatchDraw()
         hookSelectionLineRectsPadding()
+        hookSelectionPathPadding()
     }
 
     private fun hookContentDom(className: String) {
@@ -609,6 +611,37 @@ class ReaderDialogueHighlightHook(
         }
     }
 
+    private fun hookSelectionPathPadding() {
+        if (selectionPathPaddingHookInstalled) return
+        runCatching {
+            val method = android.text.Layout::class.java.getDeclaredMethod(
+                "getSelectionPath",
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                Path::class.java,
+            )
+            method.isAccessible = true
+            XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    if (ReaderHighlightBookContext.bookKey.isBlank()) return
+                    if (!settings.snapshot().moduleEnabled) return
+                    val path = param.args?.getOrNull(2) as? Path ?: return
+                    val bounds = RectF()
+                    path.computeBounds(bounds, false)
+                    if (bounds.isEmpty) return
+                    val density = activityProvider()?.resources?.displayMetrics?.density ?: 1f
+                    val source = Path(path)
+                    path.addPath(source, 0f, -SELECTION_PATH_TOP_PADDING_DP * density)
+                    path.addPath(source, 0f, SELECTION_PATH_BOTTOM_PADDING_DP * density)
+                }
+            })
+            selectionPathPaddingHookInstalled = true
+            XposedBridge.log("$LOG_PREFIX selection path padding hook installed")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX selection path padding hook failed: ${it.stackTraceToString()}")
+        }
+    }
+
     private fun Method.looksLikeSelectionLineRects(): Boolean =
         List::class.java.isAssignableFrom(returnType) &&
             parameterTypes.getOrNull(0)?.name == TEXT_LAYOUT_RESULT_CLASS &&
@@ -679,20 +712,82 @@ class ReaderDialogueHighlightHook(
         val key = annotatedStringTextKey(annotatedString)
         if (key.isBlank()) return
         synchronized(rememberedNinePatchRanges) {
-            rememberedNinePatchRanges[key] = ranges
+            rememberedNinePatchRanges[key] = RememberedNinePatchText(key, ranges)
         }
     }
 
     private fun rememberedNinePatchRanges(annotatedString: Any): List<NinePatchRange> {
         val key = annotatedStringTextKey(annotatedString)
         if (key.isBlank()) return emptyList()
-        synchronized(rememberedNinePatchRanges) {
-            return rememberedNinePatchRanges[key].orEmpty()
+        return synchronized(rememberedNinePatchRanges) {
+            rememberedNinePatchRanges[key]?.ranges
+                ?: rememberedNinePatchRanges.values.toList().asReversed()
+                    .firstNotNullOfOrNull { remembered -> deriveRememberedNinePatchRanges(remembered, key) }
+                    .orEmpty()
         }
     }
 
     private fun annotatedStringTextKey(annotatedString: Any): String =
         callNoArg(annotatedString, "getText")?.toString().orEmpty()
+
+    private fun deriveRememberedNinePatchRanges(
+        remembered: RememberedNinePatchText,
+        currentText: String,
+    ): List<NinePatchRange>? {
+        if (remembered.text.isBlank() || currentText.isBlank()) return null
+        val direct = remembered.ranges.mapNotNull { range ->
+            val source = remembered.text.substring(range.start.coerceIn(0, remembered.text.length), range.end.coerceIn(0, remembered.text.length))
+            val index = currentText.indexOf(source)
+            if (source.isBlank() || index < 0) null else range.copy(start = index, end = index + source.length)
+        }
+        if (direct.isNotEmpty()) return direct
+
+        val original = normalizedTextWithSourceMap(remembered.text)
+        val current = normalizedTextWithSourceMap(currentText)
+        if (original.text.isBlank() || current.text.isBlank()) return null
+
+        val currentInOriginal = original.text.indexOf(current.text)
+        if (currentInOriginal >= 0) {
+            return remembered.ranges.mapNotNull { range ->
+                val rangeStart = original.sourceIndices.indexOfFirst { it >= range.start }
+                val rangeEnd = original.sourceIndices.indexOfLast { it < range.end } + 1
+                if (rangeStart < 0 || rangeEnd <= rangeStart) return@mapNotNull null
+                val overlapStart = maxOf(rangeStart, currentInOriginal)
+                val overlapEnd = minOf(rangeEnd, currentInOriginal + current.text.length)
+                if (overlapEnd <= overlapStart) return@mapNotNull null
+                val localStart = overlapStart - currentInOriginal
+                val localEnd = overlapEnd - currentInOriginal
+                range.copy(
+                    start = current.sourceIndices.getOrNull(localStart) ?: return@mapNotNull null,
+                    end = (current.sourceIndices.getOrNull(localEnd - 1) ?: return@mapNotNull null) + 1,
+                )
+            }.takeIf { it.isNotEmpty() }
+        }
+
+        return remembered.ranges.mapNotNull { range ->
+            val source = remembered.text.substring(range.start.coerceIn(0, remembered.text.length), range.end.coerceIn(0, remembered.text.length))
+            val sourceNormalized = normalizedTextWithSourceMap(source)
+            if (sourceNormalized.text.isBlank()) return@mapNotNull null
+            val index = current.text.indexOf(sourceNormalized.text)
+            if (index < 0) return@mapNotNull null
+            range.copy(
+                start = current.sourceIndices.getOrNull(index) ?: return@mapNotNull null,
+                end = (current.sourceIndices.getOrNull(index + sourceNormalized.text.length - 1) ?: return@mapNotNull null) + 1,
+            )
+        }.takeIf { it.isNotEmpty() }
+    }
+
+    private fun normalizedTextWithSourceMap(value: String): NormalizedText {
+        val builder = StringBuilder(value.length)
+        val indices = ArrayList<Int>(value.length)
+        value.forEachIndexed { index, char ->
+            if (!char.isWhitespace() && char != '\u200B' && char != '\u200C' && char != '\u200D' && char != '\uFEFF') {
+                builder.append(char)
+                indices.add(index)
+            }
+        }
+        return NormalizedText(builder.toString(), indices)
+    }
 
     private fun ninePatchRanges(annotatedString: Any): List<NinePatchRange> {
         val length = (callNoArg(annotatedString, "length") as? Int)
@@ -774,10 +869,12 @@ class ReaderDialogueHighlightHook(
             val localStart = maxOf(start, lineStart)
             val localEnd = minOf(end, lineEnd)
             if (localEnd <= localStart) return@mapNotNull null
-            val left = charRect(layout, localStart)?.left ?: return@mapNotNull null
-            val right = charRect(layout, localEnd - 1)?.right ?: return@mapNotNull null
-            val top = callFloat(layout, "getLineTop", line) ?: charRect(layout, localStart)?.top ?: return@mapNotNull null
-            val bottom = callFloat(layout, "getLineBottom", line) ?: charRect(layout, localStart)?.bottom ?: return@mapNotNull null
+            val firstCharRect = charRect(layout, localStart) ?: return@mapNotNull null
+            val lastCharRect = charRect(layout, localEnd - 1) ?: return@mapNotNull null
+            val left = firstCharRect.left
+            val right = lastCharRect.right
+            val top = minOf(firstCharRect.top, lastCharRect.top)
+            val bottom = maxOf(firstCharRect.bottom, lastCharRect.bottom)
             Rect(
                 (left - box.paddingLeftPx - box.marginLeftPx).toInt(),
                 (top - box.paddingTopPx - box.marginTopPx).toInt(),
@@ -1276,6 +1373,8 @@ class ReaderDialogueHighlightHook(
         const val REEDEN_BOX_EDGE_SCALE = 0.78f
         const val SELECTION_RECT_TOP_PADDING_DP = 4f
         const val SELECTION_RECT_BOTTOM_PADDING_DP = 1f
+        const val SELECTION_PATH_TOP_PADDING_DP = 3f
+        const val SELECTION_PATH_BOTTOM_PADDING_DP = 1f
         const val NINE_PATCH_ANNOTATION_TAG = "reamicro.highlight.ninepatch"
         const val NINE_PATCH_ANNOTATION_SEPARATOR = "\u001F"
         const val MARKUP_TEXT = "#text"
@@ -1325,6 +1424,16 @@ class ReaderDialogueHighlightHook(
     private data class NinePatchDrawState(
         val ranges: List<NinePatchRange>,
         @Volatile var textLayoutResult: Any? = null,
+    )
+
+    private data class RememberedNinePatchText(
+        val text: String,
+        val ranges: List<NinePatchRange>,
+    )
+
+    private data class NormalizedText(
+        val text: String,
+        val sourceIndices: List<Int>,
     )
 
     private data class TextBox(

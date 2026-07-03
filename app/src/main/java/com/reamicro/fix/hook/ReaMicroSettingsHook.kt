@@ -12,11 +12,18 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.NinePatchDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -1439,6 +1446,8 @@ class ReaMicroSettingsHook(
                         lightPreview,
                         colorInput.text?.toString().orEmpty(),
                         cssInput.text?.toString().orEmpty(),
+                        ninePatchInput.text?.toString()?.trim().orEmpty(),
+                        style.ninePatchSlice,
                         lightFontSelection,
                         colors,
                     )
@@ -1446,11 +1455,13 @@ class ReaMicroSettingsHook(
                         darkPreview,
                         darkColorInput.text?.toString().orEmpty().ifBlank { colorInput.text?.toString().orEmpty() },
                         darkCssInput.text?.toString().orEmpty(),
+                        darkNinePatchInput.text?.toString()?.trim().orEmpty().ifBlank { ninePatchInput.text?.toString()?.trim().orEmpty() },
+                        style.darkNinePatchSlice.ifBlank { style.ninePatchSlice },
                         darkFontSelection.ifBlank { lightFontSelection },
                         colors,
                     )
                 }
-                listOf(colorInput, cssInput, darkColorInput, darkCssInput).forEach { input ->
+                listOf(colorInput, cssInput, ninePatchInput, darkColorInput, darkCssInput, darkNinePatchInput).forEach { input ->
                     input.addTextChangedListener(object : TextWatcher {
                         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
                         override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = syncPreviews.invoke()
@@ -1569,6 +1580,8 @@ class ReaMicroSettingsHook(
         preview: TextView,
         colorValue: String,
         css: String,
+        ninePatchPath: String,
+        ninePatchSlice: String,
         fontSelection: String,
         colors: SettingsDialogColors,
     ) {
@@ -1580,7 +1593,13 @@ class ReaMicroSettingsHook(
             ?: parseSettingsColor(cssValues["background"].orEmpty())
             ?: colors.field
         preview.setTextColor(textColor)
-        preview.background = settingsRoundedRect(backgroundColor, settingsDp(preview.context, 12), colors.border)
+        preview.background = readerHighlightPreviewBackground(
+            context = preview.context,
+            path = ninePatchPath,
+            slice = ninePatchSlice.ifBlank { reedenNineSlice(css) },
+            fallbackColor = backgroundColor,
+            borderColor = colors.border,
+        ) ?: settingsRoundedRect(backgroundColor, settingsDp(preview.context, 12), colors.border)
         preview.textSize = readerHighlightPreviewFontSize(cssValues["font-size"].orEmpty()) ?: 15f
         val bold = cssValues["font-weight"].orEmpty().lowercase().let { it == "bold" || it == "bolder" || (it.toIntOrNull() ?: 0) >= 600 }
         val italic = cssValues["font-style"].orEmpty().lowercase().let { it == "italic" || it == "oblique" }
@@ -1597,6 +1616,101 @@ class ReaMicroSettingsHook(
             preview.paintFlags and Paint.UNDERLINE_TEXT_FLAG.inv()
         }
     }
+
+    private fun readerHighlightPreviewBackground(
+        context: Context,
+        path: String,
+        slice: String,
+        fallbackColor: Int,
+        borderColor: Int,
+    ): Drawable? {
+        val file = File(path)
+        if (!file.isFile) return null
+        val bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return null
+        val ninePatchDrawable = if (bitmap.ninePatchChunk != null) {
+            NinePatchDrawable(context.resources, bitmap, bitmap.ninePatchChunk, Rect(), file.name)
+        } else {
+            null
+        }
+        val nineSlice = parsePreviewNineSlice(slice, bitmap.width, bitmap.height)
+        return object : Drawable() {
+            private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = fallbackColor }
+            private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = settingsDp(context, 1).toFloat()
+                color = borderColor
+            }
+
+            override fun draw(canvas: Canvas) {
+                val bounds = bounds
+                if (bounds.isEmpty) return
+                canvas.drawRect(bounds, fillPaint)
+                when {
+                    ninePatchDrawable != null -> {
+                        ninePatchDrawable.bounds = bounds
+                        ninePatchDrawable.draw(canvas)
+                    }
+                    nineSlice != null -> drawPreviewNineSlice(canvas, bitmap, nineSlice, bounds)
+                    else -> canvas.drawBitmap(bitmap, null, bounds, null)
+                }
+                canvas.drawRect(bounds, borderPaint)
+            }
+
+            override fun setAlpha(alpha: Int) {
+                fillPaint.alpha = alpha
+                borderPaint.alpha = alpha
+            }
+
+            override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) {
+                fillPaint.colorFilter = colorFilter
+                borderPaint.colorFilter = colorFilter
+            }
+
+            @Suppress("DEPRECATION")
+            override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+        }
+    }
+
+    private fun parsePreviewNineSlice(value: String, bitmapWidth: Int, bitmapHeight: Int): PreviewNineSlice? {
+        if (value.isBlank()) return null
+        val numbers = Regex("""-?\d+(?:\.\d+)?""").findAll(value).map { it.value.toFloat() }.toList()
+        if (numbers.size < 4) return null
+        val scaleX = if (numbers.size >= 6 && numbers[4] > 0f) bitmapWidth / numbers[4] else 1f
+        val scaleY = if (numbers.size >= 6 && numbers[5] > 0f) bitmapHeight / numbers[5] else 1f
+        val left = (numbers[0] * scaleX).toInt().coerceIn(0, bitmapWidth)
+        val top = (numbers[1] * scaleY).toInt().coerceIn(0, bitmapHeight)
+        val right = (numbers[2] * scaleX).toInt().coerceIn(left, bitmapWidth)
+        val bottom = (numbers[3] * scaleY).toInt().coerceIn(top, bitmapHeight)
+        if (right <= left || bottom <= top) return null
+        return PreviewNineSlice(left, top, right, bottom)
+    }
+
+    private fun drawPreviewNineSlice(canvas: Canvas, bitmap: Bitmap, slice: PreviewNineSlice, dst: Rect) {
+        val srcX = intArrayOf(0, slice.left, slice.right, bitmap.width)
+        val srcY = intArrayOf(0, slice.top, slice.bottom, bitmap.height)
+        val leftWidth = minOf(slice.left, dst.width() / 2)
+        val rightWidth = minOf(bitmap.width - slice.right, dst.width() - leftWidth)
+        val topHeight = minOf(slice.top, dst.height() / 2)
+        val bottomHeight = minOf(bitmap.height - slice.bottom, dst.height() - topHeight)
+        val dstX = intArrayOf(dst.left, dst.left + leftWidth, dst.right - rightWidth, dst.right)
+        val dstY = intArrayOf(dst.top, dst.top + topHeight, dst.bottom - bottomHeight, dst.bottom)
+        for (row in 0 until 3) {
+            for (col in 0 until 3) {
+                val source = Rect(srcX[col], srcY[row], srcX[col + 1], srcY[row + 1])
+                val target = Rect(dstX[col], dstY[row], dstX[col + 1], dstY[row + 1])
+                if (source.width() > 0 && source.height() > 0 && target.width() > 0 && target.height() > 0) {
+                    canvas.drawBitmap(bitmap, source, target, null)
+                }
+            }
+        }
+    }
+
+    private data class PreviewNineSlice(
+        val left: Int,
+        val top: Int,
+        val right: Int,
+        val bottom: Int,
+    )
 
     private fun readerHighlightCssProperties(css: String): Map<String, String> =
         css.split(';')
