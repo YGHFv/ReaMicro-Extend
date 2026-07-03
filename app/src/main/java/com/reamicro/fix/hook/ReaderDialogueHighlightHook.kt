@@ -859,11 +859,22 @@ class ReaderDialogueHighlightHook(
 
     private fun reedenBoxStyle(css: String, density: Float): ReedenBoxStyle {
         val values = cssProperties(css)
-        val padding = cssBoxEdges(values, "padding", density)
+        val rawPadding = cssBoxEdges(values, "padding", density)
+        val hasExplicitPadding = values.keys.any { it == "padding" || it.startsWith("padding-") }
+        val padding = if (hasExplicitPadding || !rawPadding.isZero()) {
+            rawPadding
+        } else {
+            BoxEdges(
+                left = DEFAULT_REEDEN_PADDING_HORIZONTAL_PX,
+                top = DEFAULT_REEDEN_PADDING_VERTICAL_PX,
+                right = DEFAULT_REEDEN_PADDING_HORIZONTAL_PX,
+                bottom = DEFAULT_REEDEN_PADDING_VERTICAL_PX,
+            )
+        }
         val margin = cssBoxEdges(values, "margin", density)
         val border = values["border"].orEmpty()
         val borderWidth = values["border-width"]?.let { cssSizePx(it, density) }
-            ?: Regex("""(\d+(?:\.\d+)?)px""").find(border)?.groupValues?.getOrNull(1)?.toFloatOrNull()?.let { it * density }
+            ?: Regex("""(\d+(?:\.\d+)?)(px|dp)?""").find(border)?.value?.let { cssSizePx(it, density) }
             ?: 0f
         val borderColor = parseCssColor(values["border-color"].orEmpty())
             ?: Regex("""rgba?\([^)]+\)|#[0-9a-fA-F]{6,8}""").find(border)?.value?.let(::parseCssColor)
@@ -907,11 +918,11 @@ class ReaderDialogueHighlightHook(
         val trimmed = value.trim().lowercase()
         val number = Regex("""-?\d+(?:\.\d+)?""").find(trimmed)?.value?.toFloatOrNull() ?: return 0f
         return when {
-            trimmed.endsWith("px") -> number * density
+            trimmed.endsWith("px") -> number
             trimmed.endsWith("dp") -> number * density
-            trimmed.endsWith("em") -> number * 16f * density
-            trimmed.endsWith("rem") -> number * 16f * density
-            else -> number * density
+            trimmed.endsWith("em") -> number * 16f
+            trimmed.endsWith("rem") -> number * 16f
+            else -> number
         }.coerceAtLeast(0f)
     }
 
@@ -1207,6 +1218,8 @@ class ReaderDialogueHighlightHook(
         const val BASIC_TEXT_DEFAULT_MODIFIER = 2
         const val BASIC_TEXT_DEFAULT_ON_TEXT_LAYOUT = 8
         const val MAX_REMEMBERED_NINE_PATCH_TEXTS = 128
+        const val DEFAULT_REEDEN_PADDING_HORIZONTAL_PX = 3f
+        const val DEFAULT_REEDEN_PADDING_VERTICAL_PX = 1.5f
         const val NINE_PATCH_ANNOTATION_TAG = "reamicro.highlight.ninepatch"
         const val NINE_PATCH_ANNOTATION_SEPARATOR = "\u001F"
         const val MARKUP_TEXT = "#text"
@@ -1277,7 +1290,10 @@ class ReaderDialogueHighlightHook(
         val top: Float,
         val right: Float,
         val bottom: Float,
-    )
+    ) {
+        fun isZero(): Boolean =
+            left == 0f && top == 0f && right == 0f && bottom == 0f
+    }
 
     private data class ReedenBoxStyle(
         val paddingLeftPx: Float,
