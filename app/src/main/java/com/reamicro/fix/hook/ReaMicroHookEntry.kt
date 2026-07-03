@@ -55,6 +55,11 @@ class ReaMicroHookEntry {
             activityProvider = { currentActivityRef?.get() },
             settings = moduleSettings,
         ).install()
+        ReaderDialogueHighlightHook(
+            classLoader = classLoader,
+            activityProvider = { currentActivityRef?.get() },
+            settings = moduleSettings,
+        ).install()
         FileEditCompletionHook(
             classLoader = classLoader,
             activityProvider = { currentActivityRef?.get() },

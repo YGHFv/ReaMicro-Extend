@@ -3,6 +3,8 @@ package com.reamicro.fix.settings
 import android.content.Context
 import android.content.SharedPreferences
 import de.robv.android.xposed.XposedBridge
+import org.json.JSONArray
+import org.json.JSONObject
 
 class XposedModuleSettings(
     private val contextProvider: () -> Context? = { null },
@@ -12,6 +14,10 @@ class XposedModuleSettings(
     @Volatile private var cachedAtMs: Long = 0L
     @Volatile private var cachedFontSettings: FontSettingsSnapshot? = null
     @Volatile private var cachedFontSettingsAtMs: Long = 0L
+    @Volatile private var cachedDialogueHighlightSettings: ReaderDialogueHighlightSettingsSnapshot? = null
+    @Volatile private var cachedDialogueHighlightSettingsAtMs: Long = 0L
+    @Volatile private var cachedHighlightSettings: ReaderHighlightSettingsSnapshot? = null
+    @Volatile private var cachedHighlightSettingsAtMs: Long = 0L
     @Volatile private var lastLogKey: String = ""
 
     fun attachContext(context: Context) {
@@ -20,6 +26,10 @@ class XposedModuleSettings(
         cachedAtMs = 0L
         cachedFontSettings = null
         cachedFontSettingsAtMs = 0L
+        cachedDialogueHighlightSettings = null
+        cachedDialogueHighlightSettingsAtMs = 0L
+        cachedHighlightSettings = null
+        cachedHighlightSettingsAtMs = 0L
     }
 
     fun snapshot(): ModuleSettingsSnapshot {
@@ -78,6 +88,10 @@ class XposedModuleSettings(
 
     fun setReaderCompactSelectionMenuEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_READER_COMPACT_SELECTION_MENU_ENABLED, enabled)
+    }
+
+    fun setReaderDialogueHighlightEnabled(enabled: Boolean) {
+        putBoolean(ModuleSettings.KEY_READER_DIALOGUE_HIGHLIGHT_ENABLED, enabled)
     }
 
     fun setFontEnabled(enabled: Boolean) {
@@ -185,6 +199,71 @@ class XposedModuleSettings(
         putString(ModuleSettings.KEY_FONT_MAPPING_KAI, family)
     }
 
+    fun dialogueHighlightSettings(): ReaderDialogueHighlightSettingsSnapshot {
+        val defaultStyle = highlightSettings().styleById(ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID)
+        return ReaderDialogueHighlightSettingsSnapshot(
+            color = defaultStyle.color,
+            fontFamily = defaultStyle.fontFamily,
+        )
+    }
+
+    fun highlightSettings(): ReaderHighlightSettingsSnapshot {
+        val now = System.currentTimeMillis()
+        cachedHighlightSettings
+            ?.takeIf { now - cachedHighlightSettingsAtMs < CACHE_WINDOW_MS }
+            ?.let { return it }
+        val prefs = prefs() ?: return ReaderHighlightSettingsSnapshot()
+        val fallbackStyle = ReaderHighlightStyle.default(
+            color = normalizeHighlightColor(
+                prefs.getString(
+                    ModuleSettings.KEY_READER_DIALOGUE_HIGHLIGHT_COLOR,
+                    ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR,
+                ).orEmpty(),
+            ),
+            fontFamily = prefs.getString(
+                ModuleSettings.KEY_READER_DIALOGUE_HIGHLIGHT_FONT,
+                ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_FONT,
+            ).orEmpty(),
+        )
+        return ReaderHighlightSettingsSnapshot(
+            styles = readHighlightStyles(prefs, fallbackStyle),
+            rules = readHighlightRules(prefs),
+        ).also {
+            cachedHighlightSettings = it
+            cachedHighlightSettingsAtMs = now
+        }
+    }
+
+    fun setReaderDialogueHighlightColor(color: String) {
+        updateDefaultHighlightStyle { style -> style.copy(color = normalizeHighlightColor(color)) }
+    }
+
+    fun setReaderDialogueHighlightFontFamily(family: String) {
+        updateDefaultHighlightStyle { style -> style.copy(fontFamily = family) }
+    }
+
+    fun setReaderHighlightStyle(style: ReaderHighlightStyle) {
+        val current = highlightSettings()
+        val next = current.styles
+            .filterNot { it.id == style.id }
+            .plus(style.copy(color = normalizeHighlightColor(style.color)))
+        putString(ModuleSettings.KEY_READER_HIGHLIGHT_STYLES, encodeHighlightStyles(next))
+    }
+
+    fun setReaderHighlightRule(rule: ReaderHighlightRule) {
+        val current = highlightSettings()
+        val next = current.rules
+            .filterNot { it.id == rule.id }
+            .plus(rule)
+        putString(ModuleSettings.KEY_READER_HIGHLIGHT_RULES, encodeHighlightRules(next))
+    }
+
+    fun setReaderHighlightRuleEnabled(ruleId: String, enabled: Boolean) {
+        highlightSettings().rules.firstOrNull { it.id == ruleId }?.let { rule ->
+            setReaderHighlightRule(rule.copy(enabled = enabled))
+        }
+    }
+
     private fun putBoolean(key: String, value: Boolean) {
         prefs()?.edit()?.putBoolean(key, value)?.commit()
         cachedSnapshot = null
@@ -198,6 +277,10 @@ class XposedModuleSettings(
         cachedAtMs = 0L
         cachedFontSettings = null
         cachedFontSettingsAtMs = 0L
+        cachedDialogueHighlightSettings = null
+        cachedDialogueHighlightSettingsAtMs = 0L
+        cachedHighlightSettings = null
+        cachedHighlightSettingsAtMs = 0L
         snapshot()
     }
 
@@ -261,6 +344,10 @@ class XposedModuleSettings(
             ModuleSettings.KEY_READER_COMPACT_SELECTION_MENU_ENABLED,
             ModuleSettings.DEFAULT_READER_COMPACT_SELECTION_MENU_ENABLED,
         )
+        val readerDialogueHighlightEnabled = prefs.getBoolean(
+            ModuleSettings.KEY_READER_DIALOGUE_HIGHLIGHT_ENABLED,
+            ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_ENABLED,
+        )
         val editFileEnabled = prefs.getBoolean(
             ModuleSettings.KEY_EDIT_FILE_ENABLED,
             ModuleSettings.DEFAULT_EDIT_FILE_ENABLED,
@@ -309,6 +396,7 @@ class XposedModuleSettings(
                     readerOverwriteCheckEnabled ||
                     readerEditOverwriteEnabled ||
                     editFileEnabled ||
+                    readerDialogueHighlightEnabled ||
                     ModuleSettings.DEFAULT_READER_ENABLED,
             ),
             readerLongPressEnabled = readerLongPressEnabled,
@@ -317,6 +405,7 @@ class XposedModuleSettings(
             readerEditOverwriteEnabled = readerEditOverwriteEnabled,
             readerDictionaryEnabled = readerDictionaryEnabled,
             readerCompactSelectionMenuEnabled = readerCompactSelectionMenuEnabled,
+            readerDialogueHighlightEnabled = readerDialogueHighlightEnabled,
             fontEnabled = prefs.getBoolean(
                 ModuleSettings.KEY_FONT_ENABLED,
                 ModuleSettings.DEFAULT_FONT_ENABLED,
@@ -411,6 +500,112 @@ class XposedModuleSettings(
         XposedBridge.log("ReaMicro LSP legacy parent switches forced on: ${disabledKeys.joinToString()}")
     }
 
+    private fun normalizeHighlightColor(value: String): String {
+        val trimmed = value.trim()
+        val hex = when {
+            trimmed.matches(Regex("^#[0-9a-fA-F]{6}$")) -> trimmed
+            trimmed.matches(Regex("^#[0-9a-fA-F]{8}$")) -> "#${trimmed.takeLast(6)}"
+            trimmed.matches(Regex("^[0-9a-fA-F]{6}$")) -> "#$trimmed"
+            trimmed.matches(Regex("^[0-9a-fA-F]{8}$")) -> "#${trimmed.takeLast(6)}"
+            else -> ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR
+        }
+        return hex.uppercase()
+    }
+
+    private fun updateDefaultHighlightStyle(update: (ReaderHighlightStyle) -> ReaderHighlightStyle) {
+        val current = highlightSettings()
+        val defaultStyle = current.styleById(ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID)
+        setReaderHighlightStyle(update(defaultStyle.copy(id = ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID)))
+    }
+
+    private fun readHighlightStyles(
+        prefs: SharedPreferences,
+        fallbackStyle: ReaderHighlightStyle,
+    ): List<ReaderHighlightStyle> {
+        val raw = prefs.getString(ModuleSettings.KEY_READER_HIGHLIGHT_STYLES, "").orEmpty()
+        val decoded = runCatching {
+            val array = JSONArray(raw)
+            buildList {
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index) ?: continue
+                    val id = item.optString("id")
+                    if (id.isBlank()) continue
+                    add(
+                        ReaderHighlightStyle(
+                            id = id,
+                            name = item.optString("name").ifBlank { id },
+                            color = normalizeHighlightColor(item.optString("color")),
+                            fontFamily = item.optString("fontFamily"),
+                            css = item.optString("css"),
+                            ninePatchPath = item.optString("ninePatchPath"),
+                        ),
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+        val hasDefault = decoded.any { it.id == ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID }
+        return if (hasDefault) decoded else listOf(fallbackStyle) + decoded
+    }
+
+    private fun readHighlightRules(prefs: SharedPreferences): List<ReaderHighlightRule> {
+        val defaults = ReaderHighlightRule.defaults()
+        val raw = prefs.getString(ModuleSettings.KEY_READER_HIGHLIGHT_RULES, "").orEmpty()
+        val decoded = runCatching {
+            val array = JSONArray(raw)
+            buildList {
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index) ?: continue
+                    val id = item.optString("id")
+                    if (id.isBlank()) continue
+                    val type = runCatching {
+                        ReaderHighlightRuleType.valueOf(item.optString("type"))
+                    }.getOrNull() ?: defaults.firstOrNull { it.id == id }?.type ?: continue
+                    add(
+                        ReaderHighlightRule(
+                            id = id,
+                            name = item.optString("name").ifBlank { id },
+                            type = type,
+                            styleId = item.optString("styleId")
+                                .ifBlank { ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID },
+                            enabled = item.optBoolean("enabled", true),
+                        ),
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+        return defaults.map { default -> decoded.firstOrNull { it.id == default.id } ?: default } +
+            decoded.filterNot { item -> defaults.any { it.id == item.id } }
+    }
+
+    private fun encodeHighlightStyles(styles: List<ReaderHighlightStyle>): String =
+        JSONArray().apply {
+            styles.forEach { style ->
+                put(
+                    JSONObject()
+                        .put("id", style.id)
+                        .put("name", style.name)
+                        .put("color", normalizeHighlightColor(style.color))
+                        .put("fontFamily", style.fontFamily)
+                        .put("css", style.css)
+                        .put("ninePatchPath", style.ninePatchPath),
+                )
+            }
+        }.toString()
+
+    private fun encodeHighlightRules(rules: List<ReaderHighlightRule>): String =
+        JSONArray().apply {
+            rules.forEach { rule ->
+                put(
+                    JSONObject()
+                        .put("id", rule.id)
+                        .put("name", rule.name)
+                        .put("type", rule.type.name)
+                        .put("styleId", rule.styleId)
+                        .put("enabled", rule.enabled),
+                )
+            }
+        }.toString()
+
     private fun logSnapshot(snapshot: ModuleSettingsSnapshot) {
         val key = listOf(
             snapshot.moduleEnabled,
@@ -425,6 +620,7 @@ class XposedModuleSettings(
             snapshot.readerEditOverwriteEnabled,
             snapshot.readerDictionaryEnabled,
             snapshot.readerCompactSelectionMenuEnabled,
+            snapshot.readerDialogueHighlightEnabled,
             snapshot.fontEnabled,
             snapshot.fontSettingsEnabled,
             snapshot.accountEnabled,
@@ -459,6 +655,7 @@ class XposedModuleSettings(
                     "readerEditOverwrite=${snapshot.readerEditOverwriteEnabled}, " +
                     "readerDictionary=${snapshot.readerDictionaryEnabled}, " +
                     "readerCompactMenu=${snapshot.readerCompactSelectionMenuEnabled}, " +
+                    "readerDialogueHighlight=${snapshot.readerDialogueHighlightEnabled}, " +
                     "font=${snapshot.fontEnabled}, " +
                     "fontSettings=${snapshot.fontSettingsEnabled}, " +
                     "account=${snapshot.accountEnabled}, " +

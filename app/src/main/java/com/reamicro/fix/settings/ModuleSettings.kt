@@ -17,6 +17,7 @@ object ModuleSettings {
     const val KEY_READER_EDIT_OVERWRITE_ENABLED = "reader_edit_overwrite_enabled"
     const val KEY_READER_DICTIONARY_ENABLED = "reader_dictionary_enabled"
     const val KEY_READER_COMPACT_SELECTION_MENU_ENABLED = "reader_compact_selection_menu_enabled"
+    const val KEY_READER_DIALOGUE_HIGHLIGHT_ENABLED = "reader_dialogue_highlight_enabled"
     const val KEY_FONT_ENABLED = "font_enabled"
     const val KEY_FONT_SETTINGS_ENABLED = "font_settings_enabled"
     const val KEY_ACCOUNT_ENABLED = "account_enabled"
@@ -49,6 +50,9 @@ object ModuleSettings {
     const val DEFAULT_READER_EDIT_OVERWRITE_ENABLED = false
     const val DEFAULT_READER_DICTIONARY_ENABLED = true
     const val DEFAULT_READER_COMPACT_SELECTION_MENU_ENABLED = false
+    const val DEFAULT_READER_DIALOGUE_HIGHLIGHT_ENABLED = false
+    const val DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR = "#FF9800"
+    const val DEFAULT_READER_DIALOGUE_HIGHLIGHT_FONT = ""
     const val DEFAULT_FONT_ENABLED = true
     const val DEFAULT_FONT_SETTINGS_ENABLED = false
     const val DEFAULT_ACCOUNT_ENABLED = true
@@ -75,6 +79,13 @@ object ModuleSettings {
     const val KEY_FONT_GLOBAL_FAMILY = "font_global_family"
     const val KEY_FONT_MAPPING_SONG = "font_mapping_song"
     const val KEY_FONT_MAPPING_KAI = "font_mapping_kai"
+    const val KEY_READER_DIALOGUE_HIGHLIGHT_COLOR = "reader_dialogue_highlight_color"
+    const val KEY_READER_DIALOGUE_HIGHLIGHT_FONT = "reader_dialogue_highlight_font"
+    const val KEY_READER_HIGHLIGHT_STYLES = "reader_highlight_styles"
+    const val KEY_READER_HIGHLIGHT_RULES = "reader_highlight_rules"
+    const val DEFAULT_READER_HIGHLIGHT_STYLE_ID = "default"
+    const val DEFAULT_READER_DOUBLE_QUOTE_RULE_ID = "double_quote_dialogue"
+    const val DEFAULT_READER_SINGLE_QUOTE_RULE_ID = "single_quote_phrase"
 
     const val WANFENGLI_SOURCE_GROUP_ID = "wanfengli"
     const val KEY_WANFENGLI_HIDDEN_MIGRATED = "wanfengli_hidden_source_migrated"
@@ -126,6 +137,7 @@ data class ModuleSettingsSnapshot(
     val readerEditOverwriteEnabled: Boolean = ModuleSettings.DEFAULT_READER_EDIT_OVERWRITE_ENABLED,
     val readerDictionaryEnabled: Boolean = ModuleSettings.DEFAULT_READER_DICTIONARY_ENABLED,
     val readerCompactSelectionMenuEnabled: Boolean = ModuleSettings.DEFAULT_READER_COMPACT_SELECTION_MENU_ENABLED,
+    val readerDialogueHighlightEnabled: Boolean = ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_ENABLED,
     val fontEnabled: Boolean = ModuleSettings.DEFAULT_FONT_ENABLED,
     val fontSettingsEnabled: Boolean = ModuleSettings.DEFAULT_FONT_SETTINGS_ENABLED,
     val accountEnabled: Boolean = ModuleSettings.DEFAULT_ACCOUNT_ENABLED,
@@ -175,6 +187,9 @@ data class ModuleSettingsSnapshot(
 
     val canUseCompactReaderSelectionMenu: Boolean
         get() = moduleEnabled && readerCompactSelectionMenuEnabled
+
+    val canHighlightReaderDialogue: Boolean
+        get() = moduleEnabled && readerDialogueHighlightEnabled
 
     val canRunFontCompletion: Boolean
         get() = moduleEnabled
@@ -240,3 +255,67 @@ data class FontSettingsSnapshot(
     val songMapping: String = "",
     val kaiMapping: String = "",
 )
+
+data class ReaderDialogueHighlightSettingsSnapshot(
+    val color: String = ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR,
+    val fontFamily: String = ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_FONT,
+)
+
+data class ReaderHighlightSettingsSnapshot(
+    val styles: List<ReaderHighlightStyle> = listOf(ReaderHighlightStyle.default()),
+    val rules: List<ReaderHighlightRule> = ReaderHighlightRule.defaults(),
+) {
+    fun styleById(id: String): ReaderHighlightStyle =
+        styles.firstOrNull { it.id == id } ?: styles.firstOrNull() ?: ReaderHighlightStyle.default()
+}
+
+data class ReaderHighlightStyle(
+    val id: String,
+    val name: String,
+    val color: String,
+    val fontFamily: String = "",
+    val css: String = "",
+    val ninePatchPath: String = "",
+) {
+    companion object {
+        fun default(
+            color: String = ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR,
+            fontFamily: String = ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_FONT,
+        ): ReaderHighlightStyle =
+            ReaderHighlightStyle(
+                id = ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID,
+                name = "默认样式",
+                color = color,
+                fontFamily = fontFamily,
+            )
+    }
+}
+
+data class ReaderHighlightRule(
+    val id: String,
+    val name: String,
+    val type: ReaderHighlightRuleType,
+    val styleId: String = ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID,
+    val enabled: Boolean = true,
+) {
+    companion object {
+        fun defaults(): List<ReaderHighlightRule> =
+            listOf(
+                ReaderHighlightRule(
+                    id = ModuleSettings.DEFAULT_READER_DOUBLE_QUOTE_RULE_ID,
+                    name = "双引号对话",
+                    type = ReaderHighlightRuleType.DoubleQuoteDialogue,
+                ),
+                ReaderHighlightRule(
+                    id = ModuleSettings.DEFAULT_READER_SINGLE_QUOTE_RULE_ID,
+                    name = "单引号词组",
+                    type = ReaderHighlightRuleType.SingleQuotePhrase,
+                ),
+            )
+    }
+}
+
+enum class ReaderHighlightRuleType {
+    DoubleQuoteDialogue,
+    SingleQuotePhrase,
+}

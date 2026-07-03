@@ -1310,7 +1310,16 @@ class AccountCompletionController(
                     .relativize(file.toPath())
                     .toString()
                     .replace('\\', '/')
-                addFileEntry(epub, file, relativePath)
+                val patchedOpf = if (relativePath.endsWith(".opf", ignoreCase = true)) {
+                    patchedOpfBytes(file)
+                } else {
+                    null
+                }
+                if (patchedOpf != null) {
+                    addBytesEntry(epub, patchedOpf, relativePath)
+                } else {
+                    addFileEntry(epub, file, relativePath)
+                }
             }
     }
 
@@ -1326,6 +1335,24 @@ class AccountCompletionController(
         zip.putNextEntry(entry)
         zip.write(bytes)
         zip.closeEntry()
+    }
+
+    private fun patchedOpfBytes(file: File): ByteArray? {
+        val content = runCatching { file.readText(Charsets.UTF_8) }.getOrNull() ?: return null
+        val patched = ensureNcxSpineToc(content)
+        return patched.takeIf { it != content }?.toByteArray(Charsets.UTF_8)
+    }
+
+    private fun ensureNcxSpineToc(content: String): String {
+        if (Regex("""<spine\b[^>]*\btoc\s*=""", RegexOption.IGNORE_CASE).containsMatchIn(content)) {
+            return content
+        }
+        val ncxId = Regex(
+            """<item\b(?=[^>]*\bmedia-type\s*=\s*["']application/x-dtbncx\+xml["'])(?=[^>]*\bid\s*=\s*["']([^"']+)["'])[^>]*>""",
+            RegexOption.IGNORE_CASE,
+        ).find(content)?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() } ?: return content
+        return Regex("""<spine\b""", RegexOption.IGNORE_CASE)
+            .replaceFirst(content, "<spine toc=\"$ncxId\"")
     }
 
     private fun uniqueBookArchiveEntryName(usedNames: MutableSet<String>, title: String): String {
