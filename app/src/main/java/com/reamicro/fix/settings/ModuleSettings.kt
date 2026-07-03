@@ -19,6 +19,7 @@ object ModuleSettings {
     const val KEY_READER_COMPACT_SELECTION_MENU_ENABLED = "reader_compact_selection_menu_enabled"
     const val KEY_READER_DIALOGUE_HIGHLIGHT_ENABLED = "reader_dialogue_highlight_enabled"
     const val KEY_READER_SELECTION_HIGHLIGHT_ENABLED = "reader_selection_highlight_enabled"
+    const val KEY_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED = "reader_highlight_performance_log_enabled"
     const val KEY_FONT_ENABLED = "font_enabled"
     const val KEY_FONT_SETTINGS_ENABLED = "font_settings_enabled"
     const val KEY_ACCOUNT_ENABLED = "account_enabled"
@@ -53,6 +54,7 @@ object ModuleSettings {
     const val DEFAULT_READER_COMPACT_SELECTION_MENU_ENABLED = false
     const val DEFAULT_READER_DIALOGUE_HIGHLIGHT_ENABLED = false
     const val DEFAULT_READER_SELECTION_HIGHLIGHT_ENABLED = false
+    const val DEFAULT_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED = false
     const val DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR = "#FF9800"
     const val DEFAULT_READER_DIALOGUE_HIGHLIGHT_FONT = ""
     const val DEFAULT_FONT_ENABLED = true
@@ -141,6 +143,7 @@ data class ModuleSettingsSnapshot(
     val readerCompactSelectionMenuEnabled: Boolean = ModuleSettings.DEFAULT_READER_COMPACT_SELECTION_MENU_ENABLED,
     val readerDialogueHighlightEnabled: Boolean = ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_ENABLED,
     val readerSelectionHighlightEnabled: Boolean = ModuleSettings.DEFAULT_READER_SELECTION_HIGHLIGHT_ENABLED,
+    val readerHighlightPerformanceLogEnabled: Boolean = ModuleSettings.DEFAULT_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED,
     val fontEnabled: Boolean = ModuleSettings.DEFAULT_FONT_ENABLED,
     val fontSettingsEnabled: Boolean = ModuleSettings.DEFAULT_FONT_SETTINGS_ENABLED,
     val accountEnabled: Boolean = ModuleSettings.DEFAULT_ACCOUNT_ENABLED,
@@ -196,6 +199,9 @@ data class ModuleSettingsSnapshot(
 
     val canHighlightReaderSelection: Boolean
         get() = moduleEnabled && readerSelectionHighlightEnabled
+
+    val canLogReaderHighlightPerformance: Boolean
+        get() = moduleEnabled && readerHighlightPerformanceLogEnabled
 
     val canRunFontCompletion: Boolean
         get() = moduleEnabled
@@ -315,19 +321,19 @@ data class ReaderHighlightStyle(
     val darkNinePatchSlice: String = "",
 ) {
     fun colorForTheme(dark: Boolean): String =
-        if (dark && !darkUsesLight) darkColor.ifBlank { color } else color
+        color
 
     fun fontFamilyForTheme(dark: Boolean): String =
-        if (dark && !darkUsesLight) darkFontFamily.ifBlank { fontFamily } else fontFamily
+        fontFamily
 
     fun cssForTheme(dark: Boolean): String =
-        if (dark && !darkUsesLight) darkCss.ifBlank { css } else css
+        css
 
     fun ninePatchPathForTheme(dark: Boolean): String =
-        if (dark && !darkUsesLight) darkNinePatchPath.ifBlank { ninePatchPath } else ninePatchPath
+        ninePatchPath
 
     fun ninePatchSliceForTheme(dark: Boolean): String =
-        if (dark && !darkUsesLight) darkNinePatchSlice.ifBlank { ninePatchSlice } else ninePatchSlice
+        ninePatchSlice
 
     companion object {
         fun default(
@@ -384,9 +390,18 @@ enum class ReaderHighlightRuleType {
 object ReaderHighlightBookContext {
     @Volatile var bookKey: String = ""
     @Volatile var bookTitle: String = ""
+    @Volatile private var runtimeVersion: Long = 0L
+    @Volatile var refreshRequester: ((String) -> Unit)? = null
 
     fun update(bookKey: String, bookTitle: String) {
         this.bookKey = bookKey
         this.bookTitle = bookTitle
+    }
+
+    fun version(): Long = runtimeVersion
+
+    fun bumpVersion(source: String, requestRefresh: Boolean = true) {
+        runtimeVersion += 1
+        if (requestRefresh) refreshRequester?.invoke(source)
     }
 }

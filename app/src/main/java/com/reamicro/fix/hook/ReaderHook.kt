@@ -109,6 +109,11 @@ class ReaderHook(
     @Volatile private var scrollCrashMarkerOwnedByThisProcess: Boolean = false
 
     fun install() {
+        ReaderHighlightBookContext.refreshRequester = { source ->
+            activityProvider()?.window?.decorView?.post {
+                refreshReaderHighlightWindow(source)
+            } ?: refreshReaderHighlightWindow(source)
+        }
         hookContentDomRenderTextWidthFallback()
         hookScrollPagerCrashGuard()
         installNativeSelectionHooks()
@@ -2487,9 +2492,20 @@ class ReaderHook(
         }.getOrNull()
 
     private fun refreshReaderAfterSelectionHighlight() {
-        activityProvider()?.window?.decorView?.post {
-            forceRefreshReaderWindow("selection-highlight")
-        } ?: forceRefreshReaderWindow("selection-highlight")
+        ReaderHighlightBookContext.bumpVersion("selection-highlight")
+    }
+
+    private fun refreshReaderHighlightWindow(source: String) {
+        val activity = activityProvider()
+        val refreshed = forceRefreshReaderWindow(source)
+        val decor = activity?.window?.decorView
+        runCatching {
+            decor?.invalidate()
+            decor?.requestLayout()
+        }
+        if (!refreshed) {
+            XposedBridge.log("$LOG_PREFIX reader highlight refresh skipped: no ReaderViewModel source=$source")
+        }
     }
 
     private fun forceRefreshReaderWindow(source: String): Boolean {

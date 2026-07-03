@@ -94,10 +94,15 @@ class XposedModuleSettings(
 
     fun setReaderDialogueHighlightEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_READER_DIALOGUE_HIGHLIGHT_ENABLED, enabled)
+        notifyReaderHighlightChanged("dialogue-highlight-enabled")
     }
 
     fun setReaderSelectionHighlightEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_READER_SELECTION_HIGHLIGHT_ENABLED, enabled)
+    }
+
+    fun setReaderHighlightPerformanceLogEnabled(enabled: Boolean) {
+        putBoolean(ModuleSettings.KEY_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED, enabled)
     }
 
     fun setFontEnabled(enabled: Boolean) {
@@ -255,10 +260,17 @@ class XposedModuleSettings(
             .plus(
                 style.copy(
                     color = normalizeHighlightColor(style.color),
-                    darkColor = normalizeHighlightColor(style.darkColor.ifBlank { style.color }),
+                    darkUsesLight = true,
+                    darkColor = "",
+                    css = sanitizeHighlightCss(style.css),
+                    darkFontFamily = "",
+                    darkCss = "",
+                    darkNinePatchPath = "",
+                    darkNinePatchSlice = "",
                 ),
             )
         putString(ModuleSettings.KEY_READER_HIGHLIGHT_STYLES, encodeHighlightStyles(next))
+        notifyReaderHighlightChanged("highlight-style")
     }
 
     fun removeReaderHighlightStyle(styleId: String) {
@@ -276,6 +288,7 @@ class XposedModuleSettings(
             }
         }
         putHighlightSettings(nextStyles, nextRules)
+        notifyReaderHighlightChanged("highlight-style-remove")
     }
 
     fun setReaderHighlightRule(rule: ReaderHighlightRule) {
@@ -284,6 +297,7 @@ class XposedModuleSettings(
             .filterNot { it.id == rule.id }
             .plus(rule)
         putString(ModuleSettings.KEY_READER_HIGHLIGHT_RULES, encodeHighlightRules(next))
+        notifyReaderHighlightChanged("highlight-rule")
     }
 
     fun addReaderBookHighlightRule(bookKey: String, bookTitle: String, text: String): ReaderHighlightRule? {
@@ -349,6 +363,7 @@ class XposedModuleSettings(
             ModuleSettings.KEY_READER_HIGHLIGHT_RULES,
             encodeHighlightRules(current.rules.filterNot { it.id == ruleId }),
         )
+        notifyReaderHighlightChanged("highlight-rule-remove")
     }
 
     fun setReaderHighlightRuleEnabled(ruleId: String, enabled: Boolean) {
@@ -389,6 +404,10 @@ class XposedModuleSettings(
         cachedHighlightSettings = null
         cachedHighlightSettingsAtMs = 0L
         snapshot()
+    }
+
+    private fun notifyReaderHighlightChanged(source: String) {
+        ReaderHighlightBookContext.bumpVersion(source)
     }
 
     private fun putExclusiveRotationBase(key: String, enabled: Boolean) {
@@ -459,6 +478,10 @@ class XposedModuleSettings(
             ModuleSettings.KEY_READER_SELECTION_HIGHLIGHT_ENABLED,
             ModuleSettings.DEFAULT_READER_SELECTION_HIGHLIGHT_ENABLED,
         )
+        val readerHighlightPerformanceLogEnabled = prefs.getBoolean(
+            ModuleSettings.KEY_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED,
+            ModuleSettings.DEFAULT_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED,
+        )
         val editFileEnabled = prefs.getBoolean(
             ModuleSettings.KEY_EDIT_FILE_ENABLED,
             ModuleSettings.DEFAULT_EDIT_FILE_ENABLED,
@@ -519,6 +542,7 @@ class XposedModuleSettings(
             readerCompactSelectionMenuEnabled = readerCompactSelectionMenuEnabled,
             readerDialogueHighlightEnabled = readerDialogueHighlightEnabled,
             readerSelectionHighlightEnabled = readerSelectionHighlightEnabled,
+            readerHighlightPerformanceLogEnabled = readerHighlightPerformanceLogEnabled,
             fontEnabled = prefs.getBoolean(
                 ModuleSettings.KEY_FONT_ENABLED,
                 ModuleSettings.DEFAULT_FONT_ENABLED,
@@ -649,17 +673,11 @@ class XposedModuleSettings(
                             name = item.optString("name").ifBlank { id },
                             color = normalizeHighlightColor(item.optString("color")),
                             fontFamily = item.optString("fontFamily"),
-                            css = item.optString("css"),
+                            css = sanitizeHighlightCss(item.optString("css")),
                             ninePatchPath = item.optString("ninePatchPath"),
                             ninePatchSlice = item.optString("ninePatchSlice"),
-                            darkUsesLight = item.optBoolean("darkUsesLight", true),
-                            darkColor = normalizeHighlightColor(
-                                item.optString("darkColor").ifBlank { item.optString("color") },
-                            ),
-                            darkFontFamily = item.optString("darkFontFamily"),
-                            darkCss = item.optString("darkCss"),
-                            darkNinePatchPath = item.optString("darkNinePatchPath"),
-                            darkNinePatchSlice = item.optString("darkNinePatchSlice"),
+                            darkUsesLight = true,
+                            darkColor = "",
                         ),
                     )
                 }
@@ -716,13 +734,69 @@ class XposedModuleSettings(
     }
 
     private fun readerHighlightStyleImportKey(style: ReaderHighlightStyle): String? {
-        val css = style.css.trim()
+        val css = sanitizeHighlightCss(style.css)
         val path = style.ninePatchPath.trim()
         if (css.isBlank() || path.isBlank()) return null
         val file = File(path)
         if (!file.isFile) return null
         val hash = runCatching { md5Hex(file.readBytes()) }.getOrNull() ?: return null
         return "$css|$hash"
+    }
+
+    private fun sanitizeHighlightCss(css: String): String =
+        css.split(';')
+            .mapNotNull { part ->
+                val index = part.indexOf(':')
+                if (index <= 0) return@mapNotNull null
+                val key = part.substring(0, index).trim().lowercase()
+                val value = part.substring(index + 1).trim()
+                if (key.isBlank() || value.isBlank() || !isSupportedHighlightCssProperty(key, value)) {
+                    null
+                } else {
+                    "$key: $value"
+                }
+            }
+            .joinToString("; ")
+
+    private fun isSupportedHighlightCssProperty(key: String, value: String): Boolean {
+        if (value.isBlank()) return false
+        if (value.contains("url(", ignoreCase = true)) return false
+        return when (key) {
+            "color", "background", "background-color", "border-color" ->
+                isHighlightCssColorValue(value)
+            "background-size" ->
+                isSupportedHighlightBackgroundSize(value)
+            "border" ->
+                highlightCssSizeRegex.containsMatchIn(value) || highlightCssColorRegex.containsMatchIn(value)
+            "border-width", "border-radius",
+            "padding-left", "padding-top", "padding-right", "padding-bottom",
+            "margin-left", "margin-top", "margin-right", "margin-bottom" ->
+                isHighlightCssSizeValue(value)
+            "padding", "margin" ->
+                isHighlightCssBoxValue(value)
+            "reeden-background-nine-slice", "--reeden-background-nine-slice" ->
+                Regex("""-?\d+(?:\.\d+)?""").findAll(value).count() >= 4
+            else -> false
+        }
+    }
+
+    private val highlightCssSizeRegex = Regex("""\b\d+(?:\.\d+)?(?:px|dp|em|rem)?\b""", RegexOption.IGNORE_CASE)
+    private val highlightCssColorRegex = Regex("""rgba?\([^)]+\)|#[0-9a-fA-F]{6,8}""")
+
+    private fun isHighlightCssColorValue(value: String): Boolean =
+        value.trim().matches(highlightCssColorRegex)
+
+    private fun isHighlightCssSizeValue(value: String): Boolean =
+        value.trim().matches(Regex("""\d+(?:\.\d+)?(?:px|dp|em|rem)?""", RegexOption.IGNORE_CASE))
+
+    private fun isHighlightCssBoxValue(value: String): Boolean {
+        val parts = value.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        return parts.size in 1..4 && parts.all(::isHighlightCssSizeValue)
+    }
+
+    private fun isSupportedHighlightBackgroundSize(value: String): Boolean {
+        val normalized = value.trim().lowercase().replace(Regex("\\s+"), " ")
+        return normalized == "100% 100%" || normalized == "stretch"
     }
 
     private fun md5Hex(bytes: ByteArray): String =
@@ -773,15 +847,9 @@ class XposedModuleSettings(
                         .put("name", style.name)
                         .put("color", normalizeHighlightColor(style.color))
                         .put("fontFamily", style.fontFamily)
-                        .put("css", style.css)
+                        .put("css", sanitizeHighlightCss(style.css))
                         .put("ninePatchPath", style.ninePatchPath)
-                        .put("ninePatchSlice", style.ninePatchSlice)
-                        .put("darkUsesLight", style.darkUsesLight)
-                        .put("darkColor", normalizeHighlightColor(style.darkColor.ifBlank { style.color }))
-                        .put("darkFontFamily", style.darkFontFamily)
-                        .put("darkCss", style.darkCss)
-                        .put("darkNinePatchPath", style.darkNinePatchPath)
-                        .put("darkNinePatchSlice", style.darkNinePatchSlice),
+                        .put("ninePatchSlice", style.ninePatchSlice),
                 )
             }
         }.toString()
@@ -820,6 +888,7 @@ class XposedModuleSettings(
             snapshot.readerCompactSelectionMenuEnabled,
             snapshot.readerDialogueHighlightEnabled,
             snapshot.readerSelectionHighlightEnabled,
+            snapshot.readerHighlightPerformanceLogEnabled,
             snapshot.fontEnabled,
             snapshot.fontSettingsEnabled,
             snapshot.accountEnabled,
@@ -856,6 +925,7 @@ class XposedModuleSettings(
                     "readerCompactMenu=${snapshot.readerCompactSelectionMenuEnabled}, " +
                     "readerDialogueHighlight=${snapshot.readerDialogueHighlightEnabled}, " +
                     "readerSelectionHighlight=${snapshot.readerSelectionHighlightEnabled}, " +
+                    "readerHighlightPerfLog=${snapshot.readerHighlightPerformanceLogEnabled}, " +
                     "font=${snapshot.fontEnabled}, " +
                     "fontSettings=${snapshot.fontSettingsEnabled}, " +
                     "account=${snapshot.accountEnabled}, " +

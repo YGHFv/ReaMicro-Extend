@@ -17,11 +17,10 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
-import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.NinePatchDrawable
 import android.net.Uri
@@ -1104,6 +1103,15 @@ class ReaMicroSettingsHook(
                         checked
                     },
                 ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED,
+                    title = "\u9ad8\u4eae\u65e5\u5fd7",
+                    checked = snapshot.readerHighlightPerformanceLogEnabled,
+                    onChanged = { checked, _ ->
+                        settings.setReaderHighlightPerformanceLogEnabled(checked)
+                        checked
+                    },
+                ),
             )
             addLazyItem(lazyListScope, READER_HIGHLIGHT_MANAGEMENT_ITEM_KEY) { itemComposer ->
                 renderHostActionCard(managementRows, itemComposer)
@@ -1156,7 +1164,7 @@ class ReaMicroSettingsHook(
                     ActionRow(
                         key = "reader_highlight_style_add",
                         title = "\u6dfb\u52a0\u914d\u7f6e",
-                        subtitle = "\u65b0\u589e\u4e00\u7ec4\u53ef\u5206\u522b\u8bbe\u7f6e\u6d45\u8272\u548c\u6df1\u8272\u7684\u9ad8\u4eae\u6837\u5f0f",
+                        subtitle = "\u65b0\u589e\u4e00\u7ec4\u9ad8\u4eae\u6837\u5f0f",
                         singleLineSubtitle = true,
                         onClick = { openReaderHighlightStyleDialog(newReaderHighlightStyle()) },
                         onLongClick = ::openReaderHighlightStyleImportPicker,
@@ -1168,7 +1176,6 @@ class ReaMicroSettingsHook(
                             key = "reader_highlight_style_${style.id}",
                             title = style.name,
                             subtitle = highlightStyleSummary(style),
-                            trailing = style.color,
                             singleLineSubtitle = true,
                             onClick = { openReaderHighlightStyleDialog(style) },
                             onLongClick = { exportReaderHighlightStyle(style) },
@@ -1345,184 +1352,113 @@ class ReaMicroSettingsHook(
                 val nameInput = settingsDialogInput(activity, "\u6837\u5f0f\u540d\u79f0", singleLine = true, colors = colors).apply {
                     setText(style.name)
                 }
-                val colorInput = settingsDialogInput(activity, "\u6d45\u8272\u989c\u8272\uff0c\u4f8b\u5982 #FF9800", singleLine = true, colors = colors).apply {
+                val colorInput = settingsDialogInput(activity, "\u989c\u8272\uff0c\u4f8b\u5982 #FF9800", singleLine = true, colors = colors).apply {
                     setText(style.color)
                 }
-                var lightFontSelection = style.fontFamily
-                lateinit var syncLightFontStatus: () -> Unit
-                val lightFontStatus = settingsDialogFontChoiceRow(activity, "", null, lightFontSelection, colors) {
+                var fontSelection = style.fontFamily
+                lateinit var syncFontStatus: () -> Unit
+                val fontStatus = settingsDialogFontChoiceRow(activity, "", null, fontSelection, colors) {
                     openSettingsFontSelectionDialog(
                         activity = activity,
-                        title = "\u6d45\u8272\u5b57\u4f53",
-                        currentSelection = lightFontSelection,
+                        title = "\u5b57\u4f53",
+                        currentSelection = fontSelection,
                         clearTitle = "\u8ddf\u968f\u5168\u5c40\u5b57\u4f53",
                     ) { selection ->
-                        lightFontSelection = selection
-                        syncLightFontStatus.invoke()
+                        fontSelection = selection
+                        syncFontStatus.invoke()
                     }
                 }
-                val cssInput = settingsDialogInput(activity, "\u6d45\u8272 CSS\uff08\u652f\u6301 color/background/font-size/font-weight/font-style/text-decoration\uff09", singleLine = false, colors = colors).apply {
-                    setText(style.css)
+                val cssInput = settingsDialogInput(activity, "CSS\uff08\u652f\u6301 color/background-color/border/padding/margin/background-size\uff09", singleLine = false, colors = colors).apply {
+                    setText(sanitizeReaderHighlightCss(style.css))
                     minLines = 2
                 }
-                val ninePatchInput = settingsDialogInput(activity, "\u6d45\u8272 .9.png \u8def\u5f84\uff08\u4fdd\u7559\u914d\u7f6e\uff09", singleLine = true, colors = colors).apply {
+                val ninePatchInput = settingsDialogInput(activity, "\u56fe\u7247\u8def\u5f84\uff08\u4fdd\u7559\u914d\u7f6e\uff09", singleLine = true, colors = colors).apply {
                     setText(style.ninePatchPath)
                 }
                 val ninePatchSelectButton = settingsDialogButton(
                     activity,
-                    "\u9009\u62e9\u6d45\u8272\u70b9\u4e5d\u56fe",
-                    colors,
-                    SettingsDialogButtonRole.Neutral,
-                )
-                var darkUsesLight = style.darkUsesLight
-                val darkToggleButton = settingsDialogButton(
-                    activity,
-                    if (darkUsesLight) "\u6df1\u8272\u5171\u7528\u6d45\u8272" else "\u6df1\u8272\u5355\u72ec\u914d\u7f6e",
-                    colors,
-                    SettingsDialogButtonRole.Neutral,
-                ).apply {
-                    layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ).apply { bottomMargin = settingsDp(activity, 10) }
-                }
-                val darkColorInput = settingsDialogInput(activity, "\u6df1\u8272\u989c\u8272\uff0c\u4f8b\u5982 #FFB74D", singleLine = true, colors = colors).apply {
-                    setText(style.darkColor.ifBlank { style.color })
-                }
-                var darkFontSelection = style.darkFontFamily
-                lateinit var syncDarkFontStatus: () -> Unit
-                val darkFontStatus = settingsDialogFontChoiceRow(activity, "", null, darkFontSelection, colors) {
-                    openSettingsFontSelectionDialog(
-                        activity = activity,
-                        title = "\u6df1\u8272\u5b57\u4f53",
-                        currentSelection = darkFontSelection,
-                        clearTitle = "\u8ddf\u968f\u6d45\u8272\u5b57\u4f53",
-                    ) { selection ->
-                        darkFontSelection = selection
-                        syncDarkFontStatus.invoke()
-                    }
-                }
-                val darkCssInput = settingsDialogInput(activity, "\u6df1\u8272 CSS\uff08\u652f\u6301 color/background/font-size/font-weight/font-style/text-decoration\uff09", singleLine = false, colors = colors).apply {
-                    setText(style.darkCss)
-                    minLines = 2
-                }
-                val darkNinePatchInput = settingsDialogInput(activity, "\u6df1\u8272 .9.png \u8def\u5f84\uff08\u4fdd\u7559\u914d\u7f6e\uff09", singleLine = true, colors = colors).apply {
-                    setText(style.darkNinePatchPath)
-                }
-                val darkNinePatchSelectButton = settingsDialogButton(
-                    activity,
-                    "\u9009\u62e9\u6df1\u8272\u70b9\u4e5d\u56fe",
+                    if (style.ninePatchPath.isBlank()) "\u9009\u62e9\u56fe\u7247" else "\u66f4\u6362\u56fe\u7247",
                     colors,
                     SettingsDialogButtonRole.Neutral,
                 )
                 val finishButton = settingsDialogButton(activity, "\u5b8c\u6210", colors)
                 val deleteButton = settingsDialogButton(activity, "\u5220\u9664", colors, SettingsDialogButtonRole.Destructive)
                 val cancelButton = settingsDialogButton(activity, "\u53d6\u6d88", colors, SettingsDialogButtonRole.Neutral)
-                val lightPreview = readerHighlightStylePreview(activity, "\u6d45\u8272\u9884\u89c8\uff1a\u201c\u5bf9\u8bdd\u9ad8\u4eae\u9884\u89c8\u201d", colors)
-                val darkPreview = readerHighlightStylePreview(activity, "\u6df1\u8272\u9884\u89c8\uff1a\u201c\u5bf9\u8bdd\u9ad8\u4eae\u9884\u89c8\u201d", colors)
+                val preview = readerHighlightStylePreview(activity, "\u9884\u89c8\uff1a\u201c\u5bf9\u8bdd\u9ad8\u4eae\u9884\u89c8\u201d", colors)
                 lateinit var syncPreviews: () -> Unit
-                fun syncDarkInputs() {
-                    val visibility = if (darkUsesLight) View.GONE else View.VISIBLE
-                    darkToggleButton.text = if (darkUsesLight) "\u6df1\u8272\u5171\u7528\u6d45\u8272" else "\u6df1\u8272\u5355\u72ec\u914d\u7f6e"
-                    darkColorInput.visibility = visibility
-                    darkFontStatus.visibility = visibility
-                    darkCssInput.visibility = visibility
-                    darkNinePatchInput.visibility = visibility
-                    darkNinePatchSelectButton.visibility = visibility
-                    darkPreview.visibility = visibility
-                    syncPreviews.invoke()
+                fun syncImageButtons() {
+                    ninePatchSelectButton.text = if (ninePatchInput.text?.toString()?.trim().isNullOrBlank()) {
+                        "\u9009\u62e9\u56fe\u7247"
+                    } else {
+                        "\u66f4\u6362\u56fe\u7247"
+                    }
                 }
-                syncLightFontStatus = {
-                    lightFontStatus.text = "\u6d45\u8272\u5b57\u4f53\uff1a${dialogueHighlightFontSummary(lightFontSelection)}"
-                    lightFontStatus.typeface = androidTypefaceForFontSelection(lightFontSelection) ?: Typeface.DEFAULT
-                }
-                syncDarkFontStatus = {
-                    darkFontStatus.text = "\u6df1\u8272\u5b57\u4f53\uff1a" +
-                        if (darkFontSelection.isBlank()) "\u8ddf\u968f\u6d45\u8272\u5b57\u4f53" else displayFontName(darkFontSelection)
-                    darkFontStatus.typeface = androidTypefaceForFontSelection(darkFontSelection) ?: Typeface.DEFAULT
+                syncFontStatus = {
+                    fontStatus.text = "\u5b57\u4f53\uff1a${dialogueHighlightFontSummary(fontSelection)}"
+                    fontStatus.typeface = androidTypefaceForFontSelection(fontSelection) ?: Typeface.DEFAULT
                 }
                 syncPreviews = {
                     syncReaderHighlightStylePreview(
-                        lightPreview,
+                        preview,
                         colorInput.text?.toString().orEmpty(),
                         cssInput.text?.toString().orEmpty(),
                         ninePatchInput.text?.toString()?.trim().orEmpty(),
                         style.ninePatchSlice,
-                        lightFontSelection,
-                        colors,
-                    )
-                    syncReaderHighlightStylePreview(
-                        darkPreview,
-                        darkColorInput.text?.toString().orEmpty().ifBlank { colorInput.text?.toString().orEmpty() },
-                        darkCssInput.text?.toString().orEmpty(),
-                        darkNinePatchInput.text?.toString()?.trim().orEmpty().ifBlank { ninePatchInput.text?.toString()?.trim().orEmpty() },
-                        style.darkNinePatchSlice.ifBlank { style.ninePatchSlice },
-                        darkFontSelection.ifBlank { lightFontSelection },
+                        fontSelection,
                         colors,
                     )
                 }
-                listOf(colorInput, cssInput, ninePatchInput, darkColorInput, darkCssInput, darkNinePatchInput).forEach { input ->
+                listOf(colorInput, cssInput).forEach { input ->
                     input.addTextChangedListener(object : TextWatcher {
                         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
                         override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = syncPreviews.invoke()
                         override fun afterTextChanged(s: Editable?) = Unit
                     })
                 }
+                ninePatchInput.addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                        syncImageButtons()
+                        syncPreviews.invoke()
+                    }
+                    override fun afterTextChanged(s: Editable?) = Unit
+                })
                 card.addView(settingsDialogTitle(activity, "\u9ad8\u4eae\u6837\u5f0f", colors))
                 card.addView(nameInput)
-                card.addView(settingsDialogHint(activity, "\u6df1\u8272\u9ed8\u8ba4\u5171\u7528\u6d45\u8272\u914d\u7f6e\uff1bCSS \u652f\u6301 font-size\u3001\u52a0\u7c97\u3001\u659c\u4f53\u3001\u4e0b\u5212\u7ebf\u7b49\u6837\u5f0f\u3002", colors))
                 card.addView(colorInput)
-                syncLightFontStatus.invoke()
-                card.addView(lightFontStatus)
+                syncFontStatus.invoke()
+                card.addView(fontStatus)
                 card.addView(cssInput)
                 syncPreviews.invoke()
-                card.addView(lightPreview)
-                card.addView(ninePatchInput)
+                card.addView(preview)
                 card.addView(ninePatchSelectButton, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                 ).apply { bottomMargin = settingsDp(activity, 10) })
-                card.addView(darkToggleButton)
-                card.addView(darkColorInput)
-                syncDarkFontStatus.invoke()
-                card.addView(darkFontStatus)
-                card.addView(darkCssInput)
-                card.addView(darkPreview)
-                card.addView(darkNinePatchInput)
-                card.addView(darkNinePatchSelectButton, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { bottomMargin = settingsDp(activity, 10) })
-                syncDarkInputs()
+                syncImageButtons()
                 val buttons = if (style.id == ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID) {
                     listOf(finishButton, cancelButton)
                 } else {
                     listOf(deleteButton, finishButton, cancelButton)
                 }
                 card.addView(settingsDialogButtonRow(activity, buttons))
-                darkToggleButton.setOnClickListener {
-                    darkUsesLight = !darkUsesLight
-                    syncDarkInputs()
-                }
                 ninePatchSelectButton.setOnClickListener {
                     openHighlightNinePatchPicker(activity, ninePatchInput)
-                }
-                darkNinePatchSelectButton.setOnClickListener {
-                    openHighlightNinePatchPicker(activity, darkNinePatchInput)
                 }
                 finishButton.setOnClickListener {
                     settings.setReaderHighlightStyle(
                         style.copy(
                             name = nameInput.text?.toString()?.trim().orEmpty().ifBlank { style.name },
                             color = colorInput.text?.toString()?.trim().orEmpty(),
-                            fontFamily = lightFontSelection,
-                            css = cssInput.text?.toString()?.trim().orEmpty(),
+                            fontFamily = fontSelection,
+                            css = sanitizeReaderHighlightCss(cssInput.text?.toString().orEmpty()),
                             ninePatchPath = ninePatchInput.text?.toString()?.trim().orEmpty(),
-                            darkUsesLight = darkUsesLight,
-                            darkColor = darkColorInput.text?.toString()?.trim().orEmpty(),
-                            darkFontFamily = darkFontSelection,
-                            darkCss = darkCssInput.text?.toString()?.trim().orEmpty(),
-                            darkNinePatchPath = darkNinePatchInput.text?.toString()?.trim().orEmpty(),
+                            darkUsesLight = true,
+                            darkColor = "",
+                            darkFontFamily = "",
+                            darkCss = "",
+                            darkNinePatchPath = "",
+                            darkNinePatchSlice = "",
                         ),
                     )
                     bumpReaderHighlightVersion()
@@ -1559,7 +1495,7 @@ class ReaMicroSettingsHook(
         message: String,
         colors: SettingsDialogColors,
     ): TextView =
-        TextView(context).apply {
+        ReaderHighlightPreviewTextView(context).apply {
             text = message
             textSize = 15f
             includeFontPadding = true
@@ -1589,85 +1525,113 @@ class ReaMicroSettingsHook(
         val textColor = parseSettingsColor(cssValues["color"].orEmpty())
             ?: parseSettingsColor(colorValue)
             ?: colors.title
-        val backgroundColor = parseSettingsColor(cssValues["background-color"].orEmpty())
+            val backgroundColor = parseSettingsColor(cssValues["background-color"].orEmpty())
             ?: parseSettingsColor(cssValues["background"].orEmpty())
             ?: colors.field
         preview.setTextColor(textColor)
-        preview.background = readerHighlightPreviewBackground(
-            context = preview.context,
+        preview.background = settingsRoundedRect(colors.field, settingsDp(preview.context, 12), colors.border)
+        (preview as? ReaderHighlightPreviewTextView)?.setHighlightPreview(
+            css = css,
             path = ninePatchPath,
             slice = ninePatchSlice.ifBlank { reedenNineSlice(css) },
             fallbackColor = backgroundColor,
-            borderColor = colors.border,
-        ) ?: settingsRoundedRect(backgroundColor, settingsDp(preview.context, 12), colors.border)
-        preview.textSize = readerHighlightPreviewFontSize(cssValues["font-size"].orEmpty()) ?: 15f
-        val bold = cssValues["font-weight"].orEmpty().lowercase().let { it == "bold" || it == "bolder" || (it.toIntOrNull() ?: 0) >= 600 }
-        val italic = cssValues["font-style"].orEmpty().lowercase().let { it == "italic" || it == "oblique" }
+            hasFallbackFill = cssValues.containsKey("background-color") || cssValues.containsKey("background"),
+        )
+        preview.textSize = 15f
         val baseTypeface = androidTypefaceForFontSelection(fontSelection) ?: Typeface.DEFAULT
-        preview.typeface = Typeface.create(baseTypeface, when {
-            bold && italic -> Typeface.BOLD_ITALIC
-            bold -> Typeface.BOLD
-            italic -> Typeface.ITALIC
-            else -> Typeface.NORMAL
-        })
-        preview.paintFlags = if (cssValues["text-decoration"].orEmpty().contains("underline", ignoreCase = true)) {
-            preview.paintFlags or Paint.UNDERLINE_TEXT_FLAG
-        } else {
-            preview.paintFlags and Paint.UNDERLINE_TEXT_FLAG.inv()
-        }
+        preview.typeface = Typeface.create(baseTypeface, Typeface.NORMAL)
+        preview.paintFlags = preview.paintFlags and Paint.UNDERLINE_TEXT_FLAG.inv()
     }
 
-    private fun readerHighlightPreviewBackground(
-        context: Context,
-        path: String,
-        slice: String,
-        fallbackColor: Int,
-        borderColor: Int,
-    ): Drawable? {
-        val file = File(path)
-        if (!file.isFile) return null
-        val bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return null
-        val ninePatchDrawable = if (bitmap.ninePatchChunk != null) {
-            NinePatchDrawable(context.resources, bitmap, bitmap.ninePatchChunk, Rect(), file.name)
-        } else {
-            null
+    private inner class ReaderHighlightPreviewTextView(context: Context) : TextView(context) {
+        private var previewCss: String = ""
+        private var previewPath: String = ""
+        private var previewSlice: String = ""
+        private var previewFallbackColor: Int = Color.TRANSPARENT
+        private var previewHasFallbackFill: Boolean = false
+        private var previewBitmap: Bitmap? = null
+        private var previewNinePatchDrawable: NinePatchDrawable? = null
+        private var previewBitmapPath: String = ""
+
+        fun setHighlightPreview(
+            css: String,
+            path: String,
+            slice: String,
+            fallbackColor: Int,
+            hasFallbackFill: Boolean,
+        ) {
+            previewCss = css
+            previewPath = path
+            previewSlice = slice
+            previewFallbackColor = fallbackColor
+            previewHasFallbackFill = hasFallbackFill
+            invalidatePreviewBitmap()
+            invalidate()
         }
-        val nineSlice = parsePreviewNineSlice(slice, bitmap.width, bitmap.height)
-        return object : Drawable() {
-            private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = fallbackColor }
-            private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                style = Paint.Style.STROKE
-                strokeWidth = settingsDp(context, 1).toFloat()
-                color = borderColor
-            }
 
-            override fun draw(canvas: Canvas) {
-                val bounds = bounds
-                if (bounds.isEmpty) return
-                canvas.drawRect(bounds, fillPaint)
-                when {
-                    ninePatchDrawable != null -> {
-                        ninePatchDrawable.bounds = bounds
-                        ninePatchDrawable.draw(canvas)
+        override fun onDraw(canvas: Canvas) {
+            drawPreviewLineBackgrounds(canvas)
+            super.onDraw(canvas)
+        }
+
+        private fun invalidatePreviewBitmap() {
+            if (previewPath == previewBitmapPath) return
+            previewBitmapPath = previewPath
+            previewBitmap = null
+            previewNinePatchDrawable = null
+            val file = File(previewPath)
+            if (!file.isFile) return
+            val bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return
+            previewBitmap = bitmap
+            if (bitmap.ninePatchChunk != null) {
+                previewNinePatchDrawable = NinePatchDrawable(resources, bitmap, bitmap.ninePatchChunk, Rect(), file.name)
+            }
+        }
+
+        private fun drawPreviewLineBackgrounds(canvas: Canvas) {
+            val layout = layout ?: return
+            val bitmap = previewBitmap
+            val hasImage = bitmap != null
+            if (!hasImage && !previewHasFallbackFill) return
+            val box = previewBoxStyle(previewCss, resources.displayMetrics.density)
+            val nineSlice = bitmap?.let { parsePreviewNineSlice(previewSlice, it.width, it.height) }
+            val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = previewFallbackColor }
+            for (line in 0 until layout.lineCount) {
+                val lineLeft = layout.getLineLeft(line)
+                val lineRight = layout.getLineRight(line)
+                if (lineRight <= lineLeft) continue
+                val rect = Rect(
+                    (totalPaddingLeft + lineLeft - box.paddingLeftPx - box.marginLeftPx).toInt(),
+                    (totalPaddingTop + layout.getLineTop(line) - box.paddingTopPx - box.marginTopPx).toInt(),
+                    (totalPaddingLeft + lineRight + box.paddingRightPx + box.marginRightPx).toInt(),
+                    (totalPaddingTop + layout.getLineBottom(line) + box.paddingBottomPx + box.marginBottomPx).toInt(),
+                )
+                if (rect.width() <= 0 || rect.height() <= 0) continue
+                val saveCount = if (box.radiusPx > 0f) {
+                    val path = android.graphics.Path().apply {
+                        addRoundRect(RectF(rect), box.radiusPx, box.radiusPx, android.graphics.Path.Direction.CW)
                     }
-                    nineSlice != null -> drawPreviewNineSlice(canvas, bitmap, nineSlice, bounds)
-                    else -> canvas.drawBitmap(bitmap, null, bounds, null)
+                    val count = canvas.save()
+                    canvas.clipPath(path)
+                    count
+                } else {
+                    -1
                 }
-                canvas.drawRect(bounds, borderPaint)
+                if (bitmap != null) {
+                    when {
+                        previewNinePatchDrawable != null -> {
+                            previewNinePatchDrawable?.bounds = rect
+                            previewNinePatchDrawable?.draw(canvas)
+                        }
+                        nineSlice != null -> drawPreviewNineSlice(canvas, bitmap, nineSlice, rect)
+                        else -> drawPreviewBitmapByBackgroundSize(canvas, bitmap, rect, box.backgroundSize)
+                    }
+                } else {
+                    canvas.drawRect(rect, fillPaint)
+                }
+                if (saveCount >= 0) canvas.restoreToCount(saveCount)
+                drawPreviewCssBorder(canvas, rect, box)
             }
-
-            override fun setAlpha(alpha: Int) {
-                fillPaint.alpha = alpha
-                borderPaint.alpha = alpha
-            }
-
-            override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) {
-                fillPaint.colorFilter = colorFilter
-                borderPaint.colorFilter = colorFilter
-            }
-
-            @Suppress("DEPRECATION")
-            override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
         }
     }
 
@@ -1705,6 +1669,103 @@ class ReaMicroSettingsHook(
         }
     }
 
+    private fun drawPreviewBitmapByBackgroundSize(
+        canvas: Canvas,
+        bitmap: Bitmap,
+        dst: Rect,
+        backgroundSize: String,
+    ) {
+        if (backgroundSize.contains("100% 100%", ignoreCase = true) ||
+            backgroundSize.contains("stretch", ignoreCase = true)
+        ) {
+            canvas.drawBitmap(bitmap, null, dst, null)
+            return
+        }
+        drawPreviewCoverBitmap(canvas, bitmap, dst)
+    }
+
+    private fun drawPreviewCoverBitmap(canvas: Canvas, bitmap: Bitmap, dst: Rect) {
+        if (dst.width() <= 0 || dst.height() <= 0 || bitmap.width <= 0 || bitmap.height <= 0) return
+        val srcAspect = bitmap.width.toFloat() / bitmap.height.toFloat()
+        val dstAspect = dst.width().toFloat() / dst.height().toFloat()
+        val src = if (srcAspect > dstAspect) {
+            val width = (bitmap.height * dstAspect).toInt().coerceIn(1, bitmap.width)
+            val left = (bitmap.width - width) / 2
+            Rect(left, 0, left + width, bitmap.height)
+        } else {
+            val height = (bitmap.width / dstAspect).toInt().coerceIn(1, bitmap.height)
+            val top = (bitmap.height - height) / 2
+            Rect(0, top, bitmap.width, top + height)
+        }
+        canvas.drawBitmap(bitmap, src, dst, null)
+    }
+
+    private fun drawPreviewCssBorder(canvas: Canvas, rect: Rect, box: PreviewBoxStyle) {
+        if (box.borderWidthPx <= 0f || box.borderColor == null || rect.width() <= 0 || rect.height() <= 0) return
+        val inset = box.borderWidthPx / 2f
+        val borderRect = RectF(rect).apply { inset(inset, inset) }
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = box.borderWidthPx
+            color = box.borderColor
+        }
+        if (box.radiusPx > 0f) {
+            canvas.drawRoundRect(borderRect, box.radiusPx, box.radiusPx, paint)
+        } else {
+            canvas.drawRect(borderRect, paint)
+        }
+    }
+
+    private fun previewBoxStyle(css: String, density: Float): PreviewBoxStyle {
+        val values = readerHighlightCssProperties(css)
+        val padding = previewCssBoxEdges(values, "padding", density).scale(PREVIEW_REEDEN_BOX_EDGE_SCALE)
+        val margin = previewCssBoxEdges(values, "margin", density).scale(PREVIEW_REEDEN_BOX_EDGE_SCALE)
+        val border = values["border"].orEmpty()
+        val borderWidth = values["border-width"]?.let { previewCssSizePx(it, density) }
+            ?: Regex("""(\d+(?:\.\d+)?)px""").find(border)?.groupValues?.getOrNull(1)?.toFloatOrNull()?.let { it * density }
+            ?: 0f
+        val borderColor = parseSettingsColor(values["border-color"].orEmpty())
+            ?: Regex("""rgba?\([^)]+\)|#[0-9a-fA-F]{6,8}""").find(border)?.value?.let(::parseSettingsColor)
+        return PreviewBoxStyle(
+            paddingLeftPx = padding.left,
+            paddingTopPx = padding.top,
+            paddingRightPx = padding.right,
+            paddingBottomPx = padding.bottom,
+            marginLeftPx = margin.left,
+            marginTopPx = margin.top,
+            marginRightPx = margin.right,
+            marginBottomPx = margin.bottom,
+            borderWidthPx = borderWidth,
+            borderColor = borderColor,
+            radiusPx = values["border-radius"]?.let { previewCssSizePx(it, density) } ?: 0f,
+            backgroundSize = values["background-size"].orEmpty(),
+        )
+    }
+
+    private fun previewCssBoxEdges(values: Map<String, String>, prefix: String, density: Float): PreviewBoxEdges {
+        val shorthand = values[prefix].orEmpty()
+            .split(Regex("\\s+"))
+            .filter { it.isNotBlank() }
+            .map { previewCssSizePx(it, density) }
+        val top = values["$prefix-top"]?.let { previewCssSizePx(it, density) } ?: shorthand.getOrNull(0) ?: 0f
+        val right = values["$prefix-right"]?.let { previewCssSizePx(it, density) } ?: shorthand.getOrNull(1) ?: shorthand.getOrNull(0) ?: 0f
+        val bottom = values["$prefix-bottom"]?.let { previewCssSizePx(it, density) } ?: shorthand.getOrNull(2) ?: shorthand.getOrNull(0) ?: 0f
+        val left = values["$prefix-left"]?.let { previewCssSizePx(it, density) } ?: shorthand.getOrNull(3) ?: shorthand.getOrNull(1) ?: shorthand.getOrNull(0) ?: 0f
+        return PreviewBoxEdges(left = left, top = top, right = right, bottom = bottom)
+    }
+
+    private fun previewCssSizePx(value: String, density: Float): Float {
+        val trimmed = value.trim().lowercase()
+        val number = Regex("""-?\d+(?:\.\d+)?""").find(trimmed)?.value?.toFloatOrNull() ?: return 0f
+        return when {
+            trimmed.endsWith("px") -> number * density
+            trimmed.endsWith("dp") -> number * density
+            trimmed.endsWith("em") -> number * 16f * density
+            trimmed.endsWith("rem") -> number * 16f * density
+            else -> number * density
+        }.coerceAtLeast(0f)
+    }
+
     private data class PreviewNineSlice(
         val left: Int,
         val top: Int,
@@ -1712,29 +1773,97 @@ class ReaMicroSettingsHook(
         val bottom: Int,
     )
 
+    private data class PreviewBoxEdges(
+        val left: Float,
+        val top: Float,
+        val right: Float,
+        val bottom: Float,
+    ) {
+        fun scale(factor: Float): PreviewBoxEdges =
+            PreviewBoxEdges(left * factor, top * factor, right * factor, bottom * factor)
+    }
+
+    private data class PreviewBoxStyle(
+        val paddingLeftPx: Float,
+        val paddingTopPx: Float,
+        val paddingRightPx: Float,
+        val paddingBottomPx: Float,
+        val marginLeftPx: Float,
+        val marginTopPx: Float,
+        val marginRightPx: Float,
+        val marginBottomPx: Float,
+        val borderWidthPx: Float,
+        val borderColor: Int?,
+        val radiusPx: Float,
+        val backgroundSize: String,
+    )
+
     private fun readerHighlightCssProperties(css: String): Map<String, String> =
         css.split(';')
             .mapNotNull { part ->
                 val index = part.indexOf(':')
-                if (index <= 0) null else part.substring(0, index).trim().lowercase() to part.substring(index + 1).trim()
+                if (index <= 0) {
+                    null
+                } else {
+                    val key = part.substring(0, index).trim().lowercase()
+                    val value = part.substring(index + 1).trim()
+                    if (isSupportedReaderHighlightCssProperty(key, value)) key to value else null
+                }
             }
             .toMap()
 
-    private fun readerHighlightPreviewFontSize(value: String): Float? {
-        val trimmed = value.trim().lowercase()
-        if (trimmed.isBlank()) return null
-        val number = Regex("""-?\d+(?:\.\d+)?""").find(trimmed)?.value?.toFloatOrNull() ?: return null
-        val scaledDensity = previewScaledDensity()
-        return when {
-            trimmed.endsWith("px") -> number / scaledDensity
-            trimmed.endsWith("em") -> number * 15f
-            trimmed.endsWith("rem") -> number * 15f
-            else -> number
-        }.coerceIn(8f, 48f)
+    private fun sanitizeReaderHighlightCss(css: String): String =
+        css.split(';')
+            .mapNotNull { part ->
+                val index = part.indexOf(':')
+                if (index <= 0) return@mapNotNull null
+                val key = part.substring(0, index).trim().lowercase()
+                val value = part.substring(index + 1).trim()
+                if (key.isBlank() || value.isBlank() || !isSupportedReaderHighlightCssProperty(key, value)) {
+                    null
+                } else {
+                    "$key: $value"
+                }
+            }
+            .joinToString("; ")
+
+    private fun isSupportedReaderHighlightCssProperty(key: String, value: String): Boolean {
+        if (value.isBlank()) return false
+        if (value.contains("url(", ignoreCase = true)) return false
+        return when (key) {
+            "color", "background", "background-color", "border-color" ->
+                parseSettingsColor(value) != null
+            "background-size" ->
+                isSupportedReaderHighlightBackgroundSize(value)
+            "border" ->
+                readerHighlightCssSizeRegex.containsMatchIn(value) || readerHighlightCssColorRegex.containsMatchIn(value)
+            "border-width", "border-radius",
+            "padding-left", "padding-top", "padding-right", "padding-bottom",
+            "margin-left", "margin-top", "margin-right", "margin-bottom" ->
+                isReaderHighlightCssSizeValue(value)
+            "padding", "margin" ->
+                isReaderHighlightCssBoxValue(value)
+            "reeden-background-nine-slice", "--reeden-background-nine-slice" ->
+                Regex("""-?\d+(?:\.\d+)?""").findAll(value).count() >= 4
+            else -> false
+        }
     }
 
-    private fun previewScaledDensity(): Float =
-        activityProvider()?.resources?.displayMetrics?.scaledDensity ?: 1f
+    private val readerHighlightCssSizeRegex = Regex("""\b\d+(?:\.\d+)?(?:px|dp|em|rem)?\b""", RegexOption.IGNORE_CASE)
+    private val readerHighlightCssColorRegex = Regex("""rgba?\([^)]+\)|#[0-9a-fA-F]{6,8}""")
+
+    private fun isReaderHighlightCssSizeValue(value: String): Boolean =
+        value.trim().matches(Regex("""\d+(?:\.\d+)?(?:px|dp|em|rem)?""", RegexOption.IGNORE_CASE))
+
+    private fun isReaderHighlightCssBoxValue(value: String): Boolean {
+        val parts = value.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        return parts.size in 1..4 && parts.all(::isReaderHighlightCssSizeValue)
+    }
+
+    private fun isSupportedReaderHighlightBackgroundSize(value: String): Boolean {
+        val normalized = value.trim().lowercase().replace(Regex("\\s+"), " ")
+        return normalized == "100% 100%" || normalized == "stretch"
+    }
 
     private fun parseSettingsColor(value: String): Int? {
         val trimmed = value.trim()
@@ -1782,8 +1911,8 @@ class ReaMicroSettingsHook(
             }
             activity.startActivityForResult(intent, HIGHLIGHT_NINE_PATCH_DOCUMENT_REQUEST_CODE)
         }.onFailure {
-            showToast("\u6253\u5f00\u70b9\u4e5d\u56fe\u9009\u62e9\u5931\u8d25")
-            XposedBridge.log("$LOG_PREFIX open highlight nine-patch picker failed: ${it.stackTraceToString()}")
+            showToast("\u6253\u5f00\u56fe\u7247\u9009\u62e9\u5931\u8d25")
+            XposedBridge.log("$LOG_PREFIX open highlight image picker failed: ${it.stackTraceToString()}")
         }
     }
 
@@ -1791,10 +1920,10 @@ class ReaMicroSettingsHook(
         runCatching {
             val target = copyHighlightNinePatchUri(activity, uri)
             pendingHighlightNinePatchInputRef?.get()?.setText(target.absolutePath)
-            showToast("\u5df2\u9009\u62e9\u70b9\u4e5d\u56fe\uff1a${target.name}")
+            showToast("\u5df2\u9009\u62e9\u56fe\u7247\uff1a${target.name}")
         }.onFailure {
-            showToast(it.message ?: "\u9009\u62e9\u70b9\u4e5d\u56fe\u5931\u8d25")
-            XposedBridge.log("$LOG_PREFIX import highlight nine-patch failed: ${it.stackTraceToString()}")
+            showToast(it.message ?: "\u9009\u62e9\u56fe\u7247\u5931\u8d25")
+            XposedBridge.log("$LOG_PREFIX import highlight image failed: ${it.stackTraceToString()}")
         }
     }
 
@@ -1853,18 +1982,11 @@ class ReaMicroSettingsHook(
             .put("name", style.name)
             .put("color", style.color)
             .put("fontFamily", style.fontFamily)
-            .put("css", style.css)
+            .put("css", sanitizeReaderHighlightCss(style.css))
             .put("ninePatchPath", style.ninePatchPath)
             .put("ninePatchSlice", style.ninePatchSlice)
-            .put("darkUsesLight", style.darkUsesLight)
-            .put("darkColor", style.darkColor)
-            .put("darkFontFamily", style.darkFontFamily)
-            .put("darkCss", style.darkCss)
-            .put("darkNinePatchPath", style.darkNinePatchPath)
-            .put("darkNinePatchSlice", style.darkNinePatchSlice)
             .apply {
                 highlightNinePatchJson(style.ninePatchPath)?.let { put("ninePatchFile", it) }
-                highlightNinePatchJson(style.darkNinePatchPath)?.let { put("darkNinePatchFile", it) }
             }
 
     private fun readerHighlightStyleFromJson(activity: Activity, root: JSONObject): ReaderHighlightStyle {
@@ -1881,17 +2003,10 @@ class ReaMicroSettingsHook(
             name = item.optString("name").ifBlank { "\u5bfc\u5165\u9ad8\u4eae\u6837\u5f0f" },
             color = item.optString("color").ifBlank { ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR },
             fontFamily = item.optString("fontFamily"),
-            css = item.optString("css"),
+            css = sanitizeReaderHighlightCss(item.optString("css")),
             ninePatchPath = restoreHighlightNinePatchFromJson(activity, item.optJSONObject("ninePatchFile"))
                 ?: item.optString("ninePatchPath"),
             ninePatchSlice = item.optString("ninePatchSlice"),
-            darkUsesLight = item.optBoolean("darkUsesLight", true),
-            darkColor = item.optString("darkColor"),
-            darkFontFamily = item.optString("darkFontFamily"),
-            darkCss = item.optString("darkCss"),
-            darkNinePatchPath = restoreHighlightNinePatchFromJson(activity, item.optJSONObject("darkNinePatchFile"))
-                ?: item.optString("darkNinePatchPath"),
-            darkNinePatchSlice = item.optString("darkNinePatchSlice"),
         )
     }
 
@@ -1910,7 +2025,8 @@ class ReaMicroSettingsHook(
         var skippedDuplicates = 0
         for (index in 0 until data.length()) {
             val item = data.optJSONObject(index) ?: continue
-            val css = item.optString("styleCssText")
+            val rawCss = item.optString("styleCssText")
+            val css = sanitizeReaderHighlightCss(rawCss)
             val imageData = item.optString("backgroundImageData")
             if (css.isBlank() || imageData.isBlank()) continue
             val imageBytes = runCatching {
@@ -1935,7 +2051,7 @@ class ReaMicroSettingsHook(
                 ReaderHighlightStyle(
                     id = id,
                     name = item.optString("name").ifBlank { "Reeden \u9ad8\u4eae\u6837\u5f0f ${styles.size + 1}" },
-                    color = colorFromReedenCss(css),
+                    color = colorFromReedenCss(rawCss),
                     fontFamily = "",
                     css = css,
                     ninePatchPath = imagePath,
@@ -1949,26 +2065,30 @@ class ReaMicroSettingsHook(
 
     private fun readerHighlightStyleImportKey(style: ReaderHighlightStyle): String? {
         val path = style.ninePatchPath.trim()
-        if (style.css.isBlank() || path.isBlank()) return null
+        val css = sanitizeReaderHighlightCss(style.css)
+        if (css.isBlank() || path.isBlank()) return null
         val file = File(path)
         if (!file.isFile) return null
         val hash = runCatching { md5Hex(file.readBytes()) }.getOrNull() ?: return null
-        return readerHighlightStyleImportKey(style.css, hash)
+        return readerHighlightStyleImportKey(css, hash)
     }
 
     private fun readerHighlightStyleImportKey(css: String, imageHash: String): String =
-        "${css.trim()}|${imageHash.uppercase()}"
+        "${sanitizeReaderHighlightCss(css)}|${imageHash.uppercase()}"
 
     private fun copyHighlightNinePatchUri(activity: Activity, uri: Uri): File {
         val rawName = queryDisplayName(activity, uri) ?: uri.lastPathSegment.orEmpty()
-        if (!rawName.endsWith(".9.png", ignoreCase = true)) {
-            error("\u8bf7\u9009\u62e9 .9.png \u70b9\u4e5d\u56fe")
+        if (!rawName.endsWith(".png", ignoreCase = true)) {
+            error("\u8bf7\u9009\u62e9 PNG \u56fe\u7247")
         }
-        val displayName = sanitizeNinePatchFileName(rawName)
-        val target = uniqueHighlightNinePatchFile(activity, displayName)
+        val target = if (rawName.endsWith(".9.png", ignoreCase = true)) {
+            uniqueHighlightNinePatchFile(activity, sanitizeNinePatchFileName(rawName))
+        } else {
+            uniqueHighlightImageFile(activity, sanitizeHighlightImageFileName(rawName))
+        }
         activity.contentResolver.openInputStream(uri)?.use { input ->
             target.outputStream().buffered().use { output -> input.copyTo(output) }
-        } ?: error("\u65e0\u6cd5\u8bfb\u53d6\u70b9\u4e5d\u56fe")
+        } ?: error("\u65e0\u6cd5\u8bfb\u53d6\u56fe\u7247")
         return target
     }
 
@@ -5464,12 +5584,7 @@ class ReaMicroSettingsHook(
 
     private fun highlightStyleSummary(style: ReaderHighlightStyle): String =
         listOfNotNull(
-            "\u6d45\u8272 ${dialogueHighlightColorSummary(style.color)}",
-            if (style.darkUsesLight) {
-                "\u6df1\u8272\u5171\u7528"
-            } else {
-                "\u6df1\u8272 ${dialogueHighlightColorSummary(style.darkColor.ifBlank { style.color })}"
-            },
+            dialogueHighlightColorSummary(style.color),
             dialogueHighlightFontSummary(style.fontFamily),
             style.css.takeIf { it.isNotBlank() }?.let { "CSS" },
             style.ninePatchPath.takeIf { it.isNotBlank() }?.let {
@@ -7178,6 +7293,7 @@ class ReaMicroSettingsHook(
         const val TEXT_WITH_FONT_FAMILY_MASK = 130938
         const val TEXT_SINGLE_LINE_MASK = 73722
         const val PRESET_PROMPT_PREVIEW_MAX_CHARS = 32
+        const val PREVIEW_REEDEN_BOX_EDGE_SCALE = 0.78f
         const val FAMILY_SYSTEM = "system"
         const val FAMILY_SOURCE_HAN_SERIF = "serif"
         const val ONLINE_COMPLETION_TITLE = "在线补全"
