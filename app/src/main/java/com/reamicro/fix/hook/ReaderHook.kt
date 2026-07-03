@@ -1288,6 +1288,9 @@ class ReaderHook(
                             val page = param.args?.getOrNull(1)
                             currentPageRef = WeakReference(page)
                             renderingEpubPage.set(page)
+                            currentHighlightBookIdentity()?.let { (bookKey, bookTitle) ->
+                                ReaderHighlightBookContext.update(bookKey, bookTitle)
+                            }
                             scheduleRestorePersistedSearchOrigin("page rendered")
                             val args = param.args ?: return
                             val marksIndex = 4
@@ -1569,10 +1572,7 @@ class ReaderHook(
             Toast.makeText(activity, "\u672a\u83b7\u53d6\u5230\u9009\u4e2d\u6587\u672c", Toast.LENGTH_SHORT).show()
             return
         }
-        val context = lastCatalogContext
-        val bookKey = context?.let(::bookKey).orEmpty()
-        val bookTitle = context?.let(::bookTitle).orEmpty().ifBlank { "\u672c\u4e66" }
-        if (bookKey.isBlank()) {
+        val (bookKey, bookTitle) = currentHighlightBookIdentity() ?: run {
             Toast.makeText(activity, "\u672a\u83b7\u53d6\u5230\u5f53\u524d\u4e66\u7c4d", Toast.LENGTH_SHORT).show()
             return
         }
@@ -3457,6 +3457,35 @@ class ReaderHook(
 
     private fun bookTitle(context: CatalogContext): String =
         callString(context.book, "getTitle")
+
+    private fun currentHighlightBookIdentity(): Pair<String, String>? {
+        lastCatalogContext?.let { context ->
+            val key = bookKey(context)
+            if (key.isNotBlank()) return key to bookTitle(context).ifBlank { fallbackCurrentBookTitle() }
+        }
+        bottomSearchBookRef?.get()?.let { book ->
+            val title = callString(book, "getTitle").ifBlank { fallbackCurrentBookTitle() }
+            val key = listOf(
+                currentEpubRoot()?.absolutePath.orEmpty(),
+                callString(book, "getId"),
+                callString(book, "getBookId"),
+                title,
+            ).filter { it.isNotBlank() }.joinToString(separator = "|")
+            if (key.isNotBlank()) return key to title.ifBlank { "\u672c\u4e66" }
+        }
+        val root = currentEpubRoot() ?: return null
+        val title = fallbackCurrentBookTitle()
+            .ifBlank { root.nameWithoutExtension }
+            .ifBlank { root.name }
+            .ifBlank { "\u672c\u4e66" }
+        return root.absolutePath to title
+    }
+
+    private fun fallbackCurrentBookTitle(): String {
+        val page = currentPageRef?.get()
+        return callString(callNoArg(page, "getChapter"), "getTitle")
+            .ifBlank { callString(page, "getTitle") }
+    }
 
     private fun isDifferentSearchBook(previous: CatalogContext, next: CatalogContext): Boolean {
         val previousKey = searchBookIdentity(previous)
