@@ -81,6 +81,7 @@ class ReaderHook(
     private var searchOverlayThemeCallbacksActivityRef: WeakReference<Activity>? = null
     private var bottomSearchReceiverRef: WeakReference<Any>? = null
     private var bottomSearchBookRef: WeakReference<Any>? = null
+    private val composeMethodCache = HashMap<String, Method>()
     // Rendering hooks run on the host reader pipeline. ThreadLocal keeps the current page
     // available to downstream text/cfi hooks without leaking it across concurrent renders.
     private val renderingEpubPage = ThreadLocal<Any?>()
@@ -1097,10 +1098,172 @@ class ReaderHook(
                     }
                 })
             }
+            hookNativeSelectionMenuContent(bodyClass)
             XposedBridge.log("$LOG_PREFIX native SelectionBubbleMenu hook installed: ${menuMethods.size}")
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX native selection menu hook failed: ${it.stackTraceToString()}")
         }
+    }
+
+    private fun hookNativeSelectionMenuContent(bodyClass: Class<*>) {
+        val contentMethods = bodyClass.declaredMethods.filter { method ->
+            method.name.contains("SelectionBubbleMenu") &&
+                method.name.contains("lambda") &&
+                method.parameterTypes.size == 4 &&
+                List::class.java.isAssignableFrom(method.parameterTypes[0]) &&
+                method.parameterTypes[1] == Long::class.javaPrimitiveType
+        }
+        if (contentMethods.isEmpty()) {
+            XposedBridge.log("$LOG_PREFIX native SelectionBubbleMenu content hook skipped: lambda not found")
+            return
+        }
+        contentMethods.forEach { method ->
+            method.isAccessible = true
+            XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val actions = (param.args?.getOrNull(0) as? List<*>)?.filterNotNull().orEmpty()
+                    val maxPerRow = selectionMenuMaxItemsPerRow(actions.size) ?: return
+                    val tint = (param.args?.getOrNull(1) as? Number)?.toLong() ?: return
+                    val composer = param.args?.getOrNull(2) ?: return
+                    runCatching {
+                        renderWrappedSelectionMenu(actions, tint, composer, maxPerRow)
+                    }.onSuccess {
+                        param.result = targetUnit()
+                    }.onFailure {
+                        XposedBridge.log("$LOG_PREFIX wrap native selection menu failed: ${it.stackTraceToString()}")
+                    }
+                }
+            })
+        }
+        XposedBridge.log("$LOG_PREFIX native SelectionBubbleMenu content hook installed: ${contentMethods.size}")
+    }
+
+    private fun selectionMenuMaxItemsPerRow(actionCount: Int): Int? {
+        if (settingsProvider().canUseCompactReaderSelectionMenu) {
+            return if (actionCount > 6) 6 else null
+        }
+        return when {
+            actionCount <= 4 -> null
+            actionCount <= 6 -> 3
+            else -> 4
+        }
+    }
+
+    private fun renderWrappedSelectionMenu(actions: List<Any>, tint: Long, composer: Any, maxPerRow: Int) {
+        val content = functionProxy("ReaderSelectionFlowRow", KOTLIN_FUNCTION3_CLASS) { args ->
+            val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
+            actions.forEach { action ->
+                renderNativeSelectionMenuItem(action, tint, innerComposer)
+            }
+            targetUnit()
+        }
+        composeMethod(FLOW_LAYOUT_KT_CLASS, FLOW_ROW_METHOD, 10).invoke(
+            null,
+            selectionMenuPaddingModifier(),
+            arrangementSpacedBy(2),
+            arrangementSpacedBy(2),
+            null,
+            maxPerRow,
+            Int.MAX_VALUE,
+            content,
+            composer,
+            0,
+            8,
+        )
+    }
+
+    private fun renderNativeSelectionMenuItem(action: Any, tint: Long, composer: Any) {
+        nativeSelectionMenuItemMethod().invoke(
+            null,
+            callString(action, "getTitle"),
+            callNoArg(action, "getIcon") ?: return,
+            tint,
+            selectionMenuActionCallback(action) ?: return,
+            composer,
+            0,
+        )
+    }
+
+    private fun nativeSelectionMenuItemMethod(): Method =
+        synchronized(composeMethodCache) {
+            composeMethodCache.getOrPut("org.epub.ui.BodyKt#SelectionMenuItem/6") {
+                classLoader.loadClass("org.epub.ui.BodyKt").declaredMethods.firstOrNull { method ->
+                    method.name.contains("SelectionMenuItem") &&
+                        method.parameterTypes.size == 6 &&
+                        method.parameterTypes[0] == String::class.java &&
+                        method.parameterTypes[2] == Long::class.javaPrimitiveType
+                }?.apply { isAccessible = true }
+                    ?: error("SelectionMenuItem method not found")
+            }
+        }
+
+    private fun selectionMenuPaddingModifier(): Any =
+        composeMethod(PADDING_KT_CLASS, PADDING_METHOD, 5).invoke(
+            null,
+            modifierInstance(),
+            udp(8),
+            udp(6),
+            udp(8),
+            udp(6),
+        )
+
+    private fun arrangementSpacedBy(dp: Int): Any =
+        ARRANGEMENT_SPACED_BY_METHOD_CANDIDATES.firstNotNullOfOrNull { name ->
+            runCatching {
+                staticObject(ARRANGEMENT_CLASS, "INSTANCE").javaClass.methods.firstOrNull { method ->
+                    method.name == name && method.parameterTypes.size == 1
+                }?.invoke(staticObject(ARRANGEMENT_CLASS, "INSTANCE"), udp(dp))
+            }.getOrNull()
+        } ?: error("Arrangement.spacedBy method not found")
+
+    private fun modifierInstance(): Any =
+        staticObject(MODIFIER_CLASS, "INSTANCE")
+
+    private fun udp(value: Int): Float =
+        classLoader.loadClass(UNIT_EXT_KT_CLASS).declaredMethods.first {
+            it.name == UDP_METHOD && it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
+        }.apply { isAccessible = true }.invoke(null, value) as Float
+
+    private fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any {
+        val functionClass = classLoader.loadClass(functionClassName)
+        return Proxy.newProxyInstance(classLoader, arrayOf(functionClass)) { proxy, method, args ->
+            when (method.name) {
+                "invoke" -> runCatching {
+                    block(args)
+                }.onFailure {
+                    XposedBridge.log("$LOG_PREFIX failed in $name callback: ${it.stackTraceToString()}")
+                }.getOrElse { targetUnit() }
+                "toString" -> "ReaMicro$name"
+                "hashCode" -> System.identityHashCode(proxy)
+                "equals" -> proxy === args?.getOrNull(0)
+                else -> null
+            }
+        }
+    }
+
+    private fun composeMethod(className: String, methodName: String, parameterCount: Int): Method {
+        val cacheKey = "$className#$methodName/$parameterCount"
+        return synchronized(composeMethodCache) {
+            composeMethodCache.getOrPut(cacheKey) {
+                classLoader.loadClass(className).declaredMethods.firstOrNull { method ->
+                    method.name == methodName && method.parameterTypes.size == parameterCount
+                }?.apply { isAccessible = true }
+                    ?: error("$className.$methodName/$parameterCount not found")
+            }
+        }
+    }
+
+    private fun staticObject(className: String, fieldName: String): Any {
+        val clazz = classLoader.loadClass(className)
+        val field = runCatching { clazz.getDeclaredField(fieldName) }
+            .recoverCatching { clazz.getField(fieldName) }
+            .recoverCatching { clazz.getDeclaredField("Companion") }
+            .getOrElse {
+                val fields = clazz.declaredFields.joinToString { field -> "${field.name}:${field.type.name}" }
+                error("$className.$fieldName not found; fields=[$fields]")
+            }
+        field.isAccessible = true
+        return field.get(null)
     }
 
     private fun compactSelectionMenuActions(actions: List<Any>): List<Any> {
@@ -4107,12 +4270,26 @@ class ReaderHook(
         const val SCROLL_CRASH_PREFS = "reamicro_scroll_crash_guard"
         const val SCROLL_CRASH_PENDING_KEY = "scroll_crash_pending"
         const val KOTLIN_FUNCTION0_CLASS = "kotlin.jvm.functions.Function0"
+        const val KOTLIN_FUNCTION3_CLASS = "kotlin.jvm.functions.Function3"
         const val KOTLIN_UNIT_CLASS = "kotlin.Unit"
         const val KOTLIN_CONTINUATION_CLASS = "kotlin.coroutines.Continuation"
         const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = "kotlin.coroutines.EmptyCoroutineContext"
         const val KOTLIN_INTRINSICS_CLASS = "kotlin.coroutines.intrinsics.IntrinsicsKt"
         const val KOTLIN_COROUTINE_SINGLETONS_CLASS = "kotlin.coroutines.intrinsics.CoroutineSingletons"
         const val KOTLIN_RESULT_KT_CLASS = "kotlin.ResultKt"
+        const val FLOW_LAYOUT_KT_CLASS = "androidx.compose.foundation.layout.FlowLayoutKt"
+        const val FLOW_ROW_METHOD = "FlowRow"
+        const val PADDING_KT_CLASS = "androidx.compose.foundation.layout.PaddingKt"
+        const val PADDING_METHOD = "padding-qDBjuR0"
+        const val ARRANGEMENT_CLASS = "androidx.compose.foundation.layout.Arrangement"
+        const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
+        const val UNIT_EXT_KT_CLASS = "app.zhendong.reamicro.arch.extensions.UnitExtKt"
+        const val UDP_METHOD = "getUdp"
+        val ARRANGEMENT_SPACED_BY_METHOD_CANDIDATES = listOf(
+            "spacedBy-0680j_4",
+            "m837spacedBy0680j_4",
+            "m874spacedBy0680j_4",
+        )
         const val MAX_SEARCH_RESULTS = 2000
         const val MAX_MATCHES_PER_FILE = 200
         const val SEARCH_SNIPPET_RADIUS = 16
