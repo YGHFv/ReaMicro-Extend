@@ -646,6 +646,7 @@ class XposedModuleSettings(
                             fontFamily = item.optString("fontFamily"),
                             css = item.optString("css"),
                             ninePatchPath = item.optString("ninePatchPath"),
+                            ninePatchSlice = item.optString("ninePatchSlice"),
                             darkUsesLight = item.optBoolean("darkUsesLight", true),
                             darkColor = normalizeHighlightColor(
                                 item.optString("darkColor").ifBlank { item.optString("color") },
@@ -653,6 +654,7 @@ class XposedModuleSettings(
                             darkFontFamily = item.optString("darkFontFamily"),
                             darkCss = item.optString("darkCss"),
                             darkNinePatchPath = item.optString("darkNinePatchPath"),
+                            darkNinePatchSlice = item.optString("darkNinePatchSlice"),
                         ),
                     )
                 }
@@ -706,11 +708,13 @@ class XposedModuleSettings(
                         .put("fontFamily", style.fontFamily)
                         .put("css", style.css)
                         .put("ninePatchPath", style.ninePatchPath)
+                        .put("ninePatchSlice", style.ninePatchSlice)
                         .put("darkUsesLight", style.darkUsesLight)
                         .put("darkColor", normalizeHighlightColor(style.darkColor.ifBlank { style.color }))
                         .put("darkFontFamily", style.darkFontFamily)
                         .put("darkCss", style.darkCss)
-                        .put("darkNinePatchPath", style.darkNinePatchPath),
+                        .put("darkNinePatchPath", style.darkNinePatchPath)
+                        .put("darkNinePatchSlice", style.darkNinePatchSlice),
                 )
             }
         }.toString()

@@ -70,13 +70,16 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import java.io.File
 import java.io.FileOutputStream
+import java.util.zip.GZIPInputStream
 import java.lang.ref.WeakReference
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.system.exitProcess
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -1515,8 +1518,8 @@ class ReaMicroSettingsHook(
         runCatching {
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
-                type = "application/json"
-                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/json", "text/plain", "*/*"))
+                type = "*/*"
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/json", "text/plain", "application/octet-stream", "*/*"))
             }
             activity.startActivityForResult(intent, HIGHLIGHT_STYLE_DOCUMENT_REQUEST_CODE)
         }.onFailure {
@@ -1553,18 +1556,39 @@ class ReaMicroSettingsHook(
 
     private fun importReaderHighlightStyleFromUri(activity: Activity, uri: Uri) {
         runCatching {
-            val text = activity.contentResolver.openInputStream(uri)
-                ?.bufferedReader(Charsets.UTF_8)
-                ?.use { it.readText() }
+            val bytes = activity.contentResolver.openInputStream(uri)
+                ?.use { it.readBytes() }
                 ?: error("empty highlight style file")
-            val imported = readerHighlightStyleFromJson(activity, JSONObject(text))
-            settings.setReaderHighlightStyle(imported)
+            val imported = readerHighlightImportFromBytes(activity, bytes)
+            imported.styles.forEach(settings::setReaderHighlightStyle)
+            imported.rules.forEach(settings::setReaderHighlightRule)
             bumpReaderHighlightVersion()
-            showToast("\u5df2\u5bfc\u5165\u9ad8\u4eae\u6837\u5f0f\uff1a${imported.name}")
+            showToast(
+                if (imported.reeden) {
+                    "\u5df2\u5bfc\u5165 Reeden \u914d\u7f6e\uff1a${imported.styles.size} \u4e2a\u6837\u5f0f / ${imported.rules.size} \u6761\u89c4\u5219"
+                } else if (imported.styles.size == 1) {
+                    "\u5df2\u5bfc\u5165\u9ad8\u4eae\u6837\u5f0f\uff1a${imported.styles.first().name}"
+                } else {
+                    "\u5df2\u5bfc\u5165 ${imported.styles.size} \u4e2a\u9ad8\u4eae\u6837\u5f0f"
+                },
+            )
         }.onFailure {
             showToast("\u5bfc\u5165\u9ad8\u4eae\u6837\u5f0f\u5931\u8d25")
             XposedBridge.log("$LOG_PREFIX import highlight style failed: ${it.stackTraceToString()}")
         }
+    }
+
+    private fun readerHighlightImportFromBytes(activity: Activity, bytes: ByteArray): ReaderHighlightImport {
+        if (bytes.size >= 4 && bytes[0] == 'R'.code.toByte() && bytes[1] == 'E'.code.toByte() &&
+            bytes[2] == 'D'.code.toByte() && bytes[3] == 1.toByte()
+        ) {
+            return readerHighlightImportFromReedenRed(activity, bytes)
+        }
+        return ReaderHighlightImport(
+            styles = listOf(readerHighlightStyleFromJson(activity, JSONObject(bytes.toString(Charsets.UTF_8)))),
+            rules = emptyList(),
+            reeden = false,
+        )
     }
 
     private fun readerHighlightStyleExportJson(activity: Activity, style: ReaderHighlightStyle): JSONObject =
@@ -1581,11 +1605,13 @@ class ReaMicroSettingsHook(
             .put("fontFamily", style.fontFamily)
             .put("css", style.css)
             .put("ninePatchPath", style.ninePatchPath)
+            .put("ninePatchSlice", style.ninePatchSlice)
             .put("darkUsesLight", style.darkUsesLight)
             .put("darkColor", style.darkColor)
             .put("darkFontFamily", style.darkFontFamily)
             .put("darkCss", style.darkCss)
             .put("darkNinePatchPath", style.darkNinePatchPath)
+            .put("darkNinePatchSlice", style.darkNinePatchSlice)
             .apply {
                 highlightNinePatchJson(style.ninePatchPath)?.let { put("ninePatchFile", it) }
                 highlightNinePatchJson(style.darkNinePatchPath)?.let { put("darkNinePatchFile", it) }
@@ -1608,12 +1634,85 @@ class ReaMicroSettingsHook(
             css = item.optString("css"),
             ninePatchPath = restoreHighlightNinePatchFromJson(activity, item.optJSONObject("ninePatchFile"))
                 ?: item.optString("ninePatchPath"),
+            ninePatchSlice = item.optString("ninePatchSlice"),
             darkUsesLight = item.optBoolean("darkUsesLight", true),
             darkColor = item.optString("darkColor"),
             darkFontFamily = item.optString("darkFontFamily"),
             darkCss = item.optString("darkCss"),
             darkNinePatchPath = restoreHighlightNinePatchFromJson(activity, item.optJSONObject("darkNinePatchFile"))
                 ?: item.optString("darkNinePatchPath"),
+            darkNinePatchSlice = item.optString("darkNinePatchSlice"),
+        )
+    }
+
+    private fun readerHighlightImportFromReedenRed(activity: Activity, bytes: ByteArray): ReaderHighlightImport {
+        val json = GZIPInputStream(bytes.copyOfRange(4, bytes.size).inputStream())
+            .bufferedReader(Charsets.UTF_8)
+            .use { it.readText() }
+        val root = JSONObject(json)
+        if (root.optString("type") != "highlightRule") error("not a Reeden highlight rule file")
+        val data = root.optJSONArray("data") ?: JSONArray()
+        val existingIds = settings.highlightSettings().styles.map { it.id }.toMutableSet()
+        val existingRuleIds = settings.highlightSettings().rules.map { it.id }.toMutableSet()
+        val imagePathByHash = HashMap<String, String>()
+        val styles = ArrayList<ReaderHighlightStyle>()
+        val rules = ArrayList<ReaderHighlightRule>()
+        for (index in 0 until data.length()) {
+            val item = data.optJSONObject(index) ?: continue
+            val css = item.optString("styleCssText")
+            val imageData = item.optString("backgroundImageData")
+            if (css.isBlank() || imageData.isBlank()) continue
+            val imageBytes = runCatching {
+                GZIPInputStream(Base64.decode(imageData, Base64.DEFAULT).inputStream()).use { it.readBytes() }
+            }.getOrNull() ?: continue
+            val hash = md5Hex(imageBytes)
+            val imagePath = imagePathByHash.getOrPut(hash) {
+                writeReaderHighlightImage(activity, imageBytes, "$hash.png").absolutePath
+            }
+            var id: String
+            var suffix = 0
+            do {
+                id = "style_reeden_${System.currentTimeMillis()}_${index}_$suffix"
+                suffix++
+            } while (!existingIds.add(id))
+            styles.add(
+                ReaderHighlightStyle(
+                    id = id,
+                    name = item.optString("name").ifBlank { "Reeden \u9ad8\u4eae\u6837\u5f0f ${styles.size + 1}" },
+                    color = colorFromReedenCss(css),
+                    fontFamily = "",
+                    css = css,
+                    ninePatchPath = imagePath,
+                    ninePatchSlice = reedenNineSlice(css),
+                ),
+            )
+            reedenRuleFromItem(item, id, index, existingRuleIds)?.let(rules::add)
+        }
+        if (styles.isEmpty()) error("no Reeden highlight styles found")
+        return ReaderHighlightImport(styles = styles, rules = rules, reeden = true)
+    }
+
+    private fun reedenRuleFromItem(
+        item: JSONObject,
+        styleId: String,
+        index: Int,
+        existingRuleIds: MutableSet<String>,
+    ): ReaderHighlightRule? {
+        val pattern = item.optString("keyword")
+        if (pattern.isBlank()) return null
+        var ruleId: String
+        var suffix = 0
+        do {
+            ruleId = "rule_reeden_${System.currentTimeMillis()}_${index}_$suffix"
+            suffix++
+        } while (!existingRuleIds.add(ruleId))
+        return ReaderHighlightRule(
+            id = ruleId,
+            name = item.optString("name").ifBlank { "Reeden \u9ad8\u4eae\u89c4\u5219 ${index + 1}" },
+            type = if (item.optBoolean("isRegex", false)) ReaderHighlightRuleType.Regex else ReaderHighlightRuleType.FixedText,
+            styleId = styleId,
+            enabled = item.optBoolean("enabled", true),
+            pattern = pattern,
         )
     }
 
@@ -1633,7 +1732,6 @@ class ReaMicroSettingsHook(
     private fun highlightNinePatchJson(path: String): JSONObject? {
         val file = File(path)
         if (!file.isFile) return null
-        if (!file.name.endsWith(".9.png", ignoreCase = true)) return null
         return JSONObject()
             .put("name", file.name)
             .put("mime", "image/png")
@@ -1644,8 +1742,8 @@ class ReaMicroSettingsHook(
         item ?: return null
         val encoded = item.optString("base64")
         if (encoded.isBlank()) return null
-        val name = sanitizeNinePatchFileName(item.optString("name").ifBlank { "highlight.9.png" })
-        val target = uniqueHighlightNinePatchFile(activity, name)
+        val name = sanitizeHighlightImageFileName(item.optString("name").ifBlank { "highlight.png" })
+        val target = uniqueHighlightImageFile(activity, name)
         target.writeBytes(Base64.decode(encoded, Base64.DEFAULT))
         return target.absolutePath
     }
@@ -1662,6 +1760,11 @@ class ReaMicroSettingsHook(
         return target
     }
 
+    private fun writeReaderHighlightImage(activity: Activity, bytes: ByteArray, displayName: String): File =
+        uniqueHighlightImageFile(activity, sanitizeHighlightImageFileName(displayName)).apply {
+            writeBytes(bytes)
+        }
+
     private fun sanitizeNinePatchFileName(name: String): String {
         val cleaned = safeDownloadName(name)
             .removeSuffix(".png")
@@ -1669,6 +1772,58 @@ class ReaMicroSettingsHook(
             .trim('.', ' ')
             .ifBlank { "highlight" }
         return "$cleaned.9.png"
+    }
+
+    private fun sanitizeHighlightImageFileName(name: String): String {
+        val cleaned = safeDownloadName(name)
+            .removeSuffix(".png")
+            .trim('.', ' ')
+            .ifBlank { "highlight" }
+        return "$cleaned.png"
+    }
+
+    private fun uniqueHighlightImageFile(activity: Activity, displayName: String): File {
+        val dir = File(activity.filesDir, "reader_highlight_nine_patch").apply { mkdirs() }
+        val base = displayName.removeSuffix(".png").ifBlank { "highlight" }
+        var target = File(dir, "$base.png")
+        var index = 1
+        while (target.exists()) {
+            target = File(dir, "${base}_$index.png")
+            index++
+        }
+        return target
+    }
+
+    private fun md5Hex(bytes: ByteArray): String =
+        MessageDigest.getInstance("MD5")
+            .digest(bytes)
+            .joinToString("") { "%02X".format(it) }
+
+    private fun reedenNineSlice(css: String): String =
+        Regex("""(?:--)?reeden-background-nine-slice\s*:\s*([^;]+)""")
+            .findAll(css)
+            .lastOrNull()
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+            .orEmpty()
+
+    private fun colorFromReedenCss(css: String): String {
+        val value = Regex("""color\s*:\s*([^;]+)""").find(css)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+        val rgba = Regex("""rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})""")
+            .find(value)
+            ?.groupValues
+        if (rgba != null && rgba.size >= 4) {
+            return "#%02X%02X%02X".format(
+                rgba[1].toInt().coerceIn(0, 255),
+                rgba[2].toInt().coerceIn(0, 255),
+                rgba[3].toInt().coerceIn(0, 255),
+            )
+        }
+        val hex = Regex("""#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})""").find(value)?.value
+        return hex?.let {
+            if (it.length == 9) "#${it.takeLast(6)}" else it
+        }?.uppercase() ?: ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR
     }
 
     private fun safeDownloadName(value: String): String =
@@ -4986,7 +5141,9 @@ class ReaMicroSettingsHook(
             },
             dialogueHighlightFontSummary(style.fontFamily),
             style.css.takeIf { it.isNotBlank() }?.let { "CSS" },
-            style.ninePatchPath.takeIf { it.isNotBlank() }?.let { ".9.png" },
+            style.ninePatchPath.takeIf { it.isNotBlank() }?.let {
+                if (style.ninePatchSlice.isNotBlank()) "Reeden \u4e5d\u5bab\u683c\u56fe" else ".9.png"
+            },
         ).joinToString(" / ")
 
     private fun highlightRuleTypeTitle(rule: ReaderHighlightRule): String =
@@ -6354,6 +6511,12 @@ class ReaMicroSettingsHook(
         val bookKey: String,
         val bookTitle: String,
         val subtitle: String,
+    )
+
+    private data class ReaderHighlightImport(
+        val styles: List<ReaderHighlightStyle>,
+        val rules: List<ReaderHighlightRule>,
+        val reeden: Boolean,
     )
 
     private enum class FontPickerTarget(

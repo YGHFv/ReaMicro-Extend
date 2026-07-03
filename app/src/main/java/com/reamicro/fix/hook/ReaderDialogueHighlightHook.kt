@@ -2,7 +2,12 @@ package com.reamicro.fix.hook
 
 import android.app.Activity
 import android.content.res.Configuration
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Rect
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.NinePatchDrawable
 import com.reamicro.fix.settings.ReaderHighlightRule
 import com.reamicro.fix.settings.ReaderHighlightBookContext
 import com.reamicro.fix.settings.ReaderHighlightRuleType
@@ -14,6 +19,7 @@ import de.robv.android.xposed.XposedHelpers
 import java.io.File
 import java.lang.reflect.Field
 import java.lang.reflect.Method
+import java.lang.reflect.Proxy
 
 class ReaderDialogueHighlightHook(
     private val classLoader: ClassLoader,
@@ -24,10 +30,14 @@ class ReaderDialogueHighlightHook(
     private val fieldCache = HashMap<String, Field>()
     private val fontFamilyCache = HashMap<String, Any>()
     private val failedFontFamilyLogKeys = HashSet<String>()
+    private val ninePatchDrawableCache = HashMap<String, CachedImage>()
+    @Volatile private var ninePatchDrawHookInstalled: Boolean = false
+    @Volatile private var lastNinePatchLogKey: String = ""
     @Volatile private var lastAppliedLogKey: String = ""
 
     fun install() {
         CONTENT_DOM_CLASS_CANDIDATES.forEach(::hookContentDom)
+        hookJustifyTextNinePatchDraw()
     }
 
     private fun hookContentDom(className: String) {
@@ -75,6 +85,7 @@ class ReaderDialogueHighlightHook(
             val singleQuoteRanges = enabledRules
                 .filter { it.type == ReaderHighlightRuleType.SingleQuotePhrase }
                 .flatMap { findQuoteRanges(text, SINGLE_QUOTES) }
+            val ninePatchAnnotations = ArrayList<NinePatchAnnotation>()
             val rangeObjects = enabledRules.flatMap { rule ->
                 val ranges = findRanges(
                     text = text,
@@ -83,7 +94,16 @@ class ReaderDialogueHighlightHook(
                     singleQuoteRanges = singleQuoteRanges,
                 )
                 if (ranges.isEmpty()) return@flatMap emptyList()
-                val style = createHighlightSpanStyle(highlight.styleById(rule.styleId), dark) ?: return@flatMap emptyList()
+                val highlightStyle = highlight.styleById(rule.styleId)
+                val style = createHighlightSpanStyle(highlightStyle, dark) ?: return@flatMap emptyList()
+                val ninePatchPath = highlightStyle.ninePatchPathForTheme(dark).trim()
+                if (ninePatchPath.isNotBlank()) {
+                    val ninePatchSlice = highlightStyle.ninePatchSliceForTheme(dark)
+                        .ifBlank { reedenNineSlice(highlightStyle.cssForTheme(dark)) }
+                    ranges.forEach { range ->
+                        ninePatchAnnotations.add(NinePatchAnnotation(ninePatchPath, ninePatchSlice, range.first, range.last))
+                    }
+                }
                 ranges.mapNotNull { range -> createAnnotatedRange(style, range.first, range.last) }
             }
             if (rangeObjects.isEmpty()) return
@@ -92,7 +112,11 @@ class ReaderDialogueHighlightHook(
                 addAll(originalSpanStyles.filterNotNull())
                 addAll(rangeObjects)
             }
-            val nextContent = newAnnotatedString(content, nextSpanStyles) ?: return
+            val nextContent = if (ninePatchAnnotations.isEmpty()) {
+                newAnnotatedString(content, nextSpanStyles)
+            } else {
+                newAnnotatedStringWithNinePatchAnnotations(content, nextSpanStyles, ninePatchAnnotations)
+            } ?: return
             field(contentDom.javaClass.name, "content").set(contentDom, nextContent)
             logApplied(text, rangeObjects.size)
         }.onFailure {
@@ -384,6 +408,334 @@ class ReaderDialogueHighlightHook(
         method(ANNOTATED_STRING_EXT_CLASS, "newInstance\$default", 5)
             .invoke(null, original, spanStyles, null, 2, null)
 
+    private fun newAnnotatedStringWithNinePatchAnnotations(
+        original: Any,
+        spanStyles: List<Any>,
+        annotations: List<NinePatchAnnotation>,
+    ): Any? =
+        runCatching {
+            val builderClass = cls(ANNOTATED_STRING_BUILDER_CLASS)
+            val builder = builderClass.getDeclaredConstructor(String::class.java)
+                .apply { isAccessible = true }
+                .newInstance(callNoArg(original, "getText")?.toString().orEmpty())
+            val addStringAnnotation = builderClass.methods.first {
+                it.name == "addStringAnnotation" && it.parameterTypes.size == 4
+            }
+            val addStyleMethods = builderClass.methods.filter {
+                it.name == "addStyle" && it.parameterTypes.size == 3
+            }
+            val toAnnotatedString = builderClass.methods.first {
+                it.name == "toAnnotatedString" && it.parameterTypes.isEmpty()
+            }
+            val length = (callNoArg(original, "length") as? Int)
+                ?: callNoArg(original, "getLength") as? Int
+                ?: callNoArg(original, "getText")?.toString()?.length
+                ?: 0
+            val originalStringAnnotations = original.javaClass.methods.firstOrNull {
+                it.name == "getStringAnnotations" && it.parameterTypes.size == 2
+            }?.invoke(original, 0, length) as? List<*> ?: emptyList<Any>()
+            originalStringAnnotations.filterNotNull().forEach { range ->
+                addStringAnnotation.invoke(
+                    builder,
+                    callNoArg(range, "getTag")?.toString().orEmpty(),
+                    callNoArg(range, "getItem")?.toString().orEmpty(),
+                    callNoArg(range, "getStart") as? Int ?: return@forEach,
+                    callNoArg(range, "getEnd") as? Int ?: return@forEach,
+                )
+            }
+            annotations.forEach { annotation ->
+                addStringAnnotation.invoke(
+                    builder,
+                    NINE_PATCH_ANNOTATION_TAG,
+                    annotation.path + NINE_PATCH_ANNOTATION_SEPARATOR + annotation.slice,
+                    annotation.start,
+                    annotation.end,
+                )
+            }
+            (callNoArg(original, "getParagraphStyles") as? List<*>)
+                ?.filterNotNull()
+                ?.forEach { range -> addAnnotatedStyle(builder, addStyleMethods, range) }
+            spanStyles.forEach { range -> addAnnotatedStyle(builder, addStyleMethods, range) }
+            toAnnotatedString.invoke(builder)
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX nine-patch annotation failed: ${it.stackTraceToString()}")
+        }.getOrNull()
+
+    private fun addAnnotatedStyle(builder: Any, addStyleMethods: List<Method>, range: Any) {
+        val item = callNoArg(range, "getItem") ?: return
+        val start = callNoArg(range, "getStart") as? Int ?: return
+        val end = callNoArg(range, "getEnd") as? Int ?: return
+        addStyleMethods.firstOrNull { method ->
+            method.parameterTypes[0].isAssignableFrom(item.javaClass)
+        }?.invoke(builder, item, start, end)
+    }
+
+    private fun hookJustifyTextNinePatchDraw() {
+        if (ninePatchDrawHookInstalled) return
+        runCatching {
+            val justifyTextClass = cls(JUSTIFY_TEXT_CLASS)
+            val annotatedStringClass = cls(ANNOTATED_STRING_CLASS)
+            val methods = justifyTextClass.declaredMethods.filter { method ->
+                method.name == "JustifyText" &&
+                    method.parameterTypes.size == 8 &&
+                    method.parameterTypes[0] == annotatedStringClass
+            }
+            methods.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        injectNinePatchDraw(param)
+                    }
+                })
+            }
+            ninePatchDrawHookInstalled = methods.isNotEmpty()
+            XposedBridge.log("$LOG_PREFIX nine-patch draw hook installed count=${methods.size}")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX nine-patch draw hook failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun injectNinePatchDraw(param: XC_MethodHook.MethodHookParam) {
+        runCatching {
+            val annotatedString = param.args?.getOrNull(0) ?: return
+            val ranges = ninePatchRanges(annotatedString)
+            if (ranges.isEmpty()) return
+            val state = NinePatchDrawState(ranges)
+            val modifier = drawBehindModifier(param.args?.getOrNull(1), state) ?: return
+            val originalOnTextLayout = param.args?.getOrNull(4)
+            param.args[1] = modifier
+            param.args[4] = function1Proxy("NinePatchTextLayout") { args ->
+                state.textLayoutResult = args?.getOrNull(0)
+                invokeFunction1(originalOnTextLayout, args?.getOrNull(0))
+                targetUnit()
+            }
+            val defaultMask = param.args.getOrNull(7) as? Int
+            if (defaultMask != null) {
+                param.args[7] = defaultMask and JUSTIFY_TEXT_DEFAULT_MODIFIER.inv() and
+                    JUSTIFY_TEXT_DEFAULT_ON_TEXT_LAYOUT.inv()
+            }
+        }.onFailure {
+            logNinePatchDrawFailure("inject", it)
+        }
+    }
+
+    private fun ninePatchRanges(annotatedString: Any): List<NinePatchRange> {
+        val length = (callNoArg(annotatedString, "length") as? Int)
+            ?: callNoArg(annotatedString, "getLength") as? Int
+            ?: callNoArg(annotatedString, "getText")?.toString()?.length
+            ?: 0
+        val annotations = annotatedString.javaClass.methods.firstOrNull {
+            it.name == "getStringAnnotations" && it.parameterTypes.size == 3
+        }?.invoke(annotatedString, NINE_PATCH_ANNOTATION_TAG, 0, length) as? List<*>
+            ?: return emptyList()
+        return annotations.mapNotNull { range ->
+            range ?: return@mapNotNull null
+            val value = callNoArg(range, "getItem")?.toString().orEmpty()
+            val path = value.substringBefore(NINE_PATCH_ANNOTATION_SEPARATOR).trim()
+            val slice = value.substringAfter(NINE_PATCH_ANNOTATION_SEPARATOR, "").trim()
+            val start = callNoArg(range, "getStart") as? Int ?: return@mapNotNull null
+            val end = callNoArg(range, "getEnd") as? Int ?: return@mapNotNull null
+            if (path.isBlank() || end <= start) null else NinePatchRange(start, end, path, slice)
+        }
+    }
+
+    private fun drawBehindModifier(baseModifier: Any?, state: NinePatchDrawState): Any? =
+        runCatching {
+            val modifier = baseModifier ?: modifierInstance()
+            cls(DRAW_MODIFIER_KT_CLASS).methods.firstOrNull {
+                it.name == "drawBehind" && it.parameterTypes.size == 2
+            }?.invoke(null, modifier, function1Proxy("NinePatchDraw") {
+                drawNinePatchBackgrounds(it?.getOrNull(0), state)
+                targetUnit()
+            })
+        }.onFailure {
+            logNinePatchDrawFailure("modifier", it)
+        }.getOrNull()
+
+    private fun drawNinePatchBackgrounds(drawScope: Any?, state: NinePatchDrawState) {
+        val layout = state.textLayoutResult ?: return
+        val canvas = nativeCanvas(drawScope) ?: return
+        val density = activityProvider()?.resources?.displayMetrics?.density ?: 1f
+        val horizontalPadding = (3f * density).toInt().coerceAtLeast(2)
+        val verticalPadding = (1.5f * density).toInt().coerceAtLeast(1)
+        state.ranges.forEach { range ->
+            val image = imageForNinePatch(range.path) ?: return@forEach
+            val nineSlice = parseNineSlice(range.slice, image.bitmap.width, image.bitmap.height)
+            lineRects(layout, range.start, range.end, horizontalPadding, verticalPadding).forEach { rect ->
+                if (nineSlice != null) {
+                    drawNineSlice(canvas, image.bitmap, nineSlice, rect)
+                } else {
+                    image.drawable.bounds = rect
+                    image.drawable.draw(canvas)
+                }
+            }
+        }
+    }
+
+    private fun lineRects(layout: Any, start: Int, end: Int, horizontalPadding: Int, verticalPadding: Int): List<Rect> {
+        val lineForOffset = layout.javaClass.methods.firstOrNull {
+            it.name == "getLineForOffset" && it.parameterTypes.size == 1
+        } ?: return emptyList()
+        val startLine = lineForOffset.invoke(layout, start) as? Int ?: return emptyList()
+        val endLine = lineForOffset.invoke(layout, (end - 1).coerceAtLeast(start)) as? Int ?: startLine
+        return (startLine..endLine).mapNotNull { line ->
+            val lineStart = callInt(layout, "getLineStart", line) ?: return@mapNotNull null
+            val lineEnd = lineEnd(layout, line) ?: return@mapNotNull null
+            val localStart = maxOf(start, lineStart)
+            val localEnd = minOf(end, lineEnd)
+            if (localEnd <= localStart) return@mapNotNull null
+            val left = charRect(layout, localStart)?.left ?: return@mapNotNull null
+            val right = charRect(layout, localEnd - 1)?.right ?: return@mapNotNull null
+            val top = callFloat(layout, "getLineTop", line) ?: charRect(layout, localStart)?.top ?: return@mapNotNull null
+            val bottom = callFloat(layout, "getLineBottom", line) ?: charRect(layout, localStart)?.bottom ?: return@mapNotNull null
+            Rect(
+                (left - horizontalPadding).toInt(),
+                (top - verticalPadding).toInt(),
+                (right + horizontalPadding).toInt(),
+                (bottom + verticalPadding).toInt(),
+            )
+        }
+    }
+
+    private fun lineEnd(layout: Any, line: Int): Int? {
+        layout.javaClass.methods.firstOrNull {
+            it.name == "getLineEnd" && it.parameterTypes.size == 2
+        }?.let { return it.invoke(layout, line, false) as? Int }
+        return layout.javaClass.methods.firstOrNull {
+            it.name == "getLineEnd" && it.parameterTypes.size == 1
+        }?.invoke(layout, line) as? Int
+    }
+
+    private fun charRect(layout: Any, offset: Int): TextBox? {
+        val rect = layout.javaClass.methods.firstOrNull {
+            it.name == "getBoundingBox" && it.parameterTypes.size == 1
+        }?.invoke(layout, offset) ?: return null
+        return TextBox(
+            left = callNoArg(rect, "getLeft") as? Float ?: return null,
+            top = callNoArg(rect, "getTop") as? Float ?: return null,
+            right = callNoArg(rect, "getRight") as? Float ?: return null,
+            bottom = callNoArg(rect, "getBottom") as? Float ?: return null,
+        )
+    }
+
+    private fun nativeCanvas(drawScope: Any?): android.graphics.Canvas? {
+        val drawContext = callNoArg(drawScope, "getDrawContext") ?: return null
+        val composeCanvas = callNoArg(drawContext, "getCanvas") ?: return null
+        val canvasKt = cls(ANDROID_CANVAS_KT_CLASS)
+        return canvasKt.methods.firstOrNull {
+            it.name == "getNativeCanvas" && it.parameterTypes.size == 1
+        }?.invoke(null, composeCanvas) as? android.graphics.Canvas
+    }
+
+    private fun imageForNinePatch(path: String): CachedImage? {
+        val file = File(path)
+        if (!file.isFile) return null
+        val cacheKey = file.absolutePath
+        val modified = file.lastModified()
+        synchronized(ninePatchDrawableCache) {
+            ninePatchDrawableCache[cacheKey]?.takeIf { it.modified == modified }?.let { return it }
+        }
+        val bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return null
+        val drawable = if (bitmap.ninePatchChunk != null) {
+            NinePatchDrawable(activityProvider()?.resources, bitmap, bitmap.ninePatchChunk, Rect(), file.name)
+        } else {
+            BitmapDrawable(activityProvider()?.resources, bitmap)
+        }
+        val cached = CachedImage(modified, bitmap, drawable)
+        synchronized(ninePatchDrawableCache) {
+            ninePatchDrawableCache[cacheKey] = cached
+        }
+        return cached
+    }
+
+    private fun parseNineSlice(value: String, bitmapWidth: Int, bitmapHeight: Int): NineSlice? {
+        if (value.isBlank()) return null
+        val numbers = Regex("""-?\d+(?:\.\d+)?""").findAll(value).map { it.value.toFloat() }.toList()
+        if (numbers.size < 4) return null
+        val scaleX = if (numbers.size >= 6 && numbers[4] > 0f) bitmapWidth / numbers[4] else 1f
+        val scaleY = if (numbers.size >= 6 && numbers[5] > 0f) bitmapHeight / numbers[5] else 1f
+        val left = (numbers[0] * scaleX).toInt().coerceIn(0, bitmapWidth)
+        val top = (numbers[1] * scaleY).toInt().coerceIn(0, bitmapHeight)
+        val right = (numbers[2] * scaleX).toInt().coerceIn(left, bitmapWidth)
+        val bottom = (numbers[3] * scaleY).toInt().coerceIn(top, bitmapHeight)
+        if (right <= left || bottom <= top) return null
+        return NineSlice(left, top, right, bottom)
+    }
+
+    private fun drawNineSlice(canvas: android.graphics.Canvas, bitmap: android.graphics.Bitmap, slice: NineSlice, dst: Rect) {
+        val srcX = intArrayOf(0, slice.left, slice.right, bitmap.width)
+        val srcY = intArrayOf(0, slice.top, slice.bottom, bitmap.height)
+        val leftWidth = minOf(slice.left, dst.width() / 2)
+        val rightWidth = minOf(bitmap.width - slice.right, dst.width() - leftWidth)
+        val topHeight = minOf(slice.top, dst.height() / 2)
+        val bottomHeight = minOf(bitmap.height - slice.bottom, dst.height() - topHeight)
+        val dstX = intArrayOf(dst.left, dst.left + leftWidth, dst.right - rightWidth, dst.right)
+        val dstY = intArrayOf(dst.top, dst.top + topHeight, dst.bottom - bottomHeight, dst.bottom)
+        for (row in 0 until 3) {
+            for (col in 0 until 3) {
+                val source = Rect(srcX[col], srcY[row], srcX[col + 1], srcY[row + 1])
+                val target = Rect(dstX[col], dstY[row], dstX[col + 1], dstY[row + 1])
+                if (source.width() > 0 && source.height() > 0 && target.width() > 0 && target.height() > 0) {
+                    canvas.drawBitmap(bitmap, source, target, null)
+                }
+            }
+        }
+    }
+
+    private fun reedenNineSlice(css: String): String =
+        Regex("""(?:--)?reeden-background-nine-slice\s*:\s*([^;]+)""")
+            .findAll(css)
+            .lastOrNull()
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+            .orEmpty()
+
+    private fun modifierInstance(): Any? =
+        fieldObjectOrNull(MODIFIER_CLASS, "INSTANCE") ?: fieldObjectOrNull(MODIFIER_CLASS, "Companion")
+
+    private fun function1Proxy(name: String, block: (Array<Any?>?) -> Any?): Any {
+        val functionClass = cls(FUNCTION1_CLASS)
+        return Proxy.newProxyInstance(classLoader, arrayOf(functionClass)) { proxy, method, args ->
+            when (method.name) {
+                "invoke" -> runCatching { block(args) }
+                    .onFailure { logNinePatchDrawFailure(name, it) }
+                    .getOrElse { targetUnit() }
+                "toString" -> "ReaMicro$name"
+                "hashCode" -> System.identityHashCode(proxy)
+                "equals" -> proxy === args?.getOrNull(0)
+                else -> null
+            }
+        }
+    }
+
+    private fun invokeFunction1(function: Any?, value: Any?) {
+        if (function == null) return
+        function.javaClass.methods.firstOrNull {
+            it.name == "invoke" && it.parameterTypes.size == 1
+        }?.invoke(function, value)
+    }
+
+    private fun callInt(target: Any, name: String, value: Int): Int? =
+        target.javaClass.methods.firstOrNull {
+            it.name == name && it.parameterTypes.size == 1
+        }?.invoke(target, value) as? Int
+
+    private fun callFloat(target: Any, name: String, value: Int): Float? =
+        target.javaClass.methods.firstOrNull {
+            it.name == name && it.parameterTypes.size == 1
+        }?.invoke(target, value) as? Float
+
+    private fun targetUnit(): Any? =
+        fieldObjectOrNull(UNIT_CLASS, "INSTANCE")
+
+    private fun logNinePatchDrawFailure(source: String, error: Throwable) {
+        val key = "$source|${error.javaClass.name}|${error.message}"
+        if (key == lastNinePatchLogKey) return
+        lastNinePatchLogKey = key
+        XposedBridge.log("$LOG_PREFIX nine-patch draw $source failed: ${error.stackTraceToString()}")
+    }
+
     private fun resolveFontFamily(selection: String): Any? {
         if (selection.isBlank()) return null
         synchronized(fontFamilyCache) {
@@ -563,9 +915,17 @@ class ReaderDialogueHighlightHook(
         const val LOG_PREFIX = "ReaMicro LSP"
         const val DEFAULT_DIALOGUE_COLOR = "#FF9800"
         const val SPAN_STYLE_CLASS = "androidx.compose.ui.text.SpanStyle"
+        const val ANNOTATED_STRING_CLASS = "androidx.compose.ui.text.AnnotatedString"
+        const val ANNOTATED_STRING_BUILDER_CLASS = "androidx.compose.ui.text.AnnotatedString\$Builder"
         const val ANNOTATED_RANGE_CLASS = "androidx.compose.ui.text.AnnotatedString\$Range"
         const val ANNOTATED_STRING_EXT_CLASS = "org.epub.utils.AnnotatedStringExtKt"
+        const val JUSTIFY_TEXT_CLASS = "app.zhendong.reamicro.arch.components.JustifyText_androidKt"
+        const val DRAW_MODIFIER_KT_CLASS = "androidx.compose.ui.draw.DrawModifierKt"
+        const val ANDROID_CANVAS_KT_CLASS = "androidx.compose.ui.graphics.AndroidCanvas_androidKt"
         const val COLOR_KT_CLASS = "androidx.compose.ui.graphics.ColorKt"
+        const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
+        const val FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
+        const val UNIT_CLASS = "kotlin.Unit"
         const val FONT_PROVIDER_CLASS = "org.epub.FontProvider"
         const val FONT_FAMILY_CLASS = "androidx.compose.ui.text.font.FontFamily"
         const val FONT_FAMILY_KT_CLASS = "androidx.compose.ui.text.font.FontFamilyKt"
@@ -585,6 +945,10 @@ class ReaderDialogueHighlightHook(
         const val FONT_STYLE_ITALIC = 1
         const val TEXT_DECORATION_UNDERLINE = 1
         const val TEXT_DECORATION_LINE_THROUGH = 2
+        const val JUSTIFY_TEXT_DEFAULT_MODIFIER = 2
+        const val JUSTIFY_TEXT_DEFAULT_ON_TEXT_LAYOUT = 16
+        const val NINE_PATCH_ANNOTATION_TAG = "reamicro.highlight.ninepatch"
+        const val NINE_PATCH_ANNOTATION_SEPARATOR = "\u001F"
         const val MARKUP_TEXT = "#text"
         val CONTENT_DOM_CLASS_CANDIDATES = listOf(
             "org.epub.html.node.ContentDom",
@@ -610,5 +974,44 @@ class ReaderDialogueHighlightHook(
         val fontStyle: String? = null,
         val fontFeatureSettings: String = "",
         val textDecoration: String? = null,
+    )
+
+    private data class NinePatchAnnotation(
+        val path: String,
+        val slice: String,
+        val start: Int,
+        val end: Int,
+    )
+
+    private data class NinePatchRange(
+        val start: Int,
+        val end: Int,
+        val path: String,
+        val slice: String,
+    )
+
+    private data class NinePatchDrawState(
+        val ranges: List<NinePatchRange>,
+        @Volatile var textLayoutResult: Any? = null,
+    )
+
+    private data class TextBox(
+        val left: Float,
+        val top: Float,
+        val right: Float,
+        val bottom: Float,
+    )
+
+    private data class NineSlice(
+        val left: Int,
+        val top: Int,
+        val right: Int,
+        val bottom: Int,
+    )
+
+    private data class CachedImage(
+        val modified: Long,
+        val bitmap: android.graphics.Bitmap,
+        val drawable: Drawable,
     )
 }

@@ -306,11 +306,13 @@ data class ReaderHighlightStyle(
     val fontFamily: String = "",
     val css: String = "",
     val ninePatchPath: String = "",
+    val ninePatchSlice: String = "",
     val darkUsesLight: Boolean = true,
     val darkColor: String = "",
     val darkFontFamily: String = "",
     val darkCss: String = "",
     val darkNinePatchPath: String = "",
+    val darkNinePatchSlice: String = "",
 ) {
     fun colorForTheme(dark: Boolean): String =
         if (dark && !darkUsesLight) darkColor.ifBlank { color } else color
@@ -323,6 +325,9 @@ data class ReaderHighlightStyle(
 
     fun ninePatchPathForTheme(dark: Boolean): String =
         if (dark && !darkUsesLight) darkNinePatchPath.ifBlank { ninePatchPath } else ninePatchPath
+
+    fun ninePatchSliceForTheme(dark: Boolean): String =
+        if (dark && !darkUsesLight) darkNinePatchSlice.ifBlank { ninePatchSlice } else ninePatchSlice
 
     companion object {
         fun default(
