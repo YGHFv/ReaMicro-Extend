@@ -284,6 +284,7 @@ class XposedModuleSettings(
     fun addReaderBookHighlightRule(bookKey: String, bookTitle: String, text: String): ReaderHighlightRule? {
         val pattern = text.trim()
         if (bookKey.isBlank() || pattern.isBlank()) return null
+        val normalizedBookTitle = readableReaderBookTitle(bookTitle, *bookKey.split('|').toTypedArray())
         val current = highlightSettings()
         current.rules.firstOrNull {
             it.bookKey == bookKey &&
@@ -301,11 +302,35 @@ class XposedModuleSettings(
             enabled = true,
             pattern = pattern,
             bookKey = bookKey,
-            bookTitle = bookTitle.ifBlank { "本书" },
+            bookTitle = normalizedBookTitle,
         )
         setReaderHighlightRule(rule)
         return rule
     }
+
+    private fun readableReaderBookTitle(vararg candidates: String): String =
+        candidates
+            .asSequence()
+            .map(::cleanReaderBookTitleCandidate)
+            .firstOrNull { it.isNotBlank() && !isInternalReaderBookTitle(it) && !isGenericReaderBookTitle(it) }
+            .orEmpty()
+
+    private fun cleanReaderBookTitleCandidate(value: String): String =
+        value.trim()
+            .substringAfterLast('|')
+            .substringAfterLast('/')
+            .substringAfterLast('\\')
+            .removeSuffix(".epub")
+            .removeSuffix(".EPUB")
+            .trim()
+
+    private fun isInternalReaderBookTitle(value: String): Boolean =
+        value.contains('|') ||
+            value.matches(Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")) ||
+            value.matches(Regex("^[0-9a-fA-F]{16,}$"))
+
+    private fun isGenericReaderBookTitle(value: String): Boolean =
+        value == "\u672c\u4e66" || value == "\u56fe\u4e66"
 
     fun removeReaderHighlightRule(ruleId: String) {
         if (ruleId == ModuleSettings.DEFAULT_READER_DOUBLE_QUOTE_RULE_ID ||

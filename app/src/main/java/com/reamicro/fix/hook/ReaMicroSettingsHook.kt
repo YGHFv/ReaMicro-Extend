@@ -27,6 +27,7 @@ import android.provider.OpenableColumns
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
+import android.util.Base64
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
@@ -69,6 +70,7 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import java.io.File
 import java.io.FileOutputStream
+import java.lang.ref.WeakReference
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 import java.text.SimpleDateFormat
@@ -113,6 +115,7 @@ class ReaMicroSettingsHook(
     @Volatile private var lastOnlineSourceImportAtMs: Long = 0L
     @Volatile private var pendingDeleteOnlineSourceId: String = ""
     @Volatile private var pendingDeleteOnlineSourceAtMs: Long = 0L
+    @Volatile private var pendingHighlightNinePatchInputRef: WeakReference<EditText>? = null
     private val previewFontFamilyCache = HashMap<String, Any>()
     private val failedPreviewFontFamilyLogKeys = HashSet<String>()
     private val fontFilesCacheLock = Any()
@@ -1356,6 +1359,12 @@ class ReaMicroSettingsHook(
                 val ninePatchInput = settingsDialogInput(activity, "\u6d45\u8272 .9.png \u8def\u5f84\uff08\u4fdd\u7559\u914d\u7f6e\uff09", singleLine = true, colors = colors).apply {
                     setText(style.ninePatchPath)
                 }
+                val ninePatchSelectButton = settingsDialogButton(
+                    activity,
+                    "\u9009\u62e9\u6d45\u8272\u70b9\u4e5d\u56fe",
+                    colors,
+                    SettingsDialogButtonRole.Neutral,
+                )
                 var darkUsesLight = style.darkUsesLight
                 val darkToggleButton = settingsDialogButton(
                     activity,
@@ -1391,6 +1400,12 @@ class ReaMicroSettingsHook(
                 val darkNinePatchInput = settingsDialogInput(activity, "\u6df1\u8272 .9.png \u8def\u5f84\uff08\u4fdd\u7559\u914d\u7f6e\uff09", singleLine = true, colors = colors).apply {
                     setText(style.darkNinePatchPath)
                 }
+                val darkNinePatchSelectButton = settingsDialogButton(
+                    activity,
+                    "\u9009\u62e9\u6df1\u8272\u70b9\u4e5d\u56fe",
+                    colors,
+                    SettingsDialogButtonRole.Neutral,
+                )
                 val finishButton = settingsDialogButton(activity, "\u5b8c\u6210", colors)
                 val deleteButton = settingsDialogButton(activity, "\u5220\u9664", colors, SettingsDialogButtonRole.Destructive)
                 val cancelButton = settingsDialogButton(activity, "\u53d6\u6d88", colors, SettingsDialogButtonRole.Neutral)
@@ -1401,6 +1416,7 @@ class ReaMicroSettingsHook(
                     darkFontStatus.visibility = visibility
                     darkCssInput.visibility = visibility
                     darkNinePatchInput.visibility = visibility
+                    darkNinePatchSelectButton.visibility = visibility
                 }
                 syncLightFontStatus = {
                     lightFontStatus.text = "\u6d45\u8272\u5b57\u4f53\uff1a${dialogueHighlightFontSummary(lightFontSelection)}"
@@ -1419,12 +1435,20 @@ class ReaMicroSettingsHook(
                 card.addView(lightFontStatus)
                 card.addView(cssInput)
                 card.addView(ninePatchInput)
+                card.addView(ninePatchSelectButton, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = settingsDp(activity, 10) })
                 card.addView(darkToggleButton)
                 card.addView(darkColorInput)
                 syncDarkFontStatus.invoke()
                 card.addView(darkFontStatus)
                 card.addView(darkCssInput)
                 card.addView(darkNinePatchInput)
+                card.addView(darkNinePatchSelectButton, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = settingsDp(activity, 10) })
                 syncDarkInputs()
                 val buttons = if (style.id == ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID) {
                     listOf(finishButton, cancelButton)
@@ -1435,6 +1459,12 @@ class ReaMicroSettingsHook(
                 darkToggleButton.setOnClickListener {
                     darkUsesLight = !darkUsesLight
                     syncDarkInputs()
+                }
+                ninePatchSelectButton.setOnClickListener {
+                    openHighlightNinePatchPicker(activity, ninePatchInput)
+                }
+                darkNinePatchSelectButton.setOnClickListener {
+                    openHighlightNinePatchPicker(activity, darkNinePatchInput)
                 }
                 finishButton.setOnClickListener {
                     settings.setReaderHighlightStyle(
@@ -1472,7 +1502,7 @@ class ReaMicroSettingsHook(
         runCatching {
             val fileName = "reamicro_highlight_style_${safeDownloadName(style.name)}_" +
                 SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date()) + ".json"
-            writeTextToDownloads(activity, fileName, readerHighlightStyleExportJson(style).toString(2))
+            writeTextToDownloads(activity, fileName, readerHighlightStyleExportJson(activity, style).toString(2))
             showToast("\u5df2\u5bfc\u51fa\u9ad8\u4eae\u6837\u5f0f\uff1a$fileName")
         }.onFailure {
             showToast("\u5bfc\u51fa\u9ad8\u4eae\u6837\u5f0f\u5931\u8d25")
@@ -1495,13 +1525,39 @@ class ReaMicroSettingsHook(
         }
     }
 
+    private fun openHighlightNinePatchPicker(activity: Activity, input: EditText) {
+        runCatching {
+            pendingHighlightNinePatchInputRef = WeakReference(input)
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "image/png"
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/png", "application/octet-stream", "*/*"))
+            }
+            activity.startActivityForResult(intent, HIGHLIGHT_NINE_PATCH_DOCUMENT_REQUEST_CODE)
+        }.onFailure {
+            showToast("\u6253\u5f00\u70b9\u4e5d\u56fe\u9009\u62e9\u5931\u8d25")
+            XposedBridge.log("$LOG_PREFIX open highlight nine-patch picker failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun importHighlightNinePatchFromUri(activity: Activity, uri: Uri) {
+        runCatching {
+            val target = copyHighlightNinePatchUri(activity, uri)
+            pendingHighlightNinePatchInputRef?.get()?.setText(target.absolutePath)
+            showToast("\u5df2\u9009\u62e9\u70b9\u4e5d\u56fe\uff1a${target.name}")
+        }.onFailure {
+            showToast(it.message ?: "\u9009\u62e9\u70b9\u4e5d\u56fe\u5931\u8d25")
+            XposedBridge.log("$LOG_PREFIX import highlight nine-patch failed: ${it.stackTraceToString()}")
+        }
+    }
+
     private fun importReaderHighlightStyleFromUri(activity: Activity, uri: Uri) {
         runCatching {
             val text = activity.contentResolver.openInputStream(uri)
                 ?.bufferedReader(Charsets.UTF_8)
                 ?.use { it.readText() }
                 ?: error("empty highlight style file")
-            val imported = readerHighlightStyleFromJson(JSONObject(text))
+            val imported = readerHighlightStyleFromJson(activity, JSONObject(text))
             settings.setReaderHighlightStyle(imported)
             bumpReaderHighlightVersion()
             showToast("\u5df2\u5bfc\u5165\u9ad8\u4eae\u6837\u5f0f\uff1a${imported.name}")
@@ -1511,7 +1567,7 @@ class ReaMicroSettingsHook(
         }
     }
 
-    private fun readerHighlightStyleExportJson(style: ReaderHighlightStyle): JSONObject =
+    private fun readerHighlightStyleExportJson(activity: Activity, style: ReaderHighlightStyle): JSONObject =
         JSONObject()
             .put("type", "reader_highlight_style")
             .put("version", 1)
@@ -1530,8 +1586,12 @@ class ReaMicroSettingsHook(
             .put("darkFontFamily", style.darkFontFamily)
             .put("darkCss", style.darkCss)
             .put("darkNinePatchPath", style.darkNinePatchPath)
+            .apply {
+                highlightNinePatchJson(style.ninePatchPath)?.let { put("ninePatchFile", it) }
+                highlightNinePatchJson(style.darkNinePatchPath)?.let { put("darkNinePatchFile", it) }
+            }
 
-    private fun readerHighlightStyleFromJson(root: JSONObject): ReaderHighlightStyle {
+    private fun readerHighlightStyleFromJson(activity: Activity, root: JSONObject): ReaderHighlightStyle {
         val item = root.optJSONObject("style") ?: root
         val existingIds = settings.highlightSettings().styles.map { it.id }.toSet()
         val rawId = item.optString("id").takeIf { it.isNotBlank() } ?: uniqueReaderHighlightId("style")
@@ -1546,13 +1606,69 @@ class ReaMicroSettingsHook(
             color = item.optString("color").ifBlank { ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR },
             fontFamily = item.optString("fontFamily"),
             css = item.optString("css"),
-            ninePatchPath = item.optString("ninePatchPath"),
+            ninePatchPath = restoreHighlightNinePatchFromJson(activity, item.optJSONObject("ninePatchFile"))
+                ?: item.optString("ninePatchPath"),
             darkUsesLight = item.optBoolean("darkUsesLight", true),
             darkColor = item.optString("darkColor"),
             darkFontFamily = item.optString("darkFontFamily"),
             darkCss = item.optString("darkCss"),
-            darkNinePatchPath = item.optString("darkNinePatchPath"),
+            darkNinePatchPath = restoreHighlightNinePatchFromJson(activity, item.optJSONObject("darkNinePatchFile"))
+                ?: item.optString("darkNinePatchPath"),
         )
+    }
+
+    private fun copyHighlightNinePatchUri(activity: Activity, uri: Uri): File {
+        val rawName = queryDisplayName(activity, uri) ?: uri.lastPathSegment.orEmpty()
+        if (!rawName.endsWith(".9.png", ignoreCase = true)) {
+            error("\u8bf7\u9009\u62e9 .9.png \u70b9\u4e5d\u56fe")
+        }
+        val displayName = sanitizeNinePatchFileName(rawName)
+        val target = uniqueHighlightNinePatchFile(activity, displayName)
+        activity.contentResolver.openInputStream(uri)?.use { input ->
+            target.outputStream().buffered().use { output -> input.copyTo(output) }
+        } ?: error("\u65e0\u6cd5\u8bfb\u53d6\u70b9\u4e5d\u56fe")
+        return target
+    }
+
+    private fun highlightNinePatchJson(path: String): JSONObject? {
+        val file = File(path)
+        if (!file.isFile) return null
+        if (!file.name.endsWith(".9.png", ignoreCase = true)) return null
+        return JSONObject()
+            .put("name", file.name)
+            .put("mime", "image/png")
+            .put("base64", Base64.encodeToString(file.readBytes(), Base64.NO_WRAP))
+    }
+
+    private fun restoreHighlightNinePatchFromJson(activity: Activity, item: JSONObject?): String? {
+        item ?: return null
+        val encoded = item.optString("base64")
+        if (encoded.isBlank()) return null
+        val name = sanitizeNinePatchFileName(item.optString("name").ifBlank { "highlight.9.png" })
+        val target = uniqueHighlightNinePatchFile(activity, name)
+        target.writeBytes(Base64.decode(encoded, Base64.DEFAULT))
+        return target.absolutePath
+    }
+
+    private fun uniqueHighlightNinePatchFile(activity: Activity, displayName: String): File {
+        val dir = File(activity.filesDir, "reader_highlight_nine_patch").apply { mkdirs() }
+        val base = displayName.removeSuffix(".9.png").ifBlank { "highlight" }
+        var target = File(dir, "$base.9.png")
+        var index = 1
+        while (target.exists()) {
+            target = File(dir, "${base}_$index.9.png")
+            index++
+        }
+        return target
+    }
+
+    private fun sanitizeNinePatchFileName(name: String): String {
+        val cleaned = safeDownloadName(name)
+            .removeSuffix(".png")
+            .removeSuffix(".9")
+            .trim('.', ' ')
+            .ifBlank { "highlight" }
+        return "$cleaned.9.png"
     }
 
     private fun safeDownloadName(value: String): String =
@@ -4826,28 +4942,18 @@ class ReaMicroSettingsHook(
                     ),
                 )
             }
-            val currentBookKey = ReaderHighlightBookContext.bookKey
-            if (currentBookKey.isNotBlank() && none { it.bookKey == currentBookKey }) {
-                add(
-                    ReaderHighlightBookGroupRow(
-                        bookKey = currentBookKey,
-                        bookTitle = displayReaderBookTitle(currentBookKey, ReaderHighlightBookContext.bookTitle),
-                        subtitle = "\u6682\u65e0\u672c\u4e66\u89c4\u5219",
-                    ),
-                )
-            }
         }.sortedBy { it.bookTitle }
 
     private fun displayReaderBookTitle(bookKey: String, storedTitle: String): String {
         val candidates = buildList {
-            add(storedTitle)
             if (ReaderHighlightBookContext.bookKey == bookKey) add(ReaderHighlightBookContext.bookTitle)
             addAll(bookKey.split('|'))
+            add(storedTitle)
         }
         return candidates
             .asSequence()
             .map(::cleanReaderBookTitle)
-            .firstOrNull { it.isNotBlank() && !isInternalReaderBookTitle(it) }
+            .firstOrNull { it.isNotBlank() && !isGenericReaderBookTitle(it) && !isInternalReaderBookTitle(it) }
             ?: "\u672c\u4e66"
     }
 
@@ -4866,6 +4972,9 @@ class ReaMicroSettingsHook(
         value.contains('|') ||
             value.matches(Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")) ||
             value.matches(Regex("^[0-9a-fA-F]{16,}$"))
+
+    private fun isGenericReaderBookTitle(value: String): Boolean =
+        value == "\u672c\u4e66" || value == "\u56fe\u4e66"
 
     private fun highlightStyleSummary(style: ReaderHighlightStyle): String =
         listOfNotNull(
@@ -5133,6 +5242,7 @@ class ReaMicroSettingsHook(
                     when (requestCode) {
                         FONT_DOCUMENT_REQUEST_CODE -> copyFontUriToLibrary(activity, uri)
                         HIGHLIGHT_STYLE_DOCUMENT_REQUEST_CODE -> importReaderHighlightStyleFromUri(activity, uri)
+                        HIGHLIGHT_NINE_PATCH_DOCUMENT_REQUEST_CODE -> importHighlightNinePatchFromUri(activity, uri)
                         ACCOUNT_CREDENTIAL_DOCUMENT_REQUEST_CODE -> importCredentialFromUri(activity, uri)
                         ACCOUNT_DATA_DOCUMENT_REQUEST_CODE -> importAccountDataFromUri(activity, uri)
                     }
@@ -6549,6 +6659,7 @@ class ReaMicroSettingsHook(
         const val ACCOUNT_DATA_DOCUMENT_REQUEST_CODE = 0x524D48
         const val ONLINE_SOURCE_DOCUMENT_REQUEST_CODE = 0x524D49
         const val HIGHLIGHT_STYLE_DOCUMENT_REQUEST_CODE = 0x524D4A
+        const val HIGHLIGHT_NINE_PATCH_DOCUMENT_REQUEST_CODE = 0x524D4B
         const val ACCOUNT_RESTART_DELAY_MS = 1_400L
         const val ACCOUNT_RESTART_KILL_DELAY_MS = 250L
         const val ACCOUNT_RESTART_COMMAND_DELAY_SECONDS = "0.8"

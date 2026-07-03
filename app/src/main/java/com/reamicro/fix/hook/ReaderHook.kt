@@ -104,7 +104,6 @@ class ReaderHook(
     @Volatile private var activeSearchHighlightPageNumber: Int? = null
     @Volatile private var activeSearchHighlightRenderLogId: Long? = null
     @Volatile private var activeSearchHighlightRenderLogCount: Int = 0
-    @Volatile private var activeSelectionHighlightMark: Any? = null
     @Volatile private var pendingSearchOriginRestore: Boolean = false
     @Volatile private var scrollCrashMarkerOwnedByThisProcess: Boolean = false
 
@@ -363,7 +362,7 @@ class ReaderHook(
                             resetFullTextSearchState("catalog book changed", removeOverlays = true)
                         }
                         lastCatalogContext = context
-                        ReaderHighlightBookContext.update(bookKey(context), bookTitle(context).ifBlank { "\u672c\u4e66" })
+                        ReaderHighlightBookContext.update(bookKey(context), bookTitle(context))
                         injectSearchHighlightIntoReaderCatalog(param)
                         ensureSearchIndexAsync(context)
                         scheduleRestorePersistedSearchOrigin("catalog context")
@@ -1588,8 +1587,8 @@ class ReaderHook(
             Toast.makeText(activity, "\u6dfb\u52a0\u9ad8\u4eae\u89c4\u5219\u5931\u8d25", Toast.LENGTH_SHORT).show()
             return
         }
-        applySelectionHighlightMark(selection)
         callNoArg(controller, "clearSelection")
+        refreshReaderAfterSelectionHighlight()
         Toast.makeText(activity, "\u5df2\u6dfb\u52a0\u672c\u4e66\u9ad8\u4eae", Toast.LENGTH_SHORT).show()
     }
 
@@ -2255,20 +2254,6 @@ class ReaderHook(
         )
     }
 
-    private fun createSelectionHighlightMark(selection: NativeSelectionPayload): Any? {
-        val startCfi = selection.startCfi.ifBlank { return null }
-        val endCfi = selection.endCfi.ifBlank { startCfi }
-        return createReaderMark(
-            id = SELECTION_HIGHLIGHT_MARK_ID_BASE + (System.currentTimeMillis() % SELECTION_HIGHLIGHT_MARK_ID_RANGE),
-            chapter = fallbackCurrentChapterTitle().ifBlank { "\u672c\u4e66\u9ad8\u4eae" },
-            startCfi = startCfi,
-            endCfi = endCfi,
-            quote = selection.quote,
-            style = MARK_STYLE_FILL,
-            color = MARK_COLOR_YELLOW,
-        )
-    }
-
     private fun createReaderMark(
         id: Long,
         chapter: String,
@@ -2338,44 +2323,25 @@ class ReaderHook(
             XposedBridge.log("$LOG_PREFIX create search highlight mark failed: ${it.stackTraceToString()}")
         }.getOrNull()
 
-    private fun applySelectionHighlightMark(selection: NativeSelectionPayload) {
-        val mark = createSelectionHighlightMark(selection) ?: return
-        activeSelectionHighlightMark = mark
-        injectSelectionHighlightMark(currentViewModelRef?.get(), mark)
-        scheduleSelectionHighlightRefresh(mark, 300L)
-        scheduleSelectionHighlightRefresh(mark, 900L)
+    private fun refreshReaderAfterSelectionHighlight() {
+        activityProvider()?.window?.decorView?.post {
+            forceRefreshReaderWindow("selection-highlight")
+        } ?: forceRefreshReaderWindow("selection-highlight")
     }
 
-    private fun scheduleSelectionHighlightRefresh(mark: Any, delayMs: Long) {
-        val view = activityProvider()?.window?.decorView
-        val block = {
-            if (activeSelectionHighlightMark === mark) {
-                injectSelectionHighlightMark(currentViewModelRef?.get(), mark)
-            }
-        }
-        if (view != null) {
-            view.postDelayed(block, delayMs)
-        } else {
-            Thread {
-                runCatching {
-                    Thread.sleep(delayMs)
-                    block()
-                }
-            }.apply {
-                name = "ReaMicroSelectionHighlight"
-                isDaemon = true
-                start()
-            }
-        }
+    private fun forceRefreshReaderWindow(source: String): Boolean {
+        val viewModel = currentViewModelRef?.get() ?: return false
+        return runCatching {
+            val windowKey = XposedHelpers.getObjectField(viewModel, "windowKey")
+            XposedHelpers.callMethod(windowKey, "setValue", "reamicro_${source}_${System.currentTimeMillis()}")
+            XposedBridge.log("$LOG_PREFIX reader window refresh requested: $source")
+            true
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX reader window refresh failed: ${it.stackTraceToString()}")
+        }.getOrDefault(false)
     }
-
-    private fun injectSelectionHighlightMark(viewModel: Any?, mark: Any): Boolean =
-        updateSearchMarks(viewModel, "selection-inject") { marks ->
-            marks.filterNot(::isSelectionInjectedHighlightMark) + mark
-        }
 
     private fun clearSelectionInjectedHighlight(viewModel: Any? = currentViewModelRef?.get()): Boolean {
-        activeSelectionHighlightMark = null
         return updateSearchMarks(viewModel, "selection-clear") { marks ->
             val filtered = marks.filterNot(::isSelectionInjectedHighlightMark)
             if (filtered.size == marks.size) marks else filtered
@@ -2441,20 +2407,18 @@ class ReaderHook(
 
     private fun appendActiveSearchHighlightMark(original: List<*>, label: String? = null): List<Any>? {
         val searchMark = activeSearchHighlightMark
-        val selectionMark = activeSelectionHighlightMark
-        if (searchMark == null && selectionMark == null) return null
         val cleanMarks = original
             .filterNotNull()
             .filterNot(::isSearchResultHighlightMark)
             .filterNot(::isSelectionInjectedHighlightMark)
-        return ArrayList<Any>(cleanMarks.size + 2).apply {
+        if (searchMark == null) {
+            return if (cleanMarks.size == original.filterNotNull().size) null else ArrayList(cleanMarks)
+        }
+        return ArrayList<Any>(cleanMarks.size + 1).apply {
             addAll(cleanMarks)
-            searchMark?.let(::add)
-            selectionMark?.let(::add)
+            add(searchMark)
         }.also { next ->
-            if (searchMark != null) {
-                label?.let { logSearchHighlightRenderInput(it, original.size, next.size, searchMark) }
-            }
+            label?.let { logSearchHighlightRenderInput(it, original.size, next.size, searchMark) }
         }
     }
 
@@ -3541,11 +3505,21 @@ class ReaderHook(
     private fun bookTitle(context: CatalogContext): String =
         readableBookTitle(
             callString(currentPageRef?.get(), "getBookTitle"),
-            callString(context.book, "getTitle"),
+            readableBookTitleFromBook(currentUiStateBook()),
+            readableBookTitleFromBook(context.book),
             titleFromCurrentEpubRoot(),
         )
 
     private fun currentHighlightBookIdentity(): Pair<String, String>? {
+        currentUiStateBook()?.let { book ->
+            val title = readableBookTitle(
+                readableBookTitleFromBook(book),
+                callString(currentPageRef?.get(), "getBookTitle"),
+                titleFromCurrentEpubRoot(),
+            ).ifBlank { fallbackCurrentBookTitle() }
+            val key = bookKeyFromBook(book, title)
+            if (key.isNotBlank()) return key to title
+        }
         lastCatalogContext?.let { context ->
             val key = bookKey(context)
             if (key.isNotBlank()) return key to bookTitle(context).ifBlank { fallbackCurrentBookTitle() }
@@ -3553,33 +3527,52 @@ class ReaderHook(
         bottomSearchBookRef?.get()?.let { book ->
             val title = readableBookTitle(
                 callString(currentPageRef?.get(), "getBookTitle"),
-                callString(book, "getTitle"),
+                readableBookTitleFromBook(book),
                 titleFromCurrentEpubRoot(),
             ).ifBlank { fallbackCurrentBookTitle() }
-            val key = listOf(
-                currentEpubRoot()?.absolutePath.orEmpty(),
-                callString(book, "getId"),
-                callString(book, "getBookId"),
-                title,
-            ).filter { it.isNotBlank() }.joinToString(separator = "|")
-            if (key.isNotBlank()) return key to title.ifBlank { "\u672c\u4e66" }
+            val key = bookKeyFromBook(book, title)
+            if (key.isNotBlank()) return key to title
         }
         val root = currentEpubRoot() ?: return null
         val title = fallbackCurrentBookTitle()
             .ifBlank { root.nameWithoutExtension }
             .ifBlank { root.name }
-            .ifBlank { "\u672c\u4e66" }
         return root.absolutePath to title
     }
 
     private fun fallbackCurrentBookTitle(): String {
         val title = readableBookTitle(
             callString(currentPageRef?.get(), "getBookTitle"),
+            readableBookTitleFromBook(currentUiStateBook()),
+            lastCatalogContext?.let { readableBookTitleFromBook(it.book) }.orEmpty(),
             titleFromCurrentEpubRoot(),
         )
         if (title.isNotBlank()) return title
         return fallbackCurrentChapterTitle()
     }
+
+    private fun currentUiStateBook(): Any? {
+        val viewModel = currentViewModelRef?.get() ?: return null
+        val uiStateFlow = callNoArg(viewModel, "getUiState") ?: return null
+        val uiState = callNoArg(uiStateFlow, "getValue") ?: return null
+        return callNoArg(uiState, "getBook")
+    }
+
+    private fun readableBookTitleFromBook(book: Any?): String =
+        readableBookTitle(
+            callString(book, "getTitle"),
+            callString(book, "getSubtitle"),
+            callString(book, "getUri"),
+            callString(book, "getUuid"),
+        )
+
+    private fun bookKeyFromBook(book: Any, title: String): String =
+        listOf(
+            currentEpubRoot()?.absolutePath.orEmpty(),
+            callString(book, "getId"),
+            callString(book, "getBookId"),
+            title,
+        ).filter { it.isNotBlank() }.joinToString(separator = "|")
 
     private fun fallbackCurrentChapterTitle(): String {
         val page = currentPageRef?.get()
@@ -3596,7 +3589,7 @@ class ReaderHook(
     private fun readableBookTitle(vararg candidates: String): String =
         candidates
             .map { cleanBookTitleCandidate(it) }
-            .firstOrNull { it.isNotBlank() && !isInternalBookTitle(it) }
+            .firstOrNull { it.isNotBlank() && !isInternalBookTitle(it) && !isGenericBookTitle(it) }
             .orEmpty()
 
     private fun cleanBookTitleCandidate(value: String): String {
@@ -3616,6 +3609,9 @@ class ReaderHook(
         value.matches(Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")) ||
             value.matches(Regex("^[0-9a-fA-F]{16,}$")) ||
             value.contains('|')
+
+    private fun isGenericBookTitle(value: String): Boolean =
+        value == "\u672c\u4e66" || value == "\u56fe\u4e66"
 
     private fun isDifferentSearchBook(previous: CatalogContext, next: CatalogContext): Boolean {
         val previousKey = searchBookIdentity(previous)
