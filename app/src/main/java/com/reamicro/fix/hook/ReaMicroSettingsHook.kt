@@ -4406,9 +4406,9 @@ class ReaMicroSettingsHook(
                 val status = settingsDialogStatus(
                     activity,
                     if (existing == null) {
-                        "\u586b\u5b8c\u540e\u5148\u70b9\u51fb\u6d4b\u8bd5"
+                        "\u586b\u5b8c\u540e\u5148\u70b9\u51fb\u6d4b\u8bd5\uff0c\u957f\u6309\u5b8c\u6210\u53ef\u76f4\u63a5\u4fdd\u5b58"
                     } else {
-                        "\u5f53\u524d\u914d\u7f6e\u53ef\u76f4\u63a5\u5b8c\u6210\uff0c\u4fee\u6539\u540e\u9700\u8981\u91cd\u65b0\u6d4b\u8bd5"
+                        "\u5f53\u524d\u914d\u7f6e\u53ef\u76f4\u63a5\u5b8c\u6210\uff0c\u4fee\u6539\u540e\u9700\u8981\u91cd\u65b0\u6d4b\u8bd5\uff1b\u957f\u6309\u5b8c\u6210\u53ef\u76f4\u63a5\u4fdd\u5b58"
                     },
                     colors,
                 )
@@ -4484,13 +4484,17 @@ class ReaMicroSettingsHook(
                     val busy = testing || fetchingModels
                     val canFetchModels = hasBaseAndKey() && !busy
                     val canTest = hasAllValues() && !busy
-                    val canFinish = hasAllValues() && testPassedForCurrentValues() && !busy
+                    val canFinish = hasAllValues() && !busy
                     fetchModelsButton.isEnabled = canFetchModels
                     fetchModelsButton.alpha = if (canFetchModels) 1f else 0.38f
                     testButton.isEnabled = canTest
                     testButton.alpha = if (canTest) 1f else 0.38f
                     finishButton.isEnabled = canFinish
-                    finishButton.alpha = if (canFinish) 1f else 0.38f
+                    finishButton.alpha = when {
+                        !canFinish -> 0.38f
+                        testPassedForCurrentValues() -> 1f
+                        else -> 0.72f
+                    }
                     deleteButton?.isEnabled = !busy
                     deleteButton?.alpha = if (busy) 0.38f else 1f
                     cancelButton.isEnabled = !busy
@@ -4567,11 +4571,12 @@ class ReaMicroSettingsHook(
                         }
                     }, "ReaMicroAiApiTest").start()
                 }
-                finishButton.setOnClickListener {
+
+                fun saveApiConfigDirect() {
                     val values = values()
-                    if (!testPassedForCurrentValues()) {
-                        Toast.makeText(activity, "\u8bf7\u5148\u6d4b\u8bd5\u901a\u8fc7", Toast.LENGTH_SHORT).show()
-                        return@setOnClickListener
+                    if (values.baseUrl.isBlank() || values.apiKey.isBlank() || values.model.isBlank()) {
+                        Toast.makeText(activity, "\u8bf7\u5148\u586b\u5b8c\u5168\u90e8\u5b57\u6bb5", Toast.LENGTH_SHORT).show()
+                        return
                     }
                     val config = if (existing == null) {
                         AiApiStore.add(activity.applicationContext, values.baseUrl, values.apiKey, values.model, values.name)
@@ -4587,6 +4592,18 @@ class ReaMicroSettingsHook(
                         },
                     )
                     dialog.dismiss()
+                }
+
+                finishButton.setOnClickListener {
+                    if (!testPassedForCurrentValues()) {
+                        Toast.makeText(activity, "\u8bf7\u5148\u6d4b\u8bd5\u901a\u8fc7\uff0c\u6216\u957f\u6309\u5b8c\u6210\u76f4\u63a5\u4fdd\u5b58", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                    saveApiConfigDirect()
+                }
+                finishButton.setOnLongClickListener {
+                    saveApiConfigDirect()
+                    true
                 }
                 cancelButton.setOnClickListener { dialog.dismiss() }
                 refreshButtons()

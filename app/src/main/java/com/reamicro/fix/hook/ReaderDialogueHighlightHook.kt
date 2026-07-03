@@ -40,6 +40,7 @@ class ReaderDialogueHighlightHook(
     }
     @Volatile private var ninePatchDrawHookInstalled: Boolean = false
     @Volatile private var basicTextDrawHookInstalled: Boolean = false
+    @Volatile private var selectionRectPaddingHookInstalled: Boolean = false
     @Volatile private var lastNinePatchLogKey: String = ""
     @Volatile private var lastAppliedLogKey: String = ""
 
@@ -47,6 +48,7 @@ class ReaderDialogueHighlightHook(
         CONTENT_DOM_CLASS_CANDIDATES.forEach(::hookContentDom)
         hookJustifyTextNinePatchDraw()
         hookBasicTextNinePatchDraw()
+        hookSelectionLineRectsPadding()
     }
 
     private fun hookContentDom(className: String) {
@@ -71,6 +73,7 @@ class ReaderDialogueHighlightHook(
     }
 
     private fun applyDialogueHighlight(contentDom: Any?) {
+        hookSelectionLineRectsPadding()
         val snapshot = settings.snapshot()
         if (!snapshot.canHighlightReaderDialogue) return
         runCatching {
@@ -580,6 +583,65 @@ class ReaderDialogueHighlightHook(
         }
     }
 
+    private fun hookSelectionLineRectsPadding() {
+        if (selectionRectPaddingHookInstalled) return
+        runCatching {
+            val bodyClass = cls(BODY_KT_CLASS)
+            val methods = bodyClass.declaredMethods.filter { method ->
+                method.parameterTypes.size == 2 &&
+                    (method.name.contains("selectionLineRects") || method.looksLikeSelectionLineRects())
+            }
+            methods.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val rects = param.result as? List<*> ?: return
+                        if (rects.isEmpty()) return
+                        param.result = expandSelectionRects(rects)
+                    }
+                })
+            }
+            selectionRectPaddingHookInstalled = methods.isNotEmpty()
+            XposedBridge.log("$LOG_PREFIX selection rect padding hook installed count=${methods.size}")
+        }.onFailure {
+            if (it.javaClass.name.contains("ClassNotFound")) return
+            XposedBridge.log("$LOG_PREFIX selection rect padding hook failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun Method.looksLikeSelectionLineRects(): Boolean =
+        List::class.java.isAssignableFrom(returnType) &&
+            parameterTypes.getOrNull(0)?.name == TEXT_LAYOUT_RESULT_CLASS &&
+            parameterTypes.getOrNull(1)?.name == TEXT_RANGE_CLASS
+
+    private fun expandSelectionRects(rects: List<*>): List<Any> {
+        val density = activityProvider()?.resources?.displayMetrics?.density ?: 1f
+        val topPadding = SELECTION_RECT_TOP_PADDING_DP * density
+        val bottomPadding = SELECTION_RECT_BOTTOM_PADDING_DP * density
+        return rects.mapNotNull { rect ->
+            rect ?: return@mapNotNull null
+            createGeometryRect(
+                left = callNoArg(rect, "getLeft") as? Float ?: return@mapNotNull rect,
+                top = (callNoArg(rect, "getTop") as? Float ?: return@mapNotNull rect) - topPadding,
+                right = callNoArg(rect, "getRight") as? Float ?: return@mapNotNull rect,
+                bottom = (callNoArg(rect, "getBottom") as? Float ?: return@mapNotNull rect) + bottomPadding,
+            ) ?: rect
+        }
+    }
+
+    private fun createGeometryRect(left: Float, top: Float, right: Float, bottom: Float): Any? =
+        runCatching {
+            cls(GEOMETRY_RECT_CLASS)
+                .getDeclaredConstructor(
+                    Float::class.javaPrimitiveType,
+                    Float::class.javaPrimitiveType,
+                    Float::class.javaPrimitiveType,
+                    Float::class.javaPrimitiveType,
+                )
+                .apply { isAccessible = true }
+                .newInstance(left, top, right, bottom)
+        }.getOrNull()
+
     private fun injectNinePatchDraw(
         param: XC_MethodHook.MethodHookParam,
         onTextLayoutIndex: Int,
@@ -859,8 +921,8 @@ class ReaderDialogueHighlightHook(
 
     private fun reedenBoxStyle(css: String, density: Float): ReedenBoxStyle {
         val values = cssProperties(css)
-        val padding = cssBoxEdges(values, "padding", density)
-        val margin = cssBoxEdges(values, "margin", density)
+        val padding = cssBoxEdges(values, "padding", density).scale(REEDEN_BOX_EDGE_SCALE)
+        val margin = cssBoxEdges(values, "margin", density).scale(REEDEN_BOX_EDGE_SCALE)
         val border = values["border"].orEmpty()
         val borderWidth = values["border-width"]?.let { cssSizePx(it, density) }
             ?: Regex("""(\d+(?:\.\d+)?)px""").find(border)?.groupValues?.getOrNull(1)?.toFloatOrNull()?.let { it * density }
@@ -1174,10 +1236,14 @@ class ReaderDialogueHighlightHook(
         const val ANNOTATED_RANGE_CLASS = "androidx.compose.ui.text.AnnotatedString\$Range"
         const val ANNOTATED_STRING_EXT_CLASS = "org.epub.utils.AnnotatedStringExtKt"
         const val JUSTIFY_TEXT_CLASS = "app.zhendong.reamicro.arch.components.JustifyText_androidKt"
+        const val BODY_KT_CLASS = "org.epub.ui.BodyKt"
+        const val TEXT_LAYOUT_RESULT_CLASS = "androidx.compose.ui.text.TextLayoutResult"
+        const val TEXT_RANGE_CLASS = "androidx.compose.ui.text.TextRange"
         const val BASIC_TEXT_CLASS = "androidx.compose.foundation.text.BasicTextKt"
         const val DRAW_MODIFIER_KT_CLASS = "androidx.compose.ui.draw.DrawModifierKt"
         const val ANDROID_CANVAS_KT_CLASS = "androidx.compose.ui.graphics.AndroidCanvas_androidKt"
         const val COLOR_KT_CLASS = "androidx.compose.ui.graphics.ColorKt"
+        const val GEOMETRY_RECT_CLASS = "androidx.compose.ui.geometry.Rect"
         const val TEXT_UNIT_KT_CLASS = "androidx.compose.ui.unit.TextUnitKt"
         const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
         const val FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
@@ -1207,6 +1273,9 @@ class ReaderDialogueHighlightHook(
         const val BASIC_TEXT_DEFAULT_MODIFIER = 2
         const val BASIC_TEXT_DEFAULT_ON_TEXT_LAYOUT = 8
         const val MAX_REMEMBERED_NINE_PATCH_TEXTS = 128
+        const val REEDEN_BOX_EDGE_SCALE = 0.78f
+        const val SELECTION_RECT_TOP_PADDING_DP = 4f
+        const val SELECTION_RECT_BOTTOM_PADDING_DP = 1f
         const val NINE_PATCH_ANNOTATION_TAG = "reamicro.highlight.ninepatch"
         const val NINE_PATCH_ANNOTATION_SEPARATOR = "\u001F"
         const val MARKUP_TEXT = "#text"
@@ -1277,7 +1346,15 @@ class ReaderDialogueHighlightHook(
         val top: Float,
         val right: Float,
         val bottom: Float,
-    )
+    ) {
+        fun scale(factor: Float): BoxEdges =
+            BoxEdges(
+                left = left * factor,
+                top = top * factor,
+                right = right * factor,
+                bottom = bottom * factor,
+            )
+    }
 
     private data class ReedenBoxStyle(
         val paddingLeftPx: Float,
