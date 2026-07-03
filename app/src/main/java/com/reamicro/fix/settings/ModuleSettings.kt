@@ -18,6 +18,7 @@ object ModuleSettings {
     const val KEY_READER_DICTIONARY_ENABLED = "reader_dictionary_enabled"
     const val KEY_READER_COMPACT_SELECTION_MENU_ENABLED = "reader_compact_selection_menu_enabled"
     const val KEY_READER_DIALOGUE_HIGHLIGHT_ENABLED = "reader_dialogue_highlight_enabled"
+    const val KEY_READER_SELECTION_HIGHLIGHT_ENABLED = "reader_selection_highlight_enabled"
     const val KEY_FONT_ENABLED = "font_enabled"
     const val KEY_FONT_SETTINGS_ENABLED = "font_settings_enabled"
     const val KEY_ACCOUNT_ENABLED = "account_enabled"
@@ -51,6 +52,7 @@ object ModuleSettings {
     const val DEFAULT_READER_DICTIONARY_ENABLED = true
     const val DEFAULT_READER_COMPACT_SELECTION_MENU_ENABLED = false
     const val DEFAULT_READER_DIALOGUE_HIGHLIGHT_ENABLED = false
+    const val DEFAULT_READER_SELECTION_HIGHLIGHT_ENABLED = false
     const val DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR = "#FF9800"
     const val DEFAULT_READER_DIALOGUE_HIGHLIGHT_FONT = ""
     const val DEFAULT_FONT_ENABLED = true
@@ -138,6 +140,7 @@ data class ModuleSettingsSnapshot(
     val readerDictionaryEnabled: Boolean = ModuleSettings.DEFAULT_READER_DICTIONARY_ENABLED,
     val readerCompactSelectionMenuEnabled: Boolean = ModuleSettings.DEFAULT_READER_COMPACT_SELECTION_MENU_ENABLED,
     val readerDialogueHighlightEnabled: Boolean = ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_ENABLED,
+    val readerSelectionHighlightEnabled: Boolean = ModuleSettings.DEFAULT_READER_SELECTION_HIGHLIGHT_ENABLED,
     val fontEnabled: Boolean = ModuleSettings.DEFAULT_FONT_ENABLED,
     val fontSettingsEnabled: Boolean = ModuleSettings.DEFAULT_FONT_SETTINGS_ENABLED,
     val accountEnabled: Boolean = ModuleSettings.DEFAULT_ACCOUNT_ENABLED,
@@ -190,6 +193,9 @@ data class ModuleSettingsSnapshot(
 
     val canHighlightReaderDialogue: Boolean
         get() = moduleEnabled && readerDialogueHighlightEnabled
+
+    val canHighlightReaderSelection: Boolean
+        get() = moduleEnabled && readerSelectionHighlightEnabled
 
     val canRunFontCompletion: Boolean
         get() = moduleEnabled
@@ -267,7 +273,31 @@ data class ReaderHighlightSettingsSnapshot(
 ) {
     fun styleById(id: String): ReaderHighlightStyle =
         styles.firstOrNull { it.id == id } ?: styles.firstOrNull() ?: ReaderHighlightStyle.default()
+
+    fun bookRules(bookKey: String): List<ReaderHighlightRule> =
+        rules.filter { it.bookKey == bookKey }
+
+    fun bookRuleGroups(): List<ReaderHighlightBookRuleGroup> =
+        rules
+            .filter { it.bookKey.isNotBlank() }
+            .groupBy { it.bookKey }
+            .map { (bookKey, items) ->
+                ReaderHighlightBookRuleGroup(
+                    bookKey = bookKey,
+                    bookTitle = items.firstNotNullOfOrNull { it.bookTitle.takeIf(String::isNotBlank) } ?: "本书",
+                    enabledCount = items.count { it.enabled },
+                    totalCount = items.size,
+                )
+            }
+            .sortedBy { it.bookTitle }
 }
+
+data class ReaderHighlightBookRuleGroup(
+    val bookKey: String,
+    val bookTitle: String,
+    val enabledCount: Int,
+    val totalCount: Int,
+)
 
 data class ReaderHighlightStyle(
     val id: String,
@@ -315,6 +345,8 @@ data class ReaderHighlightRule(
     val styleId: String = ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID,
     val enabled: Boolean = true,
     val pattern: String = "",
+    val bookKey: String = "",
+    val bookTitle: String = "",
 ) {
     companion object {
         fun defaults(): List<ReaderHighlightRule> =
@@ -338,4 +370,14 @@ enum class ReaderHighlightRuleType {
     SingleQuotePhrase,
     FixedText,
     Regex,
+}
+
+object ReaderHighlightBookContext {
+    @Volatile var bookKey: String = ""
+    @Volatile var bookTitle: String = ""
+
+    fun update(bookKey: String, bookTitle: String) {
+        this.bookKey = bookKey
+        this.bookTitle = bookTitle
+    }
 }

@@ -58,6 +58,7 @@ import com.reamicro.fix.online.OnlineSourceAuth
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.OnlineSourceStore
 import com.reamicro.fix.settings.ModuleSettings
+import com.reamicro.fix.settings.ReaderHighlightBookContext
 import com.reamicro.fix.settings.ReaderHighlightRule
 import com.reamicro.fix.settings.ReaderHighlightRuleType
 import com.reamicro.fix.settings.ReaderHighlightStyle
@@ -103,6 +104,7 @@ class ReaMicroSettingsHook(
     @Volatile private var fontLibraryVersionUiState: Any? = null
     @Volatile private var onlineSourceVersionUiState: Any? = null
     @Volatile private var aiApiVersionUiState: Any? = null
+    @Volatile private var readerHighlightVersionUiState: Any? = null
     @Volatile private var pendingDeleteFontUiState: Any? = null
     @Volatile private var lastFontImportToken: String = ""
     @Volatile private var lastFontImportAtMs: Long = 0L
@@ -423,6 +425,7 @@ class ReaMicroSettingsHook(
     private fun handleNestedInjectedBack(): Boolean {
         val currentRoute = currentInjectedRoute()
         if (currentRoute !is InjectedRoute.FontPicker &&
+            currentRoute !is InjectedRoute.ReaderBookHighlightRules &&
             currentRoute != InjectedRoute.FontLibrary &&
             currentRoute !in MODULE_CHILD_ROUTES &&
             currentRoute !in READER_CHILD_ROUTES &&
@@ -433,6 +436,7 @@ class ReaMicroSettingsHook(
             .takeIf { it.isNotEmpty() }
             ?: listOf(
                 when {
+                    currentRoute is InjectedRoute.ReaderBookHighlightRules -> InjectedRoute.ReaderHighlightTextSettings
                     currentRoute in READER_CHILD_ROUTES -> InjectedRoute.ReaderCompletionSettings
                     currentRoute in MODULE_CHILD_ROUTES -> InjectedRoute.ModuleSettings
                     currentRoute in AI_CHILD_ROUTES -> InjectedRoute.AiConfigSettings
@@ -488,6 +492,7 @@ class ReaMicroSettingsHook(
                 InjectedRoute.ReaderHighlightSettings -> renderReaderHighlightSettingsContent(innerPaddings, innerComposer)
                 InjectedRoute.ReaderHighlightConfigSettings -> renderReaderHighlightConfigSettingsContent(innerPaddings, innerComposer)
                 InjectedRoute.ReaderHighlightTextSettings -> renderReaderHighlightTextSettingsContent(innerPaddings, innerComposer)
+                is InjectedRoute.ReaderBookHighlightRules -> renderReaderBookHighlightRulesContent(currentRoute, innerPaddings, innerComposer)
                 InjectedRoute.ReaderHighlightColorPicker -> renderReaderHighlightColorPickerContent(innerPaddings, innerComposer)
                 InjectedRoute.CloudCompletionSettings -> renderCloudCompletionSettingsContent(innerPaddings, innerComposer)
                 InjectedRoute.RotationCompletionSettings -> renderRotationCompletionSettingsContent(innerPaddings, innerComposer)
@@ -526,6 +531,7 @@ class ReaMicroSettingsHook(
 
     private fun renderInjectedBackHandler(route: InjectedRoute, composer: Any) {
         val enabled = route is InjectedRoute.FontPicker ||
+            route is InjectedRoute.ReaderBookHighlightRules ||
             route == InjectedRoute.FontLibrary ||
             route in MODULE_CHILD_ROUTES ||
             route in READER_CHILD_ROUTES ||
@@ -1039,6 +1045,15 @@ class ReaMicroSettingsHook(
                     },
                 ),
                 ToggleRow(
+                    key = ModuleSettings.KEY_READER_COMPACT_SELECTION_MENU_ENABLED,
+                    title = "\u7b80\u6d01\u83dc\u5355",
+                    checked = snapshot.readerCompactSelectionMenuEnabled,
+                    onChanged = { checked, _ ->
+                        settings.setReaderCompactSelectionMenuEnabled(checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
                     key = ModuleSettings.KEY_READER_EDIT_OVERWRITE_ENABLED,
                     title = "\u7f16\u8f91\u8986\u5199",
                     checked = snapshot.readerEditOverwriteEnabled,
@@ -1057,11 +1072,11 @@ class ReaMicroSettingsHook(
                     },
                 ),
                 ToggleRow(
-                    key = ModuleSettings.KEY_READER_COMPACT_SELECTION_MENU_ENABLED,
-                    title = "\u7b80\u6d01\u83dc\u5355",
-                    checked = snapshot.readerCompactSelectionMenuEnabled,
+                    key = ModuleSettings.KEY_READER_SELECTION_HIGHLIGHT_ENABLED,
+                    title = "\u9ad8\u4eae\u9009\u4e2d",
+                    checked = snapshot.readerSelectionHighlightEnabled,
                     onChanged = { checked, _ ->
-                        settings.setReaderCompactSelectionMenuEnabled(checked)
+                        settings.setReaderSelectionHighlightEnabled(checked)
                         checked
                     },
                 ),
@@ -1089,6 +1104,7 @@ class ReaMicroSettingsHook(
     private fun renderReaderHighlightSettingsContent(innerPaddings: Any, composer: Any) {
         val listContent = functionProxy("ReaderHighlightSettingsList", FUNCTION1_CLASS) { args ->
             val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            readerHighlightVersionValue()
             val highlight = settings.highlightSettings()
             val rows = listOf(
                 ActionRow(
@@ -1118,6 +1134,7 @@ class ReaMicroSettingsHook(
         val listContent = functionProxy("ReaderHighlightConfigSettingsList", FUNCTION1_CLASS) { args ->
             val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
             fontLibraryVersionValue()
+            readerHighlightVersionValue()
             val highlight = settings.highlightSettings()
             val rows = buildList {
                 add(
@@ -1155,6 +1172,7 @@ class ReaMicroSettingsHook(
     private fun renderReaderHighlightTextSettingsContent(innerPaddings: Any, composer: Any) {
         val listContent = functionProxy("ReaderHighlightTextSettingsList", FUNCTION1_CLASS) { args ->
             val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            readerHighlightVersionValue()
             val highlight = settings.highlightSettings()
             val rows = buildList {
                 add(
@@ -1166,7 +1184,7 @@ class ReaMicroSettingsHook(
                         onClick = { openReaderHighlightRuleDialog(newReaderHighlightRule()) },
                     ),
                 )
-                highlight.rules.forEach { rule ->
+                highlight.rules.filter { it.bookKey.isBlank() }.forEach { rule ->
                     val style = highlight.styleById(rule.styleId)
                     add(
                         ActionRow(
@@ -1180,7 +1198,88 @@ class ReaMicroSettingsHook(
                                     composer = itemComposer,
                                 ) { enabled ->
                                     settings.setReaderHighlightRuleEnabled(rule.id, enabled)
-                                    setInjectedRouteState(currentInjectedRoute())
+                                    bumpReaderHighlightVersion()
+                                }
+                            },
+                            singleLineSubtitle = true,
+                            onClick = { openReaderHighlightRuleDialog(rule) },
+                        ),
+                    )
+                }
+                val bookGroups = buildList {
+                    addAll(highlight.bookRuleGroups().map { group ->
+                        Triple(group.bookKey, group.bookTitle, "${group.enabledCount} / ${group.totalCount} \u6761\u672c\u4e66\u89c4\u5219")
+                    })
+                    val currentBookKey = ReaderHighlightBookContext.bookKey
+                    if (currentBookKey.isNotBlank() && none { it.first == currentBookKey }) {
+                        add(
+                            Triple(
+                                currentBookKey,
+                                ReaderHighlightBookContext.bookTitle.ifBlank { "\u672c\u4e66" },
+                                "\u6682\u65e0\u672c\u4e66\u89c4\u5219",
+                            ),
+                        )
+                    }
+                }
+                bookGroups.forEach { (bookKey, bookTitle, subtitle) ->
+                    add(
+                        ActionRow(
+                            key = "reader_highlight_book_${bookKey.hashCode()}",
+                            title = bookTitle,
+                            subtitle = subtitle,
+                            trailing = "\u672c\u4e66",
+                            singleLineSubtitle = true,
+                            onClick = {
+                                openNestedInjectedRoute(
+                                    InjectedRoute.ReaderBookHighlightRules(bookKey, bookTitle),
+                                )
+                            },
+                        ),
+                    )
+                }
+            }
+            addLazyItem(lazyListScope, READER_HIGHLIGHT_TEXT_ITEM_KEY) { itemComposer ->
+                renderHostActionCard(rows, itemComposer)
+            }
+            targetUnit()
+        }
+        renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    private fun renderReaderBookHighlightRulesContent(route: InjectedRoute.ReaderBookHighlightRules, innerPaddings: Any, composer: Any) {
+        val listContent = functionProxy("ReaderBookHighlightRulesList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            readerHighlightVersionValue()
+            val highlight = settings.highlightSettings()
+            val rows = buildList {
+                add(
+                    ActionRow(
+                        key = "reader_book_highlight_rule_add_${route.bookKey.hashCode()}",
+                        title = "\u6dfb\u52a0\u914d\u7f6e",
+                        subtitle = "\u65b0\u589e\u672c\u4e66\u56fa\u5b9a\u6587\u672c\u6216\u6b63\u5219\u9ad8\u4eae\u89c4\u5219",
+                        singleLineSubtitle = true,
+                        onClick = {
+                            openReaderHighlightRuleDialog(
+                                newReaderHighlightRule(route.bookKey, route.bookTitle),
+                            )
+                        },
+                    ),
+                )
+                highlight.bookRules(route.bookKey).forEach { rule ->
+                    val style = highlight.styleById(rule.styleId)
+                    add(
+                        ActionRow(
+                            key = "reader_book_highlight_rule_${rule.id}",
+                            title = rule.name,
+                            subtitle = "${highlightRuleSummary(rule)} / ${style.name}",
+                            trailingContent = { itemComposer ->
+                                renderHostActionSwitch(
+                                    key = "reader_book_highlight_rule_switch_${rule.id}",
+                                    checked = rule.enabled,
+                                    composer = itemComposer,
+                                ) { enabled ->
+                                    settings.setReaderHighlightRuleEnabled(rule.id, enabled)
+                                    bumpReaderHighlightVersion()
                                 }
                             },
                             singleLineSubtitle = true,
@@ -1189,7 +1288,7 @@ class ReaMicroSettingsHook(
                     )
                 }
             }
-            addLazyItem(lazyListScope, READER_HIGHLIGHT_TEXT_ITEM_KEY) { itemComposer ->
+            addLazyItem(lazyListScope, READER_HIGHLIGHT_BOOK_RULES_ITEM_KEY) { itemComposer ->
                 renderHostActionCard(rows, itemComposer)
             }
             targetUnit()
@@ -1350,12 +1449,12 @@ class ReaMicroSettingsHook(
                             darkNinePatchPath = darkNinePatchInput.text?.toString()?.trim().orEmpty(),
                         ),
                     )
-                    setInjectedRouteState(currentInjectedRoute())
+                    bumpReaderHighlightVersion()
                     dialog.dismiss()
                 }
                 deleteButton.setOnClickListener {
                     settings.removeReaderHighlightStyle(style.id)
-                    setInjectedRouteState(currentInjectedRoute())
+                    bumpReaderHighlightVersion()
                     dialog.dismiss()
                 }
                 cancelButton.setOnClickListener { dialog.dismiss() }
@@ -1402,7 +1501,7 @@ class ReaMicroSettingsHook(
                 ?: error("empty highlight style file")
             val imported = readerHighlightStyleFromJson(JSONObject(text))
             settings.setReaderHighlightStyle(imported)
-            setInjectedRouteState(currentInjectedRoute())
+            bumpReaderHighlightVersion()
             showToast("\u5df2\u5bfc\u5165\u9ad8\u4eae\u6837\u5f0f\uff1a${imported.name}")
         }.onFailure {
             showToast("\u5bfc\u5165\u9ad8\u4eae\u6837\u5f0f\u5931\u8d25")
@@ -1567,12 +1666,12 @@ class ReaMicroSettingsHook(
                             },
                         ),
                     )
-                    setInjectedRouteState(currentInjectedRoute())
+                    bumpReaderHighlightVersion()
                     dialog.dismiss()
                 }
                 deleteButton.setOnClickListener {
                     settings.removeReaderHighlightRule(rule.id)
-                    setInjectedRouteState(currentInjectedRoute())
+                    bumpReaderHighlightVersion()
                     dialog.dismiss()
                 }
                 cancelButton.setOnClickListener { dialog.dismiss() }
@@ -4760,13 +4859,16 @@ class ReaMicroSettingsHook(
         )
     }
 
-    private fun newReaderHighlightRule(): ReaderHighlightRule {
-        val index = settings.highlightSettings().rules.size + 1
+    private fun newReaderHighlightRule(bookKey: String = "", bookTitle: String = ""): ReaderHighlightRule {
+        val rules = settings.highlightSettings().rules
+        val index = rules.count { it.bookKey == bookKey } + 1
         return ReaderHighlightRule(
             id = uniqueReaderHighlightId("rule"),
-            name = "\u9ad8\u4eae\u89c4\u5219 $index",
+            name = if (bookKey.isBlank()) "\u9ad8\u4eae\u89c4\u5219 $index" else "\u672c\u4e66\u89c4\u5219 $index",
             type = ReaderHighlightRuleType.FixedText,
             styleId = ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID,
+            bookKey = bookKey,
+            bookTitle = bookTitle,
         )
     }
 
@@ -5730,6 +5832,22 @@ class ReaMicroSettingsHook(
             ?.invoke(state, value + 1)
     }
 
+    private fun readerHighlightVersionState(): Any {
+        readerHighlightVersionUiState?.let { return it }
+        return mutableState(0).also { readerHighlightVersionUiState = it }
+    }
+
+    private fun readerHighlightVersionValue(): Int =
+        (readerHighlightVersionState().method0("getValue") as? Number)?.toInt() ?: 0
+
+    private fun bumpReaderHighlightVersion() {
+        val state = readerHighlightVersionState()
+        val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
+        state.javaClass.methods
+            .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+            ?.invoke(state, value + 1)
+    }
+
     private fun accountListVersionState(): Any {
         accountListVersionUiState?.let { return it }
         return mutableState(0).also { accountListVersionUiState = it }
@@ -6102,6 +6220,7 @@ class ReaMicroSettingsHook(
         object ReaderHighlightSettings : InjectedRoute(READER_HIGHLIGHT_SETTINGS_TITLE)
         object ReaderHighlightConfigSettings : InjectedRoute("\u9ad8\u4eae\u6837\u5f0f")
         object ReaderHighlightTextSettings : InjectedRoute("\u9ad8\u4eae\u89c4\u5219")
+        data class ReaderBookHighlightRules(val bookKey: String, val bookTitle: String) : InjectedRoute(bookTitle)
         object ReaderHighlightColorPicker : InjectedRoute("\u5bf9\u8bdd\u989c\u8272")
         object CloudCompletionSettings : InjectedRoute("\u4e91\u76d8\u8865\u5168")
         object RotationCompletionSettings : InjectedRoute("\u65cb\u8f6c\u8865\u5168")
@@ -6364,6 +6483,7 @@ class ReaMicroSettingsHook(
         const val READER_HIGHLIGHT_COLOR_PICKER_ITEM_KEY = 0x524D4676
         const val READER_HIGHLIGHT_CONFIG_ITEM_KEY = 0x524D4677
         const val READER_HIGHLIGHT_TEXT_ITEM_KEY = 0x524D4678
+        const val READER_HIGHLIGHT_BOOK_RULES_ITEM_KEY = 0x524D4679
         const val ACCOUNT_CREDENTIAL_DOCUMENT_REQUEST_CODE = 0x524D47
         const val ACCOUNT_DATA_DOCUMENT_REQUEST_CODE = 0x524D48
         const val ONLINE_SOURCE_DOCUMENT_REQUEST_CODE = 0x524D49

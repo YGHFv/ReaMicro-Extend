@@ -94,6 +94,10 @@ class XposedModuleSettings(
         putBoolean(ModuleSettings.KEY_READER_DIALOGUE_HIGHLIGHT_ENABLED, enabled)
     }
 
+    fun setReaderSelectionHighlightEnabled(enabled: Boolean) {
+        putBoolean(ModuleSettings.KEY_READER_SELECTION_HIGHLIGHT_ENABLED, enabled)
+    }
+
     fun setFontEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_FONT_ENABLED, enabled)
     }
@@ -277,6 +281,32 @@ class XposedModuleSettings(
         putString(ModuleSettings.KEY_READER_HIGHLIGHT_RULES, encodeHighlightRules(next))
     }
 
+    fun addReaderBookHighlightRule(bookKey: String, bookTitle: String, text: String): ReaderHighlightRule? {
+        val pattern = text.trim()
+        if (bookKey.isBlank() || pattern.isBlank()) return null
+        val current = highlightSettings()
+        current.rules.firstOrNull {
+            it.bookKey == bookKey &&
+                it.type == ReaderHighlightRuleType.FixedText &&
+                it.pattern == pattern
+        }?.let { existing ->
+            if (!existing.enabled) setReaderHighlightRule(existing.copy(enabled = true))
+            return existing
+        }
+        val rule = ReaderHighlightRule(
+            id = "book_${System.currentTimeMillis()}_${Integer.toHexString(pattern.hashCode())}",
+            name = pattern.take(24).ifBlank { "本书高亮" },
+            type = ReaderHighlightRuleType.FixedText,
+            styleId = ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID,
+            enabled = true,
+            pattern = pattern,
+            bookKey = bookKey,
+            bookTitle = bookTitle.ifBlank { "本书" },
+        )
+        setReaderHighlightRule(rule)
+        return rule
+    }
+
     fun removeReaderHighlightRule(ruleId: String) {
         if (ruleId == ModuleSettings.DEFAULT_READER_DOUBLE_QUOTE_RULE_ID ||
             ruleId == ModuleSettings.DEFAULT_READER_SINGLE_QUOTE_RULE_ID
@@ -395,6 +425,10 @@ class XposedModuleSettings(
             ModuleSettings.KEY_READER_DIALOGUE_HIGHLIGHT_ENABLED,
             ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_ENABLED,
         )
+        val readerSelectionHighlightEnabled = prefs.getBoolean(
+            ModuleSettings.KEY_READER_SELECTION_HIGHLIGHT_ENABLED,
+            ModuleSettings.DEFAULT_READER_SELECTION_HIGHLIGHT_ENABLED,
+        )
         val editFileEnabled = prefs.getBoolean(
             ModuleSettings.KEY_EDIT_FILE_ENABLED,
             ModuleSettings.DEFAULT_EDIT_FILE_ENABLED,
@@ -444,6 +478,7 @@ class XposedModuleSettings(
                     readerEditOverwriteEnabled ||
                     editFileEnabled ||
                     readerDialogueHighlightEnabled ||
+                    readerSelectionHighlightEnabled ||
                     ModuleSettings.DEFAULT_READER_ENABLED,
             ),
             readerLongPressEnabled = readerLongPressEnabled,
@@ -453,6 +488,7 @@ class XposedModuleSettings(
             readerDictionaryEnabled = readerDictionaryEnabled,
             readerCompactSelectionMenuEnabled = readerCompactSelectionMenuEnabled,
             readerDialogueHighlightEnabled = readerDialogueHighlightEnabled,
+            readerSelectionHighlightEnabled = readerSelectionHighlightEnabled,
             fontEnabled = prefs.getBoolean(
                 ModuleSettings.KEY_FONT_ENABLED,
                 ModuleSettings.DEFAULT_FONT_ENABLED,
@@ -623,6 +659,8 @@ class XposedModuleSettings(
                                 .ifBlank { ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID },
                             enabled = item.optBoolean("enabled", true),
                             pattern = item.optString("pattern"),
+                            bookKey = item.optString("bookKey"),
+                            bookTitle = item.optString("bookTitle"),
                         ),
                     )
                 }
@@ -662,7 +700,9 @@ class XposedModuleSettings(
                         .put("type", rule.type.name)
                         .put("styleId", rule.styleId)
                         .put("enabled", rule.enabled)
-                        .put("pattern", rule.pattern),
+                        .put("pattern", rule.pattern)
+                        .put("bookKey", rule.bookKey)
+                        .put("bookTitle", rule.bookTitle),
                 )
             }
         }.toString()
@@ -682,6 +722,7 @@ class XposedModuleSettings(
             snapshot.readerDictionaryEnabled,
             snapshot.readerCompactSelectionMenuEnabled,
             snapshot.readerDialogueHighlightEnabled,
+            snapshot.readerSelectionHighlightEnabled,
             snapshot.fontEnabled,
             snapshot.fontSettingsEnabled,
             snapshot.accountEnabled,
@@ -717,6 +758,7 @@ class XposedModuleSettings(
                     "readerDictionary=${snapshot.readerDictionaryEnabled}, " +
                     "readerCompactMenu=${snapshot.readerCompactSelectionMenuEnabled}, " +
                     "readerDialogueHighlight=${snapshot.readerDialogueHighlightEnabled}, " +
+                    "readerSelectionHighlight=${snapshot.readerSelectionHighlightEnabled}, " +
                     "font=${snapshot.fontEnabled}, " +
                     "fontSettings=${snapshot.fontSettingsEnabled}, " +
                     "account=${snapshot.accountEnabled}, " +

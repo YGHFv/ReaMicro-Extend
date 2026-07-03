@@ -40,6 +40,8 @@ import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.ai.AiApiTestResult
 import com.reamicro.fix.reader.SearchHighlightPlanner
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
+import com.reamicro.fix.settings.ReaderHighlightBookContext
+import com.reamicro.fix.settings.XposedModuleSettings
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
@@ -62,6 +64,7 @@ class ReaderHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
     private val settingsProvider: () -> ModuleSettingsSnapshot = { ModuleSettingsSnapshot() },
+    private val settings: XposedModuleSettings? = null,
 ) {
     private var nativeSelectionHookInstalled: Boolean = false
     private var currentSelectionControllerRef: WeakReference<Any>? = null
@@ -119,6 +122,9 @@ class ReaderHook(
 
     private fun canShowReaderDictionary(): Boolean =
         settingsProvider().canShowReaderDictionary
+
+    private fun canHighlightReaderSelection(): Boolean =
+        settingsProvider().canHighlightReaderSelection
 
     private fun canRunFullTextSearch(): Boolean {
         val snapshot = settingsProvider()
@@ -356,6 +362,7 @@ class ReaderHook(
                             resetFullTextSearchState("catalog book changed", removeOverlays = true)
                         }
                         lastCatalogContext = context
+                        ReaderHighlightBookContext.update(bookKey(context), bookTitle(context).ifBlank { "\u672c\u4e66" })
                         injectSearchHighlightIntoReaderCatalog(param)
                         ensureSearchIndexAsync(context)
                         scheduleRestorePersistedSearchOrigin("catalog context")
@@ -1076,6 +1083,10 @@ class ReaderHook(
                             val action = (editImageVector() ?: fallbackIcon)?.let(::createNativeEditAction)
                             if (action != null) next.add(action)
                         }
+                        if (canHighlightReaderSelection() && original.none { callString(it, "getTitle") == "\u9ad8\u4eae" }) {
+                            val action = (highlightImageVector() ?: fallbackIcon)?.let(::createNativeHighlightAction)
+                            if (action != null) next.add(action)
+                        }
                         val compact = if (settingsProvider().canUseCompactReaderSelectionMenu) {
                             compactSelectionMenuActions(next)
                         } else {
@@ -1146,6 +1157,16 @@ class ReaderHook(
             "create native dictionary action",
         )
 
+    private fun createNativeHighlightAction(icon: Any): Any? =
+        createSelectionMenuAction(
+            if (settingsProvider().canUseCompactReaderSelectionMenu) "" else "\u9ad8\u4eae",
+            icon,
+            nativeFunction0 {
+                highlightNativeSelection()
+            },
+            "create native highlight action",
+        )
+
     private fun createSelectionMenuAction(title: String, icon: Any, callback: Any, logLabel: String): Any? =
         runCatching {
             val actionClass = classLoader.loadClass("org.epub.ui.SelectionMenuAction")
@@ -1178,6 +1199,23 @@ class ReaderHook(
             DICTIONARY_ICON_MENU_BOOK_CLASS to "getMenuBook",
             DICTIONARY_ICON_AUTO_STORIES_CLASS to "getAutoStories",
             DICTIONARY_ICON_BOOK_CLASS to "getBook",
+        ).firstNotNullOfOrNull { (className, methodName) ->
+            runCatching {
+                classLoader.loadClass(className).declaredMethods.firstOrNull {
+                    it.name == methodName && it.parameterTypes.size == 1
+                }?.apply { isAccessible = true }?.invoke(null, outlined)
+            }.getOrNull()
+        }
+    }
+
+    private fun highlightImageVector(): Any? {
+        val outlined = runCatching {
+            classLoader.loadClass(ICONS_OUTLINED_CLASS).getField("INSTANCE").get(null)
+        }.getOrNull() ?: return null
+        return listOf(
+            HIGHLIGHT_ICON_BORDER_COLOR_CLASS to "getBorderColor",
+            HIGHLIGHT_ICON_FORMAT_COLOR_FILL_CLASS to "getFormatColorFill",
+            HIGHLIGHT_ICON_MODE_EDIT_CLASS to "getModeEdit",
         ).firstNotNullOfOrNull { (className, methodName) ->
             runCatching {
                 classLoader.loadClass(className).declaredMethods.firstOrNull {
@@ -1521,6 +1559,31 @@ class ReaderHook(
             }
             requestDictionaryPreset(activity, config, quote, initialPreset, handle)
         }
+    }
+
+    private fun highlightNativeSelection() {
+        val activity = activityProvider() ?: return
+        if (!canHighlightReaderSelection()) return
+        val (controller, quote) = currentNativeSelectionText()
+        if (quote.isBlank()) {
+            Toast.makeText(activity, "\u672a\u83b7\u53d6\u5230\u9009\u4e2d\u6587\u672c", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val context = lastCatalogContext
+        val bookKey = context?.let(::bookKey).orEmpty()
+        val bookTitle = context?.let(::bookTitle).orEmpty().ifBlank { "\u672c\u4e66" }
+        if (bookKey.isBlank()) {
+            Toast.makeText(activity, "\u672a\u83b7\u53d6\u5230\u5f53\u524d\u4e66\u7c4d", Toast.LENGTH_SHORT).show()
+            return
+        }
+        ReaderHighlightBookContext.update(bookKey, bookTitle)
+        val rule = settings?.addReaderBookHighlightRule(bookKey, bookTitle, quote)
+        if (rule == null) {
+            Toast.makeText(activity, "\u6dfb\u52a0\u9ad8\u4eae\u89c4\u5219\u5931\u8d25", Toast.LENGTH_SHORT).show()
+            return
+        }
+        callNoArg(controller, "clearSelection")
+        Toast.makeText(activity, "\u5df2\u6dfb\u52a0\u672c\u4e66\u9ad8\u4eae", Toast.LENGTH_SHORT).show()
     }
 
     private fun requestDictionaryPreset(
@@ -3880,6 +3943,9 @@ class ReaderHook(
         const val DICTIONARY_ICON_MENU_BOOK_CLASS = "androidx.compose.material.icons.outlined.MenuBookKt"
         const val DICTIONARY_ICON_AUTO_STORIES_CLASS = "androidx.compose.material.icons.outlined.AutoStoriesKt"
         const val DICTIONARY_ICON_BOOK_CLASS = "androidx.compose.material.icons.outlined.BookKt"
+        const val HIGHLIGHT_ICON_BORDER_COLOR_CLASS = "androidx.compose.material.icons.outlined.BorderColorKt"
+        const val HIGHLIGHT_ICON_FORMAT_COLOR_FILL_CLASS = "androidx.compose.material.icons.outlined.FormatColorFillKt"
+        const val HIGHLIGHT_ICON_MODE_EDIT_CLASS = "androidx.compose.material.icons.outlined.ModeEditKt"
         const val ICONS_OUTLINED_CLASS = "androidx.compose.material.icons.Icons\$Outlined"
         const val LOG_PREFIX = "ReaMicro LSP"
         const val FLIP_STYLE_TRANSLATE = 0

@@ -33,6 +33,7 @@ class ReaMicroHookEntry {
             classLoader = classLoader,
             activityProvider = { currentActivityRef?.get() },
             settingsProvider = moduleSettings::snapshot,
+            settings = moduleSettings,
         ).install()
         ReaderAutoPageHook(
             classLoader = classLoader,

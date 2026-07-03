@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.res.Configuration
 import android.graphics.Color
 import com.reamicro.fix.settings.ReaderHighlightRule
+import com.reamicro.fix.settings.ReaderHighlightBookContext
 import com.reamicro.fix.settings.ReaderHighlightRuleType
 import com.reamicro.fix.settings.ReaderHighlightStyle
 import com.reamicro.fix.settings.XposedModuleSettings
@@ -51,14 +52,23 @@ class ReaderDialogueHighlightHook(
     }
 
     private fun applyDialogueHighlight(contentDom: Any?) {
-        if (!settings.snapshot().canHighlightReaderDialogue) return
+        val snapshot = settings.snapshot()
+        if (!snapshot.canHighlightReaderDialogue) return
         runCatching {
             contentDom ?: return
             val content = callNoArg(contentDom, "getContent") ?: return
             val text = callNoArg(content, "getText")?.toString().orEmpty()
             if (text.isBlank()) return
             val highlight = settings.highlightSettings()
-            val enabledRules = highlight.rules.filter { it.enabled }
+            val currentBookKey = ReaderHighlightBookContext.bookKey
+            val enabledRules = highlight.rules.filter { rule ->
+                if (!rule.enabled) return@filter false
+                if (rule.bookKey.isBlank()) {
+                    snapshot.canHighlightReaderDialogue
+                } else {
+                    rule.bookKey == currentBookKey
+                }
+            }
             if (enabledRules.isEmpty()) return
             val dark = isNightMode()
             val protectedRanges = protectedStyledElementRanges(contentDom, text)
