@@ -31,13 +31,19 @@ class ReaderDialogueHighlightHook(
     private val fontFamilyCache = HashMap<String, Any>()
     private val failedFontFamilyLogKeys = HashSet<String>()
     private val ninePatchDrawableCache = HashMap<String, CachedImage>()
+    private val rememberedNinePatchRanges = object : LinkedHashMap<String, List<NinePatchRange>>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<NinePatchRange>>?): Boolean =
+            size > MAX_REMEMBERED_NINE_PATCH_TEXTS
+    }
     @Volatile private var ninePatchDrawHookInstalled: Boolean = false
+    @Volatile private var basicTextDrawHookInstalled: Boolean = false
     @Volatile private var lastNinePatchLogKey: String = ""
     @Volatile private var lastAppliedLogKey: String = ""
 
     fun install() {
         CONTENT_DOM_CLASS_CANDIDATES.forEach(::hookContentDom)
         hookJustifyTextNinePatchDraw()
+        hookBasicTextNinePatchDraw()
     }
 
     private fun hookContentDom(className: String) {
@@ -94,7 +100,7 @@ class ReaderDialogueHighlightHook(
                     singleQuoteRanges = singleQuoteRanges,
                 )
                 if (ranges.isEmpty()) return@flatMap emptyList()
-                val highlightStyle = highlight.styleById(rule.styleId)
+                val highlightStyle = highlight.styleById(rule.styleIdForTheme(dark))
                 val style = createHighlightSpanStyle(highlightStyle, dark) ?: return@flatMap emptyList()
                 val ninePatchPath = highlightStyle.ninePatchPathForTheme(dark).trim()
                 if (ninePatchPath.isNotBlank()) {
@@ -266,6 +272,7 @@ class ReaderDialogueHighlightHook(
         val css = parseCssStyle(style.cssForTheme(dark))
         val color = composeColor(css.color.ifBlank { style.colorForTheme(dark) })
         val background = css.backgroundColor.takeIf { it.isNotBlank() }?.let(::composeColor)
+        val fontSize = css.fontSize?.let(::composeSpTextUnit)
         val fontSelection = style.fontFamilyForTheme(dark).ifBlank { settings.fontSettings().globalFamily }
         val fontFamily = resolveFontFamily(fontSelection)
         val fontWeight = css.fontWeight?.let(::resolveFontWeight)
@@ -275,6 +282,7 @@ class ReaderDialogueHighlightHook(
             ?: return null
         constructor.isAccessible = true
         var mask = SPAN_STYLE_DEFAULT_MASK_EXCEPT_COLOR
+        if (fontSize != null) mask = mask and SPAN_STYLE_MASK_FONT_SIZE.inv()
         if (fontWeight != null) mask = mask and SPAN_STYLE_MASK_FONT_WEIGHT.inv()
         if (fontStyle != null) mask = mask and SPAN_STYLE_MASK_FONT_STYLE.inv()
         if (fontFamily != null) mask = mask and SPAN_STYLE_MASK_FONT_FAMILY.inv()
@@ -283,7 +291,7 @@ class ReaderDialogueHighlightHook(
         if (textDecoration != null) mask = mask and SPAN_STYLE_MASK_TEXT_DECORATION.inv()
         return constructor.newInstance(
             color,
-            0L,
+            fontSize ?: 0L,
             fontWeight,
             fontStyle,
             null,
@@ -324,7 +332,26 @@ class ReaderDialogueHighlightHook(
             fontStyle = values["font-style"]?.lowercase(),
             fontFeatureSettings = values["font-feature-settings"].orEmpty(),
             textDecoration = values["text-decoration"]?.lowercase(),
+            fontSize = values["font-size"]?.lowercase(),
         )
+    }
+
+    private fun composeSpTextUnit(value: String): Long? {
+        val trimmed = value.trim().lowercase()
+        if (trimmed.isBlank()) return null
+        val number = Regex("""-?\d+(?:\.\d+)?""").find(trimmed)?.value?.toFloatOrNull() ?: return null
+        val scaledDensity = activityProvider()?.resources?.displayMetrics?.scaledDensity ?: 1f
+        val sp = when {
+            trimmed.endsWith("px") -> number / scaledDensity
+            trimmed.endsWith("em") -> number * 16f
+            trimmed.endsWith("rem") -> number * 16f
+            else -> number
+        }.coerceIn(1f, 96f)
+        return cls(TEXT_UNIT_KT_CLASS).methods.firstOrNull { method ->
+            method.name == "getSp" &&
+                method.parameterTypes.size == 1 &&
+                method.parameterTypes[0] == Float::class.javaPrimitiveType
+        }?.apply { isAccessible = true }?.invoke(null, sp) as? Long
     }
 
     private fun resolveFontWeight(value: String): Any? {
@@ -505,7 +532,7 @@ class ReaderDialogueHighlightHook(
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        injectNinePatchDraw(param)
+                        rememberNinePatchRanges(param.args?.getOrNull(0))
                     }
                 })
             }
@@ -516,29 +543,90 @@ class ReaderDialogueHighlightHook(
         }
     }
 
-    private fun injectNinePatchDraw(param: XC_MethodHook.MethodHookParam) {
+    private fun hookBasicTextNinePatchDraw() {
+        if (basicTextDrawHookInstalled) return
+        runCatching {
+            val basicTextClass = cls(BASIC_TEXT_CLASS)
+            val annotatedStringClass = cls(ANNOTATED_STRING_CLASS)
+            val modifierClass = cls(MODIFIER_CLASS)
+            val methods = basicTextClass.declaredMethods.filter { method ->
+                method.name.contains("BasicText") &&
+                    method.parameterTypes.size >= 12 &&
+                    method.parameterTypes[0] == annotatedStringClass &&
+                    method.parameterTypes[1] == modifierClass
+            }
+            methods.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        injectNinePatchDraw(
+                            param = param,
+                            onTextLayoutIndex = 3,
+                            defaultMaskIndex = param.args?.lastIndex,
+                            modifierDefaultMask = BASIC_TEXT_DEFAULT_MODIFIER,
+                            onTextLayoutDefaultMask = BASIC_TEXT_DEFAULT_ON_TEXT_LAYOUT,
+                        )
+                    }
+                })
+            }
+            basicTextDrawHookInstalled = methods.isNotEmpty()
+            XposedBridge.log("$LOG_PREFIX basic text nine-patch draw hook installed count=${methods.size}")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX basic text nine-patch draw hook failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun injectNinePatchDraw(
+        param: XC_MethodHook.MethodHookParam,
+        onTextLayoutIndex: Int,
+        defaultMaskIndex: Int?,
+        modifierDefaultMask: Int,
+        onTextLayoutDefaultMask: Int,
+    ) {
         runCatching {
             val annotatedString = param.args?.getOrNull(0) ?: return
-            val ranges = ninePatchRanges(annotatedString)
+            val ranges = ninePatchRanges(annotatedString).ifEmpty { rememberedNinePatchRanges(annotatedString) }
             if (ranges.isEmpty()) return
             val state = NinePatchDrawState(ranges)
             val modifier = drawBehindModifier(param.args?.getOrNull(1), state) ?: return
-            val originalOnTextLayout = param.args?.getOrNull(4)
+            val originalOnTextLayout = param.args?.getOrNull(onTextLayoutIndex)
             param.args[1] = modifier
-            param.args[4] = function1Proxy("NinePatchTextLayout") { args ->
+            param.args[onTextLayoutIndex] = function1Proxy("NinePatchTextLayout") { args ->
                 state.textLayoutResult = args?.getOrNull(0)
                 invokeFunction1(originalOnTextLayout, args?.getOrNull(0))
                 targetUnit()
             }
-            val defaultMask = param.args.getOrNull(7) as? Int
+            val defaultMask = defaultMaskIndex?.let { param.args.getOrNull(it) as? Int }
             if (defaultMask != null) {
-                param.args[7] = defaultMask and JUSTIFY_TEXT_DEFAULT_MODIFIER.inv() and
-                    JUSTIFY_TEXT_DEFAULT_ON_TEXT_LAYOUT.inv()
+                param.args[defaultMaskIndex] = defaultMask and modifierDefaultMask.inv() and
+                    onTextLayoutDefaultMask.inv()
             }
         }.onFailure {
             logNinePatchDrawFailure("inject", it)
         }
     }
+
+    private fun rememberNinePatchRanges(annotatedString: Any?) {
+        annotatedString ?: return
+        val ranges = ninePatchRanges(annotatedString)
+        if (ranges.isEmpty()) return
+        val key = annotatedStringTextKey(annotatedString)
+        if (key.isBlank()) return
+        synchronized(rememberedNinePatchRanges) {
+            rememberedNinePatchRanges[key] = ranges
+        }
+    }
+
+    private fun rememberedNinePatchRanges(annotatedString: Any): List<NinePatchRange> {
+        val key = annotatedStringTextKey(annotatedString)
+        if (key.isBlank()) return emptyList()
+        synchronized(rememberedNinePatchRanges) {
+            return rememberedNinePatchRanges[key].orEmpty()
+        }
+    }
+
+    private fun annotatedStringTextKey(annotatedString: Any): String =
+        callNoArg(annotatedString, "getText")?.toString().orEmpty()
 
     private fun ninePatchRanges(annotatedString: Any): List<NinePatchRange> {
         val length = (callNoArg(annotatedString, "length") as? Int)
@@ -959,9 +1047,11 @@ class ReaderDialogueHighlightHook(
         const val ANNOTATED_RANGE_CLASS = "androidx.compose.ui.text.AnnotatedString\$Range"
         const val ANNOTATED_STRING_EXT_CLASS = "org.epub.utils.AnnotatedStringExtKt"
         const val JUSTIFY_TEXT_CLASS = "app.zhendong.reamicro.arch.components.JustifyText_androidKt"
+        const val BASIC_TEXT_CLASS = "androidx.compose.foundation.text.BasicTextKt"
         const val DRAW_MODIFIER_KT_CLASS = "androidx.compose.ui.draw.DrawModifierKt"
         const val ANDROID_CANVAS_KT_CLASS = "androidx.compose.ui.graphics.AndroidCanvas_androidKt"
         const val COLOR_KT_CLASS = "androidx.compose.ui.graphics.ColorKt"
+        const val TEXT_UNIT_KT_CLASS = "androidx.compose.ui.unit.TextUnitKt"
         const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
         const val FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
         const val UNIT_CLASS = "kotlin.Unit"
@@ -974,6 +1064,7 @@ class ReaderDialogueHighlightHook(
         const val FAMILY_SYSTEM = "system"
         const val FAMILY_SOURCE_HAN_SERIF = "serif"
         const val SPAN_STYLE_DEFAULT_MASK_EXCEPT_COLOR = 65534
+        const val SPAN_STYLE_MASK_FONT_SIZE = 2
         const val SPAN_STYLE_MASK_FONT_WEIGHT = 4
         const val SPAN_STYLE_MASK_FONT_STYLE = 8
         const val SPAN_STYLE_MASK_FONT_FAMILY = 32
@@ -986,6 +1077,9 @@ class ReaderDialogueHighlightHook(
         const val TEXT_DECORATION_LINE_THROUGH = 2
         const val JUSTIFY_TEXT_DEFAULT_MODIFIER = 2
         const val JUSTIFY_TEXT_DEFAULT_ON_TEXT_LAYOUT = 16
+        const val BASIC_TEXT_DEFAULT_MODIFIER = 2
+        const val BASIC_TEXT_DEFAULT_ON_TEXT_LAYOUT = 8
+        const val MAX_REMEMBERED_NINE_PATCH_TEXTS = 128
         const val NINE_PATCH_ANNOTATION_TAG = "reamicro.highlight.ninepatch"
         const val NINE_PATCH_ANNOTATION_SEPARATOR = "\u001F"
         const val MARKUP_TEXT = "#text"
@@ -1013,6 +1107,7 @@ class ReaderDialogueHighlightHook(
         val fontStyle: String? = null,
         val fontFeatureSettings: String = "",
         val textDecoration: String? = null,
+        val fontSize: String? = null,
     )
 
     private data class NinePatchAnnotation(

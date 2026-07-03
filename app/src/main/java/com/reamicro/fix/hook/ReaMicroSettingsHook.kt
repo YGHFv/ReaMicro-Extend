@@ -13,6 +13,7 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
@@ -1192,12 +1193,11 @@ class ReaMicroSettingsHook(
                     ),
                 )
                 highlight.rules.filter { it.bookKey.isBlank() }.forEach { rule ->
-                    val style = highlight.styleById(rule.styleId)
                     add(
                         ActionRow(
                             key = "reader_highlight_rule_${rule.id}",
                             title = rule.name,
-                            subtitle = "${highlightRuleSummary(rule)} / ${style.name}",
+                            subtitle = "${highlightRuleSummary(rule)} / ${highlightRuleStyleSummary(highlight, rule)}",
                             trailingContent = { itemComposer ->
                                 renderHostActionSwitch(
                                     key = "reader_highlight_rule_switch_${rule.id}",
@@ -1274,12 +1274,11 @@ class ReaMicroSettingsHook(
                     ),
                 )
                 highlight.bookRules(route.bookKey).forEach { rule ->
-                    val style = highlight.styleById(rule.styleId)
                     add(
                         ActionRow(
                             key = "reader_book_highlight_rule_${rule.id}",
                             title = rule.name,
-                            subtitle = "${highlightRuleSummary(rule)} / ${style.name}",
+                            subtitle = "${highlightRuleSummary(rule)} / ${highlightRuleStyleSummary(highlight, rule)}",
                             trailingContent = { itemComposer ->
                                 renderHostActionSwitch(
                                     key = "reader_book_highlight_rule_switch_${rule.id}",
@@ -1355,7 +1354,7 @@ class ReaMicroSettingsHook(
                         syncLightFontStatus.invoke()
                     }
                 }
-                val cssInput = settingsDialogInput(activity, "\u6d45\u8272 CSS\uff08\u652f\u6301 color/background/font-weight/font-style/text-decoration\uff09", singleLine = false, colors = colors).apply {
+                val cssInput = settingsDialogInput(activity, "\u6d45\u8272 CSS\uff08\u652f\u6301 color/background/font-size/font-weight/font-style/text-decoration\uff09", singleLine = false, colors = colors).apply {
                     setText(style.css)
                     minLines = 2
                 }
@@ -1396,7 +1395,7 @@ class ReaMicroSettingsHook(
                         syncDarkFontStatus.invoke()
                     }
                 }
-                val darkCssInput = settingsDialogInput(activity, "\u6df1\u8272 CSS\uff08\u652f\u6301 color/background/font-weight/font-style/text-decoration\uff09", singleLine = false, colors = colors).apply {
+                val darkCssInput = settingsDialogInput(activity, "\u6df1\u8272 CSS\uff08\u652f\u6301 color/background/font-size/font-weight/font-style/text-decoration\uff09", singleLine = false, colors = colors).apply {
                     setText(style.darkCss)
                     minLines = 2
                 }
@@ -1412,6 +1411,9 @@ class ReaMicroSettingsHook(
                 val finishButton = settingsDialogButton(activity, "\u5b8c\u6210", colors)
                 val deleteButton = settingsDialogButton(activity, "\u5220\u9664", colors, SettingsDialogButtonRole.Destructive)
                 val cancelButton = settingsDialogButton(activity, "\u53d6\u6d88", colors, SettingsDialogButtonRole.Neutral)
+                val lightPreview = readerHighlightStylePreview(activity, "\u6d45\u8272\u9884\u89c8\uff1a\u201c\u5bf9\u8bdd\u9ad8\u4eae\u9884\u89c8\u201d", colors)
+                val darkPreview = readerHighlightStylePreview(activity, "\u6df1\u8272\u9884\u89c8\uff1a\u201c\u5bf9\u8bdd\u9ad8\u4eae\u9884\u89c8\u201d", colors)
+                lateinit var syncPreviews: () -> Unit
                 fun syncDarkInputs() {
                     val visibility = if (darkUsesLight) View.GONE else View.VISIBLE
                     darkToggleButton.text = if (darkUsesLight) "\u6df1\u8272\u5171\u7528\u6d45\u8272" else "\u6df1\u8272\u5355\u72ec\u914d\u7f6e"
@@ -1420,6 +1422,8 @@ class ReaMicroSettingsHook(
                     darkCssInput.visibility = visibility
                     darkNinePatchInput.visibility = visibility
                     darkNinePatchSelectButton.visibility = visibility
+                    darkPreview.visibility = visibility
+                    syncPreviews.invoke()
                 }
                 syncLightFontStatus = {
                     lightFontStatus.text = "\u6d45\u8272\u5b57\u4f53\uff1a${dialogueHighlightFontSummary(lightFontSelection)}"
@@ -1430,13 +1434,38 @@ class ReaMicroSettingsHook(
                         if (darkFontSelection.isBlank()) "\u8ddf\u968f\u6d45\u8272\u5b57\u4f53" else displayFontName(darkFontSelection)
                     darkFontStatus.typeface = androidTypefaceForFontSelection(darkFontSelection) ?: Typeface.DEFAULT
                 }
+                syncPreviews = {
+                    syncReaderHighlightStylePreview(
+                        lightPreview,
+                        colorInput.text?.toString().orEmpty(),
+                        cssInput.text?.toString().orEmpty(),
+                        lightFontSelection,
+                        colors,
+                    )
+                    syncReaderHighlightStylePreview(
+                        darkPreview,
+                        darkColorInput.text?.toString().orEmpty().ifBlank { colorInput.text?.toString().orEmpty() },
+                        darkCssInput.text?.toString().orEmpty(),
+                        darkFontSelection.ifBlank { lightFontSelection },
+                        colors,
+                    )
+                }
+                listOf(colorInput, cssInput, darkColorInput, darkCssInput).forEach { input ->
+                    input.addTextChangedListener(object : TextWatcher {
+                        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = syncPreviews.invoke()
+                        override fun afterTextChanged(s: Editable?) = Unit
+                    })
+                }
                 card.addView(settingsDialogTitle(activity, "\u9ad8\u4eae\u6837\u5f0f", colors))
                 card.addView(nameInput)
-                card.addView(settingsDialogHint(activity, "\u6df1\u8272\u9ed8\u8ba4\u5171\u7528\u6d45\u8272\u914d\u7f6e\uff1b\u5b57\u4f53\u4ece\u5b57\u4f53\u5e93\u9009\u62e9\uff0cCSS \u7528\u4e8e\u52a0\u7c97\u3001\u659c\u4f53\u3001\u4e0b\u5212\u7ebf\u7b49\u6837\u5f0f\u3002", colors))
+                card.addView(settingsDialogHint(activity, "\u6df1\u8272\u9ed8\u8ba4\u5171\u7528\u6d45\u8272\u914d\u7f6e\uff1bCSS \u652f\u6301 font-size\u3001\u52a0\u7c97\u3001\u659c\u4f53\u3001\u4e0b\u5212\u7ebf\u7b49\u6837\u5f0f\u3002", colors))
                 card.addView(colorInput)
                 syncLightFontStatus.invoke()
                 card.addView(lightFontStatus)
                 card.addView(cssInput)
+                syncPreviews.invoke()
+                card.addView(lightPreview)
                 card.addView(ninePatchInput)
                 card.addView(ninePatchSelectButton, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1447,6 +1476,7 @@ class ReaMicroSettingsHook(
                 syncDarkFontStatus.invoke()
                 card.addView(darkFontStatus)
                 card.addView(darkCssInput)
+                card.addView(darkPreview)
                 card.addView(darkNinePatchInput)
                 card.addView(darkNinePatchSelectButton, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1513,6 +1543,106 @@ class ReaMicroSettingsHook(
         }
     }
 
+    private fun readerHighlightStylePreview(
+        context: Context,
+        message: String,
+        colors: SettingsDialogColors,
+    ): TextView =
+        TextView(context).apply {
+            text = message
+            textSize = 15f
+            includeFontPadding = true
+            setPadding(
+                settingsDp(context, 12),
+                settingsDp(context, 10),
+                settingsDp(context, 12),
+                settingsDp(context, 10),
+            )
+            background = settingsRoundedRect(colors.field, settingsDp(context, 12), colors.border)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = settingsDp(context, 10) }
+        }
+
+    private fun syncReaderHighlightStylePreview(
+        preview: TextView,
+        colorValue: String,
+        css: String,
+        fontSelection: String,
+        colors: SettingsDialogColors,
+    ) {
+        val cssValues = readerHighlightCssProperties(css)
+        val textColor = parseSettingsColor(cssValues["color"].orEmpty())
+            ?: parseSettingsColor(colorValue)
+            ?: colors.title
+        val backgroundColor = parseSettingsColor(cssValues["background-color"].orEmpty())
+            ?: parseSettingsColor(cssValues["background"].orEmpty())
+            ?: colors.field
+        preview.setTextColor(textColor)
+        preview.background = settingsRoundedRect(backgroundColor, settingsDp(preview.context, 12), colors.border)
+        preview.textSize = readerHighlightPreviewFontSize(cssValues["font-size"].orEmpty()) ?: 15f
+        val bold = cssValues["font-weight"].orEmpty().lowercase().let { it == "bold" || it == "bolder" || (it.toIntOrNull() ?: 0) >= 600 }
+        val italic = cssValues["font-style"].orEmpty().lowercase().let { it == "italic" || it == "oblique" }
+        val baseTypeface = androidTypefaceForFontSelection(fontSelection) ?: Typeface.DEFAULT
+        preview.typeface = Typeface.create(baseTypeface, when {
+            bold && italic -> Typeface.BOLD_ITALIC
+            bold -> Typeface.BOLD
+            italic -> Typeface.ITALIC
+            else -> Typeface.NORMAL
+        })
+        preview.paintFlags = if (cssValues["text-decoration"].orEmpty().contains("underline", ignoreCase = true)) {
+            preview.paintFlags or Paint.UNDERLINE_TEXT_FLAG
+        } else {
+            preview.paintFlags and Paint.UNDERLINE_TEXT_FLAG.inv()
+        }
+    }
+
+    private fun readerHighlightCssProperties(css: String): Map<String, String> =
+        css.split(';')
+            .mapNotNull { part ->
+                val index = part.indexOf(':')
+                if (index <= 0) null else part.substring(0, index).trim().lowercase() to part.substring(index + 1).trim()
+            }
+            .toMap()
+
+    private fun readerHighlightPreviewFontSize(value: String): Float? {
+        val trimmed = value.trim().lowercase()
+        if (trimmed.isBlank()) return null
+        val number = Regex("""-?\d+(?:\.\d+)?""").find(trimmed)?.value?.toFloatOrNull() ?: return null
+        val scaledDensity = previewScaledDensity()
+        return when {
+            trimmed.endsWith("px") -> number / scaledDensity
+            trimmed.endsWith("em") -> number * 15f
+            trimmed.endsWith("rem") -> number * 15f
+            else -> number
+        }.coerceIn(8f, 48f)
+    }
+
+    private fun previewScaledDensity(): Float =
+        activityProvider()?.resources?.displayMetrics?.scaledDensity ?: 1f
+
+    private fun parseSettingsColor(value: String): Int? {
+        val trimmed = value.trim()
+        if (trimmed.isBlank()) return null
+        runCatching { Color.parseColor(trimmed) }.getOrNull()?.let { return it }
+        val groups = Regex("""rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*([0-9.]+))?\s*\)""")
+            .find(trimmed)
+            ?.groupValues
+            ?: return null
+        val alpha = groups.getOrNull(4)
+            ?.takeIf { it.isNotBlank() }
+            ?.toFloatOrNull()
+            ?.let { if (it <= 1f) (it * 255).toInt() else it.toInt() }
+            ?: 255
+        return Color.argb(
+            alpha.coerceIn(0, 255),
+            groups[1].toInt().coerceIn(0, 255),
+            groups[2].toInt().coerceIn(0, 255),
+            groups[3].toInt().coerceIn(0, 255),
+        )
+    }
+
     private fun openReaderHighlightStyleImportPicker() {
         val activity = activityProvider() ?: return
         runCatching {
@@ -1565,7 +1695,9 @@ class ReaMicroSettingsHook(
             bumpReaderHighlightVersion()
             showToast(
                 if (imported.reeden) {
-                    if (imported.skippedDuplicates > 0) {
+                    if (imported.styles.isEmpty() && imported.skippedDuplicates > 0) {
+                        "\u5df2\u5b58\u5728 Reeden \u9ad8\u4eae\u6837\u5f0f\uff1a${imported.skippedDuplicates} \u4e2a"
+                    } else if (imported.skippedDuplicates > 0) {
                         "\u5df2\u5bfc\u5165 Reeden \u9ad8\u4eae\u6837\u5f0f\uff1a${imported.styles.size} \u4e2a\uff0c\u8df3\u8fc7 ${imported.skippedDuplicates} \u4e2a\u91cd\u590d"
                     } else {
                         "\u5df2\u5bfc\u5165 Reeden \u9ad8\u4eae\u6837\u5f0f\uff1a${imported.styles.size} \u4e2a"
@@ -1852,16 +1984,47 @@ class ReaMicroSettingsHook(
                     }
                 }
                 var selectedStyleId = rule.styleId.ifBlank { ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID }
+                var selectedDarkStyleId = rule.darkStyleId
                 val typeStatus = settingsDialogStatus(activity, "\u7c7b\u578b\uff1a${highlightRuleTypeTitle(rule)}", colors)
                 val patternInput = settingsDialogInput(activity, "\u5339\u914d\u5185\u5bb9", singleLine = false, colors = colors).apply {
                     setText(rule.pattern)
                     minLines = 2
                 }
-                val styleStatus = settingsDialogStatus(
+                lateinit var syncStyleSelection: () -> Unit
+                val lightStyleStatus = settingsDialogChoiceRow(
                     activity,
-                    "\u6837\u5f0f\uff1a${highlight.styleById(selectedStyleId).name}",
+                    "",
                     colors,
-                )
+                ) {
+                    openReaderHighlightStyleSelectionDialog(
+                        activity = activity,
+                        title = "\u9009\u62e9\u6d45\u8272\u6837\u5f0f",
+                        styles = styles,
+                        currentStyleId = selectedStyleId,
+                        colors = colors,
+                        allowFollowLight = false,
+                    ) { styleId ->
+                        selectedStyleId = styleId.ifBlank { ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID }
+                        syncStyleSelection.invoke()
+                    }
+                }
+                val darkStyleStatus = settingsDialogChoiceRow(
+                    activity,
+                    "",
+                    colors,
+                ) {
+                    openReaderHighlightStyleSelectionDialog(
+                        activity = activity,
+                        title = "\u9009\u62e9\u6df1\u8272\u6837\u5f0f",
+                        styles = styles,
+                        currentStyleId = selectedDarkStyleId,
+                        colors = colors,
+                        allowFollowLight = true,
+                    ) { styleId ->
+                        selectedDarkStyleId = styleId
+                        syncStyleSelection.invoke()
+                    }
+                }
                 val finishButton = settingsDialogButton(activity, "\u5b8c\u6210", colors)
                 val deleteButton = settingsDialogButton(activity, "\u5220\u9664", colors, SettingsDialogButtonRole.Destructive)
                 val cancelButton = settingsDialogButton(activity, "\u53d6\u6d88", colors, SettingsDialogButtonRole.Neutral)
@@ -1876,9 +2039,13 @@ class ReaMicroSettingsHook(
                         else -> "\u5339\u914d\u5185\u5bb9"
                     }
                 }
-                fun selectStyle(style: ReaderHighlightStyle) {
-                    selectedStyleId = style.id
-                    styleStatus.text = "\u6837\u5f0f\uff1a${style.name}"
+                syncStyleSelection = {
+                    lightStyleStatus.text = "\u6d45\u8272\u6837\u5f0f\uff1a${highlight.styleById(selectedStyleId).name}"
+                    darkStyleStatus.text = if (selectedDarkStyleId.isBlank()) {
+                        "\u6df1\u8272\u6837\u5f0f\uff1a\u8ddf\u968f\u6d45\u8272"
+                    } else {
+                        "\u6df1\u8272\u6837\u5f0f\uff1a${highlight.styleById(selectedDarkStyleId).name}"
+                    }
                 }
                 card.addView(settingsDialogTitle(activity, "\u9ad8\u4eae\u89c4\u5219", colors))
                 card.addView(settingsDialogHint(activity, "${highlightRuleTypeTitle(rule)}\uff1a${highlightRuleDescription(rule)}", colors))
@@ -1902,14 +2069,9 @@ class ReaMicroSettingsHook(
                     card.addView(patternInput)
                     syncTypeSelection()
                 }
-                card.addView(styleStatus)
-                styles.forEach { style ->
-                    card.addView(
-                        settingsDialogChoiceRow(activity, "${style.name}  ${style.id}", colors) {
-                            selectStyle(style)
-                        },
-                    )
-                }
+                syncStyleSelection.invoke()
+                card.addView(lightStyleStatus)
+                card.addView(darkStyleStatus)
                 val buttons = if (builtInRule) {
                     listOf(finishButton, cancelButton)
                 } else {
@@ -1926,6 +2088,7 @@ class ReaMicroSettingsHook(
                             },
                             type = selectedType,
                             styleId = selectedStyleId.ifBlank { ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID },
+                            darkStyleId = selectedDarkStyleId,
                             pattern = if (
                                 selectedType == ReaderHighlightRuleType.FixedText ||
                                 selectedType == ReaderHighlightRuleType.Regex
@@ -1950,6 +2113,46 @@ class ReaMicroSettingsHook(
                 XposedBridge.log("$LOG_PREFIX open highlight rule dialog failed: ${it.stackTraceToString()}")
             }
         }
+    }
+
+    private fun openReaderHighlightStyleSelectionDialog(
+        activity: Activity,
+        title: String,
+        styles: List<ReaderHighlightStyle>,
+        currentStyleId: String,
+        colors: SettingsDialogColors,
+        allowFollowLight: Boolean,
+        onSelected: (String) -> Unit,
+    ) {
+        val dialog = Dialog(activity)
+        val card = settingsDialogCard(activity, colors)
+        card.addView(settingsDialogTitle(activity, title, colors))
+        if (allowFollowLight) {
+            card.addView(
+                settingsDialogChoiceRow(
+                    activity,
+                    if (currentStyleId.isBlank()) "\u8ddf\u968f\u6d45\u8272  \u5f53\u524d" else "\u8ddf\u968f\u6d45\u8272",
+                    colors,
+                ) {
+                    onSelected("")
+                    dialog.dismiss()
+                },
+            )
+        }
+        styles.forEach { style ->
+            val selected = style.id == currentStyleId
+            card.addView(
+                settingsDialogChoiceRow(
+                    activity,
+                    if (selected) "${style.name}  \u5f53\u524d" else style.name,
+                    colors,
+                ) {
+                    onSelected(style.id)
+                    dialog.dismiss()
+                },
+            )
+        }
+        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, 0.92f)
     }
 
     private fun renderCloudCompletionSettingsContent(innerPaddings: Any, composer: Any) {
@@ -5165,6 +5368,19 @@ class ReaMicroSettingsHook(
             rule.type == ReaderHighlightRuleType.FixedText || rule.type == ReaderHighlightRuleType.Regex
         }?.compactOnlineSourceLine()
         return if (pattern.isNullOrBlank()) base else "$base: $pattern"
+    }
+
+    private fun highlightRuleStyleSummary(
+        highlight: ReaderHighlightSettingsSnapshot,
+        rule: ReaderHighlightRule,
+    ): String {
+        val light = highlight.styleById(rule.styleId).name
+        val dark = rule.darkStyleId.takeIf { it.isNotBlank() }?.let { highlight.styleById(it).name }
+        return if (dark.isNullOrBlank() || dark == light) {
+            "\u6d45/\u6df1 $light"
+        } else {
+            "\u6d45 $light / \u6df1 $dark"
+        }
     }
 
     private fun newReaderHighlightStyle(): ReaderHighlightStyle {

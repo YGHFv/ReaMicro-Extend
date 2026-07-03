@@ -348,11 +348,15 @@ data class ReaderHighlightRule(
     val name: String,
     val type: ReaderHighlightRuleType,
     val styleId: String = ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID,
+    val darkStyleId: String = "",
     val enabled: Boolean = true,
     val pattern: String = "",
     val bookKey: String = "",
     val bookTitle: String = "",
 ) {
+    fun styleIdForTheme(dark: Boolean): String =
+        if (dark) darkStyleId.ifBlank { styleId } else styleId
+
     companion object {
         fun defaults(): List<ReaderHighlightRule> =
             listOf(

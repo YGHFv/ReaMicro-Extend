@@ -3,6 +3,8 @@ package com.reamicro.fix.settings
 import android.content.Context
 import android.content.SharedPreferences
 import de.robv.android.xposed.XposedBridge
+import java.io.File
+import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -264,8 +266,11 @@ class XposedModuleSettings(
         val current = highlightSettings()
         val nextStyles = current.styles.filterNot { it.id == styleId }
         val nextRules = current.rules.map { rule ->
-            if (rule.styleId == styleId) {
-                rule.copy(styleId = ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID)
+            if (rule.styleId == styleId || rule.darkStyleId == styleId) {
+                rule.copy(
+                    styleId = if (rule.styleId == styleId) ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID else rule.styleId,
+                    darkStyleId = if (rule.darkStyleId == styleId) "" else rule.darkStyleId,
+                )
             } else {
                 rule
             }
@@ -660,9 +665,70 @@ class XposedModuleSettings(
                 }
             }
         }.getOrDefault(emptyList())
-        val hasDefault = decoded.any { it.id == ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID }
-        return if (hasDefault) decoded else listOf(fallbackStyle) + decoded
+        val deduped = dedupeReaderHighlightStyles(decoded, readerHighlightReferencedStyleIds(prefs))
+        val hasDefault = deduped.any { it.id == ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID }
+        return if (hasDefault) deduped else listOf(fallbackStyle) + deduped
     }
+
+    private fun dedupeReaderHighlightStyles(
+        styles: List<ReaderHighlightStyle>,
+        referencedStyleIds: Set<String>,
+    ): List<ReaderHighlightStyle> {
+        val result = ArrayList<ReaderHighlightStyle>(styles.size)
+        val indexByKey = HashMap<String, Int>()
+        styles.forEach { style ->
+            val key = readerHighlightStyleImportKey(style)
+            if (key == null) {
+                result.add(style)
+                return@forEach
+            }
+            val existingIndex = indexByKey[key]
+            if (existingIndex == null) {
+                indexByKey[key] = result.size
+                result.add(style)
+                return@forEach
+            }
+            val existing = result[existingIndex]
+            if (style.id in referencedStyleIds && existing.id !in referencedStyleIds) {
+                result[existingIndex] = style
+            }
+        }
+        return result
+    }
+
+    private fun readerHighlightReferencedStyleIds(prefs: SharedPreferences): Set<String> {
+        val raw = prefs.getString(ModuleSettings.KEY_READER_HIGHLIGHT_RULES, "").orEmpty()
+        return runCatching {
+            val array = JSONArray(raw)
+            buildSet {
+                for (index in 0 until array.length()) {
+                    val styleId = array.optJSONObject(index)
+                        ?.optString("styleId")
+                        .orEmpty()
+                    if (styleId.isNotBlank()) add(styleId)
+                    val darkStyleId = array.optJSONObject(index)
+                        ?.optString("darkStyleId")
+                        .orEmpty()
+                    if (darkStyleId.isNotBlank()) add(darkStyleId)
+                }
+            }
+        }.getOrDefault(emptySet())
+    }
+
+    private fun readerHighlightStyleImportKey(style: ReaderHighlightStyle): String? {
+        val css = style.css.trim()
+        val path = style.ninePatchPath.trim()
+        if (css.isBlank() || path.isBlank()) return null
+        val file = File(path)
+        if (!file.isFile) return null
+        val hash = runCatching { md5Hex(file.readBytes()) }.getOrNull() ?: return null
+        return "$css|$hash"
+    }
+
+    private fun md5Hex(bytes: ByteArray): String =
+        MessageDigest.getInstance("MD5")
+            .digest(bytes)
+            .joinToString("") { "%02X".format(it) }
 
     private fun readHighlightRules(prefs: SharedPreferences): List<ReaderHighlightRule> {
         val defaults = ReaderHighlightRule.defaults()
@@ -684,6 +750,7 @@ class XposedModuleSettings(
                             type = type,
                             styleId = item.optString("styleId")
                                 .ifBlank { ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID },
+                            darkStyleId = item.optString("darkStyleId"),
                             enabled = item.optBoolean("enabled", true),
                             pattern = item.optString("pattern"),
                             bookKey = item.optString("bookKey"),
@@ -728,6 +795,7 @@ class XposedModuleSettings(
                         .put("name", rule.name)
                         .put("type", rule.type.name)
                         .put("styleId", rule.styleId)
+                        .put("darkStyleId", rule.darkStyleId)
                         .put("enabled", rule.enabled)
                         .put("pattern", rule.pattern)
                         .put("bookKey", rule.bookKey)
