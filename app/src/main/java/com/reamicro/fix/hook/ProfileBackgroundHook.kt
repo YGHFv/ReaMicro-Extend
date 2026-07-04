@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
 import android.graphics.Shader
+import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -383,7 +384,8 @@ class ProfileBackgroundHook(
         val density = activity.resources.displayMetrics.density.coerceAtLeast(1f)
         val screenW = activity.resources.displayMetrics.widthPixels.coerceAtLeast(1)
         val headerH = (PROFILE_BACKGROUND_HEADER_HEIGHT_DP * density).toInt().coerceAtLeast(1)
-        val key = "$path|$screenW|$headerH"
+        val cropPosition = settingsProvider().profileBackgroundCropPosition
+        val key = "$path|$screenW|$headerH|$cropPosition"
         val headerBitmap = if (cachedHeaderBitmapKey == key && cachedHeaderBitmap != null) {
             cachedHeaderBitmap!!
         } else {
@@ -399,7 +401,13 @@ class ProfileBackgroundHook(
                 val scaledW = bitmap.width * scale
                 val scaledH = bitmap.height * scale
                 val left = (screenW - scaledW) / 2f
-                val top = 0f
+                val overflowY = (scaledH - headerH).coerceAtLeast(0f)
+                val cropFraction = when (cropPosition) {
+                    ModuleSettings.PROFILE_BACKGROUND_CROP_BOTTOM -> 1f
+                    ModuleSettings.PROFILE_BACKGROUND_CROP_CENTER -> 0.5f
+                    else -> 0f
+                }
+                val top = -overflowY * cropFraction
                 canvas.drawBitmap(
                     bitmap,
                     null,

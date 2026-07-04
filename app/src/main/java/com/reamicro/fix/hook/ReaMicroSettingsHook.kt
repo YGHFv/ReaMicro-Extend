@@ -766,6 +766,10 @@ class ReaMicroSettingsHook(
     private fun profileBackgroundColorSummary(value: String): String =
         PROFILE_BACKGROUND_COLOR_OPTIONS.firstOrNull { it.value.equals(value, ignoreCase = true) }?.title ?: value
 
+    private fun profileBackgroundCropPositionSummary(value: String): String =
+        PROFILE_BACKGROUND_CROP_POSITION_OPTIONS.firstOrNull { it.value == value }?.title
+            ?: PROFILE_BACKGROUND_CROP_POSITION_OPTIONS.first().title
+
     private fun completionEntryRow(key: String, title: String, enabled: Boolean, route: InjectedRoute): ActionRow =
         ActionRow(
             key = key,
@@ -1588,6 +1592,13 @@ class ReaMicroSettingsHook(
                     singleLineSubtitle = true,
                     onClick = { openProfileBackgroundImagePicker() },
                 ),
+                ActionRow(
+                    key = "profile_background_crop_position_entry",
+                    title = "\u88c1\u526a\u4f4d\u7f6e",
+                    subtitle = profileBackgroundCropPositionSummary(snapshot.profileBackgroundCropPosition),
+                    singleLineSubtitle = true,
+                    onClick = { openProfileBackgroundCropPositionDialog() },
+                ),
             )
             addLazyItem(lazyListScope, PROFILE_BACKGROUND_COLOR_PICKER_ITEM_KEY + 1) { itemComposer ->
                 renderHostActionCard(imageRows, itemComposer)
@@ -1624,6 +1635,31 @@ class ReaMicroSettingsHook(
                 dialog.show()
             }.onFailure {
                 XposedBridge.log("ReaMicro LSP profile background dialog failed: ${it.stackTraceToString()}")
+            }
+        }
+    }
+
+    private fun openProfileBackgroundCropPositionDialog() {
+        val activity = activityProvider() ?: return
+        activity.runOnUiThread {
+            runCatching {
+                val current = settings.snapshot().profileBackgroundCropPosition
+                val titles = PROFILE_BACKGROUND_CROP_POSITION_OPTIONS.map { it.title }.toTypedArray()
+                val checked = PROFILE_BACKGROUND_CROP_POSITION_OPTIONS
+                    .indexOfFirst { it.value == current }
+                    .coerceAtLeast(0)
+                AlertDialog.Builder(activity)
+                    .setTitle("\u88c1\u526a\u4f4d\u7f6e")
+                    .setSingleChoiceItems(titles, checked) { dialog, which ->
+                        val option = PROFILE_BACKGROUND_CROP_POSITION_OPTIONS.getOrNull(which) ?: return@setSingleChoiceItems
+                        settings.setProfileBackgroundCropPosition(option.value)
+                        dialog.dismiss()
+                        refreshCurrentInjectedRoute()
+                    }
+                    .setNegativeButton("\u5173\u95ed", null)
+                    .show()
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX profile background crop position dialog failed: ${it.stackTraceToString()}")
             }
         }
     }
@@ -8036,6 +8072,11 @@ class ReaMicroSettingsHook(
             HighlightColorOption("#FF1F2937", "\u6df1\u773c\u773c"),
             HighlightColorOption("#FF0F172A", "\u591c\u7a7a\u84dd"),
             HighlightColorOption("#FF6B7280", "\u77f3\u677f\u7070"),
+        )
+        val PROFILE_BACKGROUND_CROP_POSITION_OPTIONS = listOf(
+            HighlightColorOption(ModuleSettings.PROFILE_BACKGROUND_CROP_TOP, "\u9760\u4e0a"),
+            HighlightColorOption(ModuleSettings.PROFILE_BACKGROUND_CROP_CENTER, "\u5c45\u4e2d"),
+            HighlightColorOption(ModuleSettings.PROFILE_BACKGROUND_CROP_BOTTOM, "\u9760\u4e0b"),
         )
         const val YOUSHU_LOGIN_URL = "https://m.youshu.me/login.php"
         const val YOUSHU_FAST_LOGIN_VERIFY_ATTEMPTS = 1

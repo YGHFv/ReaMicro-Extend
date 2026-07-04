@@ -197,6 +197,10 @@ class XposedModuleSettings(
         putString(ModuleSettings.KEY_PROFILE_BACKGROUND_IMAGE, path)
     }
 
+    fun setProfileBackgroundCropPosition(position: String) {
+        putString(ModuleSettings.KEY_PROFILE_BACKGROUND_CROP_POSITION, normalizeProfileBackgroundCropPosition(position))
+    }
+
     fun setAssociationSearchSourceEnabled(groupId: String, enabled: Boolean) {
         putBoolean(ModuleSettings.searchSourceKey(groupId), enabled)
     }
@@ -725,6 +729,12 @@ class XposedModuleSettings(
                 ModuleSettings.KEY_PROFILE_BACKGROUND_IMAGE,
                 ModuleSettings.DEFAULT_PROFILE_BACKGROUND_IMAGE,
             ) ?: ModuleSettings.DEFAULT_PROFILE_BACKGROUND_IMAGE,
+            profileBackgroundCropPosition = normalizeProfileBackgroundCropPosition(
+                prefs.getString(
+                    ModuleSettings.KEY_PROFILE_BACKGROUND_CROP_POSITION,
+                    ModuleSettings.DEFAULT_PROFILE_BACKGROUND_CROP_POSITION,
+                ) ?: ModuleSettings.DEFAULT_PROFILE_BACKGROUND_CROP_POSITION,
+            ),
             associationSearchSources = readAssociationSearchSources(prefs),
         )
     }
@@ -816,6 +826,14 @@ class XposedModuleSettings(
         }
         return hex.uppercase()
     }
+
+    private fun normalizeProfileBackgroundCropPosition(value: String): String =
+        when (value.trim().lowercase()) {
+            ModuleSettings.PROFILE_BACKGROUND_CROP_TOP -> ModuleSettings.PROFILE_BACKGROUND_CROP_TOP
+            ModuleSettings.PROFILE_BACKGROUND_CROP_CENTER -> ModuleSettings.PROFILE_BACKGROUND_CROP_CENTER
+            ModuleSettings.PROFILE_BACKGROUND_CROP_BOTTOM -> ModuleSettings.PROFILE_BACKGROUND_CROP_BOTTOM
+            else -> ModuleSettings.DEFAULT_PROFILE_BACKGROUND_CROP_POSITION
+        }
 
     private fun updateDefaultHighlightStyle(update: (ReaderHighlightStyle) -> ReaderHighlightStyle) {
         val current = highlightSettings()
@@ -1191,6 +1209,7 @@ class XposedModuleSettings(
             snapshot.profileBackgroundColor,
             snapshot.profileBackgroundUseImage,
             snapshot.profileBackgroundImage,
+            snapshot.profileBackgroundCropPosition,
             snapshot.associationSearchSources,
         ).joinToString("|")
         if (key == lastLogKey) return
@@ -1232,6 +1251,7 @@ class XposedModuleSettings(
                     "profileBackgroundColor=${snapshot.profileBackgroundColor}, " +
                     "profileBackgroundUseImage=${snapshot.profileBackgroundUseImage}, " +
                     "profileBackgroundImage=${snapshot.profileBackgroundImage}, " +
+                    "profileBackgroundCropPosition=${snapshot.profileBackgroundCropPosition}, " +
                     "sources=${snapshot.associationSearchSources}",
             )
         }

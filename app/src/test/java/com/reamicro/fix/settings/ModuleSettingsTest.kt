@@ -218,6 +218,14 @@ class ModuleSettingsTest {
     }
 
     @Test
+    fun profileBackgroundDefaultCropPositionKeepsTopCrop() {
+        assertEquals(
+            ModuleSettings.PROFILE_BACKGROUND_CROP_TOP,
+            ModuleSettingsSnapshot().profileBackgroundCropPosition,
+        )
+    }
+
+    @Test
     fun profileBackgroundColorIsCarriedThroughSnapshot() {
         val snapshot = ModuleSettingsSnapshot(
             moduleEnabled = true,
@@ -226,6 +234,15 @@ class ModuleSettingsTest {
         )
         assertEquals("#FF1F2937", snapshot.profileBackgroundColor)
         assertTrue(snapshot.canShowProfileBackground)
+    }
+
+    @Test
+    fun profileBackgroundCropPositionIsCarriedThroughSnapshot() {
+        val snapshot = ModuleSettingsSnapshot(
+            profileBackgroundCropPosition = ModuleSettings.PROFILE_BACKGROUND_CROP_CENTER,
+        )
+
+        assertEquals(ModuleSettings.PROFILE_BACKGROUND_CROP_CENTER, snapshot.profileBackgroundCropPosition)
     }
 
     @Test

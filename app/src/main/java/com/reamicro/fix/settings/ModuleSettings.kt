@@ -43,6 +43,7 @@ object ModuleSettings {
     const val KEY_PROFILE_BACKGROUND_COLOR = "profile_background_color"
     const val KEY_PROFILE_BACKGROUND_USE_IMAGE = "profile_background_use_image"
     const val KEY_PROFILE_BACKGROUND_IMAGE = "profile_background_image"
+    const val KEY_PROFILE_BACKGROUND_CROP_POSITION = "profile_background_crop_position"
 
     private const val KEY_ASSOCIATION_SOURCE_PREFIX = "association_source_"
     private const val KEY_ONLINE_SOURCE_PREFIX = "online_source_"
@@ -86,6 +87,10 @@ object ModuleSettings {
     const val DEFAULT_PROFILE_BACKGROUND_COLOR = "#80000000"
     const val DEFAULT_PROFILE_BACKGROUND_USE_IMAGE = false
     const val DEFAULT_PROFILE_BACKGROUND_IMAGE = ""
+    const val PROFILE_BACKGROUND_CROP_TOP = "top"
+    const val PROFILE_BACKGROUND_CROP_CENTER = "center"
+    const val PROFILE_BACKGROUND_CROP_BOTTOM = "bottom"
+    const val DEFAULT_PROFILE_BACKGROUND_CROP_POSITION = PROFILE_BACKGROUND_CROP_TOP
     val ROTATION_BASE_KEYS = setOf(
         KEY_ROTATION_AUTO_ENABLED,
         KEY_ROTATION_PORTRAIT_LOCK_ENABLED,
@@ -187,6 +192,7 @@ data class ModuleSettingsSnapshot(
     val profileBackgroundColor: String = ModuleSettings.DEFAULT_PROFILE_BACKGROUND_COLOR,
     val profileBackgroundUseImage: Boolean = ModuleSettings.DEFAULT_PROFILE_BACKGROUND_USE_IMAGE,
     val profileBackgroundImage: String = ModuleSettings.DEFAULT_PROFILE_BACKGROUND_IMAGE,
+    val profileBackgroundCropPosition: String = ModuleSettings.DEFAULT_PROFILE_BACKGROUND_CROP_POSITION,
     val associationSearchSources: Map<String, Boolean> = ModuleSettings.defaultAssociationSearchSources(),
 ) {
     val canRunAssociation: Boolean
