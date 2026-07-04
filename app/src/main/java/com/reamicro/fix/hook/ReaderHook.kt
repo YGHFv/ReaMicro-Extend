@@ -120,6 +120,7 @@ class ReaderHook(
         hookReaderViewModel()
         hookReaderCatalog()
         hookReaderBottomBar()
+        hookInlineSearchIcon()
         hookHomeBookshelfScreen()
     }
 
@@ -542,7 +543,7 @@ class ReaderHook(
                         val activity = activityProvider() ?: return
                         activity.runOnUiThread {
                             if (statusName == "Menu") {
-                                if (canShowSearchEntry) {
+                                if (canShowSearchEntry && !settingsProvider().inlineSearchIconEnabled) {
                                     showSearchMenuButton(activity, receiver, book)
                                 } else {
                                     removeSearchMenuButton()
@@ -560,6 +561,78 @@ class ReaderHook(
             XposedBridge.log("$LOG_PREFIX reader bottom search hook failed: ${it.stackTraceToString()}")
         }
     }
+
+    @Volatile private var nextIconIsDarkLightToggle = false
+
+    private fun hookInlineSearchIcon() {
+        runCatching {
+            // hook getDarkMode/getLightMode：设置标志位，下一个 Icon 调用替换为搜索图标
+            listOf(DARK_MODE_ICON_CLASS to "getDarkMode", LIGHT_MODE_ICON_CLASS to "getLightMode").forEach { (className, methodName) ->
+                runCatching {
+                    val cls = classLoader.loadClass(className)
+                    cls.declaredMethods.filter { it.name == methodName && it.parameterTypes.size == 1 }.forEach { m ->
+                        m.isAccessible = true
+                        XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                            override fun afterHookedMethod(param: MethodHookParam) {
+                                if (!settingsProvider().inlineSearchIconEnabled) return
+                                if (!canRunFullTextSearch() || !readerBottomMenuVisible) return
+                                nextIconIsDarkLightToggle = true
+                            }
+                        })
+                    }
+                }
+            }
+            // hook Icon-ww6aTOc：替换 imageVector 为 Search 图标
+            val iconClass = classLoader.loadClass("androidx.compose.material3.IconKt")
+            iconClass.declaredMethods.filter {
+                it.name == "Icon-ww6aTOc" && it.parameterTypes.size == 7
+            }.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!settingsProvider().inlineSearchIconEnabled) return
+                        if (!canRunFullTextSearch() || !readerBottomMenuVisible) return
+                        if (!nextIconIsDarkLightToggle) return
+                        nextIconIsDarkLightToggle = false
+                        val searchIcon = searchImageVector() ?: return
+                        // 替换 imageVector 参数（位置 0）为搜索图标
+                        param.args?.set(0, searchIcon)
+                    }
+                })
+            }
+            // hook clickable-oSLSa3U$default：将深浅色按钮的点击回调替换为打开搜索
+            runCatching {
+                val clickableClass = classLoader.loadClass("androidx.compose.foundation.ClickableKt")
+                clickableClass.declaredMethods.filter {
+                    it.name.startsWith("clickable-") && it.name.endsWith("\$default") && it.parameterTypes.size == 8
+                }.forEach { method ->
+                    method.isAccessible = true
+                    XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (!settingsProvider().inlineSearchIconEnabled) return
+                            if (!canRunFullTextSearch() || !readerBottomMenuVisible) return
+                            val onClick = param.args?.getOrNull(5) ?: return
+                            val className = onClick.javaClass.name
+                            // 仅匹配 ReaderBottomBarKt 生成的深浅色切换 lambda
+                            if (!className.contains("ReaderBottomBarKt") ||
+                                !className.contains("ExternalSyntheticLambda")) return
+                            param.args[5] = nativeFunction0 { openBottomSearchPage() }
+                        }
+                    })
+                }
+            }
+            XposedBridge.log("$LOG_PREFIX inline search icon replacement hook installed")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX inline search icon hook failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun searchImageVector(): Any? = runCatching {
+        val outlined = classLoader.loadClass(ICONS_OUTLINED_CLASS).getField("INSTANCE").get(null)
+        classLoader.loadClass(SEARCH_ICON_CLASS).declaredMethods.firstOrNull {
+            it.name == "getSearch" && it.parameterTypes.size == 1
+        }?.apply { isAccessible = true }?.invoke(null, outlined)
+    }.getOrNull()
 
     private fun showSearchMenuButton(activity: Activity, receiver: Any?, book: Any?) {
         if (!canShowReaderSearchEntry()) {
@@ -4287,6 +4360,9 @@ class ReaderHook(
         const val SCROLL_CRASH_PENDING_KEY = "scroll_crash_pending"
         const val KOTLIN_FUNCTION0_CLASS = "kotlin.jvm.functions.Function0"
         const val KOTLIN_FUNCTION3_CLASS = "kotlin.jvm.functions.Function3"
+        const val DARK_MODE_ICON_CLASS = "androidx.compose.material.icons.outlined.DarkModeKt"
+        const val LIGHT_MODE_ICON_CLASS = "androidx.compose.material.icons.outlined.LightModeKt"
+        const val SEARCH_ICON_CLASS = "androidx.compose.material.icons.outlined.SearchKt"
         const val KOTLIN_UNIT_CLASS = "kotlin.Unit"
         const val KOTLIN_CONTINUATION_CLASS = "kotlin.coroutines.Continuation"
         const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = "kotlin.coroutines.EmptyCoroutineContext"

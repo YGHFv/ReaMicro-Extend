@@ -2319,17 +2319,31 @@ class WebDavDriveHook(
                         }
                         (map[BACKUP_TYPE_ONLINE_COMPLETION] as? List<*>)?.forEach { item ->
                             val group = item as? OnlineSearchGroup ?: return@forEach
-                            val title = onlineCompletionGroupTitle(group)
-                            val renderType = onlineCompletionRenderTypeForSource(group.source, title)
-                            add(
-                                HomeSearchSection(
-                                    type = renderType,
-                                    title = title,
-                                    results = onlineCompletionGroupVisibleCloudBooks(group),
-                                ),
-                            )
+                            runCatching {
+                                val title = onlineCompletionGroupTitle(group)
+                                val renderType = onlineCompletionRenderTypeForSource(group.source, title)
+                                add(
+                                    HomeSearchSection(
+                                        type = renderType,
+                                        title = title,
+                                        results = onlineCompletionGroupVisibleCloudBooks(group),
+                                    ),
+                                )
+                            }.onFailure { error ->
+                                XposedBridge.log(
+                                    "$LOG_PREFIX online completion render section failed source=${group.source.name} " +
+                                        "results=${group.results.size} first=${group.results.firstOrNull()?.name.orEmpty()} " +
+                                        "error=${error.stackTraceToString()}",
+                                )
+                            }
                         }
                     }
+                    // 关键：把我们的补全条目（OnlineSearchGroup，非 host CloudBook 类型）
+                    // 以及任何 host 原生无法渲染的空/异类条目从 map 中剔除，避免 host 原生
+                    // CloudResultList 对其做 list.get(0) 触发 IndexOutOfBounds 崩溃
+                    // （不同 host 版本容忍度不同，2.1.0 会直接崩）。我们自有的 footer hook
+                    // 仍会从 sections 里正常渲染补全结果。
+                    sanitizeHostCloudSearchResults(param, map)
                     if (sections.isEmpty()) return
                     val intentReceiver = param.args?.getOrNull(3) ?: return
                     homeWebDavSearchRender.set(HomeSearchRenderContext(sections, intentReceiver))
@@ -2357,6 +2371,30 @@ class WebDavDriveHook(
             XposedBridge.log("$LOG_PREFIX WebDAV home search result hook installed")
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to hook WebDAV home search result: ${it.stackTraceToString()}")
+        }
+    }
+
+    /**
+     * 把 host 原生 CloudResultList 无法安全渲染的条目从 cloudSearchResults map 中剔除，
+     * 再回写到方法参数，避免 host 自身对我们注入的补全条目（OnlineSearchGroup）做
+     * list.get(0) 触发 IndexOutOfBounds（v2.1.0 等版本会直接崩溃）。
+     * 补全结果由我们自己的 footer hook 从 sections 渲染，因此剔除不影响展示。
+     */
+    private fun sanitizeHostCloudSearchResults(param: XC_MethodHook.MethodHookParam, map: Map<*, *>) {
+        runCatching {
+            // 仅保留 host 原生可渲染的键（WebDAV / 本地库），补全键交给我们自己渲染。
+            val hasOnlineEntry = map.containsKey(BACKUP_TYPE_ONLINE_COMPLETION)
+            if (!hasOnlineEntry) return
+            val sanitized = LinkedHashMap<Any?, Any?>()
+            map.forEach { (key, value) ->
+                if (key == BACKUP_TYPE_ONLINE_COMPLETION) return@forEach
+                // 空列表也剔除，避免任何 host 版本对空 list 做 get(0)
+                if (value is List<*> && value.isEmpty()) return@forEach
+                sanitized[key] = value
+            }
+            param.args?.set(2, sanitized)
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX sanitize host cloud results failed: ${it.stackTraceToString()}")
         }
     }
 
@@ -5980,24 +6018,51 @@ class WebDavDriveHook(
         val copyMethods = stateClass.methods
             .filter { it.name == "copy" && it.returnType == stateClass && it.parameterTypes.isNotEmpty() }
             .sortedByDescending { it.parameterTypes.size }
+        val expectedKeys = cloudResults.keys
         val failures = mutableListOf<String>()
         copyMethods.forEach { copyMethod ->
             runCatching {
                 copyMethod.isAccessible = true
-                val args = Array<Any?>(copyMethod.parameterTypes.size) { index ->
-                    state.invokeNoArg("component${index + 1}")
+                val paramTypes = copyMethod.parameterTypes
+                // 逐个取 componentN，失败保留 null（不会中断整体，避免错位）
+                val baseArgs = Array<Any?>(paramTypes.size) { index ->
+                    runCatching { state.invokeNoArg("component${index + 1}") }.getOrNull()
                 }
-                val cloudIndex = args.indexOfFirst { it === currentCloudResults }
-                    .takeIf { it >= 0 }
-                    ?: homeCloudSearchResultsComponentIndex(state, copyMethod.parameterTypes.size)
-                    ?: copyMethod.parameterTypes.mapIndexedNotNull { index, type ->
-                        index.takeIf { Map::class.java.isAssignableFrom(type) }
-                    }.singleOrNull()
-                    ?: throw IllegalStateException("cloudSearchResults parameter not found for ${copyMethod.parameterTypes.size}-arg HomeUiState.copy")
-                args[cloudIndex] = cloudResults
-                val copied = copyMethod.invoke(state, *args)
-                if (stateClass.isInstance(copied)) return copied
-                failures += "${copyMethod.parameterTypes.size}: returned ${copied?.javaClass?.name}"
+                // 收集所有“可接受 Map”的候选参数位。引用相等/单例空 Map 会误判，
+                // 因此改为逐个候选注入后用 getCloudSearchResults() 验证输出是否真正生效。
+                val candidateIndices = paramTypes.indices.filter { i ->
+                    Map::class.java.isAssignableFrom(paramTypes[i])
+                }
+                if (candidateIndices.isEmpty()) {
+                    throw IllegalStateException(
+                        "no Map parameter for ${paramTypes.size}-arg HomeUiState.copy",
+                    )
+                }
+                // 候选排序：当前值 === cloudSearchResults 的优先（多为真实位），
+                // 其余按声明顺序，最后逐个尝试并验证输出。
+                val orderedCandidates = candidateIndices.sortedByDescending { i ->
+                    if (baseArgs[i] != null && baseArgs[i] === currentCloudResults) 1 else 0
+                }
+                var lastCopied: Any? = null
+                orderedCandidates.forEach { cloudIndex ->
+                    val attemptResult = runCatching {
+                        val args = baseArgs.copyOf()
+                        args[cloudIndex] = cloudResults
+                        val copied = copyMethod.invoke(state, *args)
+                        if (!stateClass.isInstance(copied)) {
+                            return@runCatching null
+                        }
+                        lastCopied = copied
+                        val resultMap = runCatching { homeCloudSearchResults(copied) }.getOrNull()
+                        // 验证：注入后的 cloudSearchResults 必须真正包含我们写入的键
+                        val verified = resultMap != null && expectedKeys.all { resultMap.containsKey(it) }
+                        if (verified) copied else null
+                    }.getOrNull()
+                    if (attemptResult != null) return attemptResult
+                }
+                // 全部候选都未通过验证：若期望为空（清空场景），接受最后一次可用结果
+                if (expectedKeys.isEmpty() && lastCopied != null) return lastCopied!!
+                failures += "${paramTypes.size}: no verified cloud index in ${orderedCandidates.joinToString(",")}"
             }.onFailure {
                 failures += "${copyMethod.parameterTypes.size}: ${it.javaClass.name}: ${it.message}"
             }
@@ -6373,9 +6438,16 @@ class WebDavDriveHook(
 
     private fun onlineCompletionGroupVisibleCloudBooks(group: OnlineSearchGroup): List<Any> {
         if (group.results.isEmpty()) return listOf(newOnlineCompletionSourceCloudBook(group))
-        return group.results.take(ONLINE_COMPLETION_RESULT_LIMIT).mapIndexed { index, result ->
-            newOnlineCompletionResultCloudBook(group.source, group.query, result, index)
-        }
+        return group.results.take(ONLINE_COMPLETION_RESULT_LIMIT).mapIndexedNotNull { index, result ->
+            runCatching { newOnlineCompletionResultCloudBook(group.source, group.query, result, index) }
+                .onFailure { error ->
+                    XposedBridge.log(
+                        "$LOG_PREFIX online completion cloud book failed source=${group.source.name} " +
+                            "name=${result.name} error=${error.stackTraceToString()}",
+                    )
+                }
+                .getOrNull()
+        }.ifEmpty { listOf(newOnlineCompletionSourceCloudBook(group)) }
     }
 
     private fun newOnlineCompletionResultCloudBook(
@@ -11045,7 +11117,16 @@ img{max-width:100%;max-height:100%;height:auto;}
         if (index < 0 || isNull(index)) 0L else getLong(index)
 
     private fun logWebDav(message: String) {
-        XposedBridge.log("$LOG_PREFIX WebDAV $message")
+        // 简洁日志开启时，LSPosed 面板只保留错误日志（失败/异常），
+        // 其余常规运行日志静音，避免刷屏；关闭简洁日志则全部输出。
+        val conciseLog = runCatching { settingsProvider().conciseLogEnabled }.getOrDefault(true)
+        val isErrorMessage = message.contains("failed", ignoreCase = true) ||
+            message.contains("error", ignoreCase = true) ||
+            message.contains("exception", ignoreCase = true) ||
+            message.contains("crash", ignoreCase = true)
+        if (VERBOSE_WEBDAV_LOG || !conciseLog || isErrorMessage) {
+            XposedBridge.log("$LOG_PREFIX WebDAV $message")
+        }
         runCatching { Log.i(LOG_TAG, message) }
     }
 
@@ -11835,6 +11916,8 @@ img{max-width:100%;max-height:100%;height:auto;}
     private companion object {
         const val LOG_TAG = "ReaMicroWebDAV"
         const val LOG_PREFIX = "ReaMicro LSP"
+        // 关闭常规运行日志向 LSPosed 面板输出，避免刷屏；错误日志不受影响。
+        const val VERBOSE_WEBDAV_LOG = false
         const val BACKUP_TYPE_CLASS = "app.zhendong.reamicro.constants.BackupType"
         const val BACKUP_TYPE_NAME_METHOD = "getName"
         const val AUTH_CARD_CLASS = "app.zhendong.reamicro.ui.backup.components.AuthCardKt"

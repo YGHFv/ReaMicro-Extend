@@ -20,6 +20,8 @@ object ModuleSettings {
     const val KEY_READER_DIALOGUE_HIGHLIGHT_ENABLED = "reader_dialogue_highlight_enabled"
     const val KEY_READER_SELECTION_HIGHLIGHT_ENABLED = "reader_selection_highlight_enabled"
     const val KEY_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED = "reader_highlight_performance_log_enabled"
+    const val KEY_CONCISE_LOG_ENABLED = "concise_log_enabled"
+    const val KEY_INLINE_SEARCH_ICON_ENABLED = "inline_search_icon_enabled"
     const val KEY_FONT_ENABLED = "font_enabled"
     const val KEY_FONT_SETTINGS_ENABLED = "font_settings_enabled"
     const val KEY_ACCOUNT_ENABLED = "account_enabled"
@@ -55,6 +57,8 @@ object ModuleSettings {
     const val DEFAULT_READER_DIALOGUE_HIGHLIGHT_ENABLED = false
     const val DEFAULT_READER_SELECTION_HIGHLIGHT_ENABLED = false
     const val DEFAULT_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED = false
+    const val DEFAULT_CONCISE_LOG_ENABLED = true
+    const val DEFAULT_INLINE_SEARCH_ICON_ENABLED = false
     const val DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR = "#FF9800"
     const val DEFAULT_READER_DIALOGUE_HIGHLIGHT_FONT = ""
     const val DEFAULT_FONT_ENABLED = true
@@ -144,6 +148,8 @@ data class ModuleSettingsSnapshot(
     val readerDialogueHighlightEnabled: Boolean = ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_ENABLED,
     val readerSelectionHighlightEnabled: Boolean = ModuleSettings.DEFAULT_READER_SELECTION_HIGHLIGHT_ENABLED,
     val readerHighlightPerformanceLogEnabled: Boolean = ModuleSettings.DEFAULT_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED,
+    val conciseLogEnabled: Boolean = ModuleSettings.DEFAULT_CONCISE_LOG_ENABLED,
+    val inlineSearchIconEnabled: Boolean = ModuleSettings.DEFAULT_INLINE_SEARCH_ICON_ENABLED,
     val fontEnabled: Boolean = ModuleSettings.DEFAULT_FONT_ENABLED,
     val fontSettingsEnabled: Boolean = ModuleSettings.DEFAULT_FONT_SETTINGS_ENABLED,
     val accountEnabled: Boolean = ModuleSettings.DEFAULT_ACCOUNT_ENABLED,
@@ -201,7 +207,10 @@ data class ModuleSettingsSnapshot(
         get() = moduleEnabled && readerSelectionHighlightEnabled
 
     val canLogReaderHighlightPerformance: Boolean
-        get() = moduleEnabled && readerHighlightPerformanceLogEnabled
+        get() = moduleEnabled && readerHighlightPerformanceLogEnabled && !conciseLogEnabled
+
+    val canLogCompletionVerbose: Boolean
+        get() = moduleEnabled && !conciseLogEnabled
 
     val canRunFontCompletion: Boolean
         get() = moduleEnabled

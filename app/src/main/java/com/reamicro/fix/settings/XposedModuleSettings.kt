@@ -105,6 +105,14 @@ class XposedModuleSettings(
         putBoolean(ModuleSettings.KEY_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED, enabled)
     }
 
+    fun setConciseLogEnabled(enabled: Boolean) {
+        putBoolean(ModuleSettings.KEY_CONCISE_LOG_ENABLED, enabled)
+    }
+
+    fun setInlineSearchIconEnabled(enabled: Boolean) {
+        putBoolean(ModuleSettings.KEY_INLINE_SEARCH_ICON_ENABLED, enabled)
+    }
+
     fun setFontEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_FONT_ENABLED, enabled)
     }
@@ -482,6 +490,14 @@ class XposedModuleSettings(
             ModuleSettings.KEY_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED,
             ModuleSettings.DEFAULT_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED,
         )
+        val conciseLogEnabled = prefs.getBoolean(
+            ModuleSettings.KEY_CONCISE_LOG_ENABLED,
+            ModuleSettings.DEFAULT_CONCISE_LOG_ENABLED,
+        )
+        val inlineSearchIconEnabled = prefs.getBoolean(
+            ModuleSettings.KEY_INLINE_SEARCH_ICON_ENABLED,
+            ModuleSettings.DEFAULT_INLINE_SEARCH_ICON_ENABLED,
+        )
         val editFileEnabled = prefs.getBoolean(
             ModuleSettings.KEY_EDIT_FILE_ENABLED,
             ModuleSettings.DEFAULT_EDIT_FILE_ENABLED,
@@ -543,6 +559,8 @@ class XposedModuleSettings(
             readerDialogueHighlightEnabled = readerDialogueHighlightEnabled,
             readerSelectionHighlightEnabled = readerSelectionHighlightEnabled,
             readerHighlightPerformanceLogEnabled = readerHighlightPerformanceLogEnabled,
+            conciseLogEnabled = conciseLogEnabled,
+            inlineSearchIconEnabled = inlineSearchIconEnabled,
             fontEnabled = prefs.getBoolean(
                 ModuleSettings.KEY_FONT_ENABLED,
                 ModuleSettings.DEFAULT_FONT_ENABLED,

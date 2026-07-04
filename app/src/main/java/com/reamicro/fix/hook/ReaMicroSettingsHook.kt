@@ -123,6 +123,8 @@ class ReaMicroSettingsHook(
     @Volatile private var lastFontImportAtMs: Long = 0L
     @Volatile private var lastOnlineSourceImportToken: String = ""
     @Volatile private var lastOnlineSourceImportAtMs: Long = 0L
+    @Volatile private var lastExternalImportToken: String = ""
+    @Volatile private var lastExternalImportAtMs: Long = 0L
     @Volatile private var pendingDeleteOnlineSourceId: String = ""
     @Volatile private var pendingDeleteOnlineSourceAtMs: Long = 0L
     @Volatile private var pendingHighlightNinePatchInputRef: WeakReference<EditText>? = null
@@ -151,6 +153,7 @@ class ReaMicroSettingsHook(
         hookSettingsListBuilder()
         hookLazyListItem()
         hookFontDocumentPickerResult()
+        hookExternalSourceImportIntent()
         hookHostAccountSignOut()
         hookAccountSecurityScreen()
     }
@@ -522,6 +525,7 @@ class ReaMicroSettingsHook(
                 InjectedRoute.FontSettings -> renderFontSettingsContent(innerPaddings, innerComposer)
                 is InjectedRoute.FontPicker -> renderFontPickerContent(currentRoute.target, innerPaddings, innerComposer)
                 InjectedRoute.FontLibrary -> renderFontLibraryContent(innerPaddings, innerComposer)
+                InjectedRoute.AboutCompletion -> renderAboutCompletionContent(innerPaddings, innerComposer)
             }
             targetUnit()
         }
@@ -632,6 +636,14 @@ class ReaMicroSettingsHook(
                     title = AI_CONFIG_TITLE,
                     callbackName = "OpenAiConfigSettings",
                     route = InjectedRoute.AiConfigSettings,
+                    composer = itemComposer,
+                )
+            }
+            addLazyItem(lazyListScope, ABOUT_COMPLETION_ENTRY_ITEM_KEY) { itemComposer ->
+                renderNestedSettingsEntry(
+                    title = ABOUT_COMPLETION_TITLE,
+                    callbackName = "OpenAboutCompletion",
+                    route = InjectedRoute.AboutCompletion,
                     composer = itemComposer,
                 )
             }
@@ -1104,11 +1116,11 @@ class ReaMicroSettingsHook(
                     },
                 ),
                 ToggleRow(
-                    key = ModuleSettings.KEY_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED,
-                    title = "\u9ad8\u4eae\u65e5\u5fd7",
-                    checked = snapshot.readerHighlightPerformanceLogEnabled,
+                    key = ModuleSettings.KEY_INLINE_SEARCH_ICON_ENABLED,
+                    title = "\u5185\u5d4c\u641c\u7d22",
+                    checked = snapshot.inlineSearchIconEnabled,
                     onChanged = { checked, _ ->
-                        settings.setReaderHighlightPerformanceLogEnabled(checked)
+                        settings.setInlineSearchIconEnabled(checked)
                         checked
                     },
                 ),
@@ -1123,6 +1135,85 @@ class ReaMicroSettingsHook(
         }
         renderHostLazyColumn(innerPaddings, listContent, composer)
     }
+
+    private fun renderAboutCompletionContent(innerPaddings: Any, composer: Any) {
+        val listContent = functionProxy("AboutCompletionList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            val snapshot = settings.snapshot()
+            val toggleRows = listOf(
+                ToggleRow(
+                    key = ModuleSettings.KEY_CONCISE_LOG_ENABLED,
+                    title = "\u7b80\u6d01\u65e5\u5fd7",
+                    checked = snapshot.conciseLogEnabled,
+                    onChanged = { checked, _ ->
+                        settings.setConciseLogEnabled(checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
+                    key = ModuleSettings.KEY_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED,
+                    title = "\u9ad8\u4eae\u65e5\u5fd7",
+                    checked = snapshot.readerHighlightPerformanceLogEnabled,
+                    onChanged = { checked, _ ->
+                        settings.setReaderHighlightPerformanceLogEnabled(checked)
+                        checked
+                    },
+                ),
+            )
+            val actionRows = listOf(
+                ActionRow(
+                    key = "about_completion_export_log",
+                    title = "\u5bfc\u51fa\u65e5\u5fd7",
+                    subtitle = "\u5c06\u6a21\u5757\u8fd0\u884c\u65e5\u5fd7\u5bfc\u51fa\u5230\u4e0b\u8f7d\u76ee\u5f55",
+                    onClick = { exportModuleLog() },
+                ),
+            )
+            addLazyItem(lazyListScope, ABOUT_COMPLETION_CONTENT_ITEM_KEY) { itemComposer ->
+                renderHostSettingsCard(toggleRows, itemComposer)
+            }
+            addLazyItem(lazyListScope, ABOUT_COMPLETION_ENTRY_ITEM_KEY) { itemComposer ->
+                renderHostActionCard(actionRows, itemComposer)
+            }
+            targetUnit()
+        }
+        renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    private fun exportModuleLog() {
+        val activity = activityProvider() ?: return
+        runCatching {
+            val fileName = "reamicro_log_" +
+                SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date()) + ".txt"
+            val logText = collectModuleLog()
+            writeBytesToDownloads(activity, fileName, "text/plain", logText.toByteArray(Charsets.UTF_8))
+            showToast("\u5df2\u5bfc\u51fa\u65e5\u5fd7\uff1a$fileName")
+        }.onFailure {
+            showToast("\u5bfc\u51fa\u65e5\u5fd7\u5931\u8d25")
+            XposedBridge.log("$LOG_PREFIX export module log failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun collectModuleLog(): String {
+        val builder = StringBuilder()
+        runCatching {
+            val process = Runtime.getRuntime().exec(arrayOf("logcat", "-d", "-v", "time"))
+            process.inputStream.bufferedReader().useLines { lines ->
+                lines.forEach { line ->
+                    if (line.contains("ReaMicro", ignoreCase = true)) {
+                        builder.append(line).append('\n')
+                    }
+                }
+            }
+            process.destroy()
+        }.onFailure {
+            builder.append("collect log failed: ${it.stackTraceToString()}")
+        }
+        if (builder.isEmpty()) {
+            builder.append("\u6682\u65e0\u65e5\u5fd7\uff08logcat \u672a\u6355\u83b7\u5230\u76f8\u5173\u8bb0\u5f55\uff09")
+        }
+        return builder.toString()
+    }
+
 
     private fun renderReaderHighlightSettingsContent(innerPaddings: Any, composer: Any) {
         val listContent = functionProxy("ReaderHighlightSettingsList", FUNCTION1_CLASS) { args ->
@@ -5874,6 +5965,109 @@ class ReaMicroSettingsHook(
         }
     }
 
+    private fun hookExternalSourceImportIntent() {
+        runCatching {
+            XposedBridge.hookAllMethods(Activity::class.java, "onCreate", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val activity = param.thisObject as? Activity ?: return
+                    if (activity.packageName != HOST_PACKAGE_NAME) return
+                    consumeExternalSourceImportIntent(activity, activity.intent)
+                }
+            })
+            XposedBridge.hookAllMethods(Activity::class.java, "onNewIntent", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val activity = param.thisObject as? Activity ?: return
+                    if (activity.packageName != HOST_PACKAGE_NAME) return
+                    val intent = param.args?.getOrNull(0) as? Intent ?: activity.intent
+                    consumeExternalSourceImportIntent(activity, intent)
+                }
+            })
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX failed to hook external source import intent: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun consumeExternalSourceImportIntent(activity: Activity, intent: Intent?) {
+        intent ?: return
+        val payload = intent.getStringExtra(EXTRA_IMPORT_PAYLOAD) ?: return
+        // 只消费一次，避免旋转/重复 onCreate 反复导入
+        intent.removeExtra(EXTRA_IMPORT_PAYLOAD)
+        val displayName = intent.getStringExtra(EXTRA_IMPORT_NAME) ?: "imported.json"
+        val bytes = runCatching { Base64.decode(payload, Base64.NO_WRAP) }.getOrNull()
+        if (bytes == null || bytes.isEmpty()) {
+            showToast("导入内容为空")
+            return
+        }
+        val token = "external:$displayName:${bytes.size}"
+        if (token == lastExternalImportToken &&
+            System.currentTimeMillis() - lastExternalImportAtMs < ONLINE_SOURCE_IMPORT_DEDUPE_WINDOW_MS
+        ) {
+            return
+        }
+        lastExternalImportToken = token
+        lastExternalImportAtMs = System.currentTimeMillis()
+        importExternalJson(activity, bytes, displayName)
+    }
+
+    private fun importExternalJson(activity: Activity, bytes: ByteArray, displayName: String) {
+        when (detectExternalImportKind(bytes)) {
+            ExternalImportKind.HIGHLIGHT -> importExternalHighlight(activity, bytes)
+            ExternalImportKind.ONLINE_SOURCE -> importExternalOnlineSource(activity, bytes, displayName)
+        }
+    }
+
+    private fun detectExternalImportKind(bytes: ByteArray): ExternalImportKind {
+        // Reeden 高亮包（RED\1 magic）
+        if (bytes.size >= 4 && bytes[0] == 'R'.code.toByte() && bytes[1] == 'E'.code.toByte() &&
+            bytes[2] == 'D'.code.toByte() && bytes[3] == 1.toByte()
+        ) {
+            return ExternalImportKind.HIGHLIGHT
+        }
+        val text = bytes.toString(Charsets.UTF_8).trim().removePrefix("\uFEFF")
+        val json = runCatching {
+            when {
+                text.startsWith("[") -> JSONArray(text).optJSONObject(0)
+                text.startsWith("{") -> JSONObject(text)
+                else -> null
+            }
+        }.getOrNull() ?: return ExternalImportKind.ONLINE_SOURCE
+        val isSource = json.has("bookSourceName") || json.has("bookSourceUrl") ||
+            json.has("searchUrl") || json.has("ruleSearch") || json.has("ruleToc")
+        if (isSource) return ExternalImportKind.ONLINE_SOURCE
+        val isHighlight = json.optString("type") == "reader_highlight_style" ||
+            json.has("style") || json.has("styles") || json.has("color")
+        return if (isHighlight) ExternalImportKind.HIGHLIGHT else ExternalImportKind.ONLINE_SOURCE
+    }
+
+    private fun importExternalHighlight(activity: Activity, bytes: ByteArray) {
+        runCatching {
+            val imported = readerHighlightImportFromBytes(activity, bytes)
+            imported.styles.forEach(settings::setReaderHighlightStyle)
+            imported.rules.forEach(settings::setReaderHighlightRule)
+            bumpReaderHighlightVersion()
+            showToast(
+                if (imported.reeden) {
+                    "已导入 Reeden 高亮样式：${imported.styles.size} 个"
+                } else if (imported.styles.size == 1) {
+                    "已导入高亮样式：${imported.styles.first().name}"
+                } else {
+                    "已导入 ${imported.styles.size} 个高亮样式"
+                },
+            )
+        }.onFailure {
+            showToast("导入高亮样式失败")
+            XposedBridge.log("$LOG_PREFIX external highlight import failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun importExternalOnlineSource(activity: Activity, bytes: ByteArray, displayName: String) {
+        importOnlineSourceAsync(activity, "external:$displayName:${bytes.size}") {
+            OnlineSourceStore.importBytes(activity.applicationContext, bytes, displayName, "import:external")
+        }
+    }
+
+    private enum class ExternalImportKind { ONLINE_SOURCE, HIGHLIGHT }
+
     private fun copyFontUriToLibrary(activity: Activity, uri: Uri) {
         runCatching {
             val displayName = sanitizeFontFileName(queryDisplayName(activity, uri) ?: uri.lastPathSegment.orEmpty())
@@ -6548,20 +6742,45 @@ class ReaMicroSettingsHook(
         return mutableBooleanState(initialValue).also { rotationExpandedUiState = it }
     }
 
+    @Volatile private var injectedRouteGetter: java.lang.reflect.Method? = null
+    @Volatile private var injectedRouteSetter: java.lang.reflect.Method? = null
+
     private fun injectedRouteState(initialValue: InjectedRoute): Any {
         injectedRouteUiState?.let { return it }
-        return mutableState(initialValue).also { injectedRouteUiState = it }
+        val state = mutableState(initialValue).also { injectedRouteUiState = it }
+        resolveRouteStateAccessors(state)
+        return state
     }
 
-    private fun routeStateValue(state: Any): InjectedRoute? =
-        state.javaClass.methods.firstOrNull {
-            it.parameterTypes.isEmpty() && (it.name == "getValue" || it.name.startsWith("getValue-"))
-        }?.invoke(state) as? InjectedRoute
+    private fun resolveRouteStateAccessors(state: Any) {
+        if (injectedRouteGetter != null && injectedRouteSetter != null) return
+        runCatching {
+            val clazz = state.javaClass
+            val getter = clazz.methods.firstOrNull {
+                it.parameterTypes.isEmpty() &&
+                    (it.name == "getValue" || it.name.startsWith("getValue-")) &&
+                    it.returnType != java.lang.Void.TYPE && it.returnType != Int::class.javaPrimitiveType &&
+                    it.returnType != java.lang.Boolean.TYPE
+            }?.apply { isAccessible = true }
+            val setter = clazz.methods.firstOrNull {
+                it.name == "setValue" && it.parameterTypes.size == 1 &&
+                    it.parameterTypes[0] != Int::class.javaPrimitiveType &&
+                    it.parameterTypes[0] != java.lang.Boolean.TYPE
+            }?.apply { isAccessible = true }
+            if (getter != null) injectedRouteGetter = getter
+            if (setter != null) injectedRouteSetter = setter
+        }
+    }
+
+    private fun routeStateValue(state: Any): InjectedRoute? {
+        if (injectedRouteGetter == null) resolveRouteStateAccessors(state)
+        return runCatching { injectedRouteGetter?.invoke(state) as? InjectedRoute }.getOrNull()
+    }
 
     private fun setInjectedRouteState(route: InjectedRoute?) {
-        injectedRouteUiState?.javaClass?.methods
-            ?.firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
-            ?.invoke(injectedRouteUiState, route)
+        val state = injectedRouteUiState ?: return
+        if (injectedRouteSetter == null) resolveRouteStateAccessors(state)
+        runCatching { injectedRouteSetter?.invoke(state, route) }
     }
 
     private fun fontLibraryVersionState(): Any {
@@ -7034,6 +7253,7 @@ class ReaMicroSettingsHook(
         object FontSettings : InjectedRoute(FONT_SETTINGS_TITLE)
         data class FontPicker(val target: FontPickerTarget) : InjectedRoute(target.title)
         object FontLibrary : InjectedRoute(FONT_LIBRARY_TITLE)
+        object AboutCompletion : InjectedRoute(ABOUT_COMPLETION_TITLE)
     }
 
     private val MODULE_CHILD_ROUTES = setOf(
@@ -7044,6 +7264,7 @@ class ReaMicroSettingsHook(
         InjectedRoute.OnlineCompletionSettings,
         InjectedRoute.AiConfigSettings,
         InjectedRoute.FontSettings,
+        InjectedRoute.AboutCompletion,
     )
 
     private val READER_CHILD_ROUTES = setOf(
@@ -7283,6 +7504,8 @@ class ReaMicroSettingsHook(
         const val READER_HIGHLIGHT_TEXT_ITEM_KEY = 0x524D4678
         const val READER_HIGHLIGHT_BOOK_RULES_ITEM_KEY = 0x524D4679
         const val READER_HIGHLIGHT_BOOK_GROUPS_ITEM_KEY = 0x524D467A
+        const val ABOUT_COMPLETION_ENTRY_ITEM_KEY = 0x524D467B
+        const val ABOUT_COMPLETION_CONTENT_ITEM_KEY = 0x524D467C
         const val ACCOUNT_CREDENTIAL_DOCUMENT_REQUEST_CODE = 0x524D47
         const val ACCOUNT_DATA_DOCUMENT_REQUEST_CODE = 0x524D48
         const val ONLINE_SOURCE_DOCUMENT_REQUEST_CODE = 0x524D49
@@ -7308,11 +7531,15 @@ class ReaMicroSettingsHook(
         const val READER_HIGHLIGHT_SETTINGS_TITLE = "\u9ad8\u4eae\u7ba1\u7406"
         const val HOST_ABOUT_TITLE = "关于阅微"
         const val MODULE_ENTRY_TITLE = "补全计划"
+        const val ABOUT_COMPLETION_TITLE = "关于补全"
         const val FONT_SETTINGS_TITLE = "字体设置"
         const val FONT_LIBRARY_TITLE = "字体库"
         const val FONT_DOCUMENT_REQUEST_CODE = 0x524D46
         const val FONT_IMPORT_DEDUPE_WINDOW_MS = 2_500L
         const val ONLINE_SOURCE_IMPORT_DEDUPE_WINDOW_MS = 2_500L
+        const val HOST_PACKAGE_NAME = "app.zhendong.reamicro"
+        const val EXTRA_IMPORT_PAYLOAD = "com.reamicro.fix.import.PAYLOAD"
+        const val EXTRA_IMPORT_NAME = "com.reamicro.fix.import.NAME"
         const val ONLINE_SOURCE_REMOVE_CONFIRM_WINDOW_MS = 3_000L
         const val FONT_FILES_CACHE_WINDOW_MS = 500L
         val READER_HIGHLIGHT_COLOR_OPTIONS = listOf(
