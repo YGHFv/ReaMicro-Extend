@@ -78,6 +78,30 @@ internal class WebDavRemoteClient(
         }
     }
 
+    // 直接使用 PROPFIND href 解析出的绝对 URL 下载，绕过 buildUrl 的重新编码，
+    // 避免请求名与服务器原始编码不一致导致的 404。
+    fun requestToFileByUrl(
+        credentials: WebDavCredentials,
+        absoluteUrl: String,
+        outputFile: File,
+        onProgress: ((Int) -> Unit)? = null,
+    ) {
+        val response = executeOkHttpRequest(
+            credentials = credentials,
+            method = "GET",
+            path = absoluteUrl,
+            directory = false,
+            body = null,
+            headers = emptyMap(),
+            outputFile = outputFile,
+            onProgress = onProgress,
+            absoluteUrl = absoluteUrl,
+        )
+        if (response.code !in 200..299) {
+            error("WebDAV GET failed: HTTP ${response.code}")
+        }
+    }
+
     fun putFile(
         credentials: WebDavCredentials,
         path: String,
@@ -204,6 +228,14 @@ internal class WebDavRemoteClient(
         return base.resolve(encodedPath + suffix).toURL()
     }
 
+    // 把 PROPFIND 返回的 href（可能是绝对 URL 或以 / 开头的绝对路径）解析为可直接请求的
+    // 绝对 URL，保留服务器原始百分号编码，避免解码后再编码造成的字符不一致。
+    fun absoluteUrlFromHref(baseUrl: String, href: String): String =
+        runCatching {
+            val base = URI(baseUrl.trimEnd('/') + "/")
+            base.resolve(URI(href)).toString()
+        }.getOrElse { href }
+
     fun pathFromHref(baseUrl: String, href: String): String {
         val basePath = runCatching { URI(baseUrl).rawPath.orEmpty() }.getOrDefault("")
         val rawPath = runCatching { URI(href).rawPath }.getOrNull()
@@ -236,8 +268,9 @@ internal class WebDavRemoteClient(
         outputFile: File? = null,
         onProgress: ((Int) -> Unit)? = null,
         requestBodyOverride: Any? = null,
+        absoluteUrl: String? = null,
     ): WebDavHttpResponse {
-        val url = buildUrl(credentials.url, path, directory).toString()
+        val url = absoluteUrl ?: buildUrl(credentials.url, path, directory).toString()
         val requestBuilder = cls(OKHTTP_REQUEST_BUILDER_CLASS).getDeclaredConstructor()
             .apply { isAccessible = true }
             .newInstance()

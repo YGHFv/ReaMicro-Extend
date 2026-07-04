@@ -166,6 +166,10 @@ class BookOverviewImageSelectionHook(
                 dialog.dismiss()
                 showAiImageDialog(context, target)
             })
+            card.addView(actionRow(activity, "保存${target.label}", "把当前${target.label}图片保存到相册", colors) {
+                dialog.dismiss()
+                saveCurrentImageToGallery(context, target)
+            })
             if (hasSecondaryAction && secondaryAction != null) {
                 val label = when (target) {
                     ImageTarget.Cover -> "重置封面"
@@ -649,6 +653,39 @@ class BookOverviewImageSelectionHook(
 
     private fun isVersionedApiBaseUrl(baseUrl: String): Boolean =
         Regex(""".*/api/v\d+$""", RegexOption.IGNORE_CASE).matches(baseUrl)
+
+    // 读取当前封面/横幅图片字节并保存到相册。封面复用在线/本地/data-url 的加载链路，
+    // 横幅则直接读取书籍目录下的 ~banner 变体文件。
+    private fun saveCurrentImageToGallery(context: BookImageContext, target: ImageTarget) {
+        val activity = activityProvider() ?: return
+        activity.toast("正在保存${target.label}到相册")
+        Thread {
+            val result = runCatching {
+                val bytes = loadCurrentImageBytes(activity, context.book, target)
+                    ?: error("未找到${target.label}图片")
+                saveToGallery(activity, bytes, target)
+            }
+            activity.runOnUiThread {
+                result
+                    .onSuccess { activity.toast("${target.label}已保存到相册") }
+                    .onFailure {
+                        val text = it.message ?: it.javaClass.simpleName
+                        activity.toast(text)
+                        XposedBridge.log("$LOG_PREFIX save $target to gallery failed: ${it.stackTraceToString()}")
+                    }
+            }
+        }.apply { name = "ReaMicro-SaveBookImage" }.start()
+    }
+
+    private fun loadCurrentImageBytes(activity: Activity, book: Any, target: ImageTarget): ByteArray? =
+        when (target) {
+            ImageTarget.Cover -> loadReferenceImageBytes(book)
+            ImageTarget.Banner -> {
+                val bookDir = resolveBookDir(activity, book) ?: return null
+                val relative = bannerRelativeForWrite(book)
+                readImageFile(childFile(bookDir, relative))
+            }
+        }
 
     private fun saveToGallery(activity: Activity, bytes: ByteArray, target: ImageTarget): Uri {
         validateImageBytes(bytes)

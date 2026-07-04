@@ -9970,6 +9970,7 @@ img{max-width:100%;max-height:100%;height:auto;}
                     isDirectory = isDirectory,
                     size = element.textOf("getcontentlength").toLongOrNull() ?: 0L,
                     updatedAt = webDavRemoteClient.parseWebDavDate(element.textOf("getlastmodified")),
+                    rawHref = href,
                 )
             }.filterNot { it.name.startsWith(".") }
                 .let(::sortWebDavEntries)
@@ -10021,7 +10022,78 @@ img{max-width:100%;max-height:100%;height:auto;}
     private fun webDavDownload(path: String, outputFile: File, onProgress: ((Int) -> Unit)? = null) {
         val credentials = webDavCredentials() ?: error("WebDAV not authorized")
         outputFile.parentFile?.mkdirs()
-        webDavRemoteClient.requestToFile(credentials, "GET", normalizeWebDavPath(path), outputFile, onProgress)
+        val normalizedPath = normalizeWebDavPath(path)
+        try {
+            webDavRemoteClient.requestToFile(credentials, "GET", normalizedPath, outputFile, onProgress)
+        } catch (e: IllegalStateException) {
+            val msg = e.message.orEmpty()
+            val looksTruncated = normalizedPath.contains("...") || normalizedPath.contains('…')
+            if (!msg.contains("HTTP 404") || !looksTruncated) throw e
+            // 文件名含省略号时，重新编码往往与服务器原始编码不一致导致 404。
+            // 通过 PROPFIND 匹配到条目后，直接用其 href 的绝对 URL 下载，绕过重新编码。
+            val href = resolveTruncatedWebDavHref(normalizedPath)
+            if (href.isNullOrBlank()) {
+                logWebDav("GET 404 truncated path unresolvable path=$normalizedPath")
+                throw e
+            }
+            val absoluteUrl = webDavRemoteClient.absoluteUrlFromHref(credentials.url, href)
+            logWebDav("GET 404 retry via href from=$normalizedPath url=${absoluteUrl.redactWebDavUrl()}")
+            outputFile.delete()
+            webDavRemoteClient.requestToFileByUrl(credentials, absoluteUrl, outputFile, onProgress)
+        }
+    }
+
+    // host app 渲染列表时会把长文件名截断成带 "..." 或 "…" 的显示名并污染 CloudBook.path。
+    // 这里用 PROPFIND 列出父目录，按骨架字符模糊匹配真实条目，返回其原始 href。
+    private fun resolveTruncatedWebDavHref(truncatedPath: String): String? {
+        val parent = parentWebDavPath(truncatedPath)
+        val truncatedName = truncatedPath.substringAfterLast('/')
+        if (truncatedName.isBlank()) return null
+        // 兼容 ASCII "..." 与中文省略号 "…"
+        val ellipsisIndex = truncatedName.indexOf("...")
+        val singleEllipsisIndex = truncatedName.indexOf('…')
+        val splitIndex = when {
+            ellipsisIndex >= 0 -> ellipsisIndex
+            singleEllipsisIndex >= 0 -> singleEllipsisIndex
+            else -> -1
+        }
+        if (splitIndex < 0) {
+            logWebDav("truncated resolve no ellipsis name=$truncatedName")
+            return null
+        }
+        val prefix = truncatedName.substring(0, splitIndex)
+        val suffix = truncatedName.substring(splitIndex + if (ellipsisIndex >= 0) 3 else 1)
+        // 请求名与服务器名之间存在大量等价字符差异（全角/半角括号、各种空白、"…"/"..."、
+        // 省略号位置的空格等），精确 startsWith/endsWith 极易失配。改用「骨架字符」比较：
+        // 剥离所有标点、空白、省略号后只保留核心字符（中英文数字），再比对前后缀骨架。
+        val prefixSkeleton = skeletonForMatch(prefix)
+        val suffixSkeleton = skeletonForMatch(suffix)
+        val entries = runCatching { listWebDav(parent) }.getOrNull().orEmpty()
+            .filterNot { it.isDirectory }
+        val match = entries.firstOrNull { entry ->
+            val nameSkeleton = skeletonForMatch(entry.name)
+            entry.name.isNotBlank() &&
+                (prefixSkeleton.isEmpty() || nameSkeleton.startsWith(prefixSkeleton)) &&
+                (suffixSkeleton.isEmpty() || nameSkeleton.endsWith(suffixSkeleton))
+        } ?: run {
+            logWebDav("truncated resolve miss name=$truncatedName pre=$prefixSkeleton suf=$suffixSkeleton candidates=${entries.joinToString("|") { it.name }}")
+            return null
+        }
+        // 返回 PROPFIND 原始 href（保留服务器原始百分号编码），供绝对 URL 下载使用。
+        val href = match.rawHref.ifBlank { match.path }
+        logWebDav("truncated resolve hit name=${match.name} path=${match.path} hasHref=${match.rawHref.isNotBlank()}")
+        return href
+    }
+
+    // 生成用于模糊匹配的「骨架」：Unicode NFC 后，仅保留字母/数字/汉字（Letter/Digit），
+    // 丢弃所有标点、括号、空白、省略号。彻底消除请求名与服务器名之间的等价字符差异。
+    private fun skeletonForMatch(value: String): String {
+        val nfc = java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFC)
+        val sb = StringBuilder(nfc.length)
+        for (ch in nfc) {
+            if (ch.isLetterOrDigit()) sb.append(ch)
+        }
+        return sb.toString()
     }
 
     private fun webDavUpload(path: String, file: File) {
@@ -11274,6 +11346,7 @@ img{max-width:100%;max-height:100%;height:auto;}
         val isDirectory: Boolean,
         val size: Long,
         val updatedAt: Long,
+        val rawHref: String = "",
     )
 
     private data class LocalLibraryEntry(
