@@ -50,6 +50,7 @@ import java.lang.reflect.Method
 import java.io.File
 import java.lang.ref.WeakReference
 import java.lang.reflect.Proxy
+import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.io.StringReader
 import java.util.Locale
@@ -98,6 +99,8 @@ class ReaderHook(
     @Volatile private var activeSearchPageToken: Long = 0L
     @Volatile private var activeSearchPageUpdate: ((SearchState, Boolean) -> Unit)? = null
     @Volatile private var readerBottomMenuVisible: Boolean = false
+    @Volatile private var searchRenderState: SearchRenderState? = null
+    @Volatile private var cachedThemeColors: ThemeColors? = null
     @Volatile private var activeSearchHighlightId: Long? = null
     @Volatile private var activeSearchHighlightMark: Any? = null
     @Volatile private var activeSearchHighlightVisibleId: Long? = null
@@ -107,6 +110,7 @@ class ReaderHook(
     @Volatile private var activeSearchHighlightRenderLogCount: Int = 0
     @Volatile private var pendingSearchOriginRestore: Boolean = false
     @Volatile private var scrollCrashMarkerOwnedByThisProcess: Boolean = false
+    @Volatile private var catalogDumpLoggedForKey: String? = null
 
     fun install() {
         ReaderHighlightBookContext.refreshRequester = { source ->
@@ -351,6 +355,10 @@ class ReaderHook(
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val status = param.args?.getOrNull(1)
+                        param.args?.let { args ->
+                            val composer = args.getOrNull(args.size - 2)
+                            if (composer != null) cacheThemeColors(composer)
+                        }
                         if (!canRunFullTextSearch()) {
                             activityProvider()?.runOnUiThread {
                                 clearSearchOverlays(clearNavigationState = true)
@@ -782,6 +790,7 @@ class ReaderHook(
         var visibleResults: List<FullTextSearchResult> = emptyList()
         var visibleSearching = false
         var visibleStatus: String? = null
+        var refreshStickyHeader: () -> Unit = {}
 
         val resultsContainer = LinearLayout(activity).apply {
             tag = "searchResultsContainer"
@@ -791,6 +800,17 @@ class ReaderHook(
         val resultsScroll = ScrollView(activity).apply {
             tag = "searchResultsScroll"
             isFillViewport = true
+            isVerticalScrollBarEnabled = true
+            isScrollbarFadingEnabled = false
+            scrollBarSize = dp(activity, 8)
+            scrollBarStyle = View.SCROLLBARS_INSIDE_INSET
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                verticalScrollbarThumbDrawable = GradientDrawable().apply {
+                    setColor(Color.argb(150, Color.red(colors.secondaryText), Color.green(colors.secondaryText), Color.blue(colors.secondaryText)))
+                    cornerRadius = dp(activity, 4).toFloat()
+                    setSize(dp(activity, 8), dp(activity, 64))
+                }
+            }
             setBackgroundColor(colors.pageBackground)
             addView(resultsContainer, ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -810,12 +830,22 @@ class ReaderHook(
             setPadding(dp(activity, 16), 0, dp(activity, 16), 0)
             background = searchKeywordInputBackground(activity, colors)
         }
+        val statusLine = TextView(activity).apply {
+            tag = "searchStatusLine"
+            textSize = 15f
+            setTextColor(colors.secondaryText)
+            setBackgroundColor(colors.pageBackground)
+            setPadding(dp(activity, 20), dp(activity, 3), dp(activity, 20), dp(activity, 2))
+            visibility = View.GONE
+        }
 
         fun renderStatus(message: String) {
             visibleStatus = message
             visibleKeyword = ""
             visibleResults = emptyList()
             visibleSearching = false
+            searchRenderState = null
+            statusLine.visibility = View.GONE
             resultsContainer.removeAllViews()
             resultsContainer.addView(TextView(activity).apply {
                 text = message
@@ -823,6 +853,7 @@ class ReaderHook(
                 setTextColor(colors.secondaryText)
                 setPadding(dp(activity, 32), dp(activity, 28), dp(activity, 32), 0)
             })
+            resultsScroll.post { refreshStickyHeader() }
         }
 
         fun clearVisibleResults() {
@@ -830,7 +861,10 @@ class ReaderHook(
             visibleKeyword = ""
             visibleResults = emptyList()
             visibleSearching = false
+            searchRenderState = null
+            statusLine.visibility = View.GONE
             resultsContainer.removeAllViews()
+            resultsScroll.post { refreshStickyHeader() }
         }
 
         fun renderVisibleResults(
@@ -846,8 +880,9 @@ class ReaderHook(
                 ?.takeIf { it.bookKey == bookKey(context) }
                 ?.currentIndex
                 ?.takeIf { it in results.indices }
-            renderSearchResults(activity, resultsContainer, keyword, results, colors, searching, currentResultIndex)
+            renderSearchResults(activity, resultsContainer, statusLine, keyword, results, colors, searching, currentResultIndex)
             scrollSearchResultToCenter(resultsScroll, resultsContainer, currentResultIndex)
+            resultsScroll.post { refreshStickyHeader() }
         }
 
         activeSearchPageToken = pageToken
@@ -952,6 +987,80 @@ class ReaderHook(
             addView(closeAction, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(activity, 44)))
         }
 
+        val stickyVolumeHeader = TextView(activity).apply {
+            tag = "searchStickyVolumeHeader"
+            textSize = 13f
+            setTextColor(colors.primaryText)
+            setBackgroundColor(colors.pageBackground)
+            setPadding(dp(activity, 20), dp(activity, 8), dp(activity, 20), dp(activity, 2))
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            visibility = View.GONE
+        }
+        val stickyHeader = TextView(activity).apply {
+            tag = "searchStickyHeader"
+            textSize = 13f
+            setTextColor(colors.primaryText)
+            setBackgroundColor(colors.pageBackground)
+            setPadding(dp(activity, 20), dp(activity, 2), dp(activity, 20), dp(activity, 8))
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            visibility = View.GONE
+        }
+
+        fun updateStickyHeader() {
+            val scrollY = resultsScroll.scrollY
+            var currentVolume: CharSequence? = null
+            var currentChapter: CharSequence? = null
+            for (i in 0 until resultsContainer.childCount) {
+                val child = resultsContainer.getChildAt(i)
+                val childTag = child.tag as? String ?: continue
+                if (child.top >= scrollY) break
+                when {
+                    childTag.startsWith("searchVolume:") -> currentVolume = (child as? TextView)?.text
+                    childTag.startsWith("searchGroup:") -> currentChapter = (child as? TextView)?.text
+                }
+            }
+            if (currentVolume == null) {
+                stickyVolumeHeader.visibility = View.GONE
+            } else {
+                stickyVolumeHeader.text = currentVolume
+                stickyVolumeHeader.visibility = View.VISIBLE
+            }
+            if (currentChapter == null) {
+                stickyHeader.visibility = View.GONE
+            } else {
+                stickyHeader.text = currentChapter
+                stickyHeader.visibility = View.VISIBLE
+            }
+        }
+
+        val stickyColumn = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(colors.pageBackground)
+            addView(stickyVolumeHeader, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+            addView(stickyHeader, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+
+        val resultsWrapper = FrameLayout(activity).apply {
+            addView(resultsScroll, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ))
+            addView(stickyColumn, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+        resultsScroll.setOnScrollChangeListener { _, _, _, _, _ -> updateStickyHeader() }
+        refreshStickyHeader = { updateStickyHeader() }
+
         val root = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(colors.pageBackground)
@@ -959,7 +1068,11 @@ class ReaderHook(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ))
-            addView(resultsScroll, LinearLayout.LayoutParams(
+            addView(statusLine, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+            addView(resultsWrapper, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
                 1f,
@@ -977,6 +1090,13 @@ class ReaderHook(
             root.setBackgroundColor(colors.pageBackground)
             resultsScroll.setBackgroundColor(colors.pageBackground)
             resultsContainer.setBackgroundColor(colors.pageBackground)
+            statusLine.setTextColor(colors.secondaryText)
+            statusLine.setBackgroundColor(colors.pageBackground)
+            stickyColumn.setBackgroundColor(colors.pageBackground)
+            stickyVolumeHeader.setTextColor(colors.primaryText)
+            stickyVolumeHeader.setBackgroundColor(colors.pageBackground)
+            stickyHeader.setTextColor(colors.secondaryText)
+            stickyHeader.setBackgroundColor(colors.pageBackground)
             keywordInput.setTextColor(colors.primaryText)
             keywordInput.setHintTextColor(colors.secondaryText)
             keywordInput.background = searchKeywordInputBackground(activity, colors)
@@ -1330,6 +1450,63 @@ class ReaderHook(
             }
         }
     }
+
+    private fun cacheThemeColors(composer: Any) {
+        runCatching {
+            val colorScheme = hostColorScheme(composer)
+            cachedThemeColors = ThemeColors(
+                pageBackground = hostThemeColor("getBackgroundAuto", colorScheme),
+                cardBackground = hostThemeColor("getBackgroundBright", colorScheme),
+                inputBackground = hostThemeColor("getBackgroundBright", colorScheme),
+                primaryText = hostColorSchemeColor(colorScheme, "getOnBackground-0d7_KjU"),
+                secondaryText = hostThemeColor("getOnBackgroundVariant", colorScheme),
+                stroke = hostThemeColor("getBorderVariant", colorScheme),
+                chipBackground = hostThemeColor("getBackgroundDim", colorScheme),
+                action = hostColorSchemeColor(colorScheme, "getPrimary-0d7_KjU"),
+            )
+            latestThemeColors = cachedThemeColors
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX cache host theme colors failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun hostColorScheme(composer: Any): Any {
+        val materialTheme = staticObject(MATERIAL_THEME_CLASS, "INSTANCE")
+        val stable = staticInt(MATERIAL_THEME_CLASS, "\$stable")
+        return composeMethod(MATERIAL_THEME_CLASS, "getColorScheme", 2).invoke(materialTheme, composer, stable)
+            ?: error("MaterialTheme.colorScheme unavailable")
+    }
+
+    private fun hostThemeColor(methodName: String, colorScheme: Any): Int =
+        composeColorToArgb(
+            composeMethod(THEME_KT_CLASS, methodName, 1).invoke(null, colorScheme) as Long,
+        )
+
+    private fun hostColorSchemeColor(colorScheme: Any, methodName: String): Int =
+        composeColorToArgb(
+            colorScheme.javaClass.methods.first {
+                it.name == methodName && it.parameterTypes.isEmpty()
+            }.apply { isAccessible = true }.invoke(colorScheme) as Long,
+        )
+
+    private fun composeColorToArgb(color: Long): Int =
+        runCatching {
+            classLoader.loadClass(COLOR_KT_CLASS).declaredMethods.firstOrNull { method ->
+                method.name.contains("toArgb", ignoreCase = true) &&
+                    method.parameterTypes.size == 1 &&
+                    method.parameterTypes[0] == Long::class.javaPrimitiveType
+            }?.apply { isAccessible = true }?.invoke(null, color) as? Int
+        }.getOrNull() ?: composeColorFallbackToArgb(color)
+
+    private fun composeColorFallbackToArgb(color: Long): Int =
+        if ((color and 0x3fL) == 0L) {
+            (color ushr 32).toInt()
+        } else {
+            0
+        }
+
+    private fun staticInt(className: String, fieldName: String): Int =
+        classLoader.loadClass(className).getDeclaredField(fieldName).apply { isAccessible = true }.getInt(null)
 
     private fun staticObject(className: String, fieldName: String): Any {
         val clazz = classLoader.loadClass(className)
@@ -1875,69 +2052,147 @@ class ReaderHook(
     private fun renderSearchResults(
         activity: Activity,
         container: LinearLayout,
+        statusLine: TextView,
         keyword: String,
         results: List<FullTextSearchResult>,
         colors: DialogColors,
         searching: Boolean = false,
         currentResultIndex: Int? = null,
     ) {
-        container.removeAllViews()
-        container.addView(TextView(activity).apply {
-            text = if (searching) {
-                "\u641c\u7d22\u4e2d\uff0c\u5df2\u627e\u5230 ${results.size} \u5904"
-            } else {
-                "\u641c\u7d22\u5b8c\u6210\uff0c\u5171\u627e\u5230 ${results.size} \u5904"
+        val stateTag = searchRenderState
+        val canAppend = stateTag != null &&
+            stateTag.keyword == keyword &&
+            stateTag.currentIndex == currentResultIndex &&
+            results.size >= stateTag.renderedCount &&
+            stateTag.renderedCount > 0 &&
+            container.childCount > 0
+
+        val statusText = if (searching) {
+            "\u641c\u7d22\u4e2d\uff0c\u5df2\u627e\u5230 ${results.size} \u5904"
+        } else {
+            "\u641c\u7d22\u5b8c\u6210\uff0c\u5171\u627e\u5230 ${results.size} \u5904"
+        }
+        statusLine.text = statusText
+        statusLine.visibility = View.VISIBLE
+
+        if (canAppend) {
+            var previousVolumeKey = stateTag!!.lastVolumeKey
+            var previousGroupKey = stateTag.lastGroupKey
+            for (index in stateTag.renderedCount until results.size) {
+                val result = results[index]
+                val volumeKey = searchResultVolumeKey(result)
+                if (volumeKey != previousVolumeKey && volumeKey.isNotBlank()) {
+                    container.addView(searchVolumeHeaderView(activity, result, colors).apply {
+                        tag = searchVolumeHeaderTag(volumeKey)
+                    }, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ))
+                    previousVolumeKey = volumeKey
+                }
+                val groupKey = searchResultGroupKey(result)
+                if (groupKey != previousGroupKey) {
+                    container.addView(searchGroupHeaderView(activity, result, colors, first = index == 0).apply {
+                        tag = searchGroupHeaderTag(groupKey)
+                    }, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ))
+                    previousGroupKey = groupKey
+                }
+                container.addView(searchResultCard(activity, result, index, colors, index == currentResultIndex).apply {
+                    tag = searchResultViewTag(index)
+                }, resultCardLayoutParams(activity))
             }
-            textSize = 15f
-            setTextColor(colors.secondaryText)
-            setPadding(dp(activity, 24), dp(activity, 12), dp(activity, 24), dp(activity, 4))
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ))
-        if (results.isEmpty()) {
+            searchRenderState = SearchRenderState(keyword, currentResultIndex, results.size, previousVolumeKey, previousGroupKey)
             return
         }
+
+        container.removeAllViews()
+        if (results.isEmpty()) {
+            searchRenderState = SearchRenderState(keyword, currentResultIndex, 0, null, null)
+            return
+        }
+        var previousVolumeKey: String? = null
         var previousGroupKey: String? = null
         results.forEachIndexed { index, result ->
+            val volumeKey = searchResultVolumeKey(result)
+            if (volumeKey != previousVolumeKey && volumeKey.isNotBlank()) {
+                container.addView(searchVolumeHeaderView(activity, result, colors).apply {
+                    tag = searchVolumeHeaderTag(volumeKey)
+                }, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ))
+                previousVolumeKey = volumeKey
+            }
             val groupKey = searchResultGroupKey(result)
             if (groupKey != previousGroupKey) {
-                container.addView(TextView(activity).apply {
-                    text = result.chapterTitle.ifBlank { result.file.nameWithoutExtension }
-                    textSize = 18f
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextColor(colors.secondaryText)
-                    setPadding(
-                        dp(activity, 24),
-                        if (index == 0) dp(activity, 14) else dp(activity, 22),
-                        dp(activity, 24),
-                        dp(activity, 6),
-                    )
-                    maxLines = 1
-                    ellipsize = TextUtils.TruncateAt.END
+                container.addView(searchGroupHeaderView(activity, result, colors, first = index == 0).apply {
+                    tag = searchGroupHeaderTag(groupKey)
                 }, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                 ))
                 previousGroupKey = groupKey
             }
-            container.addView(searchResultCard(activity, result, index, colors).apply {
+            container.addView(searchResultCard(activity, result, index, colors, index == currentResultIndex).apply {
                 tag = searchResultViewTag(index)
-                if (index == currentResultIndex) {
-                    background = GradientDrawable().apply {
-                        setColor(Color.argb(34, Color.red(colors.actionBackground), Color.green(colors.actionBackground), Color.blue(colors.actionBackground)))
-                        cornerRadius = dp(activity, 6).toFloat()
-                    }
-                }
-            }, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply {
-                leftMargin = dp(activity, 24)
-                rightMargin = dp(activity, 24)
-                bottomMargin = dp(activity, 12)
-            })
+            }, resultCardLayoutParams(activity))
         }
+        searchRenderState = SearchRenderState(keyword, currentResultIndex, results.size, previousVolumeKey, previousGroupKey)
+    }
+
+    private fun resultCardLayoutParams(activity: Activity): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply {
+            leftMargin = dp(activity, 14)
+            rightMargin = dp(activity, 14)
+            bottomMargin = dp(activity, 2)
+        }
+
+    private data class SearchRenderState(
+        val keyword: String,
+        val currentIndex: Int?,
+        val renderedCount: Int,
+        val lastVolumeKey: String?,
+        val lastGroupKey: String?,
+    )
+
+    private fun searchVolumeHeaderView(
+        activity: Activity,
+        result: FullTextSearchResult,
+        colors: DialogColors,
+    ): TextView = TextView(activity).apply {
+        text = searchResultVolumeTitle(result)
+        textSize = 13f
+        setTextColor(colors.primaryText)
+        setBackgroundColor(colors.pageBackground)
+        setPadding(dp(activity, 20), dp(activity, 10), dp(activity, 20), dp(activity, 2))
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+    }
+
+    private fun searchGroupHeaderView(
+        activity: Activity,
+        result: FullTextSearchResult,
+        colors: DialogColors,
+        first: Boolean,
+    ): TextView = TextView(activity).apply {
+        text = searchResultChapterTitle(result).ifBlank { result.file.nameWithoutExtension }
+        textSize = 13f
+        setTextColor(colors.primaryText)
+        setBackgroundColor(colors.pageBackground)
+        setPadding(
+            dp(activity, 20),
+            if (first) dp(activity, 10) else dp(activity, 10),
+            dp(activity, 20),
+            dp(activity, 6),
+        )
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
     }
 
     private fun scrollSearchResultToCenter(scrollView: ScrollView, container: LinearLayout, index: Int?) {
@@ -1965,6 +2220,40 @@ class ReaderHook(
 
     private fun searchResultViewTag(index: Int): String = "searchResult:$index"
 
+    private fun searchVolumeHeaderTag(volumeKey: String): String = "searchVolume:$volumeKey"
+
+    private fun searchGroupHeaderTag(groupKey: String): String = "searchGroup:$groupKey"
+
+    private fun searchResultVolumeKey(result: FullTextSearchResult): String =
+        searchResultVolumeTitle(result).ifBlank { "" }
+
+    private fun searchResultVolumeTitle(result: FullTextSearchResult): String {
+        val parts = result.chapterTitle.split(' ').filter { it.isNotBlank() }
+        if (parts.isEmpty()) return ""
+        if (!isVolumeCatalogTitle(parts.first())) return ""
+        val chapterIndex = parts.indexOfFirstIndexed { index, part ->
+            index > 0 && isChapterCatalogTitle(part)
+        }
+        return parts.take(if (chapterIndex > 0) chapterIndex else 1).joinToString(" ")
+    }
+
+    private fun List<String>.indexOfFirstIndexed(predicate: (Int, String) -> Boolean): Int {
+        forEachIndexed { index, value ->
+            if (predicate(index, value)) return index
+        }
+        return -1
+    }
+
+    private fun searchResultChapterTitle(result: FullTextSearchResult): String {
+        val volume = searchResultVolumeTitle(result)
+        val title = result.chapterTitle.trim()
+        return if (volume.isNotBlank() && title.startsWith(volume)) {
+            title.removePrefix(volume).trim().ifBlank { title }
+        } else {
+            title
+        }
+    }
+
     private fun searchResultGroupKey(result: FullTextSearchResult): String =
         if (result.chapterIndex >= 0) {
             "chapter:${result.chapterIndex}"
@@ -1977,17 +2266,33 @@ class ReaderHook(
         result: FullTextSearchResult,
         resultIndex: Int,
         colors: DialogColors,
+        current: Boolean,
     ): View =
         LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(activity, 4), 0, dp(activity, 4))
+            setPadding(dp(activity, 12), dp(activity, 10), dp(activity, 12), dp(activity, 10))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(activity, 12).toFloat()
+                if (current) {
+                    setColor(
+                        Color.argb(
+                            40,
+                            Color.red(colors.actionBackground),
+                            Color.green(colors.actionBackground),
+                            Color.blue(colors.actionBackground),
+                        ),
+                    )
+                    setStroke(dp(activity, 1), colors.actionBackground)
+                } else {
+                    setColor(colors.searchChipBackground)
+                }
+            }
             addView(TextView(activity).apply {
                 text = redHighlightedSnippet(result)
-                textSize = 16f
-                typeface = Typeface.DEFAULT_BOLD
+                textSize = 14f
                 setTextColor(colors.primaryText)
-                setLineSpacing(0f, 1f)
+                setLineSpacing(dp(activity, 3).toFloat(), 1f)
                 includeFontPadding = false
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
@@ -3272,7 +3577,7 @@ class ReaderHook(
             }
             lastEmitSize = results.size
             lastEmitAt = now
-            onUpdate(results.toList(), done)
+            onUpdate(ArrayList(results), done)
         }
 
         val cachedDocuments = searchIndexState?.takeIf { it.bookKey == key }?.documents
@@ -3280,8 +3585,9 @@ class ReaderHook(
             for (document in cachedDocuments) {
                 if (generation != searchStateGeneration) return
                 if (results.size >= MAX_SEARCH_RESULTS) break
+                val previousSize = results.size
                 appendSearchMatches(document, needle, keyword, context, results)
-                emit(done = false)
+                if (results.size != previousSize) emit(done = false)
             }
             emit(done = true, force = true)
             return
@@ -3291,8 +3597,9 @@ class ReaderHook(
         forEachSearchDocument(context) { document ->
             if (generation != searchStateGeneration) return@forEachSearchDocument false
             if (results.size < MAX_SEARCH_RESULTS) {
+                val previousSize = results.size
                 appendSearchMatches(document, needle, keyword, context, results)
-                emit(done = false)
+                if (results.size != previousSize) emit(done = false)
             }
             documents.add(document)
             results.size < MAX_SEARCH_RESULTS
@@ -3316,14 +3623,18 @@ class ReaderHook(
             val index = document.lowerText.indexOf(needle, from)
             if (index < 0) break
             val snippet = snippetFor(document.text, index, index + keyword.length)
+            val chapterAnchor = document.chapterAnchors.lastOrNull { it.textStart <= index }
+            val resultChapter = chapterAnchor?.chapter ?: document.chapter
+            val resultChapterIndex = chapterAnchor?.index ?: document.chapterIndex
+            val resultChapterTitle = chapterAnchor?.title ?: document.chapterTitle
             val startCfi = document.indexedText.cfiAt(index)
             val cfi = document.indexedText.cfiAtSearchJump(index, keyword.length) ?: startCfi
             val endCfi = document.indexedText.cfiAtBoundary(index + keyword.length)
             results.add(
                 FullTextSearchResult(
-                    chapterIndex = document.chapterIndex,
-                    chapter = document.chapter,
-                    chapterTitle = document.chapterTitle,
+                    chapterIndex = resultChapterIndex,
+                    chapter = resultChapter,
+                    chapterTitle = resultChapterTitle,
                     intentReceiver = context.intentReceiver,
                     startCfi = startCfi,
                     cfi = cfi,
@@ -3334,11 +3645,6 @@ class ReaderHook(
                     snippetMatchEnd = snippet.matchEnd,
                     matchText = document.text.substring(index, (index + keyword.length).coerceAtMost(document.text.length)),
                 ),
-            )
-            XposedBridge.log(
-                "$LOG_PREFIX full-text search hit chapter=${document.chapterTitle} " +
-                    "file=${document.file.name} index=$index startCfi=${startCfi.orEmpty()} " +
-                    "jumpCfi=${cfi.orEmpty()} endCfi=${endCfi.orEmpty()} snippet=${snippet.text.take(60)}",
             )
             countInFile++
             from = index + needle.length.coerceAtLeast(1)
@@ -3357,25 +3663,36 @@ class ReaderHook(
     private fun forEachSearchDocument(context: CatalogContext, onDocument: (SearchDocument) -> Boolean) {
         val epub = currentEpubRef?.get()
         val root = currentEpubRoot() ?: return
-        val chaptersByHref = context.catalog
-            .mapIndexedNotNull { index, chapter ->
-                val href = callString(chapter, "getHref").substringBefore('#').trim()
-                if (href.isBlank()) null else normalizePath(href) to IndexedChapter(index, chapter)
+        val epubTitlePaths = epubCatalogTitlePaths(root)
+        val indexedCatalog = indexedCatalogChapters(context.catalog, root, epubTitlePaths)
+        var pathHitCount = 0
+        val chaptersByHref = indexedCatalog
+            .mapIndexedNotNull { _, chapter ->
+                val href = normalizeCatalogHref(callString(chapter.chapter, "getHref"))
+                if (chapter.titlePath.count { it == ' ' } > 0) pathHitCount++
+                if (href.isBlank()) null else href to IndexedChapter(chapter.index, chapter)
             }
             .groupBy({ it.first }, { it.second })
-        val chaptersByFile = context.catalog
-            .mapIndexedNotNull { index, chapter ->
-                val file = searchFileForHref(root, callString(chapter, "getHref")) ?: return@mapIndexedNotNull null
-                file.absolutePath to IndexedChapter(index, chapter)
+        val chaptersByFile = indexedCatalog
+            .mapIndexedNotNull { _, chapter ->
+                val file = searchFileForHref(root, callString(chapter.chapter, "getHref")) ?: return@mapIndexedNotNull null
+                file.absolutePath to IndexedChapter(chapter.index, chapter)
             }
             .groupBy({ it.first }, { it.second })
         val itemRefs = (epub?.let { callNoArg(it, "getItemRefs") } as? Iterable<*>)?.filterNotNull().orEmpty()
         val spineCfiIndex = (epub?.let { callNoArg(it, "getSpineCfiIndex") } as? Int) ?: -1
         val files = catalogTextFiles(root, context.catalog, itemRefs)
+        XposedBridge.log(
+            "$LOG_PREFIX full-text catalog title paths catalog=${indexedCatalog.size} " +
+                "pathHits=$pathHitCount hrefKeys=${chaptersByHref.size} files=${files.size}",
+        )
+        logCatalogDumpIfNeeded(context, indexedCatalog, root, pathHitCount)
         for (file in files) {
             val raw = runCatching { file.readText(StandardCharsets.UTF_8) }.getOrNull() ?: continue
             val chapter = chapterForFile(root, file, chaptersByHref, chaptersByFile)
-            val cfiBase = cfiBaseForFile(root, file, itemRefs, spineCfiIndex, chapter?.chapter)
+            val chapterAnchors = chapterAnchorsForFile(raw, chaptersForFile(root, file, chaptersByHref, chaptersByFile))
+            val fallbackTitlePath = epubTitlePaths.titlePathForFile(root, file)
+            val cfiBase = cfiBaseForFile(root, file, itemRefs, spineCfiIndex, chapter?.entry?.chapter)
             val indexedText = indexedSearchText(raw, cfiBase)
             val text = indexedText.text.ifBlank { htmlToSearchText(raw) }
             if (text.isBlank()) continue
@@ -3383,14 +3700,341 @@ class ReaderHook(
                 SearchDocument(
                     file = file,
                     chapterIndex = chapter?.index ?: -1,
-                    chapter = chapter?.chapter,
-                    chapterTitle = searchChapterTitle(raw, chapter?.chapter, file),
+                    chapter = chapter?.entry?.chapter,
+                    chapterTitle = searchChapterTitle(raw, chapter?.entry, file, fallbackTitlePath),
                     text = text,
                     lowerText = text.lowercase(Locale.ROOT),
                     indexedText = indexedText,
+                    chapterAnchors = chapterAnchors,
                 )
             if (!onDocument(document)) return
         }
+    }
+
+    private fun logCatalogDumpIfNeeded(
+        context: CatalogContext,
+        catalog: List<CatalogChapterEntry>,
+        root: File,
+        pathHitCount: Int,
+    ) {
+        val key = "${bookKey(context)}:${catalog.size}:${root.absolutePath}"
+        if (catalogDumpLoggedForKey == key) return
+        catalogDumpLoggedForKey = key
+        XposedBridge.log("$LOG_PREFIX catalog dump root=${root.absolutePath} count=${catalog.size} pathHits=$pathHitCount")
+        catalog.take(12).forEach { entry ->
+            val chapter = entry.chapter
+            XposedBridge.log(
+                "$LOG_PREFIX catalog dump #${entry.index} class=${chapter.javaClass.name} " +
+                    "title=${catalogChapterTitle(chapter)} href=${callString(chapter, "getHref")} " +
+                    "id=${catalogChapterId(chapter)} parent=${catalogChapterParentId(chapter)} " +
+                    "level=${catalogChapterLevel(chapter, entry.index)} path=${entry.titlePath} " +
+                    "fields=${catalogChapterFields(chapter)}",
+            )
+        }
+    }
+
+    private fun catalogChapterFields(chapter: Any): String =
+        chapter.javaClass.declaredFields.take(12).joinToString(";") { field ->
+            runCatching {
+                field.isAccessible = true
+                "${field.name}=${field.get(chapter)?.toString()?.take(80)}"
+            }.getOrDefault("${field.name}=?")
+        }
+
+    private fun indexedCatalogChapters(
+        catalog: List<Any>,
+        root: File? = null,
+        epubTitlePaths: Map<String, String> = root?.let(::epubCatalogTitlePaths).orEmpty(),
+    ): List<CatalogChapterEntry> {
+        val parentTitlePaths = catalogParentTitlePaths(catalog)
+        val titleStack = ArrayList<String>()
+        var currentVolumeTitle = ""
+        return catalog.mapIndexed { index, chapter ->
+            val title = catalogChapterTitle(chapter).normalizeChapterTitle()
+            val id = catalogChapterId(chapter)
+            val href = normalizeCatalogHref(callString(chapter, "getHref"))
+            val epubTitlePath = epubTitlePaths.titlePathForHref(href)
+            val level = catalogChapterLevel(chapter, index).coerceAtLeast(0)
+            while (titleStack.size > level) titleStack.removeAt(titleStack.lastIndex)
+            if (titleStack.size == level) {
+                titleStack.add(title)
+            } else {
+                titleStack[titleStack.lastIndex] = title
+            }
+            val sequentialTitlePath = if (isVolumeCatalogTitle(title)) {
+                currentVolumeTitle = title
+                title
+            } else if (currentVolumeTitle.isNotBlank() && title.isNotBlank() && !title.contains(currentVolumeTitle)) {
+                listOf(currentVolumeTitle, title).dedupeAdjacent().joinToString(" ")
+            } else {
+                ""
+            }
+            CatalogChapterEntry(
+                index = index,
+                chapter = chapter,
+                titlePath = epubTitlePath.ifBlank {
+                    parentTitlePaths[id].orEmpty().ifBlank {
+                        sequentialTitlePath.ifBlank {
+                            titleStack.filter { it.isNotBlank() }.dedupeAdjacent().joinToString(" ")
+                        }
+                    }
+                },
+            )
+        }
+    }
+
+    private fun isVolumeCatalogTitle(value: String): Boolean {
+        val compact = value.replace(Regex("\\s+"), "")
+        return Regex("""^第[0-9一二三四五六七八九十百千万〇零两]+[卷部篇集].*""").matches(compact) ||
+            compact in setOf("正文", "番外", "外传", "后日谈")
+    }
+
+    private fun isChapterCatalogTitle(value: String): Boolean {
+        val compact = value.replace(Regex("\\s+"), "")
+        return Regex("""^第[0-9一二三四五六七八九十百千万〇零两]+[章节回话幕].*""").matches(compact) ||
+            Regex("""^(序章|楔子|终章|尾声|后记).*""").matches(compact)
+    }
+
+    private fun catalogParentTitlePaths(catalog: List<Any>): Map<Long, String> {
+        val byId = catalog.mapNotNull { chapter ->
+            val id = catalogChapterId(chapter).takeIf { it != 0L } ?: return@mapNotNull null
+            id to chapter
+        }.toMap()
+        val result = linkedMapOf<Long, String>()
+        fun pathFor(chapter: Any, visiting: Set<Long> = emptySet()): String {
+            val id = catalogChapterId(chapter)
+            result[id]?.let { return it }
+            val title = catalogChapterTitle(chapter).normalizeChapterTitle()
+            val parentId = catalogChapterParentId(chapter).takeIf { it != 0L && it != id }
+            val parent = parentId?.takeIf { it !in visiting }?.let { byId[it] }
+            val path = if (parent != null) {
+                listOf(pathFor(parent, visiting + id), title)
+                    .filter { it.isNotBlank() }
+                    .dedupeAdjacent()
+                    .joinToString(" ")
+            } else {
+                title
+            }
+            if (id != 0L) result[id] = path
+            return path
+        }
+        catalog.forEach { pathFor(it) }
+        return result
+    }
+
+    private fun Map<String, String>.titlePathForHref(href: String): String {
+        if (href.isBlank()) return ""
+        get(href)?.let { return it }
+        get(href.substringBefore('#'))?.let { return it }
+        return entries.firstOrNull { (key, _) -> sameSearchContentPath(href, key) }?.value.orEmpty()
+    }
+
+    private fun Map<String, String>.titlePathForFile(root: File, file: File): String {
+        val relative = normalizePath(relativePath(root, file))
+        return titlePathForHref(relative)
+    }
+
+    private fun epubCatalogTitlePaths(root: File): Map<String, String> {
+        val result = linkedMapOf<String, String>()
+        root.walkTopDown()
+            .filter { it.isFile && it.extension.equals("ncx", ignoreCase = true) }
+            .forEach { file -> result.putAll(parseNcxTitlePaths(root, file)) }
+        root.walkTopDown()
+            .filter { file ->
+                file.isFile &&
+                    (file.extension.equals("xhtml", ignoreCase = true) || file.extension.equals("html", ignoreCase = true))
+            }
+            .forEach { file -> result.putAll(parseNavTitlePaths(root, file)) }
+        return result
+    }
+
+    private fun parseNcxTitlePaths(root: File, file: File): Map<String, String> = runCatching {
+        val parser = Xml.newPullParser()
+        parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
+        parser.setInput(file.inputStream().bufferedReader(StandardCharsets.UTF_8))
+        val stack = ArrayList<TocNode>()
+        val result = linkedMapOf<String, String>()
+        var captureText = false
+        val text = StringBuilder()
+        while (parser.eventType != XmlPullParser.END_DOCUMENT) {
+            when (parser.eventType) {
+                XmlPullParser.START_TAG -> when (parser.name.lowercase(Locale.ROOT)) {
+                    "navpoint" -> stack.add(TocNode())
+                    "content" -> stack.lastOrNull()?.href = normalizeHref(parser.getAttributeValue(null, "src").orEmpty())
+                    "text" -> if (stack.isNotEmpty()) {
+                        captureText = true
+                        text.setLength(0)
+                    }
+                }
+                XmlPullParser.TEXT -> if (captureText) text.append(parser.text.orEmpty())
+                XmlPullParser.END_TAG -> when (parser.name.lowercase(Locale.ROOT)) {
+                    "text" -> if (captureText) {
+                        stack.lastOrNull()?.title = text.toString().normalizeChapterTitle()
+                        captureText = false
+                    }
+                    "navpoint" -> if (stack.isNotEmpty()) {
+                        val node = stack.removeAt(stack.lastIndex)
+                        putTocNodeTitlePath(result, root, file, stack, node)
+                    }
+                }
+            }
+            parser.next()
+        }
+        result
+    }.getOrDefault(emptyMap())
+
+    private fun parseNavTitlePaths(root: File, file: File): Map<String, String> = runCatching {
+        val parser = Xml.newPullParser()
+        parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
+        parser.setInput(file.inputStream().bufferedReader(StandardCharsets.UTF_8))
+        val stack = ArrayList<TocNode>()
+        val result = linkedMapOf<String, String>()
+        var tocNavDepth = 0
+        var captureDepth = 0
+        val text = StringBuilder()
+        while (parser.eventType != XmlPullParser.END_DOCUMENT) {
+            when (parser.eventType) {
+                XmlPullParser.START_TAG -> {
+                    val name = parser.name.lowercase(Locale.ROOT)
+                    if (tocNavDepth > 0) tocNavDepth++
+                    if (name == "nav" && tocNavDepth == 0 && tagHasTocType(parser)) tocNavDepth = 1
+                    if (captureDepth > 0) captureDepth++
+                    when {
+                        tocNavDepth == 0 -> Unit
+                        name == "li" -> stack.add(TocNode())
+                        name == "a" && stack.isNotEmpty() -> {
+                            stack.last().href = normalizeHref(parser.getAttributeValue(null, "href").orEmpty())
+                            captureDepth = 1
+                            text.setLength(0)
+                        }
+                    }
+                }
+                XmlPullParser.TEXT -> if (captureDepth > 0) text.append(parser.text.orEmpty())
+                XmlPullParser.END_TAG -> {
+                    val name = parser.name.lowercase(Locale.ROOT)
+                    if (captureDepth > 0) {
+                        captureDepth--
+                        if (captureDepth == 0) {
+                            stack.lastOrNull()?.title = text.toString().normalizeChapterTitle()
+                        }
+                    }
+                    if (tocNavDepth > 0 && name == "li" && stack.isNotEmpty()) {
+                        val node = stack.removeAt(stack.lastIndex)
+                        putTocNodeTitlePath(result, root, file, stack, node)
+                    }
+                    if (tocNavDepth > 0) tocNavDepth--
+                }
+            }
+            parser.next()
+        }
+        result
+    }.getOrDefault(emptyMap())
+
+    private fun tagHasTocType(parser: XmlPullParser): Boolean {
+        for (index in 0 until parser.attributeCount) {
+            val name = parser.getAttributeName(index).orEmpty()
+            val value = parser.getAttributeValue(index).orEmpty()
+            if ((name == "type" || name.endsWith(":type") || name == "role") &&
+                value.lowercase(Locale.ROOT).contains("toc")) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun putTocNodeTitlePath(
+        result: MutableMap<String, String>,
+        root: File,
+        source: File,
+        stack: List<TocNode>,
+        node: TocNode,
+    ) {
+        val title = node.title.normalizeChapterTitle()
+        val href = normalizeCatalogHref(node.href)
+        if (title.isBlank() || href.isBlank()) return
+        val fileHref = href.substringBefore('#')
+        val anchor = href.substringAfter('#', "").takeIf { it.isNotBlank() }
+        val target = File(source.parentFile ?: root, fileHref).canonicalFileSafe() ?: File(source.parentFile ?: root, fileHref)
+        val key = normalizePath(relativePath(root, target)) + anchor.orEmpty().let { if (it.isBlank()) "" else "#$it" }
+        val fileKey = key.substringBefore('#')
+        val path = (stack.map { it.title.normalizeChapterTitle() } + title)
+            .filter { it.isNotBlank() }
+            .dedupeAdjacent()
+            .joinToString(" ")
+        if (key.isNotBlank() && path.isNotBlank()) {
+            result.putIfAbsent(key, path)
+            result.putIfAbsent(fileKey, path)
+        }
+    }
+
+    private fun normalizeCatalogHref(value: String): String {
+        val normalized = normalizeHref(value)
+        val file = normalizePath(normalized.substringBefore('#'))
+        val anchor = normalized.substringAfter('#', "").takeIf { it.isNotBlank() }
+        return file + anchor.orEmpty().let { if (it.isBlank()) "" else "#$it" }
+    }
+
+    private fun normalizeHref(value: String): String =
+        runCatching { URLDecoder.decode(value.trim(), "UTF-8") }
+            .getOrDefault(value.trim())
+            .substringBefore('?')
+            .replace('\uFEFF', ' ')
+            .trim()
+
+    private fun List<String>.dedupeAdjacent(): List<String> {
+        val result = ArrayList<String>(size)
+        forEach { value ->
+            if (result.lastOrNull() != value) result.add(value)
+        }
+        return result
+    }
+
+    private fun catalogChapterLevel(chapter: Any, index: Int): Int {
+        listOf("getLevel", "getDepth", "getIndent", "getTier", "getLayer").forEach { method ->
+            (callNoArg(chapter, method) as? Number)?.toInt()?.let { return it }
+        }
+        listOf("level", "depth", "indent", "tier", "layer").forEach { fieldName ->
+            runCatching {
+                chapter.javaClass.declaredFields.firstOrNull { it.name == fieldName }?.let { field ->
+                    field.isAccessible = true
+                    (field.get(chapter) as? Number)?.toInt()
+                }
+            }.getOrNull()?.let { return it }
+        }
+        val value = chapter.toString()
+        Regex("""(?:level|depth|indent|tier|layer)=(-?\d+)""")
+            .find(value)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+            ?.let { return it }
+        return if (index == 0) 0 else 0
+    }
+
+    private fun catalogChapterId(chapter: Any): Long =
+        catalogChapterLongValue(chapter, listOf("getId", "getID", "getChapterId", "getChapterID"), listOf("id", "chapterId"))
+
+    private fun catalogChapterParentId(chapter: Any): Long =
+        catalogChapterLongValue(
+            chapter,
+            listOf("getParentId", "getParentID", "getPid", "getPId", "getParentChapterId", "getParentChapterID"),
+            listOf("parentId", "parentID", "pid", "pId", "parentChapterId"),
+        )
+
+    private fun catalogChapterLongValue(chapter: Any, methods: List<String>, fields: List<String>): Long {
+        methods.forEach { method ->
+            (callNoArg(chapter, method) as? Number)?.toLong()?.let { return it }
+        }
+        fields.forEach { fieldName ->
+            runCatching {
+                chapter.javaClass.declaredFields.firstOrNull { it.name == fieldName }?.let { field ->
+                    field.isAccessible = true
+                    val value = field.get(chapter)
+                    (value as? Number)?.toLong() ?: value?.toString()?.toLongOrNull()
+                }
+            }.getOrNull()?.let { return it }
+        }
+        return 0L
     }
 
     private fun currentEpubRoot(): File? =
@@ -3439,8 +4083,13 @@ class ReaderHook(
         }
     }
 
-    private fun searchChapterTitle(raw: String, chapter: Any?, file: File): String {
-        val catalogTitle = chapter?.let(::catalogChapterTitle).orEmpty().normalizeChapterTitle()
+    private fun searchChapterTitle(
+        raw: String,
+        chapter: CatalogChapterEntry?,
+        file: File,
+        fallbackTitlePath: String = "",
+    ): String {
+        val catalogTitle = chapter?.titlePath.orEmpty().ifBlank { fallbackTitlePath }.normalizeChapterTitle()
         val fileTitle = fileChapterTitleHint(raw)
         return chooseChapterTitle(catalogTitle, fileTitle).ifBlank { file.nameWithoutExtension }
     }
@@ -3691,9 +4340,48 @@ class ReaderHook(
             ?: chaptersByHref.entries.firstOrNull { (href, _) -> sameSearchContentPath(relative, href) }?.value?.firstOrNull()
     }
 
+    private fun chaptersForFile(
+        root: File,
+        file: File,
+        chaptersByHref: Map<String, List<IndexedChapter>>,
+        chaptersByFile: Map<String, List<IndexedChapter>>,
+    ): List<IndexedChapter> {
+        val relative = normalizePath(relativePath(root, file))
+        val canonicalPath = (file.canonicalFileSafe() ?: file).absolutePath
+        return buildList {
+            chaptersByFile[canonicalPath]?.let(::addAll)
+            chaptersByHref[relative]?.let(::addAll)
+            chaptersByHref.forEach { (href, chapters) ->
+                if (sameSearchContentPath(relative, href)) addAll(chapters)
+            }
+        }.distinctBy { it.index }
+            .sortedBy { it.index }
+    }
+
+    private fun chapterAnchorsForFile(raw: String, chapters: List<IndexedChapter>): List<ChapterAnchor> =
+        chapters.mapNotNull { chapter ->
+            val href = normalizeCatalogHref(callString(chapter.entry.chapter, "getHref"))
+            val anchor = href.substringAfter('#', "").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val textStart = htmlAnchorTextStart(raw, anchor) ?: return@mapNotNull null
+            ChapterAnchor(
+                textStart = textStart,
+                index = chapter.index,
+                chapter = chapter.entry.chapter,
+                title = chapter.entry.titlePath,
+            )
+        }.sortedBy { it.textStart }
+
+    private fun htmlAnchorTextStart(raw: String, anchor: String): Int? {
+        val decoded = normalizeHref(anchor)
+        val escaped = Regex.escape(decoded)
+        val match = Regex("""(?is)<[^>]+\b(?:id|name)\s*=\s*(['"])$escaped\1[^>]*>""")
+            .find(raw) ?: return null
+        return htmlToSearchText(raw.substring(0, match.range.first)).length
+    }
+
     private fun sameSearchContentPath(relative: String, href: String): Boolean {
-        val left = normalizePath(relative)
-        val right = normalizePath(href)
+        val left = normalizePath(relative).substringBefore('#')
+        val right = normalizePath(href).substringBefore('#')
         if (left.isBlank() || right.isBlank()) return false
         return left == right ||
             left.endsWith("/$right") ||
@@ -3702,7 +4390,11 @@ class ReaderHook(
     }
 
     private fun snippetFor(text: String, start: Int, end: Int): SearchSnippet {
-        val compactRadius = if (text.any { it.code > 127 }) SEARCH_CJK_SNIPPET_RADIUS else SEARCH_SNIPPET_RADIUS
+        val compactRadius = if (text.any { it.code > 127 }) {
+            SEARCH_CJK_SNIPPET_RADIUS + SEARCH_SNIPPET_EXTRA_RADIUS
+        } else {
+            SEARCH_SNIPPET_RADIUS + SEARCH_SNIPPET_EXTRA_RADIUS
+        }
         val from = (start - compactRadius).coerceAtLeast(0)
         val to = (end + compactRadius).coerceAtMost(text.length)
         val prefix = if (from > 0) "\u2026" else ""
@@ -4374,9 +5066,13 @@ class ReaderHook(
         const val PADDING_KT_CLASS = "androidx.compose.foundation.layout.PaddingKt"
         const val PADDING_METHOD = "padding-qDBjuR0"
         const val ARRANGEMENT_CLASS = "androidx.compose.foundation.layout.Arrangement"
+        const val MATERIAL_THEME_CLASS = "androidx.compose.material3.MaterialTheme"
+        const val THEME_KT_CLASS = "app.zhendong.reamicro.arch.theme.ThemeKt"
+        const val COLOR_KT_CLASS = "androidx.compose.ui.graphics.ColorKt"
         const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
         const val UNIT_EXT_KT_CLASS = "app.zhendong.reamicro.arch.extensions.UnitExtKt"
         const val UDP_METHOD = "getUdp"
+        @Volatile var latestThemeColors: ThemeColors? = null
         val ARRANGEMENT_SPACED_BY_METHOD_CANDIDATES = listOf(
             "spacedBy-0680j_4",
             "m837spacedBy0680j_4",
@@ -4386,8 +5082,9 @@ class ReaderHook(
         const val MAX_MATCHES_PER_FILE = 200
         const val SEARCH_SNIPPET_RADIUS = 16
         const val SEARCH_CJK_SNIPPET_RADIUS = 7
-        const val SEARCH_EMIT_BATCH = 8
-        const val SEARCH_EMIT_INTERVAL_MS = 220L
+        const val SEARCH_SNIPPET_EXTRA_RADIUS = 3
+        const val SEARCH_EMIT_BATCH = 24
+        const val SEARCH_EMIT_INTERVAL_MS = 320L
         const val SEARCH_NAV_BAR_TAG = 0x524d5331
         const val SEARCH_MENU_BUTTON_TAG = 0x524d5333
         const val SEARCH_MENU_BUTTON_SIZE_DP = 44
@@ -4460,6 +5157,7 @@ class ReaderHook(
         val text: String,
         val lowerText: String,
         val indexedText: IndexedSearchText,
+        val chapterAnchors: List<ChapterAnchor>,
     )
 
     private data class ReadingTarget(
@@ -4484,7 +5182,25 @@ class ReaderHook(
 
     private data class IndexedChapter(
         val index: Int,
+        val entry: CatalogChapterEntry,
+    )
+
+    private data class CatalogChapterEntry(
+        val index: Int,
         val chapter: Any,
+        val titlePath: String,
+    )
+
+    private data class ChapterAnchor(
+        val textStart: Int,
+        val index: Int,
+        val chapter: Any,
+        val title: String,
+    )
+
+    private data class TocNode(
+        var title: String = "",
+        var href: String = "",
     )
 
     private data class SearchSnippet(
@@ -4642,18 +5358,31 @@ class ReaderHook(
     private class DialogColors(context: Context) {
         val dark: Boolean = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
             Configuration.UI_MODE_NIGHT_YES
-        val pageBackground: Int = if (dark) Color.rgb(17, 19, 24) else Color.WHITE
-        val cardBackground: Int = if (dark) Color.rgb(38, 38, 38) else Color.WHITE
-        val inputBackground: Int = if (dark) Color.rgb(44, 44, 44) else Color.WHITE
-        val primaryText: Int = if (dark) Color.rgb(238, 238, 238) else Color.rgb(25, 25, 25)
-        val secondaryText: Int = if (dark) Color.rgb(170, 170, 170) else Color.rgb(118, 118, 118)
-        val stroke: Int = if (dark) Color.rgb(68, 68, 68) else Color.rgb(228, 228, 228)
-        val searchChipBackground: Int = if (dark) Color.rgb(42, 42, 42) else Color.rgb(246, 246, 248)
+        private val theme: ThemeColors? = latestThemeColors
+        val pageBackground: Int = theme?.pageBackground ?: if (dark) Color.rgb(17, 19, 24) else Color.WHITE
+        val cardBackground: Int = theme?.cardBackground ?: if (dark) Color.rgb(38, 38, 38) else Color.WHITE
+        val inputBackground: Int = theme?.inputBackground ?: if (dark) Color.rgb(44, 44, 44) else Color.WHITE
+        val primaryText: Int = theme?.primaryText ?: if (dark) Color.rgb(238, 238, 238) else Color.rgb(25, 25, 25)
+        val secondaryText: Int = theme?.secondaryText ?: if (dark) Color.rgb(170, 170, 170) else Color.rgb(118, 118, 118)
+        val stroke: Int = theme?.stroke ?: if (dark) Color.rgb(68, 68, 68) else Color.rgb(228, 228, 228)
+        val searchChipBackground: Int = theme?.chipBackground ?: if (dark) Color.rgb(42, 42, 42) else Color.rgb(246, 246, 248)
         val inputStroke: Int = if (dark) Color.rgb(236, 162, 100) else Color.rgb(238, 118, 62)
-        val actionBackground: Int = if (dark) Color.rgb(180, 112, 64) else Color.rgb(238, 118, 62)
+        val actionBackground: Int = theme?.action ?: if (dark) Color.rgb(180, 112, 64) else Color.rgb(238, 118, 62)
         val actionText: Int = Color.WHITE
-        val accent: Int = if (dark) Color.rgb(236, 183, 102) else Color.rgb(171, 105, 38)
+        val accent: Int = actionBackground
     }
+
+    private data class ThemeColors(
+        val pageBackground: Int,
+        val cardBackground: Int,
+        val inputBackground: Int,
+        val primaryText: Int,
+        val secondaryText: Int,
+        val stroke: Int,
+        val chipBackground: Int,
+        val action: Int,
+    )
+
 }
 
 private fun dp(context: Context, value: Int): Int =
