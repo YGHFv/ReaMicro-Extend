@@ -181,6 +181,46 @@ class XposedModuleSettings(
         putBoolean(ModuleSettings.KEY_ROTATION_REVERSE_ENABLED, enabled)
     }
 
+    fun setProfileBackgroundEnabled(enabled: Boolean) {
+        putBoolean(ModuleSettings.KEY_PROFILE_BACKGROUND_ENABLED, enabled)
+    }
+
+    fun setProfileBackgroundColor(color: String) {
+        putString(ModuleSettings.KEY_PROFILE_BACKGROUND_COLOR, normalizeProfileBackgroundColor(color))
+    }
+
+    fun setProfileBackgroundUseImage(useImage: Boolean) {
+        putBoolean(ModuleSettings.KEY_PROFILE_BACKGROUND_USE_IMAGE, useImage)
+    }
+
+    fun setProfileBackgroundImage(path: String) {
+        putString(ModuleSettings.KEY_PROFILE_BACKGROUND_IMAGE, path)
+    }
+
+    fun setProfileBackgroundCropPosition(position: String) {
+        putString(ModuleSettings.KEY_PROFILE_BACKGROUND_CROP_POSITION, normalizeProfileBackgroundCropPosition(position))
+    }
+
+    fun setProfileBackgroundDisplayMode(mode: String) {
+        putString(ModuleSettings.KEY_PROFILE_BACKGROUND_DISPLAY_MODE, normalizeProfileBackgroundDisplayMode(mode))
+    }
+
+    fun setProfileBackgroundBlur(value: Int) {
+        putInt(ModuleSettings.KEY_PROFILE_BACKGROUND_BLUR, normalizePercent(value))
+    }
+
+    fun setProfileBackgroundTransparency(value: Int) {
+        putInt(ModuleSettings.KEY_PROFILE_BACKGROUND_TRANSPARENCY, normalizePercent(value))
+    }
+
+    fun setProfileBackgroundCardBlur(value: Int) {
+        putInt(ModuleSettings.KEY_PROFILE_BACKGROUND_CARD_BLUR, normalizePercent(value))
+    }
+
+    fun setProfileBackgroundCardTransparency(value: Int) {
+        putInt(ModuleSettings.KEY_PROFILE_BACKGROUND_CARD_TRANSPARENCY, normalizePercent(value))
+    }
+
     fun setAssociationSearchSourceEnabled(groupId: String, enabled: Boolean) {
         putBoolean(ModuleSettings.searchSourceKey(groupId), enabled)
     }
@@ -466,6 +506,13 @@ class XposedModuleSettings(
         snapshot()
     }
 
+    private fun putInt(key: String, value: Int) {
+        prefs()?.edit()?.putInt(key, value)?.commit()
+        cachedSnapshot = null
+        cachedAtMs = 0L
+        snapshot()
+    }
+
     private fun putString(key: String, value: String) {
         prefs()?.edit()?.putString(key, value)?.commit()
         cachedSnapshot = null
@@ -691,6 +738,60 @@ class XposedModuleSettings(
                 ModuleSettings.KEY_ROTATION_REVERSE_ENABLED,
                 ModuleSettings.DEFAULT_ROTATION_REVERSE_ENABLED,
             ),
+            profileBackgroundEnabled = prefs.getBoolean(
+                ModuleSettings.KEY_PROFILE_BACKGROUND_ENABLED,
+                ModuleSettings.DEFAULT_PROFILE_BACKGROUND_ENABLED,
+            ),
+            profileBackgroundColor = normalizeProfileBackgroundColor(
+                prefs.getString(
+                    ModuleSettings.KEY_PROFILE_BACKGROUND_COLOR,
+                    ModuleSettings.DEFAULT_PROFILE_BACKGROUND_COLOR,
+                ) ?: ModuleSettings.DEFAULT_PROFILE_BACKGROUND_COLOR,
+            ),
+            profileBackgroundUseImage = prefs.getBoolean(
+                ModuleSettings.KEY_PROFILE_BACKGROUND_USE_IMAGE,
+                ModuleSettings.DEFAULT_PROFILE_BACKGROUND_USE_IMAGE,
+            ),
+            profileBackgroundImage = prefs.getString(
+                ModuleSettings.KEY_PROFILE_BACKGROUND_IMAGE,
+                ModuleSettings.DEFAULT_PROFILE_BACKGROUND_IMAGE,
+            ) ?: ModuleSettings.DEFAULT_PROFILE_BACKGROUND_IMAGE,
+            profileBackgroundCropPosition = normalizeProfileBackgroundCropPosition(
+                prefs.getString(
+                    ModuleSettings.KEY_PROFILE_BACKGROUND_CROP_POSITION,
+                    ModuleSettings.DEFAULT_PROFILE_BACKGROUND_CROP_POSITION,
+                ) ?: ModuleSettings.DEFAULT_PROFILE_BACKGROUND_CROP_POSITION,
+            ),
+            profileBackgroundDisplayMode = normalizeProfileBackgroundDisplayMode(
+                prefs.getString(
+                    ModuleSettings.KEY_PROFILE_BACKGROUND_DISPLAY_MODE,
+                    ModuleSettings.DEFAULT_PROFILE_BACKGROUND_DISPLAY_MODE,
+                ) ?: ModuleSettings.DEFAULT_PROFILE_BACKGROUND_DISPLAY_MODE,
+            ),
+            profileBackgroundBlur = normalizePercent(
+                prefs.getInt(
+                    ModuleSettings.KEY_PROFILE_BACKGROUND_BLUR,
+                    ModuleSettings.DEFAULT_PROFILE_BACKGROUND_BLUR,
+                ),
+            ),
+            profileBackgroundTransparency = normalizePercent(
+                prefs.getInt(
+                    ModuleSettings.KEY_PROFILE_BACKGROUND_TRANSPARENCY,
+                    ModuleSettings.DEFAULT_PROFILE_BACKGROUND_TRANSPARENCY,
+                ),
+            ),
+            profileBackgroundCardBlur = normalizePercent(
+                prefs.getInt(
+                    ModuleSettings.KEY_PROFILE_BACKGROUND_CARD_BLUR,
+                    ModuleSettings.DEFAULT_PROFILE_BACKGROUND_CARD_BLUR,
+                ),
+            ),
+            profileBackgroundCardTransparency = normalizePercent(
+                prefs.getInt(
+                    ModuleSettings.KEY_PROFILE_BACKGROUND_CARD_TRANSPARENCY,
+                    ModuleSettings.DEFAULT_PROFILE_BACKGROUND_CARD_TRANSPARENCY,
+                ),
+            ),
             associationSearchSources = readAssociationSearchSources(prefs),
         )
     }
@@ -770,6 +871,37 @@ class XposedModuleSettings(
             darkCss = sanitizeHighlightCss(style.darkCss),
         )
     }
+
+    private fun normalizeProfileBackgroundColor(value: String): String {
+        val trimmed = value.trim()
+        val hex = when {
+            trimmed.matches(Regex("^#[0-9a-fA-F]{8}$")) -> trimmed
+            trimmed.matches(Regex("^#[0-9a-fA-F]{6}$")) -> "#FF${trimmed.drop(1)}"
+            trimmed.matches(Regex("^[0-9a-fA-F]{8}$")) -> "#$trimmed"
+            trimmed.matches(Regex("^[0-9a-fA-F]{6}$")) -> "#FF$trimmed"
+            else -> ModuleSettings.DEFAULT_PROFILE_BACKGROUND_COLOR
+        }
+        return hex.uppercase()
+    }
+
+    private fun normalizeProfileBackgroundCropPosition(value: String): String =
+        when (value.trim().lowercase()) {
+            ModuleSettings.PROFILE_BACKGROUND_CROP_TOP -> ModuleSettings.PROFILE_BACKGROUND_CROP_TOP
+            ModuleSettings.PROFILE_BACKGROUND_CROP_CENTER -> ModuleSettings.PROFILE_BACKGROUND_CROP_CENTER
+            ModuleSettings.PROFILE_BACKGROUND_CROP_BOTTOM -> ModuleSettings.PROFILE_BACKGROUND_CROP_BOTTOM
+            else -> ModuleSettings.DEFAULT_PROFILE_BACKGROUND_CROP_POSITION
+        }
+
+    private fun normalizeProfileBackgroundDisplayMode(value: String): String =
+        when (value.trim().lowercase()) {
+            ModuleSettings.PROFILE_BACKGROUND_DISPLAY_COVER -> ModuleSettings.PROFILE_BACKGROUND_DISPLAY_COVER
+            ModuleSettings.PROFILE_BACKGROUND_DISPLAY_FIT_WIDTH -> ModuleSettings.PROFILE_BACKGROUND_DISPLAY_FIT_WIDTH
+            ModuleSettings.PROFILE_BACKGROUND_DISPLAY_FIT_HEIGHT -> ModuleSettings.PROFILE_BACKGROUND_DISPLAY_FIT_HEIGHT
+            else -> ModuleSettings.DEFAULT_PROFILE_BACKGROUND_DISPLAY_MODE
+        }
+
+    private fun normalizePercent(value: Int): Int =
+        value.coerceIn(0, 100)
 
     private fun updateDefaultHighlightStyle(update: (ReaderHighlightStyle) -> ReaderHighlightStyle) {
         val current = highlightSettings()
@@ -1141,6 +1273,16 @@ class XposedModuleSettings(
             snapshot.rotationEnabled,
             snapshot.rotation,
             snapshot.rotationReverseEnabled,
+            snapshot.profileBackgroundEnabled,
+            snapshot.profileBackgroundColor,
+            snapshot.profileBackgroundUseImage,
+            snapshot.profileBackgroundImage,
+            snapshot.profileBackgroundCropPosition,
+            snapshot.profileBackgroundDisplayMode,
+            snapshot.profileBackgroundBlur,
+            snapshot.profileBackgroundTransparency,
+            snapshot.profileBackgroundCardBlur,
+            snapshot.profileBackgroundCardTransparency,
             snapshot.associationSearchSources,
         ).joinToString("|")
         if (key == lastLogKey) return
@@ -1178,6 +1320,16 @@ class XposedModuleSettings(
                     "rotationEnabled=${snapshot.rotationEnabled}, " +
                     "rotation=${snapshot.rotation}, " +
                     "rotationReverse=${snapshot.rotationReverseEnabled}, " +
+                    "profileBackground=${snapshot.profileBackgroundEnabled}, " +
+                    "profileBackgroundColor=${snapshot.profileBackgroundColor}, " +
+                    "profileBackgroundUseImage=${snapshot.profileBackgroundUseImage}, " +
+                    "profileBackgroundImage=${snapshot.profileBackgroundImage}, " +
+                    "profileBackgroundCropPosition=${snapshot.profileBackgroundCropPosition}, " +
+                    "profileBackgroundDisplayMode=${snapshot.profileBackgroundDisplayMode}, " +
+                    "profileBackgroundBlur=${snapshot.profileBackgroundBlur}, " +
+                    "profileBackgroundTransparency=${snapshot.profileBackgroundTransparency}, " +
+                    "profileBackgroundCardBlur=${snapshot.profileBackgroundCardBlur}, " +
+                    "profileBackgroundCardTransparency=${snapshot.profileBackgroundCardTransparency}, " +
                     "sources=${snapshot.associationSearchSources}",
             )
         }

@@ -192,6 +192,60 @@ class ModuleSettingsTest {
     }
 
     @Test
+    fun moduleParentSwitchControlsProfileBackground() {
+        val disabledParent = ModuleSettingsSnapshot(
+            moduleEnabled = false,
+            profileBackgroundEnabled = true,
+        )
+        val enabledParent = disabledParent.copy(moduleEnabled = true)
+
+        assertFalse(disabledParent.canShowProfileBackground)
+        assertTrue(enabledParent.canShowProfileBackground)
+    }
+
+    @Test
+    fun profileBackgroundDefaultsOff() {
+        assertFalse(ModuleSettingsSnapshot().canShowProfileBackground)
+        assertFalse(ModuleSettingsSnapshot().profileBackgroundEnabled)
+    }
+
+    @Test
+    fun profileBackgroundDefaultColorMatchesSpec() {
+        assertEquals(
+            ModuleSettings.DEFAULT_PROFILE_BACKGROUND_COLOR,
+            ModuleSettingsSnapshot().profileBackgroundColor,
+        )
+    }
+
+    @Test
+    fun profileBackgroundDefaultCropPositionKeepsTopCrop() {
+        assertEquals(
+            ModuleSettings.PROFILE_BACKGROUND_CROP_TOP,
+            ModuleSettingsSnapshot().profileBackgroundCropPosition,
+        )
+    }
+
+    @Test
+    fun profileBackgroundColorIsCarriedThroughSnapshot() {
+        val snapshot = ModuleSettingsSnapshot(
+            moduleEnabled = true,
+            profileBackgroundEnabled = true,
+            profileBackgroundColor = "#FF1F2937",
+        )
+        assertEquals("#FF1F2937", snapshot.profileBackgroundColor)
+        assertTrue(snapshot.canShowProfileBackground)
+    }
+
+    @Test
+    fun profileBackgroundCropPositionIsCarriedThroughSnapshot() {
+        val snapshot = ModuleSettingsSnapshot(
+            profileBackgroundCropPosition = ModuleSettings.PROFILE_BACKGROUND_CROP_CENTER,
+        )
+
+        assertEquals(ModuleSettings.PROFILE_BACKGROUND_CROP_CENTER, snapshot.profileBackgroundCropPosition)
+    }
+
+    @Test
     fun legacyAccountParentSwitchNoLongerBlocksChildSwitches() {
         val snapshot = ModuleSettingsSnapshot(
             accountEnabled = false,

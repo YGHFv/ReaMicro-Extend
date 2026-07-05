@@ -37,3 +37,4 @@ external-sources/
 source-files/*
 !source-files/
 !source-files/fanqie.rmsource
+.kotlin/
