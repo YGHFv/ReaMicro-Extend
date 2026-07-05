@@ -1565,6 +1565,9 @@ class ReaMicroSettingsHook(
                     subtitle = imageSubtitle,
                     singleLineSubtitle = true,
                     onClick = { openProfileBackgroundImagePicker() },
+                    onLongClick = if (snapshot.profileBackgroundImage.isBlank()) null else {
+                        { removeProfileBackgroundImage() }
+                    },
                 ),
                 ActionRow(
                     key = "profile_background_display_mode_entry",
@@ -2527,6 +2530,27 @@ class ReaMicroSettingsHook(
         }.onFailure {
             showToast(it.message ?: "\u9009\u62e9\u80cc\u666f\u56fe\u7247\u5931\u8d25")
             XposedBridge.log("$LOG_PREFIX import profile background image failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun removeProfileBackgroundImage() {
+        val activity = activityProvider() ?: return
+        if (settings.snapshot().profileBackgroundImage.isBlank()) {
+            showToast("\u672a\u6dfb\u52a0\u80cc\u666f\u56fe\u7247")
+            return
+        }
+        runCatching {
+            // \u6e05\u9664\u56fe\u7247\u6587\u4ef6\u5e76\u590d\u4f4d\u4e3b\u9875\u80cc\u666f\u76f8\u5173\u5f00\u5173\uff0c
+            // \u4f7f canShowProfileBackground \u81ea\u52a8\u5931\u6548\uff0c\u6240\u6709\u4e3b\u9875\u8865\u5168\u80cc\u666f\u529f\u80fd\u4e0d\u518d\u751f\u6548\u3002
+            File(activity.filesDir, "profile_background").listFiles()?.forEach { it.delete() }
+            settings.setProfileBackgroundImage("")
+            settings.setProfileBackgroundUseImage(false)
+            settings.setProfileBackgroundEnabled(false)
+            showToast("\u5df2\u79fb\u9664\u80cc\u666f\u56fe\u7247")
+            bumpProfileBackgroundVersion()
+        }.onFailure {
+            showToast(it.message ?: "\u79fb\u9664\u80cc\u666f\u56fe\u7247\u5931\u8d25")
+            XposedBridge.log("$LOG_PREFIX remove profile background image failed: ${it.stackTraceToString()}")
         }
     }
 

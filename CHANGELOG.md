@@ -13,6 +13,10 @@
 - 恢复被删除的 `settingsThemeColor` 辅助函数与 `android.util.TypedValue` 导入。
 - 所有自定义输入弹窗（含主页背景的模糊/透明度/显示方式/裁剪位置等）随之恢复模块原本样式，取消 PR 新增的背景压暗与取色配色。
 
+### 移除背景图片
+- 「背景图片」行支持长按移除（仅在已选择图片时启用）。
+- 移除会删除已保存的背景图片文件，并复位 `profileBackgroundImage`、`profileBackgroundUseImage`、`profileBackgroundEnabled`，使 `canShowProfileBackground` 变为 false，所有主页补全背景功能随之全部失效。
+
 ## 1.2.5 - 2026-07-05
 
 ### 高亮样式
