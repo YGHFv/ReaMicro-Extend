@@ -4,6 +4,7 @@ tmp/
 AGENTS.md
 build/
 .gradle/
+.kotlin/
 local.properties
 *.iml
 .alma-snapshots/
@@ -19,6 +20,16 @@ signing/
 tools/
 decompiled/
 dex_tmp/
+
+# Local verification leftovers
+logcat.txt
+window.xml
+reamicro_*.png
+icon.png
+*.tmp
+reamicro_highlight_style_*.json
+晚风里.json
+番茄.json
 
 # Optional closed/local side-loaded ReaMicro sources. If these directories
 # exist locally, Gradle can bundle their .rmsource files into the APK.

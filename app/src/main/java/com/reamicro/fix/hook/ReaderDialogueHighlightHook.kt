@@ -2,7 +2,6 @@ package com.reamicro.fix.hook
 
 import android.app.Activity
 import android.content.res.Configuration
-import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
@@ -115,12 +114,14 @@ class ReaderDialogueHighlightHook(
         if (text.isBlank()) return null
         val highlight = settings.highlightSettings()
         val currentBookKey = ReaderHighlightBookContext.bookKey
+        val currentBookTitle = ReaderHighlightBookContext.bookTitle
+        val bookGlobalRuleIds = highlight.globalRulesEnabledForBook(currentBookKey)
         val enabledRules = highlight.rules.filter { rule ->
             if (!rule.enabled) return@filter false
             if (rule.bookKey.isBlank()) {
-                snapshot.canHighlightReaderDialogue
+                snapshot.canHighlightReaderDialogue && (bookGlobalRuleIds == null || rule.id in bookGlobalRuleIds)
             } else {
-                rule.bookKey == currentBookKey
+                rule.appliesToBook(currentBookKey, currentBookTitle)
             }
         }
         if (enabledRules.isEmpty()) return null
@@ -761,8 +762,9 @@ class ReaderDialogueHighlightHook(
         if (!snapshot.canHighlightReaderDialogue) return null
         val highlight = settings.highlightSettings()
         val currentBookKey = ReaderHighlightBookContext.bookKey
+        val currentBookTitle = ReaderHighlightBookContext.bookTitle
         val enabledRules = highlight.rules.filter { rule ->
-            rule.enabled && (rule.bookKey.isBlank() || rule.bookKey == currentBookKey)
+            rule.enabled && (rule.bookKey.isBlank() || rule.appliesToBook(currentBookKey, currentBookTitle))
         }
         if (enabledRules.isEmpty()) return null
         val staleStyleIds = highlight.styles
@@ -998,16 +1000,16 @@ class ReaderDialogueHighlightHook(
     }
 
     private fun imageForNinePatch(path: String): CachedImage? {
-        val file = File(path)
-        if (!file.isFile) return null
-        val cacheKey = file.absolutePath
-        val modified = file.lastModified()
+        val assetName = path.removePrefix("asset://").takeIf { it != path }
+        val file = assetName?.let { null } ?: File(path)
+        val cacheKey = assetName?.let { "asset://$it" } ?: file!!.absolutePath
+        val modified = assetName?.hashCode()?.toLong() ?: file!!.takeIf { it.isFile }?.lastModified() ?: -1L
         synchronized(ninePatchDrawableCache) {
             ninePatchDrawableCache[cacheKey]?.takeIf { it.modified == modified }?.let { return it }
         }
-        val bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return null
+        val bitmap = ReaderHighlightImageAssets.decodeBitmap(path, activityProvider(), LOG_PREFIX) ?: return null
         val drawable = if (bitmap.ninePatchChunk != null) {
-            NinePatchDrawable(activityProvider()?.resources, bitmap, bitmap.ninePatchChunk, Rect(), file.name)
+            NinePatchDrawable(activityProvider()?.resources, bitmap, bitmap.ninePatchChunk, Rect(), assetName ?: file!!.name)
         } else {
             BitmapDrawable(activityProvider()?.resources, bitmap)
         }

@@ -32,6 +32,7 @@ import android.text.TextWatcher
 import android.util.Base64
 import android.util.Log
 import android.util.TypedValue
+import android.util.Xml
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
@@ -107,6 +108,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import org.xmlpull.v1.XmlPullParser
 import java.util.concurrent.locks.ReentrantLock
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
@@ -171,6 +173,7 @@ class WebDavDriveHook(
     private val onlineCompletionLocalSheetBook = ThreadLocal<Any?>()
     private val onlineCompletionLocalSheetDepth = ThreadLocal<Int>()
     private val onlineCompletionUpdateRowInjecting = ThreadLocal<Boolean>()
+    @Volatile private var onlineCompletionCombinedGroupRowHooked = false
     private val webDavBackupCardDepth = ThreadLocal<Int>()
     private var webDavAccountNavGraphScopeStrong: Any? = null
     private var localLibraryAccountNavGraphScopeStrong: Any? = null
@@ -465,12 +468,71 @@ class WebDavDriveHook(
                     })
                 }
             }
+            if (fileBackupMethods.isEmpty()) {
+                val publisherMethods = sheetClass.declaredMethods.filter {
+                    it.name == BOOK_PUBLISHER_METHOD &&
+                        it.parameterTypes.size == 4 &&
+                        it.parameterTypes.getOrNull(0) == String::class.java &&
+                        it.parameterTypes.getOrNull(1)?.name == FUNCTION0_CLASS &&
+                        it.parameterTypes.getOrNull(2)?.name == COMPOSER_CLASS
+                }
+                publisherMethods.forEach { method ->
+                    method.isAccessible = true
+                    XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            renderOnlineCompletionUpdateRowFromLocalSheet(param.args?.getOrNull(2))
+                        }
+                    })
+                }
+                if (publisherMethods.isNotEmpty()) {
+                    logWebDav("online completion update row hooked after BookPublisher count=${publisherMethods.size}")
+                }
+            }
+            hookOnlineCompletionBookGroupRow(sheetClass)
             logWebDav(
                 "online completion local sheet hook installed " +
                     "contexts=${localSheetContextMethods.size} backups=${fileBackupMethods.size}",
             )
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to hook online completion local sheet: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun hookOnlineCompletionBookGroupRow(sheetClass: Class<*>) {
+        val methods = sheetClass.declaredMethods.filter {
+            it.name == BOOK_META_ACTION_ROW_METHOD &&
+                it.parameterTypes.size == 6 &&
+                it.parameterTypes.getOrNull(1) == String::class.java &&
+                it.parameterTypes.getOrNull(2) == String::class.java &&
+                it.parameterTypes.getOrNull(3)?.name == FUNCTION0_CLASS &&
+                it.parameterTypes.getOrNull(4)?.name == COMPOSER_CLASS
+        }
+        methods.forEach { method ->
+            method.isAccessible = true
+            XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (onlineCompletionUpdateRowInjecting.get() == true) return
+                    if (param.args?.getOrNull(1)?.toString() != "分组") return
+                    val book = onlineCompletionLocalSheetBook.get() ?: return
+                    val info = onlineImportedBookSourceInfo(book) ?: return
+                    val groupIcon = param.args?.getOrNull(0) ?: return
+                    val groupClick = param.args?.getOrNull(3) ?: return
+                    val composer = param.args?.getOrNull(4) ?: return
+                    onlineCompletionUpdateRowInjecting.set(true)
+                    runCatching {
+                        renderOnlineCompletionUpdateGroupActionRow(book, info, groupIcon, groupClick, composer)
+                        param.result = targetUnit()
+                        logWebDav("online completion update/group row rendered title=${book.callString("getTitle")} source=${info.sourceName}")
+                    }.onFailure {
+                        XposedBridge.log("$LOG_PREFIX online completion update/group row render failed: ${it.stackTraceToString()}")
+                    }
+                    onlineCompletionUpdateRowInjecting.remove()
+                }
+            })
+        }
+        onlineCompletionCombinedGroupRowHooked = methods.isNotEmpty()
+        if (methods.isNotEmpty()) {
+            logWebDav("online completion update/group row hook installed: ${methods.size}")
         }
     }
 
@@ -484,6 +546,7 @@ class WebDavDriveHook(
 
     private fun renderOnlineCompletionUpdateRowFromLocalSheet(composer: Any?) {
         if (onlineCompletionUpdateRowInjecting.get() == true) return
+        if (onlineCompletionCombinedGroupRowHooked) return
         val book = onlineCompletionLocalSheetBook.get() ?: run {
             logWebDav("online completion update row skipped: no local sheet book composer=${composer != null}")
             return
@@ -542,7 +605,7 @@ class WebDavDriveHook(
                 )
             }
             renderOnlineCompletionPrimaryText(
-                text = "数据更新",
+                text = "更新",
                 modifier = rowWeightModifier(rowScope, modifierInstance()),
                 composer = innerComposer,
             )
@@ -574,6 +637,97 @@ class WebDavDriveHook(
             content,
             composer,
             384,
+            0,
+        )
+    }
+
+    private fun renderOnlineCompletionUpdateGroupActionRow(
+        book: Any,
+        info: OnlineImportedBookSourceInfo,
+        groupIcon: Any,
+        groupClick: Any,
+        composer: Any,
+    ) {
+        val updateClick = functionProxy("OnlineCompletionChapterUpdateActionCell", FUNCTION0_CLASS) {
+            startOnlineCompletionChapterUpdate(book, info)
+            targetUnit()
+        }
+        val content = functionProxy("OnlineCompletionUpdateGroupRowContent", FUNCTION3_CLASS) { args ->
+            val rowScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            val innerComposer = args.getOrNull(1) ?: return@functionProxy targetUnit()
+            val updateIcon = onlineCompletionUpdateImageVector() ?: groupIcon
+            renderBookLocalActionCell(
+                modifier = rowWeightModifier(rowScope, modifierInstance()),
+                image = updateIcon,
+                title = "更新",
+                onClick = updateClick,
+                composer = innerComposer,
+            )
+            renderBookLocalActionDivider(innerComposer)
+            renderBookLocalActionCell(
+                modifier = rowWeightModifier(rowScope, modifierInstance()),
+                image = groupIcon,
+                title = "分组",
+                onClick = groupClick,
+                composer = innerComposer,
+            )
+            targetUnit()
+        }
+        method(ROW_KT_CLASS, ROW_METHOD, 7).invoke(
+            null,
+            fillMaxWidthModifier(),
+            arrangementStart(),
+            alignmentCenterVertically(),
+            content,
+            composer,
+            384,
+            0,
+        )
+    }
+
+    private fun renderBookLocalActionDivider(composer: Any) {
+        runCatching {
+            val color = composeColorToArgb(borderVariantColor(composer))
+            val factory = functionProxy("OnlineCompletionUpdateGroupDivider", FUNCTION1_CLASS) { args ->
+                View((args?.getOrNull(0) as? Context) ?: activityProvider() ?: error("No context for divider")).apply {
+                    setBackgroundColor(color)
+                }
+            }
+            val update = functionProxy("OnlineCompletionUpdateGroupDividerUpdate", FUNCTION1_CLASS) { args ->
+                (args?.getOrNull(0) as? View)?.setBackgroundColor(color)
+                targetUnit()
+            }
+            cls(ANDROID_VIEW_KT_CLASS).declaredMethods.first {
+                it.name == ANDROID_VIEW_METHOD && it.parameterTypes.size == 6
+            }.apply { isAccessible = true }.invoke(
+                null,
+                factory,
+                heightModifier(widthModifier(modifierInstance(), 0.8f), 56f),
+                update,
+                composer,
+                0,
+                0,
+            )
+        }.onFailure {
+            logWebDav("failed to render update/group divider: ${it.message}")
+        }
+    }
+
+    private fun renderBookLocalActionCell(
+        modifier: Any,
+        image: Any,
+        title: String,
+        onClick: Any,
+        composer: Any,
+    ) {
+        method(BOOK_LOCAL_SHEET_CLASS, BOOK_ACTION_CELL_METHOD, 7).invoke(
+            null,
+            modifier,
+            image,
+            title,
+            onClick,
+            composer,
+            0,
             0,
         )
     }
@@ -687,6 +841,33 @@ class WebDavDriveHook(
     private fun sizeModifier(baseModifier: Any, size: Int): Any =
         method(SIZE_KT_CLASS, SIZE_METHOD, 2).invoke(null, baseModifier, udp(size))
 
+    private fun widthModifier(baseModifier: Any, widthDp: Float): Any =
+        cls(SIZE_KT_CLASS).declaredMethods.first {
+            it.name.startsWith("width") &&
+                !it.name.contains("fill", ignoreCase = true) &&
+                it.parameterTypes.size == 2 &&
+                it.parameterTypes[1] == java.lang.Float.TYPE
+        }.apply { isAccessible = true }.invoke(null, baseModifier, udp(widthDp))
+
+    private fun heightModifier(baseModifier: Any, heightDp: Float): Any =
+        cls(SIZE_KT_CLASS).declaredMethods.first {
+            it.name.startsWith("height") &&
+                !it.name.contains("fill", ignoreCase = true) &&
+                it.parameterTypes.size == 2 &&
+                it.parameterTypes[1] == java.lang.Float.TYPE
+        }.apply { isAccessible = true }.invoke(null, baseModifier, udp(heightDp))
+
+    private fun backgroundModifier(baseModifier: Any, color: Long): Any {
+        val method = cls(BACKGROUND_KT_CLASS).declaredMethods.first {
+            it.name.contains("background", ignoreCase = true) && it.parameterTypes.size >= 3
+        }.apply { isAccessible = true }
+        return if (method.parameterTypes.size == 3) {
+            method.invoke(null, baseModifier, color, null)
+        } else {
+            method.invoke(null, baseModifier, color, null, 2, null)
+        }
+    }
+
     private fun paddingModifier(
         baseModifier: Any,
         start: Int,
@@ -728,6 +909,9 @@ class WebDavDriveHook(
 
     private fun themeOnBackgroundVariant(composer: Any): Long =
         method(THEME_KT_CLASS, "getOnBackgroundVariant", 1).invoke(null, colorScheme(composer)) as Long
+
+    private fun borderVariantColor(composer: Any): Long =
+        method(THEME_KT_CLASS, "getBorderVariant", 1).invoke(null, colorScheme(composer)) as Long
 
     private fun textOverflowEllipsis(): Int =
         staticObject(TEXT_OVERFLOW_CLASS, "INSTANCE").method0("getEllipsis") as Int
@@ -4283,6 +4467,8 @@ class WebDavDriveHook(
             }.apply { isAccessible = true }.invoke(null, value) as Float
         }.getOrDefault(value.toFloat())
 
+    private fun udp(value: Float): Float = value
+
     private fun emptyModifier(): Any {
         val modifierClass = cls(MODIFIER_CLASS)
         return runCatching {
@@ -5463,6 +5649,8 @@ class WebDavDriveHook(
             .trim()
             .trim('/', '／', ',', '，', ';', '；', '|')
         if (clean.isBlank() || clean == "null") return ""
+        val normalized = clean.lowercase(Locale.ROOT).replace(Regex("[\\s_.\\-/]+"), "")
+        if (normalized == "doubanread") return "豆瓣阅读"
         return AssociationPlatforms.normalizeDisplayName(clean).ifBlank { clean }
     }
 
@@ -6609,17 +6797,34 @@ class WebDavDriveHook(
     private fun isOnlineCompletionUuid(uuid: String): Boolean =
         uuid.startsWith(ONLINE_COMPLETION_UUID_PREFIX)
 
-    private fun hasOnlineCompletionGeneratedEpubMetadata(book: Any): Boolean =
+    private fun onlineCompletionGeneratedEpubMetadata(book: Any): OnlineCompletionEpubMetadata =
         runCatching {
             val contentOpf = File(bookDirectory(book).canonicalFile, "OEBPS/content.opf")
-            if (!contentOpf.isFile) return@runCatching false
-            contentOpf.useLines { lines ->
-                lines.take(320).any { line ->
-                    line.contains("reamicro-online-source-id") ||
-                        line.contains("reamicro-online-detail-url")
+            if (!contentOpf.isFile) return@runCatching OnlineCompletionEpubMetadata()
+            val parser = Xml.newPullParser()
+            contentOpf.inputStream().buffered().use { input ->
+                parser.setInput(input, null)
+                var sourceId = ""
+                var sourceName = ""
+                var detailUrl = ""
+                var eventType = parser.eventType
+                while (eventType != XmlPullParser.END_DOCUMENT) {
+                    if (eventType == XmlPullParser.START_TAG && parser.name == "meta") {
+                        when (parser.getAttributeValue(null, "name").orEmpty()) {
+                            "reamicro-online-source-id" -> sourceId = parser.getAttributeValue(null, "content").orEmpty()
+                            "reamicro-online-source-name" -> sourceName = parser.getAttributeValue(null, "content").orEmpty()
+                            "reamicro-online-detail-url" -> detailUrl = parser.getAttributeValue(null, "content").orEmpty()
+                        }
+                    }
+                    eventType = parser.next()
                 }
+                OnlineCompletionEpubMetadata(
+                    sourceId = sourceId,
+                    sourceName = sourceName,
+                    detailUrl = detailUrl,
+                )
             }
-        }.getOrDefault(false)
+        }.getOrDefault(OnlineCompletionEpubMetadata())
 
     private fun onlineImportedBookSourceInfo(book: Any): OnlineImportedBookSourceInfo? {
         val context = currentContext()
@@ -6629,25 +6834,29 @@ class WebDavDriveHook(
         val uuid = book.callString("getUuid")
         val publisher = book.callString("getPublisher")
         val uri = book.callString("getUri")
+        val epubMetadata = onlineCompletionGeneratedEpubMetadata(book)
         val sourceId = onlineSourceIdFromEncodedValue(backupCode)
             .ifBlank { onlineSourceIdFromEncodedValue(backupId) }
+            .ifBlank { epubMetadata.sourceId }
             .ifBlank { onlineSourceIdFromUuid(uuid) }
         val sourceById = sources.firstOrNull { source -> source.id == sourceId }
         val sourceByPublisher = sources.firstOrNull { source ->
             source.name == publisher || source.id == publisher
         }
         val detailUrl = onlineCompletionQueryParameter(backupId, "detail")
+            .ifBlank { epubMetadata.detailUrl }
             .ifBlank { uri.takeIf { it.startsWith("http", ignoreCase = true) }.orEmpty() }
         // Incremental updates only work for EPUBs generated by this module; weak DB markers can exist on normal books.
-        val hasOnlineCompletionMarker = hasOnlineCompletionGeneratedEpubMetadata(book) &&
+        val hasOnlineCompletionMarker = epubMetadata.hasMarker &&
             (isOnlineCompletionLocalBook(book) ||
                 sourceId.isNotBlank() ||
-                onlineCompletionQueryParameter(backupId, "detail").isNotBlank())
+                detailUrl.isNotBlank())
         if (!hasOnlineCompletionMarker) return null
         val source = sourceById ?: sourceByPublisher
         val sourceName = source?.name.orEmpty()
             .ifBlank { onlineCompletionQueryParameter(backupId, "name") }
-            .ifBlank { publisher }
+            .ifBlank { epubMetadata.sourceName }
+            .ifBlank { publisher.takeUnless(::isPathLikeOnlineSourceName).orEmpty() }
             .ifBlank { sourceId }
         return OnlineImportedBookSourceInfo(
             sourceId = source?.id ?: sourceId,
@@ -7113,6 +7322,17 @@ class WebDavDriveHook(
             if (!value.startsWith(ONLINE_COMPLETION_BOOK_PREFIX)) return@runCatching ""
             Uri.parse(value).getQueryParameter(name).orEmpty()
         }.getOrDefault("")
+
+    private fun isPathLikeOnlineSourceName(value: String): Boolean {
+        val text = value.trim()
+        if (text.isBlank()) return false
+        if (text.contains("://")) return true
+        if (text.startsWith("/") || text.startsWith("\\") || text.startsWith("／")) return true
+        if (Regex("""^[A-Za-z]:[\\/].*""").matches(text)) return true
+        return text.endsWith(".epub", ignoreCase = true) ||
+            text.endsWith(".txt", ignoreCase = true) ||
+            text.endsWith(".pdf", ignoreCase = true)
+    }
 
     private fun handleOnlineCompletionSearchTap(book: Any): Boolean {
         val path = cloudPathOf(book)
@@ -11457,6 +11677,15 @@ img{max-width:100%;max-height:100%;height:auto;}
         val source: OnlineSourceEntry?,
     )
 
+    private data class OnlineCompletionEpubMetadata(
+        val sourceId: String = "",
+        val sourceName: String = "",
+        val detailUrl: String = "",
+    ) {
+        val hasMarker: Boolean
+            get() = sourceId.isNotBlank() || sourceName.isNotBlank() || detailUrl.isNotBlank()
+    }
+
     private data class OnlineChapterUpdateResult(
         val added: Int,
         val failed: Int,
@@ -11961,6 +12190,9 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val BOOK_LOCAL_SHEET_CONTENT_METHOD = "BookLocalSheet\$lambda\$2"
         const val FILE_BACKUP_METHOD = "FileBackup"
         const val BOOK_COMMUNITY_METHOD = "BookCommunity"
+        const val BOOK_PUBLISHER_METHOD = "BookPublisher"
+        const val BOOK_META_ACTION_ROW_METHOD = "BookMetaActionRow"
+        const val BOOK_ACTION_CELL_METHOD = "BookActionCell"
         const val FOOTER_CLASS = "app.zhendong.reamicro.arch.components.item.FooterKt"
         const val FOOTER_METHOD = "footer"
         const val CLOUD_BOOK_LIST_CLASS = "app.zhendong.reamicro.ui.storage.components.CloudBookListKt"
@@ -12090,6 +12322,9 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val MATERIAL3_TEXT_CLASS = "androidx.compose.material3.TextKt"
         const val DIVIDER_KT_CLASS = "app.zhendong.reamicro.arch.components.DividerKt"
         const val SIMPLE_DIVIDER_METHOD = "SimpleDivider-iJQMabo"
+        const val BOX_KT_CLASS = "androidx.compose.foundation.layout.BoxKt"
+        const val BOX_METHOD = "Box"
+        const val BACKGROUND_KT_CLASS = "androidx.compose.foundation.BackgroundKt"
         const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
         const val SIZE_KT_CLASS = "androidx.compose.foundation.layout.SizeKt"
         const val SIZE_METHOD = "size-3ABfNKs"

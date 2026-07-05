@@ -163,7 +163,7 @@ class ReaderImportOverwriteHook(
                             }
                         }
                         OverwriteDecision.CANCEL -> {
-                            param.throwable = duplicateBookException("overwrite import cancelled")
+                            cancelImport(param)
                             XposedBridge.log("$LOG_PREFIX overwrite import cancelled: title=$title, uuid=$uuid")
                             return
                         }
@@ -249,13 +249,17 @@ class ReaderImportOverwriteHook(
                                 rememberPreImportDecision(oldUuid, title, preDecision)
                                 XposedBridge.log("$LOG_PREFIX pre-import opf uuid rewritten: $uuid -> $oldUuid")
                             }
-                            deleteExistingBookDirBeforeImport(param.args?.getOrNull(1), oldUuid ?: uuid)
+                            clearExistingBookDirContentsBeforeImport(param.args?.getOrNull(1), oldUuid ?: uuid)
                         }
                         OverwriteDecision.INDEPENDENT -> {
-                            XposedBridge.log("$LOG_PREFIX pre-import title conflict allowed as independent: title=$title")
+                            val newUuid = UUID.randomUUID().toString()
+                            val newOpf = opf.withUuid(newUuid)
+                            newOpf.overwriteToRoot(unzipDir)
+                            rememberPreImportDecision(newUuid, title, preDecision)
+                            XposedBridge.log("$LOG_PREFIX pre-import independent uuid generated: $uuid -> $newUuid, title=$title")
                         }
                         OverwriteDecision.CANCEL -> {
-                            param.throwable = duplicateBookException("overwrite import cancelled")
+                            cancelImport(param)
                             XposedBridge.log("$LOG_PREFIX pre-import conflict cancelled: title=$title, uuid=$uuid")
                         }
                     }
@@ -302,7 +306,7 @@ class ReaderImportOverwriteHook(
                 XposedBridge.log("$LOG_PREFIX importBook reused pre-import independent decision: uuid=$uuid")
             }
             OverwriteDecision.CANCEL -> {
-                param.throwable = duplicateBookException("overwrite import cancelled")
+                cancelImport(param)
             }
         }
     }
@@ -702,7 +706,7 @@ class ReaderImportOverwriteHook(
         }
     }
 
-    private fun deleteExistingBookDirBeforeImport(booksDir: Any?, uuid: String?) {
+    private fun clearExistingBookDirContentsBeforeImport(booksDir: Any?, uuid: String?) {
         runCatching {
             val cleanUuid = uuid?.trim()?.takeIf { it.isNotBlank() } ?: return
             val basePath = booksDir ?: return
@@ -715,15 +719,16 @@ class ReaderImportOverwriteHook(
             val target = File(targetPath.toString()).canonicalFile
             val basePrefix = base.path.trimEnd(File.separatorChar) + File.separator
             if (!target.path.startsWith(basePrefix) || target == base) {
-                XposedBridge.log("$LOG_PREFIX refused to delete unexpected overwrite dir: $target")
+                XposedBridge.log("$LOG_PREFIX refused to clear unexpected overwrite dir: $target")
                 return
             }
-            if (target.exists()) {
-                target.deleteRecursively()
-                XposedBridge.log("$LOG_PREFIX deleted existing book dir before overwrite import: $target")
+            if (target.isDirectory) {
+                val children = target.listFiles().orEmpty()
+                children.forEach { child -> child.deleteRecursively() }
+                XposedBridge.log("$LOG_PREFIX cleared existing book dir before overwrite import: $target children=${children.size}")
             }
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to delete existing book dir before import: ${it.stackTraceToString()}")
+            XposedBridge.log("$LOG_PREFIX failed to clear existing book dir before import: ${it.stackTraceToString()}")
         }
     }
 
@@ -889,6 +894,10 @@ class ReaderImportOverwriteHook(
                 ?.getConstructor(String::class.java)
                 ?.newInstance(message) as? RuntimeException
         }.getOrNull() ?: RuntimeException(message)
+
+    private fun cancelImport(param: XC_MethodHook.MethodHookParam) {
+        param.throwable = duplicateBookException("导入已取消")
+    }
 
     private fun method(targetClass: Class<*>, name: String, parameterCount: Int): Method =
         (targetClass.methods.asSequence() + targetClass.declaredMethods.asSequence())

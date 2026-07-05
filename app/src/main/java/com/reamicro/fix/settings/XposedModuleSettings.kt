@@ -232,21 +232,33 @@ class XposedModuleSettings(
             ?.takeIf { now - cachedHighlightSettingsAtMs < CACHE_WINDOW_MS }
             ?.let { return it }
         val prefs = prefs() ?: return ReaderHighlightSettingsSnapshot()
-        val fallbackStyle = ReaderHighlightStyle.default(
-            color = normalizeHighlightColor(
-                prefs.getString(
-                    ModuleSettings.KEY_READER_DIALOGUE_HIGHLIGHT_COLOR,
-                    ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR,
-                ).orEmpty(),
-            ),
-            fontFamily = prefs.getString(
-                ModuleSettings.KEY_READER_DIALOGUE_HIGHLIGHT_FONT,
-                ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_FONT,
+        val color = normalizeHighlightColor(
+            prefs.getString(
+                ModuleSettings.KEY_READER_DIALOGUE_HIGHLIGHT_COLOR,
+                ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR,
             ).orEmpty(),
         )
+        val fontFamily = prefs.getString(
+            ModuleSettings.KEY_READER_DIALOGUE_HIGHLIGHT_FONT,
+            ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_FONT,
+        ).orEmpty()
+        val styles = readHighlightStyles(prefs, color, fontFamily)
+        val defaultLightStyleId = validHighlightStyleId(
+            prefs.getString(ModuleSettings.KEY_READER_HIGHLIGHT_DEFAULT_LIGHT_STYLE_ID, "").orEmpty(),
+            styles,
+            ModuleSettings.DEFAULT_READER_HIGHLIGHT_LIGHT_STYLE_ID,
+        )
+        val defaultDarkStyleId = validHighlightStyleId(
+            prefs.getString(ModuleSettings.KEY_READER_HIGHLIGHT_DEFAULT_DARK_STYLE_ID, "").orEmpty(),
+            styles,
+            ModuleSettings.DEFAULT_READER_HIGHLIGHT_DARK_STYLE_ID,
+        )
         return ReaderHighlightSettingsSnapshot(
-            styles = readHighlightStyles(prefs, fallbackStyle),
-            rules = readHighlightRules(prefs),
+            styles = styles,
+            rules = readHighlightRules(prefs, defaultLightStyleId, defaultDarkStyleId),
+            defaultLightStyleId = defaultLightStyleId,
+            defaultDarkStyleId = defaultDarkStyleId,
+            bookGlobalRules = readBookGlobalRules(prefs),
         ).also {
             cachedHighlightSettings = it
             cachedHighlightSettingsAtMs = now
@@ -263,18 +275,9 @@ class XposedModuleSettings(
 
     fun setReaderHighlightStyle(style: ReaderHighlightStyle) {
         val current = highlightSettings()
-        val sanitized = style.copy(
-            color = normalizeHighlightColor(style.color),
-            darkUsesLight = true,
-            darkColor = "",
-            css = sanitizeHighlightCss(style.css),
-            darkFontFamily = "",
-            darkCss = "",
-            darkNinePatchPath = "",
-            darkNinePatchSlice = "",
-        )
-        val isExisting = current.styles.any { it.id == style.id }
-        val remaining = current.styles.filterNot { it.id == style.id }
+        val sanitized = normalizeSavedHighlightStyle(style)
+        val isExisting = current.styles.any { it.id == sanitized.id }
+        val remaining = current.styles.filterNot { it.id == sanitized.id }
         // 修改已有样式：置顶（新修改的在最上面）；新增/导入样式：追加到末尾（新导入的在最下面）。
         val next = if (isExisting) listOf(sanitized) + remaining else remaining + sanitized
         putString(ModuleSettings.KEY_READER_HIGHLIGHT_STYLES, encodeHighlightStyles(next))
@@ -282,30 +285,100 @@ class XposedModuleSettings(
     }
 
     fun removeReaderHighlightStyle(styleId: String) {
-        if (styleId == ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID) return
+        val normalizedStyleId = normalizeHighlightStyleId(styleId)
+        if (normalizedStyleId in builtinReaderHighlightStyleIds()) return
         val current = highlightSettings()
-        val nextStyles = current.styles.filterNot { it.id == styleId }
+        val nextStyles = current.styles.filterNot { it.id == normalizedStyleId }
+        val nextDefaultLightStyleId = current.defaultLightStyleId
+            .takeIf { it != normalizedStyleId && nextStyles.any { style -> style.id == it } }
+            ?: ModuleSettings.DEFAULT_READER_HIGHLIGHT_LIGHT_STYLE_ID
+        val nextDefaultDarkStyleId = current.defaultDarkStyleId
+            .takeIf { it != normalizedStyleId && nextStyles.any { style -> style.id == it } }
+            ?: ModuleSettings.DEFAULT_READER_HIGHLIGHT_DARK_STYLE_ID
         val nextRules = current.rules.map { rule ->
-            if (rule.styleId == styleId || rule.darkStyleId == styleId) {
+            if (rule.styleId == normalizedStyleId || rule.darkStyleId == normalizedStyleId) {
                 rule.copy(
-                    styleId = if (rule.styleId == styleId) ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID else rule.styleId,
-                    darkStyleId = if (rule.darkStyleId == styleId) "" else rule.darkStyleId,
+                    styleId = if (rule.styleId == normalizedStyleId) nextDefaultLightStyleId else rule.styleId,
+                    darkStyleId = if (rule.darkStyleId == normalizedStyleId) nextDefaultDarkStyleId else rule.darkStyleId,
                 )
             } else {
                 rule
             }
         }
-        putHighlightSettings(nextStyles, nextRules)
+        putHighlightSettings(nextStyles, nextRules, nextDefaultLightStyleId, nextDefaultDarkStyleId)
         notifyReaderHighlightChanged("highlight-style-remove")
     }
 
     fun setReaderHighlightRule(rule: ReaderHighlightRule) {
         val current = highlightSettings()
+        val sanitizedRule = rule.copy(
+            styleId = normalizeHighlightRuleStyleId(
+                id = rule.styleId,
+                defaultReferenceId = ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID,
+            ),
+            darkStyleId = normalizeHighlightRuleStyleId(
+                id = rule.darkStyleId,
+                defaultReferenceId = ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID,
+            ),
+        )
         val next = current.rules
-            .filterNot { it.id == rule.id }
-            .plus(rule)
-        putString(ModuleSettings.KEY_READER_HIGHLIGHT_RULES, encodeHighlightRules(next))
+            .filterNot { it.id == sanitizedRule.id }
+            .plus(sanitizedRule)
+        val editor = prefs()?.edit() ?: return
+        editor.putString(ModuleSettings.KEY_READER_HIGHLIGHT_RULES, encodeHighlightRules(next))
+        editor.commit()
+        cachedSnapshot = null
+        cachedAtMs = 0L
+        cachedHighlightSettings = null
+        cachedHighlightSettingsAtMs = 0L
+        snapshot()
         notifyReaderHighlightChanged("highlight-rule")
+    }
+
+    fun setReaderHighlightDefaultLightStyle(styleId: String) {
+        val normalizedStyleId = normalizeHighlightStyleId(styleId)
+        if (highlightSettings().styles.none { it.id == normalizedStyleId }) return
+        putString(ModuleSettings.KEY_READER_HIGHLIGHT_DEFAULT_LIGHT_STYLE_ID, normalizedStyleId)
+        notifyReaderHighlightChanged("highlight-default-light")
+    }
+
+    fun setReaderHighlightDefaultDarkStyle(styleId: String) {
+        val normalizedStyleId = normalizeHighlightStyleId(styleId)
+        if (highlightSettings().styles.none { it.id == normalizedStyleId }) return
+        putString(ModuleSettings.KEY_READER_HIGHLIGHT_DEFAULT_DARK_STYLE_ID, normalizedStyleId)
+        notifyReaderHighlightChanged("highlight-default-dark")
+    }
+
+    fun setReaderHighlightBookGlobalRuleEnabled(bookKey: String, ruleId: String, enabled: Boolean) {
+        if (bookKey.isBlank() || ruleId.isBlank()) return
+        val current = highlightSettings()
+        val globalRuleIds = current.globalRules().map { it.id }.toSet()
+        if (ruleId !in globalRuleIds) return
+        val currentSet = current.globalRulesEnabledForBook(bookKey) ?: current.enabledGlobalRuleIds()
+        val nextSet = if (enabled) currentSet + ruleId else currentSet - ruleId
+        putString(ModuleSettings.KEY_READER_HIGHLIGHT_BOOK_GLOBAL_RULES, encodeBookGlobalRules(current.bookGlobalRules + (bookKey to nextSet)))
+        notifyReaderHighlightChanged("highlight-book-global-rule")
+    }
+
+    fun setReaderHighlightBookGlobalRulesEnabled(bookKey: String, enabled: Boolean) {
+        if (bookKey.isBlank()) return
+        val current = highlightSettings()
+        val globalRuleIds = current.globalRules().map { it.id }.toSet()
+        val nextSet = if (enabled) globalRuleIds else emptySet()
+        putString(ModuleSettings.KEY_READER_HIGHLIGHT_BOOK_GLOBAL_RULES, encodeBookGlobalRules(current.bookGlobalRules + (bookKey to nextSet)))
+        notifyReaderHighlightChanged("highlight-book-global-rules")
+    }
+
+    fun setReaderHighlightBookFollowsGlobalRules(bookKey: String, follows: Boolean) {
+        if (bookKey.isBlank()) return
+        val current = highlightSettings()
+        val nextRules = if (follows) {
+            current.bookGlobalRules - bookKey
+        } else {
+            current.bookGlobalRules + (bookKey to current.enabledGlobalRuleIds())
+        }
+        putString(ModuleSettings.KEY_READER_HIGHLIGHT_BOOK_GLOBAL_RULES, encodeBookGlobalRules(nextRules))
+        notifyReaderHighlightChanged("highlight-book-global-follow")
     }
 
     fun addReaderBookHighlightRule(bookKey: String, bookTitle: String, text: String): ReaderHighlightRule? {
@@ -314,18 +387,24 @@ class XposedModuleSettings(
         val normalizedBookTitle = readableReaderBookTitle(bookTitle, *bookKey.split('|').toTypedArray())
         val current = highlightSettings()
         current.rules.firstOrNull {
-            it.bookKey == bookKey &&
+            it.appliesToBook(bookKey, normalizedBookTitle) &&
                 it.type == ReaderHighlightRuleType.FixedText &&
                 it.pattern == pattern
         }?.let { existing ->
-            if (!existing.enabled) setReaderHighlightRule(existing.copy(enabled = true))
-            return existing
+            val updated = existing.copy(
+                enabled = true,
+                bookKey = bookKey,
+                bookTitle = normalizedBookTitle.ifBlank { existing.bookTitle },
+            )
+            if (updated != existing) setReaderHighlightRule(updated)
+            return updated
         }
         val rule = ReaderHighlightRule(
             id = "book_${System.currentTimeMillis()}_${Integer.toHexString(pattern.hashCode())}",
             name = pattern.take(24).ifBlank { "本书高亮" },
             type = ReaderHighlightRuleType.FixedText,
-            styleId = ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID,
+            styleId = ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID,
+            darkStyleId = ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID,
             enabled = true,
             pattern = pattern,
             bookKey = bookKey,
@@ -400,10 +479,19 @@ class XposedModuleSettings(
         snapshot()
     }
 
-    private fun putHighlightSettings(styles: List<ReaderHighlightStyle>, rules: List<ReaderHighlightRule>) {
+    private fun putHighlightSettings(
+        styles: List<ReaderHighlightStyle>,
+        rules: List<ReaderHighlightRule>,
+        defaultLightStyleId: String? = null,
+        defaultDarkStyleId: String? = null,
+    ) {
         prefs()?.edit()
             ?.putString(ModuleSettings.KEY_READER_HIGHLIGHT_STYLES, encodeHighlightStyles(styles))
             ?.putString(ModuleSettings.KEY_READER_HIGHLIGHT_RULES, encodeHighlightRules(rules))
+            ?.apply {
+                defaultLightStyleId?.let { putString(ModuleSettings.KEY_READER_HIGHLIGHT_DEFAULT_LIGHT_STYLE_ID, it) }
+                defaultDarkStyleId?.let { putString(ModuleSettings.KEY_READER_HIGHLIGHT_DEFAULT_DARK_STYLE_ID, it) }
+            }
             ?.commit()
         cachedSnapshot = null
         cachedAtMs = 0L
@@ -667,15 +755,32 @@ class XposedModuleSettings(
         return hex.uppercase()
     }
 
+    private fun normalizeSavedHighlightStyle(style: ReaderHighlightStyle): ReaderHighlightStyle {
+        val normalizedId = normalizeHighlightStyleId(style.id)
+        val builtInFallback = ReaderHighlightStyle.builtIns().firstOrNull { it.id == normalizedId }
+        return style.copy(
+            id = normalizedId,
+            name = style.name.ifBlank { builtInFallback?.name ?: normalizedId },
+            color = normalizeHighlightColor(style.color),
+            fontFamily = style.fontFamily,
+            css = sanitizeHighlightCss(style.css).ifBlank { builtInFallback?.css.orEmpty() },
+            ninePatchPath = style.ninePatchPath.ifBlank { builtInFallback?.ninePatchPath.orEmpty() },
+            ninePatchSlice = style.ninePatchSlice.ifBlank { builtInFallback?.ninePatchSlice.orEmpty() },
+            darkColor = style.darkColor.takeIf { it.isNotBlank() }?.let(::normalizeHighlightColor).orEmpty(),
+            darkCss = sanitizeHighlightCss(style.darkCss),
+        )
+    }
+
     private fun updateDefaultHighlightStyle(update: (ReaderHighlightStyle) -> ReaderHighlightStyle) {
         val current = highlightSettings()
-        val defaultStyle = current.styleById(ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID)
-        setReaderHighlightStyle(update(defaultStyle.copy(id = ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID)))
+        val defaultStyle = current.styleById(ModuleSettings.DEFAULT_READER_HIGHLIGHT_DARK_STYLE_ID)
+        setReaderHighlightStyle(update(defaultStyle.copy(id = ModuleSettings.DEFAULT_READER_HIGHLIGHT_DARK_STYLE_ID)))
     }
 
     private fun readHighlightStyles(
         prefs: SharedPreferences,
-        fallbackStyle: ReaderHighlightStyle,
+        defaultColor: String,
+        defaultFontFamily: String,
     ): List<ReaderHighlightStyle> {
         val raw = prefs.getString(ModuleSettings.KEY_READER_HIGHLIGHT_STYLES, "").orEmpty()
         val decoded = runCatching {
@@ -683,7 +788,7 @@ class XposedModuleSettings(
             buildList {
                 for (index in 0 until array.length()) {
                     val item = array.optJSONObject(index) ?: continue
-                    val id = item.optString("id")
+                    val id = normalizeHighlightStyleId(item.optString("id"))
                     if (id.isBlank()) continue
                     add(
                         ReaderHighlightStyle(
@@ -694,16 +799,55 @@ class XposedModuleSettings(
                             css = sanitizeHighlightCss(item.optString("css")),
                             ninePatchPath = item.optString("ninePatchPath"),
                             ninePatchSlice = item.optString("ninePatchSlice"),
-                            darkUsesLight = true,
-                            darkColor = "",
+                            darkUsesLight = item.optBoolean("darkUsesLight", true),
+                            darkColor = item.optString("darkColor"),
+                            darkFontFamily = item.optString("darkFontFamily"),
+                            darkCss = sanitizeHighlightCss(item.optString("darkCss")),
+                            darkNinePatchPath = item.optString("darkNinePatchPath"),
+                            darkNinePatchSlice = item.optString("darkNinePatchSlice"),
                         ),
                     )
                 }
             }
         }.getOrDefault(emptyList())
-        val deduped = dedupeReaderHighlightStyles(decoded, readerHighlightReferencedStyleIds(prefs))
-        val hasDefault = deduped.any { it.id == ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID }
-        return if (hasDefault) deduped else listOf(fallbackStyle) + deduped
+        val referencedStyleIds = readerHighlightReferencedStyleIds(prefs)
+        val builtIns = ReaderHighlightStyle.builtIns().map { builtIn ->
+            when (builtIn.id) {
+                ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID -> builtIn.copy(color = defaultColor, fontFamily = defaultFontFamily)
+                else -> builtIn
+            }
+        }
+        val decodedById = decoded.associateBy { it.id }
+        val mergedBuiltIns = builtIns.map { builtIn ->
+            decodedById[builtIn.id]?.let { saved ->
+                when (builtIn.id) {
+                    ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID -> normalizeSavedHighlightStyle(
+                        saved.copy(
+                            color = saved.color.ifBlank { defaultColor },
+                            fontFamily = saved.fontFamily.ifBlank { defaultFontFamily },
+                        ),
+                    )
+                    else -> normalizeSavedHighlightStyle(saved).copy(
+                        color = saved.color.ifBlank { builtIn.color },
+                        fontFamily = saved.fontFamily.ifBlank { builtIn.fontFamily },
+                        css = saved.css.ifBlank { builtIn.css },
+                        ninePatchPath = saved.ninePatchPath.ifBlank { builtIn.ninePatchPath },
+                        ninePatchSlice = saved.ninePatchSlice.ifBlank { builtIn.ninePatchSlice },
+                    )
+                }
+            } ?: builtIn
+        }
+        val custom = decoded.filterNot { style ->
+            mergedBuiltIns.any { it.id == style.id }
+        }
+        val finalStyles = dedupeReaderHighlightStyles(mergedBuiltIns + custom, referencedStyleIds.map(::normalizeHighlightStyleId).toSet())
+        val encoded = encodeHighlightStyles(finalStyles)
+        if (raw.isNotBlank() && encoded != raw) {
+            prefs.edit()
+                .putString(ModuleSettings.KEY_READER_HIGHLIGHT_STYLES, encoded)
+                .apply()
+        }
+        return finalStyles
     }
 
     private fun dedupeReaderHighlightStyles(
@@ -741,20 +885,50 @@ class XposedModuleSettings(
                     val styleId = array.optJSONObject(index)
                         ?.optString("styleId")
                         .orEmpty()
-                    if (styleId.isNotBlank()) add(styleId)
+                    if (styleId.isNotBlank()) add(normalizeHighlightStyleId(styleId))
                     val darkStyleId = array.optJSONObject(index)
                         ?.optString("darkStyleId")
                         .orEmpty()
-                    if (darkStyleId.isNotBlank()) add(darkStyleId)
+                    if (darkStyleId.isNotBlank()) add(normalizeHighlightStyleId(darkStyleId))
                 }
             }
         }.getOrDefault(emptySet())
     }
 
+    private fun normalizeHighlightStyleId(id: String): String =
+        when (id) {
+            ModuleSettings.LEGACY_READER_HIGHLIGHT_LIGHT_STYLE_ID -> ModuleSettings.BUILTIN_READER_HIGHLIGHT_RAINBOW_GLASS_STYLE_ID
+            ModuleSettings.LEGACY_READER_HIGHLIGHT_DARK_STYLE_ID -> ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID
+            else -> id
+        }
+
+    private fun normalizeHighlightRuleStyleId(
+        id: String,
+        defaultReferenceId: String,
+    ): String {
+        val trimmed = id.trim()
+        if (trimmed.isBlank() || trimmed == defaultReferenceId) return defaultReferenceId
+        return normalizeHighlightStyleId(trimmed)
+    }
+
+    private fun builtinReaderHighlightStyleIds(): Set<String> =
+        setOf(
+            ModuleSettings.BUILTIN_READER_HIGHLIGHT_RAINBOW_GLASS_STYLE_ID,
+            ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID,
+        )
+
+    private fun validHighlightStyleId(candidate: String, styles: List<ReaderHighlightStyle>, fallback: String): String {
+        val normalizedCandidate = normalizeHighlightStyleId(candidate)
+        val normalizedFallback = normalizeHighlightStyleId(fallback)
+        return normalizedCandidate.takeIf { id -> styles.any { it.id == id } }
+            ?: normalizedFallback.takeIf { id -> styles.any { it.id == id } }
+            ?: styles.firstOrNull()?.id.orEmpty()
+    }
+
     private fun readerHighlightStyleImportKey(style: ReaderHighlightStyle): String? {
         val css = sanitizeHighlightCss(style.css)
         val path = style.ninePatchPath.trim()
-        if (css.isBlank() || path.isBlank()) return null
+        if (css.isBlank() || path.isBlank() || path.startsWith("asset://")) return null
         val file = File(path)
         if (!file.isFile) return null
         val hash = runCatching { md5Hex(file.readBytes()) }.getOrNull() ?: return null
@@ -827,7 +1001,11 @@ class XposedModuleSettings(
             .digest(bytes)
             .joinToString("") { "%02X".format(it) }
 
-    private fun readHighlightRules(prefs: SharedPreferences): List<ReaderHighlightRule> {
+    private fun readHighlightRules(
+        prefs: SharedPreferences,
+        defaultLightStyleId: String,
+        defaultDarkStyleId: String,
+    ): List<ReaderHighlightRule> {
         val defaults = ReaderHighlightRule.defaults()
         val raw = prefs.getString(ModuleSettings.KEY_READER_HIGHLIGHT_RULES, "").orEmpty()
         val decoded = runCatching {
@@ -845,9 +1023,14 @@ class XposedModuleSettings(
                             id = id,
                             name = item.optString("name").ifBlank { id },
                             type = type,
-                            styleId = item.optString("styleId")
-                                .ifBlank { ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID },
-                            darkStyleId = item.optString("darkStyleId"),
+                            styleId = normalizeHighlightRuleStyleId(
+                                id = item.optString("styleId"),
+                                defaultReferenceId = ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID,
+                            ),
+                            darkStyleId = normalizeHighlightRuleStyleId(
+                                id = item.optString("darkStyleId"),
+                                defaultReferenceId = ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID,
+                            ),
                             enabled = item.optBoolean("enabled", true),
                             pattern = item.optString("pattern"),
                             bookKey = item.optString("bookKey"),
@@ -861,6 +1044,31 @@ class XposedModuleSettings(
             decoded.filterNot { item -> defaults.any { it.id == item.id } }
     }
 
+    private fun readBookGlobalRules(prefs: SharedPreferences): Map<String, Set<String>> {
+        val raw = prefs.getString(ModuleSettings.KEY_READER_HIGHLIGHT_BOOK_GLOBAL_RULES, "").orEmpty()
+        return runCatching {
+            val root = JSONObject(raw)
+            buildMap {
+                root.keys().forEach { bookKey ->
+                    val array = root.optJSONArray(bookKey) ?: return@forEach
+                    put(bookKey, buildSet {
+                        for (index in 0 until array.length()) {
+                            array.optString(index).takeIf { it.isNotBlank() }?.let(::add)
+                        }
+                    })
+                }
+            }
+        }.getOrDefault(emptyMap())
+    }
+
+    private fun encodeBookGlobalRules(values: Map<String, Set<String>>): String =
+        JSONObject().apply {
+            values.forEach { (bookKey, ruleIds) ->
+                if (bookKey.isBlank()) return@forEach
+                put(bookKey, JSONArray().apply { ruleIds.forEach(::put) })
+            }
+        }.toString()
+
     private fun encodeHighlightStyles(styles: List<ReaderHighlightStyle>): String =
         JSONArray().apply {
             styles.forEach { style ->
@@ -872,7 +1080,13 @@ class XposedModuleSettings(
                         .put("fontFamily", style.fontFamily)
                         .put("css", sanitizeHighlightCss(style.css))
                         .put("ninePatchPath", style.ninePatchPath)
-                        .put("ninePatchSlice", style.ninePatchSlice),
+                        .put("ninePatchSlice", style.ninePatchSlice)
+                        .put("darkUsesLight", style.darkUsesLight)
+                        .put("darkColor", normalizeHighlightColor(style.darkColor))
+                        .put("darkFontFamily", style.darkFontFamily)
+                        .put("darkCss", sanitizeHighlightCss(style.darkCss))
+                        .put("darkNinePatchPath", style.darkNinePatchPath)
+                        .put("darkNinePatchSlice", style.darkNinePatchSlice),
                 )
             }
         }.toString()

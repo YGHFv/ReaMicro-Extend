@@ -91,7 +91,17 @@ object ModuleSettings {
     const val KEY_READER_DIALOGUE_HIGHLIGHT_FONT = "reader_dialogue_highlight_font"
     const val KEY_READER_HIGHLIGHT_STYLES = "reader_highlight_styles"
     const val KEY_READER_HIGHLIGHT_RULES = "reader_highlight_rules"
+    const val KEY_READER_HIGHLIGHT_DEFAULT_LIGHT_STYLE_ID = "reader_highlight_default_light_style_id"
+    const val KEY_READER_HIGHLIGHT_DEFAULT_DARK_STYLE_ID = "reader_highlight_default_dark_style_id"
+    const val KEY_READER_HIGHLIGHT_BOOK_GLOBAL_RULES = "reader_highlight_book_global_rules"
     const val DEFAULT_READER_HIGHLIGHT_STYLE_ID = "default"
+    const val DEFAULT_READER_HIGHLIGHT_LIGHT_STYLE_ID = "builtin_rainbow_glass"
+    const val DEFAULT_READER_HIGHLIGHT_DARK_STYLE_ID = DEFAULT_READER_HIGHLIGHT_STYLE_ID
+    const val READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID = "__default_light__"
+    const val READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID = "__default_dark__"
+    const val LEGACY_READER_HIGHLIGHT_LIGHT_STYLE_ID = "default_light"
+    const val LEGACY_READER_HIGHLIGHT_DARK_STYLE_ID = "default_dark"
+    const val BUILTIN_READER_HIGHLIGHT_RAINBOW_GLASS_STYLE_ID = "builtin_rainbow_glass"
     const val DEFAULT_READER_DOUBLE_QUOTE_RULE_ID = "double_quote_dialogue"
     const val DEFAULT_READER_SINGLE_QUOTE_RULE_ID = "single_quote_phrase"
 
@@ -283,11 +293,48 @@ data class ReaderDialogueHighlightSettingsSnapshot(
 )
 
 data class ReaderHighlightSettingsSnapshot(
-    val styles: List<ReaderHighlightStyle> = listOf(ReaderHighlightStyle.default()),
+    val styles: List<ReaderHighlightStyle> = ReaderHighlightStyle.builtIns(),
     val rules: List<ReaderHighlightRule> = ReaderHighlightRule.defaults(),
+    val defaultLightStyleId: String = ModuleSettings.DEFAULT_READER_HIGHLIGHT_LIGHT_STYLE_ID,
+    val defaultDarkStyleId: String = ModuleSettings.DEFAULT_READER_HIGHLIGHT_DARK_STYLE_ID,
+    val bookGlobalRules: Map<String, Set<String>> = emptyMap(),
 ) {
+    fun resolvedStyleId(id: String): String =
+        when (id) {
+            ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID -> defaultLightStyleId
+            ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID -> defaultDarkStyleId
+            else -> id
+        }
+
     fun styleById(id: String): ReaderHighlightStyle =
-        styles.firstOrNull { it.id == id } ?: styles.firstOrNull() ?: ReaderHighlightStyle.default()
+        styles.firstOrNull { it.id == resolvedStyleId(id) } ?: styles.firstOrNull() ?: ReaderHighlightStyle.defaultLight()
+
+    fun defaultLightStyle(): ReaderHighlightStyle = styleById(defaultLightStyleId)
+
+    fun defaultDarkStyle(): ReaderHighlightStyle = styleById(defaultDarkStyleId)
+
+    fun globalRulesEnabledForBook(bookKey: String): Set<String>? =
+        bookGlobalRules[bookKey]
+            ?: bookGlobalRules.entries.firstOrNull { (storedBookKey, _) ->
+                readerHighlightBookIdentityMatches(
+                    storedBookKey = storedBookKey,
+                    storedBookTitle = "",
+                    currentBookKey = bookKey,
+                    currentBookTitle = ReaderHighlightBookContext.bookTitle,
+                )
+            }?.value
+
+    fun bookFollowsGlobalRules(bookKey: String): Boolean =
+        globalRulesEnabledForBook(bookKey) == null
+
+    fun globalRules(): List<ReaderHighlightRule> =
+        rules.filter { it.bookKey.isBlank() }
+
+    fun enabledGlobalRuleIds(): Set<String> =
+        globalRules().filter { it.enabled }.map { it.id }.toSet()
+
+    fun effectiveGlobalRuleIdsForBook(bookKey: String): Set<String> =
+        globalRulesEnabledForBook(bookKey) ?: enabledGlobalRuleIds()
 
     fun bookRules(bookKey: String): List<ReaderHighlightRule> =
         rules.filter { it.bookKey == bookKey }
@@ -330,31 +377,61 @@ data class ReaderHighlightStyle(
     val darkNinePatchSlice: String = "",
 ) {
     fun colorForTheme(dark: Boolean): String =
-        color
+        if (dark && !darkUsesLight) darkColor.ifBlank { color } else color
 
     fun fontFamilyForTheme(dark: Boolean): String =
-        fontFamily
+        if (dark && !darkUsesLight) darkFontFamily.ifBlank { fontFamily } else fontFamily
 
     fun cssForTheme(dark: Boolean): String =
-        css
+        if (dark && !darkUsesLight) darkCss.ifBlank { css } else css
 
     fun ninePatchPathForTheme(dark: Boolean): String =
-        ninePatchPath
+        if (dark && !darkUsesLight) darkNinePatchPath.ifBlank { ninePatchPath } else ninePatchPath
 
     fun ninePatchSliceForTheme(dark: Boolean): String =
-        ninePatchSlice
+        if (dark && !darkUsesLight) darkNinePatchSlice.ifBlank { ninePatchSlice } else ninePatchSlice
 
     companion object {
         fun default(
             color: String = ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR,
             fontFamily: String = ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_FONT,
+        ): ReaderHighlightStyle = orangeDefault(color, fontFamily)
+
+        fun defaultLight(): ReaderHighlightStyle =
+            ReaderHighlightStyle(
+                id = ModuleSettings.BUILTIN_READER_HIGHLIGHT_RAINBOW_GLASS_STYLE_ID,
+                name = "彩色玻璃·紫",
+                color = "#5A2E7F",
+                css = "background-size: 100% 100%; color: rgba(90,46,127,1); padding-left: 16.0px; padding-right: 16.0px; padding-top: 9.0px; padding-bottom: 9.0px; font-size: 0.9em",
+                ninePatchPath = "asset://reader_highlight/rainbow_glass.png",
+            )
+
+        fun defaultDark(
+            color: String = ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR,
+            fontFamily: String = ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_FONT,
+        ): ReaderHighlightStyle =
+            ReaderHighlightStyle(
+                id = ModuleSettings.DEFAULT_READER_HIGHLIGHT_DARK_STYLE_ID,
+                name = "橙色默认",
+                color = color,
+                fontFamily = fontFamily,
+                css = "font-size: 0.9em",
+            )
+
+        fun orangeDefault(
+            color: String = ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR,
+            fontFamily: String = ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_FONT,
         ): ReaderHighlightStyle =
             ReaderHighlightStyle(
                 id = ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID,
-                name = "默认样式",
+                name = "橙色默认",
                 color = color,
                 fontFamily = fontFamily,
+                css = "font-size: 0.9em",
             )
+
+        fun builtIns(): List<ReaderHighlightStyle> =
+            listOf(defaultLight(), orangeDefault())
     }
 }
 
@@ -362,15 +439,27 @@ data class ReaderHighlightRule(
     val id: String,
     val name: String,
     val type: ReaderHighlightRuleType,
-    val styleId: String = ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID,
-    val darkStyleId: String = "",
+    val styleId: String = ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID,
+    val darkStyleId: String = ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID,
     val enabled: Boolean = true,
     val pattern: String = "",
     val bookKey: String = "",
     val bookTitle: String = "",
 ) {
     fun styleIdForTheme(dark: Boolean): String =
-        if (dark) darkStyleId.ifBlank { styleId } else styleId
+        if (dark) {
+            darkStyleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID }
+        } else {
+            styleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID }
+        }
+
+    fun appliesToBook(currentBookKey: String, currentBookTitle: String = ""): Boolean =
+        readerHighlightBookIdentityMatches(
+            storedBookKey = bookKey,
+            storedBookTitle = bookTitle,
+            currentBookKey = currentBookKey,
+            currentBookTitle = currentBookTitle,
+        )
 
     companion object {
         fun defaults(): List<ReaderHighlightRule> =
@@ -414,3 +503,36 @@ object ReaderHighlightBookContext {
         if (requestRefresh) refreshRequester?.invoke(source)
     }
 }
+
+internal fun readerHighlightBookIdentityMatches(
+    storedBookKey: String,
+    storedBookTitle: String,
+    currentBookKey: String,
+    currentBookTitle: String,
+): Boolean {
+    val storedKey = storedBookKey.trim()
+    val currentKey = currentBookKey.trim()
+    if (storedKey.isBlank() || currentKey.isBlank()) return false
+    if (storedKey == currentKey) return true
+    val storedTokens = readerHighlightBookIdentityTokens(storedKey, storedBookTitle)
+    val currentTokens = readerHighlightBookIdentityTokens(currentKey, currentBookTitle)
+    return storedTokens.any { it in currentTokens }
+}
+
+private fun readerHighlightBookIdentityTokens(bookKey: String, bookTitle: String): Set<String> =
+    buildSet {
+        fun addCandidate(value: String) {
+            val trimmed = value.trim()
+            if (trimmed.isBlank()) return
+            add(trimmed)
+            val cleaned = trimmed
+                .replace('\\', '/')
+                .substringAfterLast('/')
+                .removeSuffix(".epub")
+                .removeSuffix(".EPUB")
+                .trim()
+            if (cleaned.isNotBlank()) add(cleaned)
+        }
+        bookKey.split('|').forEach(::addCandidate)
+        addCandidate(bookTitle)
+    }

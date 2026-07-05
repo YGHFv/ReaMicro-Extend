@@ -159,6 +159,39 @@ class ModuleSettingsTest {
     }
 
     @Test
+    fun legacyBookHighlightRuleMatchesCompositeCurrentBookKey() {
+        val rule = ReaderHighlightRule(
+            id = "legacy",
+            name = "Legacy",
+            type = ReaderHighlightRuleType.FixedText,
+            pattern = "important",
+            bookKey = "12345",
+            bookTitle = "Old Title",
+        )
+
+        assertTrue(rule.appliesToBook("/storage/books/New Title.epub|12345|67890|New Title", "New Title"))
+        assertFalse(rule.appliesToBook("/storage/books/Other.epub|99999|67890|Other", "Other"))
+    }
+
+    @Test
+    fun legacyBookGlobalRuleSettingMatchesCompositeCurrentBookKey() {
+        val previousTitle = ReaderHighlightBookContext.bookTitle
+        ReaderHighlightBookContext.bookTitle = "New Title"
+        try {
+            val snapshot = ReaderHighlightSettingsSnapshot(
+                bookGlobalRules = mapOf("12345" to setOf("double_quote_dialogue")),
+            )
+
+            assertEquals(
+                setOf("double_quote_dialogue"),
+                snapshot.globalRulesEnabledForBook("/storage/books/New Title.epub|12345|67890|New Title"),
+            )
+        } finally {
+            ReaderHighlightBookContext.bookTitle = previousTitle
+        }
+    }
+
+    @Test
     fun legacyAccountParentSwitchNoLongerBlocksChildSwitches() {
         val snapshot = ModuleSettingsSnapshot(
             accountEnabled = false,

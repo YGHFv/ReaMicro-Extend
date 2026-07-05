@@ -13,7 +13,6 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -72,6 +71,7 @@ import com.reamicro.fix.settings.ReaderHighlightRule
 import com.reamicro.fix.settings.ReaderHighlightRuleType
 import com.reamicro.fix.settings.ReaderHighlightStyle
 import com.reamicro.fix.settings.XposedModuleSettings
+import com.reamicro.fix.settings.readerHighlightBookIdentityMatches
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
@@ -147,6 +147,7 @@ class ReaMicroSettingsHook(
     @Volatile private var rotationExpandedUiState: Any? = null
 
     fun install() {
+        activeInstance = this
         hookStringResource()
         hookNavGraphScope()
         hookAboutScreen()
@@ -247,7 +248,7 @@ class ReaMicroSettingsHook(
 
     private fun hookSettingsListBuilder() {
         runCatching {
-            val buildMethod = method(SETTINGS_SCREEN_CLASS, SETTINGS_LIST_BUILDER_METHOD, 4)
+            val buildMethod = resolveSettingsListBuilderMethod()
             XposedBridge.hookMethod(buildMethod, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     // Track the host settings LazyColumn build so injected rows appear at a
@@ -271,6 +272,32 @@ class ReaMicroSettingsHook(
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to hook settings list: ${it.stackTraceToString()}")
         }
+    }
+
+    // 设置页 LazyColumn 构建函数是 R8 生成的 synthetic lambda，名称会随阅微版本变化。
+    // 2.1 是 "SettingsScreen$lambda$0$0$1$0"，2.2 是 "SettingsScreen$lambda$0$1$0$0"。
+    // 这里按稳定签名解析：首参是宿主 NavGraphScope，末参是 Compose LazyListScope。
+    private fun resolveSettingsListBuilderMethod(): Method {
+        val settingsClass = cls(SETTINGS_SCREEN_CLASS)
+        val lazyListScopeClass = cls(LAZY_LIST_SCOPE_CLASS)
+        val navGraphScopeClass = cls(NAV_GRAPH_SCOPE_CLASS)
+        val exact = runCatching {
+            method(SETTINGS_SCREEN_CLASS, SETTINGS_LIST_BUILDER_METHOD, 4)
+        }.getOrNull()
+        if (exact != null) return exact
+        val candidates = settingsClass.declaredMethods.filter { candidate ->
+            val params = candidate.parameterTypes
+            candidate.name.startsWith("SettingsScreen") &&
+                params.isNotEmpty() &&
+                params.first() == navGraphScopeClass &&
+                params.last() == lazyListScopeClass
+        }
+        val resolved = candidates.firstOrNull { it.parameterTypes.size == 4 }
+            ?: candidates.firstOrNull()
+            ?: error("settings list builder lambda not found in $SETTINGS_SCREEN_CLASS")
+        resolved.isAccessible = true
+        XposedBridge.log("$LOG_PREFIX resolved settings list builder: ${resolved.name}")
+        return resolved
     }
 
     private fun hookLazyListItem() {
@@ -380,11 +407,12 @@ class ReaMicroSettingsHook(
         }
     }
 
-    private fun openInjectedRouteViaHostNavigation(route: InjectedRoute): Boolean {
-        val navGraphScope = currentSettingsNavGraphScope ?: return false
+    private fun openInjectedRouteViaHostNavigation(route: InjectedRoute, navGraphScopeOverride: Any? = null): Boolean {
+        val navGraphScope = navGraphScopeOverride ?: currentSettingsNavGraphScope ?: return false
         val previousStack = injectedRouteStack
         return runCatching {
             val aboutRoute = staticObject(ROUTE_ABOUT_CLASS, "INSTANCE")
+            currentSettingsNavGraphScope = navGraphScope
             currentSettingsNavController = runCatching { navGraphScope.method0("getNavController") }.getOrNull()
             val navigate = navGraphScope.javaClass.methods.firstOrNull {
                 it.name == "navigate" && it.parameterTypes.size == 3
@@ -443,6 +471,8 @@ class ReaMicroSettingsHook(
         val currentRoute = currentInjectedRoute()
         if (currentRoute !is InjectedRoute.FontPicker &&
             currentRoute !is InjectedRoute.ReaderBookHighlightRules &&
+            currentRoute !is InjectedRoute.ReaderBookOnlyHighlightRules &&
+            currentRoute !is InjectedRoute.ReaderBookGlobalHighlightRules &&
             currentRoute != InjectedRoute.FontLibrary &&
             currentRoute !in MODULE_CHILD_ROUTES &&
             currentRoute !in READER_CHILD_ROUTES &&
@@ -454,6 +484,8 @@ class ReaMicroSettingsHook(
             ?: listOf(
                 when {
                     currentRoute is InjectedRoute.ReaderBookHighlightRules -> InjectedRoute.ReaderHighlightTextSettings
+                    currentRoute is InjectedRoute.ReaderBookOnlyHighlightRules -> InjectedRoute.ReaderHighlightTextSettings
+                    currentRoute is InjectedRoute.ReaderBookGlobalHighlightRules -> InjectedRoute.ReaderBookHighlightRules(currentRoute.bookKey, currentRoute.bookTitle)
                     currentRoute in READER_CHILD_ROUTES -> InjectedRoute.ReaderCompletionSettings
                     currentRoute in MODULE_CHILD_ROUTES -> InjectedRoute.ModuleSettings
                     currentRoute in AI_CHILD_ROUTES -> InjectedRoute.AiConfigSettings
@@ -510,6 +542,8 @@ class ReaMicroSettingsHook(
                 InjectedRoute.ReaderHighlightConfigSettings -> renderReaderHighlightConfigSettingsContent(innerPaddings, innerComposer)
                 InjectedRoute.ReaderHighlightTextSettings -> renderReaderHighlightTextSettingsContent(innerPaddings, innerComposer)
                 is InjectedRoute.ReaderBookHighlightRules -> renderReaderBookHighlightRulesContent(currentRoute, innerPaddings, innerComposer)
+                is InjectedRoute.ReaderBookOnlyHighlightRules -> renderReaderBookOnlyHighlightRulesContent(currentRoute, innerPaddings, innerComposer)
+                is InjectedRoute.ReaderBookGlobalHighlightRules -> renderReaderBookGlobalHighlightRulesContent(currentRoute, innerPaddings, innerComposer)
                 InjectedRoute.ReaderHighlightColorPicker -> renderReaderHighlightColorPickerContent(innerPaddings, innerComposer)
                 InjectedRoute.CloudCompletionSettings -> renderCloudCompletionSettingsContent(innerPaddings, innerComposer)
                 InjectedRoute.RotationCompletionSettings -> renderRotationCompletionSettingsContent(innerPaddings, innerComposer)
@@ -550,6 +584,8 @@ class ReaMicroSettingsHook(
     private fun renderInjectedBackHandler(route: InjectedRoute, composer: Any) {
         val enabled = route is InjectedRoute.FontPicker ||
             route is InjectedRoute.ReaderBookHighlightRules ||
+            route is InjectedRoute.ReaderBookOnlyHighlightRules ||
+            route is InjectedRoute.ReaderBookGlobalHighlightRules ||
             route == InjectedRoute.FontLibrary ||
             route in MODULE_CHILD_ROUTES ||
             route in READER_CHILD_ROUTES ||
@@ -562,8 +598,14 @@ class ReaMicroSettingsHook(
     }
 
     private fun renderHostTopBar(title: String, composer: Any) {
-        val back = functionProxy("ModuleSettingsBack", FUNCTION0_CLASS) {
+        renderHostTopBar(title, composer) {
             navigateBackFromInjectedRoute()
+        }
+    }
+
+    private fun renderHostTopBar(title: String, composer: Any, onBack: () -> Unit) {
+        val back = functionProxy("ModuleSettingsBack", FUNCTION0_CLASS) {
+            onBack()
             targetUnit()
         }
         method(APP_TOP_BAR_CLASS, APP_TOP_BAR_METHOD, 8).invoke(
@@ -578,6 +620,62 @@ class ReaMicroSettingsHook(
             22,
         )
     }
+
+    private fun renderReaderSheetTopBar(title: String, composer: Any, onClose: () -> Unit) {
+        val windowInsets = readerSheetWindowInsets(composer)
+        val closeIcon = closeImageVector()
+        if (windowInsets == null || closeIcon == null) {
+            renderHostTopBar(title, composer, onClose)
+            return
+        }
+        val close = functionProxy("ReaderSheetClose", FUNCTION0_CLASS) {
+            onClose()
+            targetUnit()
+        }
+        method(APP_TOP_BAR_CLASS, APP_TOP_BAR_METHOD, 8).invoke(
+            null,
+            title,
+            windowInsets,
+            closeIcon,
+            close,
+            null,
+            composer,
+            0,
+            16,
+        )
+    }
+
+    private fun readerSheetWindowInsets(composer: Any): Any? =
+        runCatching {
+            val topAppBarDefaults = staticObject(TOP_APP_BAR_DEFAULTS_CLASS, "INSTANCE")
+            val topInsets = method(TOP_APP_BAR_DEFAULTS_CLASS, "getWindowInsets", 2).invoke(
+                topAppBarDefaults,
+                composer,
+                staticInt(TOP_APP_BAR_DEFAULTS_CLASS, "\$stable"),
+            )
+            val statusInsets = method(WINDOW_INSETS_EXT_ANDROID_KT_CLASS, "getStatusBarsIgnoringVisibilityCompat", 3).invoke(
+                null,
+                staticObject(WINDOW_INSETS_CLASS, "INSTANCE"),
+                composer,
+                6,
+            )
+            method(WINDOW_INSETS_KT_CLASS, "exclude", 2).invoke(null, topInsets, statusInsets)
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX reader sheet window insets fallback: ${it.stackTraceToString()}")
+        }.getOrNull()
+
+    private fun closeImageVector(): Any? =
+        runCatching {
+            val evaIcons = staticObject(EVA_ICONS_CLASS, "INSTANCE")
+            val outline = cls(EVA_OUTLINE_KT_CLASS).declaredMethods.first {
+                it.name == "getOutline" && it.parameterTypes.size == 1
+            }.apply { isAccessible = true }.invoke(null, evaIcons)
+            cls(EVA_CLOSE_KT_CLASS).declaredMethods.first {
+                it.name == "getClose" && it.parameterTypes.size == 1
+            }.apply { isAccessible = true }.invoke(null, outline)
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX reader sheet close icon fallback: ${it.stackTraceToString()}")
+        }.getOrNull()
 
     private fun renderHostModuleSettingsContent(innerPaddings: Any, composer: Any) {
         val listContent = functionProxy("ModuleSettingsList", FUNCTION1_CLASS) { args ->
@@ -1099,7 +1197,7 @@ class ReaMicroSettingsHook(
                 ),
                 ToggleRow(
                     key = ModuleSettings.KEY_READER_SELECTION_HIGHLIGHT_ENABLED,
-                    title = "\u9ad8\u4eae\u9009\u4e2d",
+                    title = "\u9009\u4e2d\u9ad8\u4eae",
                     checked = snapshot.readerSelectionHighlightEnabled,
                     onChanged = { checked, _ ->
                         settings.setReaderSelectionHighlightEnabled(checked)
@@ -1267,6 +1365,7 @@ class ReaMicroSettingsHook(
                             key = "reader_highlight_style_${style.id}",
                             title = style.name,
                             subtitle = highlightStyleSummary(style),
+                            trailing = readerHighlightStyleDefaultTrailing(highlight, style),
                             singleLineSubtitle = true,
                             onClick = { openReaderHighlightStyleDialog(style) },
                             onLongClick = { exportReaderHighlightStyle(style) },
@@ -1365,6 +1464,10 @@ class ReaMicroSettingsHook(
             readerHighlightVersionValue()
             val highlight = settings.highlightSettings()
             val rows = buildList {
+                val globalRules = highlight.globalRules()
+                val followsGlobal = highlight.bookFollowsGlobalRules(route.bookKey)
+                val enabledGlobalRuleIds = highlight.effectiveGlobalRuleIdsForBook(route.bookKey)
+                val enabledGlobalCount = globalRules.count { it.id in enabledGlobalRuleIds }
                 add(
                     ActionRow(
                         key = "reader_book_highlight_rule_add_${route.bookKey.hashCode()}",
@@ -1374,6 +1477,23 @@ class ReaMicroSettingsHook(
                         onClick = {
                             openReaderHighlightRuleDialog(
                                 newReaderHighlightRule(route.bookKey, route.bookTitle),
+                            )
+                        },
+                    ),
+                )
+                add(
+                    ActionRow(
+                        key = "reader_book_global_rules_${route.bookKey.hashCode()}",
+                        title = "\u5168\u5c40\u89c4\u5219",
+                        subtitle = if (followsGlobal) {
+                            "\u8ddf\u968f\u5168\u5c40"
+                        } else {
+                            "\u5df2\u542f\u7528 $enabledGlobalCount/${globalRules.size} \u6761\u5168\u5c40\u89c4\u5219"
+                        },
+                        singleLineSubtitle = true,
+                        onClick = {
+                            openNestedInjectedRoute(
+                                InjectedRoute.ReaderBookGlobalHighlightRules(route.bookKey, route.bookTitle),
                             )
                         },
                     ),
@@ -1406,6 +1526,302 @@ class ReaMicroSettingsHook(
             targetUnit()
         }
         renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    private fun renderReaderBookOnlyHighlightRulesContent(route: InjectedRoute.ReaderBookOnlyHighlightRules, innerPaddings: Any, composer: Any) {
+        val listContent = functionProxy("ReaderBookOnlyHighlightRulesList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            readerHighlightVersionValue()
+            val highlight = settings.highlightSettings()
+            val rows = buildList {
+                val bookRules = highlight.bookRules(route.bookKey)
+                bookRules.forEach { rule ->
+                    add(
+                        ActionRow(
+                            key = "reader_book_only_highlight_rule_${rule.id}",
+                            title = rule.name,
+                            subtitle = "${highlightRuleSummary(rule)} / ${highlightRuleStyleSummary(highlight, rule)}",
+                            trailingContent = { itemComposer ->
+                                renderHostActionSwitch(
+                                    key = "reader_book_only_highlight_rule_switch_${rule.id}",
+                                    checked = rule.enabled,
+                                    composer = itemComposer,
+                                ) { enabled ->
+                                    settings.setReaderHighlightRuleEnabled(rule.id, enabled)
+                                    bumpReaderHighlightVersion()
+                                }
+                            },
+                            singleLineSubtitle = true,
+                            onClick = { openReaderHighlightRuleDialog(rule) },
+                        ),
+                    )
+                }
+                if (bookRules.isEmpty()) {
+                    add(
+                        ActionRow(
+                            key = "reader_book_only_highlight_empty_${route.bookKey.hashCode()}",
+                            title = "\u6682\u65e0\u5355\u4e66\u89c4\u5219",
+                            subtitle = "\u9009\u4e2d\u672c\u4e66\u6587\u672c\u540e\u53ef\u6dfb\u52a0\u9ad8\u4eae\u89c4\u5219",
+                            singleLineSubtitle = true,
+                        ),
+                    )
+                }
+            }
+            addLazyItem(lazyListScope, "reader_book_only_rules_${route.bookKey}".hashCode()) { itemComposer ->
+                renderHostActionCard(rows, itemComposer)
+            }
+            targetUnit()
+        }
+        renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    private fun renderReaderBookGlobalHighlightRulesContent(route: InjectedRoute.ReaderBookGlobalHighlightRules, innerPaddings: Any, composer: Any) {
+        val listContent = functionProxy("ReaderBookGlobalHighlightRulesList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            readerHighlightVersionValue()
+            val highlight = settings.highlightSettings()
+            val globalRules = highlight.globalRules()
+            val followsGlobal = highlight.bookFollowsGlobalRules(route.bookKey)
+            val enabledIds = highlight.effectiveGlobalRuleIdsForBook(route.bookKey)
+            val rows = buildList {
+                add(
+                    ActionRow(
+                        key = "reader_book_global_follow_${route.bookKey.hashCode()}",
+                        title = "\u8ddf\u968f\u5168\u5c40",
+                        subtitle = if (followsGlobal) "\u4fee\u6539\u4e0b\u65b9\u5f00\u5173\u65f6\u540c\u6b65\u4fee\u6539\u5168\u5c40\u89c4\u5219" else "\u4fee\u6539\u4e0b\u65b9\u5f00\u5173\u65f6\u4ec5\u5f71\u54cd\u672c\u4e66",
+                        trailingContent = { itemComposer ->
+                            renderHostActionSwitch(
+                                key = "reader_book_global_follow_switch_${route.bookKey.hashCode()}",
+                                checked = followsGlobal,
+                                composer = itemComposer,
+                            ) { enabled ->
+                                settings.setReaderHighlightBookFollowsGlobalRules(route.bookKey, enabled)
+                                bumpReaderHighlightVersion()
+                            }
+                        },
+                        singleLineSubtitle = true,
+                    ),
+                )
+                globalRules.forEach { rule ->
+                    add(
+                        ActionRow(
+                            key = "reader_book_global_rule_${route.bookKey.hashCode()}_${rule.id}",
+                            title = rule.name,
+                            subtitle = "${highlightRuleSummary(rule)} / ${highlightRuleStyleSummary(highlight, rule)}",
+                            trailingContent = { itemComposer ->
+                                renderHostActionSwitch(
+                                    key = "reader_book_global_rule_switch_${route.bookKey.hashCode()}_${rule.id}",
+                                    checked = rule.id in enabledIds,
+                                    composer = itemComposer,
+                                ) { enabled ->
+                                    if (followsGlobal) {
+                                        settings.setReaderHighlightRuleEnabled(rule.id, enabled)
+                                    } else {
+                                        settings.setReaderHighlightBookGlobalRuleEnabled(route.bookKey, rule.id, enabled)
+                                    }
+                                    bumpReaderHighlightVersion()
+                                }
+                            },
+                            singleLineSubtitle = true,
+                        ),
+                    )
+                }
+            }
+            addLazyItem(lazyListScope, "reader_book_global_rules_${route.bookKey}".hashCode()) { itemComposer ->
+                renderHostActionCard(rows, itemComposer)
+            }
+            targetUnit()
+        }
+        renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    private fun renderReaderHighlightRulesSheetFromReader(
+        globalRules: Boolean,
+        bookKey: String,
+        bookTitle: String,
+        composer: Any,
+        onClose: () -> Unit,
+    ) {
+        val title = if (globalRules) "\u5168\u5c40\u9ad8\u4eae\u89c4\u5219" else "\u5355\u4e66\u9ad8\u4eae\u89c4\u5219"
+        val content = functionProxy("ReaderHighlightRulesSheetContent", FUNCTION3_CLASS) { args ->
+            val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
+            renderReaderSheetBackHandler(innerComposer, onClose)
+            renderReaderSheetTopBar(title, innerComposer, onClose)
+            renderReaderHighlightRulesSheetList(globalRules, bookKey, bookTitle, innerComposer)
+            targetUnit()
+        }
+        method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
+            null,
+            readerHighlightSheetModifier(composer),
+            arrangementTop(),
+            alignmentStart(),
+            content,
+            composer,
+            0,
+            0,
+        )
+    }
+
+    private fun renderReaderSheetBackHandler(composer: Any, onClose: () -> Unit) {
+        val back = functionProxy("ReaderHighlightRulesSheetBack", FUNCTION0_CLASS) {
+            onClose()
+            targetUnit()
+        }
+        renderReaderSheetNavigationBackHandler(composer, back)
+        method(BACK_HANDLER_KT_CLASS, BACK_HANDLER_METHOD, 5).invoke(null, true, back, composer, 0, 0)
+    }
+
+    private fun renderReaderSheetNavigationBackHandler(composer: Any, back: Any) {
+        runCatching {
+            val none = staticObject(NAVIGATION_EVENT_INFO_NONE_CLASS, "INSTANCE")
+            val state = method(
+                REMEMBER_NAVIGATION_EVENT_STATE_KT_CLASS,
+                REMEMBER_NAVIGATION_EVENT_STATE_METHOD,
+                6,
+            ).invoke(null, none, null, null, composer, 6, 6)
+            method(
+                NAVIGATION_EVENT_HANDLER_KT_CLASS,
+                NAVIGATION_BACK_HANDLER_METHOD,
+                7,
+            ).invoke(null, state, true, null, back, composer, 0, 4)
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX reader sheet navigation back fallback: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun renderReaderHighlightRulesSheetList(
+        globalRules: Boolean,
+        bookKey: String,
+        bookTitle: String,
+        composer: Any,
+    ) {
+        val listContent = functionProxy("ReaderHighlightRulesSheetList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            readerHighlightVersionValue()
+            val rows = readerHighlightRulesSheetRows(globalRules, bookKey, bookTitle)
+            addLazyItem(lazyListScope, "reader_highlight_sheet_${globalRules}_${bookKey}".hashCode()) { itemComposer ->
+                renderHostActionCard(rows, itemComposer)
+            }
+            targetUnit()
+        }
+        method(LAZY_DSL_KT_CLASS, LAZY_COLUMN_METHOD, 13).invoke(
+            null,
+            readerHighlightSheetListModifier(),
+            null,
+            null,
+            false,
+            spacedBy(12),
+            null,
+            null,
+            false,
+            null,
+            listContent,
+            composer,
+            0,
+            494,
+        )
+    }
+
+    private fun readerHighlightRulesSheetRows(
+        globalRules: Boolean,
+        bookKey: String,
+        bookTitle: String,
+    ): List<ActionRow> {
+        val highlight = settings.highlightSettings()
+        return if (globalRules) {
+            val rules = highlight.globalRules()
+            val followsGlobal = highlight.bookFollowsGlobalRules(bookKey)
+            val enabledIds = highlight.effectiveGlobalRuleIdsForBook(bookKey)
+            buildList {
+                add(
+                    ActionRow(
+                        key = "reader_sheet_follow_${bookKey.hashCode()}",
+                        title = "\u8ddf\u968f\u5168\u5c40",
+                        subtitle = if (followsGlobal) {
+                            "\u4fee\u6539\u4e0b\u65b9\u5f00\u5173\u65f6\u540c\u6b65\u4fee\u6539\u5168\u5c40\u89c4\u5219"
+                        } else {
+                            "\u4fee\u6539\u4e0b\u65b9\u5f00\u5173\u65f6\u4ec5\u5f71\u54cd\u672c\u4e66"
+                        },
+                        trailingContent = { itemComposer ->
+                            renderHostActionSwitch(
+                                key = "reader_sheet_follow_switch_${bookKey.hashCode()}",
+                                checked = followsGlobal,
+                                composer = itemComposer,
+                            ) { enabled ->
+                                settings.setReaderHighlightBookFollowsGlobalRules(bookKey, enabled)
+                                bumpReaderHighlightVersion()
+                            }
+                        },
+                        singleLineSubtitle = true,
+                    ),
+                )
+                if (rules.isEmpty()) {
+                    add(
+                        ActionRow(
+                            key = "reader_sheet_global_empty_${bookKey.hashCode()}",
+                            title = "\u6682\u65e0\u5168\u5c40\u89c4\u5219",
+                            subtitle = "\u53ef\u5728\u9ad8\u4eae\u7ba1\u7406\u4e2d\u6dfb\u52a0",
+                            singleLineSubtitle = true,
+                        ),
+                    )
+                }
+                rules.forEach { rule ->
+                    add(
+                        ActionRow(
+                            key = "reader_sheet_global_${bookKey.hashCode()}_${rule.id}",
+                            title = rule.name,
+                            subtitle = "${highlightRuleSummary(rule)} / ${highlightRuleStyleSummary(highlight, rule)}",
+                            trailingContent = { itemComposer ->
+                                renderHostActionSwitch(
+                                    key = "reader_sheet_global_switch_${bookKey.hashCode()}_${rule.id}",
+                                    checked = rule.id in enabledIds,
+                                    composer = itemComposer,
+                                ) { enabled ->
+                                    if (followsGlobal) {
+                                        settings.setReaderHighlightRuleEnabled(rule.id, enabled)
+                                    } else {
+                                        settings.setReaderHighlightBookGlobalRuleEnabled(bookKey, rule.id, enabled)
+                                    }
+                                    bumpReaderHighlightVersion()
+                                }
+                            },
+                            singleLineSubtitle = true,
+                        ),
+                    )
+                }
+            }
+        } else {
+            val rules = highlight.rules.filter { it.bookKey.isNotBlank() && it.appliesToBook(bookKey, bookTitle) }
+            if (rules.isEmpty()) {
+                listOf(
+                    ActionRow(
+                        key = "reader_sheet_book_empty_${bookKey.hashCode()}",
+                        title = "\u6682\u65e0\u5355\u4e66\u89c4\u5219",
+                        subtitle = "\u9009\u4e2d\u6587\u5b57\u540e\u53ef\u6dfb\u52a0\u672c\u4e66\u9ad8\u4eae",
+                        singleLineSubtitle = true,
+                    ),
+                )
+            } else {
+                rules.map { rule ->
+                    ActionRow(
+                        key = "reader_sheet_book_${bookKey.hashCode()}_${rule.id}",
+                        title = rule.name,
+                        subtitle = "${highlightRuleSummary(rule)} / ${highlightRuleStyleSummary(highlight, rule)}",
+                        trailingContent = { itemComposer ->
+                            renderHostActionSwitch(
+                                key = "reader_sheet_book_switch_${bookKey.hashCode()}_${rule.id}",
+                                checked = rule.enabled,
+                                composer = itemComposer,
+                            ) { enabled ->
+                                settings.setReaderHighlightRuleEnabled(rule.id, enabled)
+                                bumpReaderHighlightVersion()
+                            }
+                        },
+                        singleLineSubtitle = true,
+                    )
+                }
+            }
+        }
     }
 
     private fun renderReaderHighlightColorPickerContent(innerPaddings: Any, composer: Any) {
@@ -1472,6 +1888,8 @@ class ReaMicroSettingsHook(
                     colors,
                     SettingsDialogButtonRole.Neutral,
                 )
+                val setLightDefaultButton = settingsDialogButton(activity, "\u6d45\u8272\u9ed8\u8ba4", colors, SettingsDialogButtonRole.Neutral)
+                val setDarkDefaultButton = settingsDialogButton(activity, "\u6df1\u8272\u9ed8\u8ba4", colors, SettingsDialogButtonRole.Neutral)
                 val finishButton = settingsDialogButton(activity, "\u5b8c\u6210", colors)
                 val deleteButton = settingsDialogButton(activity, "\u5220\u9664", colors, SettingsDialogButtonRole.Destructive)
                 val cancelButton = settingsDialogButton(activity, "\u53d6\u6d88", colors, SettingsDialogButtonRole.Neutral)
@@ -1525,9 +1943,13 @@ class ReaMicroSettingsHook(
                 card.addView(ninePatchSelectButton, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { bottomMargin = settingsDp(activity, 10) })
+                ).apply { bottomMargin = settingsDp(activity, 6) })
+                card.addView(settingsDialogButtonRow(activity, listOf(setLightDefaultButton, setDarkDefaultButton)))
                 syncImageButtons()
-                val buttons = if (style.id == ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID) {
+                val buttons = if (style.id in setOf(
+                    ModuleSettings.DEFAULT_READER_HIGHLIGHT_DARK_STYLE_ID,
+                    ModuleSettings.BUILTIN_READER_HIGHLIGHT_RAINBOW_GLASS_STYLE_ID,
+                )) {
                     listOf(finishButton, cancelButton)
                 } else {
                     listOf(deleteButton, finishButton, cancelButton)
@@ -1535,6 +1957,16 @@ class ReaMicroSettingsHook(
                 card.addView(settingsDialogButtonRow(activity, buttons))
                 ninePatchSelectButton.setOnClickListener {
                     openHighlightNinePatchPicker(activity, ninePatchInput)
+                }
+                setLightDefaultButton.setOnClickListener {
+                    settings.setReaderHighlightDefaultLightStyle(style.id)
+                    bumpReaderHighlightVersion()
+                    showToast("\u5df2\u8bbe\u4e3a\u6d45\u8272\u9ed8\u8ba4")
+                }
+                setDarkDefaultButton.setOnClickListener {
+                    settings.setReaderHighlightDefaultDarkStyle(style.id)
+                    bumpReaderHighlightVersion()
+                    showToast("\u5df2\u8bbe\u4e3a\u6df1\u8272\u9ed8\u8ba4")
                 }
                 finishButton.setOnClickListener {
                     settings.setReaderHighlightStyle(
@@ -1544,12 +1976,6 @@ class ReaMicroSettingsHook(
                             fontFamily = fontSelection,
                             css = sanitizeReaderHighlightCss(cssInput.text?.toString().orEmpty()),
                             ninePatchPath = ninePatchInput.text?.toString()?.trim().orEmpty(),
-                            darkUsesLight = true,
-                            darkColor = "",
-                            darkFontFamily = "",
-                            darkCss = "",
-                            darkNinePatchPath = "",
-                            darkNinePatchSlice = "",
                         ),
                     )
                     bumpReaderHighlightVersion()
@@ -1643,6 +2069,7 @@ class ReaMicroSettingsHook(
         private var previewBitmap: Bitmap? = null
         private var previewNinePatchDrawable: NinePatchDrawable? = null
         private var previewBitmapPath: String = ""
+        private var previewDrawLogKey: String = ""
 
         fun setHighlightPreview(
             css: String,
@@ -1666,27 +2093,35 @@ class ReaMicroSettingsHook(
         }
 
         private fun invalidatePreviewBitmap() {
-            if (previewPath == previewBitmapPath) return
+            if (previewPath == previewBitmapPath && (previewBitmap != null || previewPath.isBlank())) return
             previewBitmapPath = previewPath
             previewBitmap = null
             previewNinePatchDrawable = null
-            val file = File(previewPath)
-            if (!file.isFile) return
-            val bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return
+            previewDrawLogKey = ""
+            val assetName = previewPath.removePrefix("asset://").takeIf { it != previewPath }
+            val bitmap = ReaderHighlightImageAssets.decodeBitmap(previewPath, context, LOG_PREFIX) ?: return
             previewBitmap = bitmap
+            XposedBridge.log("$LOG_PREFIX highlight preview bitmap loaded path=$previewPath size=${bitmap.width}x${bitmap.height} alpha=${bitmap.hasAlpha()}")
             if (bitmap.ninePatchChunk != null) {
-                previewNinePatchDrawable = NinePatchDrawable(resources, bitmap, bitmap.ninePatchChunk, Rect(), file.name)
+                previewNinePatchDrawable = NinePatchDrawable(resources, bitmap, bitmap.ninePatchChunk, Rect(), assetName ?: File(previewPath).name)
             }
         }
 
         private fun drawPreviewLineBackgrounds(canvas: Canvas) {
-            val layout = layout ?: return
+            val layout = layout ?: run {
+                logPreviewDrawOnce("layout-null|$previewPath", "highlight preview draw skipped: layout unavailable path=$previewPath")
+                return
+            }
             val bitmap = previewBitmap
             val hasImage = bitmap != null
-            if (!hasImage && !previewHasFallbackFill) return
+            if (!hasImage && !previewHasFallbackFill) {
+                logPreviewDrawOnce("empty|$previewPath", "highlight preview draw skipped: no image/fallback path=$previewPath")
+                return
+            }
             val box = previewBoxStyle(previewCss, resources.displayMetrics.density)
             val nineSlice = bitmap?.let { parsePreviewNineSlice(previewSlice, it.width, it.height) }
             val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = previewFallbackColor }
+            var drawnRects = 0
             for (line in 0 until layout.lineCount) {
                 val lineLeft = layout.getLineLeft(line)
                 val lineRight = layout.getLineRight(line)
@@ -1722,7 +2157,18 @@ class ReaMicroSettingsHook(
                 }
                 if (saveCount >= 0) canvas.restoreToCount(saveCount)
                 drawPreviewCssBorder(canvas, rect, box)
+                drawnRects += 1
             }
+            logPreviewDrawOnce(
+                "draw|$previewPath|$drawnRects|${bitmap?.width}x${bitmap?.height}",
+                "highlight preview draw path=$previewPath rects=$drawnRects bitmap=${bitmap?.width}x${bitmap?.height} size=${width}x${height}",
+            )
+        }
+
+        private fun logPreviewDrawOnce(key: String, message: String) {
+            if (previewDrawLogKey == key) return
+            previewDrawLogKey = key
+            XposedBridge.log("$LOG_PREFIX $message")
         }
     }
 
@@ -2313,8 +2759,8 @@ class ReaMicroSettingsHook(
                         else -> ReaderHighlightRuleType.FixedText
                     }
                 }
-                var selectedStyleId = rule.styleId.ifBlank { ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID }
-                var selectedDarkStyleId = rule.darkStyleId
+                var selectedStyleId = rule.styleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID }
+                var selectedDarkStyleId = rule.darkStyleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID }
                 val typeStatus = settingsDialogStatus(activity, "\u7c7b\u578b\uff1a${highlightRuleTypeTitle(rule)}", colors)
                 val patternInput = settingsDialogInput(activity, "\u5339\u914d\u5185\u5bb9", singleLine = false, colors = colors).apply {
                     setText(rule.pattern)
@@ -2332,9 +2778,10 @@ class ReaMicroSettingsHook(
                         styles = styles,
                         currentStyleId = selectedStyleId,
                         colors = colors,
-                        allowFollowLight = false,
+                        defaultReferenceId = ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID,
+                        defaultLabel = "\u6d45\u8272\u9ed8\u8ba4",
                     ) { styleId ->
-                        selectedStyleId = styleId.ifBlank { ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID }
+                        selectedStyleId = styleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID }
                         syncStyleSelection.invoke()
                     }
                 }
@@ -2349,9 +2796,10 @@ class ReaMicroSettingsHook(
                         styles = styles,
                         currentStyleId = selectedDarkStyleId,
                         colors = colors,
-                        allowFollowLight = true,
+                        defaultReferenceId = ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID,
+                        defaultLabel = "\u6df1\u8272\u9ed8\u8ba4",
                     ) { styleId ->
-                        selectedDarkStyleId = styleId
+                        selectedDarkStyleId = styleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID }
                         syncStyleSelection.invoke()
                     }
                 }
@@ -2370,12 +2818,8 @@ class ReaMicroSettingsHook(
                     }
                 }
                 syncStyleSelection = {
-                    lightStyleStatus.text = "\u6d45\u8272\u6837\u5f0f\uff1a${highlight.styleById(selectedStyleId).name}"
-                    darkStyleStatus.text = if (selectedDarkStyleId.isBlank()) {
-                        "\u6df1\u8272\u6837\u5f0f\uff1a\u8ddf\u968f\u6d45\u8272"
-                    } else {
-                        "\u6df1\u8272\u6837\u5f0f\uff1a${highlight.styleById(selectedDarkStyleId).name}"
-                    }
+                    lightStyleStatus.text = "\u6d45\u8272\u6837\u5f0f\uff1a${readerHighlightLightStyleLabel(highlight, selectedStyleId)}"
+                    darkStyleStatus.text = "\u6df1\u8272\u6837\u5f0f\uff1a${readerHighlightDarkStyleLabel(highlight, selectedDarkStyleId)}"
                 }
                 card.addView(settingsDialogTitle(activity, "\u9ad8\u4eae\u89c4\u5219", colors))
                 card.addView(settingsDialogHint(activity, "${highlightRuleTypeTitle(rule)}\uff1a${highlightRuleDescription(rule)}", colors))
@@ -2417,8 +2861,8 @@ class ReaMicroSettingsHook(
                                 nameInput.text?.toString()?.trim().orEmpty().ifBlank { rule.name }
                             },
                             type = selectedType,
-                            styleId = selectedStyleId.ifBlank { ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID },
-                            darkStyleId = selectedDarkStyleId,
+                            styleId = selectedStyleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID },
+                            darkStyleId = selectedDarkStyleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID },
                             pattern = if (
                                 selectedType == ReaderHighlightRuleType.FixedText ||
                                 selectedType == ReaderHighlightRuleType.Regex
@@ -2451,24 +2895,29 @@ class ReaMicroSettingsHook(
         styles: List<ReaderHighlightStyle>,
         currentStyleId: String,
         colors: SettingsDialogColors,
-        allowFollowLight: Boolean,
+        defaultReferenceId: String,
+        defaultLabel: String,
         onSelected: (String) -> Unit,
     ) {
         val dialog = Dialog(activity)
         val card = settingsDialogCard(activity, colors)
         card.addView(settingsDialogTitle(activity, title, colors))
-        if (allowFollowLight) {
-            card.addView(
-                settingsDialogChoiceRow(
-                    activity,
-                    if (currentStyleId.isBlank()) "\u8ddf\u968f\u6d45\u8272  \u5f53\u524d" else "\u8ddf\u968f\u6d45\u8272",
-                    colors,
-                ) {
-                    onSelected("")
-                    dialog.dismiss()
+        val highlight = settings.highlightSettings()
+        val defaultStyleName = highlight.styleById(defaultReferenceId).name
+        card.addView(
+            settingsDialogChoiceRow(
+                activity,
+                if (currentStyleId == defaultReferenceId) {
+                    "$defaultLabel\uff08$defaultStyleName\uff09  \u5f53\u524d"
+                } else {
+                    "$defaultLabel\uff08$defaultStyleName\uff09"
                 },
-            )
-        }
+                colors,
+            ) {
+                onSelected(defaultReferenceId)
+                dialog.dismiss()
+            },
+        )
         styles.forEach { style ->
             val selected = style.id == currentStyleId
             card.addView(
@@ -5647,10 +6096,18 @@ class ReaMicroSettingsHook(
         }.sortedBy { it.bookTitle }
 
     private fun displayReaderBookTitle(bookKey: String, storedTitle: String): String {
+        val currentBookKey = ReaderHighlightBookContext.bookKey
+        val currentBookTitle = ReaderHighlightBookContext.bookTitle
+        val currentMatches = readerHighlightBookIdentityMatches(
+            storedBookKey = bookKey,
+            storedBookTitle = storedTitle,
+            currentBookKey = currentBookKey,
+            currentBookTitle = currentBookTitle,
+        )
         val candidates = buildList {
-            if (ReaderHighlightBookContext.bookKey == bookKey) add(ReaderHighlightBookContext.bookTitle)
-            addAll(bookKey.split('|'))
+            if (currentMatches) add(currentBookTitle)
             add(storedTitle)
+            addAll(bookKey.split('|').asReversed())
         }
         return candidates
             .asSequence()
@@ -5684,9 +6141,18 @@ class ReaMicroSettingsHook(
             dialogueHighlightFontSummary(style.fontFamily),
             style.css.takeIf { it.isNotBlank() }?.let { "CSS" },
             style.ninePatchPath.takeIf { it.isNotBlank() }?.let {
-                if (style.ninePatchSlice.isNotBlank()) "Reeden \u4e5d\u5bab\u683c\u56fe" else ".9.png"
+                if (style.ninePatchSlice.isNotBlank()) "Reeden \u4e5d\u5bab\u683c\u56fe" else "\u56fe\u7247\u80cc\u666f"
             },
         ).joinToString(" / ")
+
+    private fun readerHighlightStyleDefaultTrailing(
+        highlight: ReaderHighlightSettingsSnapshot,
+        style: ReaderHighlightStyle,
+    ): String? =
+        buildList {
+            if (style.id == highlight.defaultLightStyleId) add("\u6d45\u8272\u9ed8\u8ba4")
+            if (style.id == highlight.defaultDarkStyleId) add("\u6df1\u8272\u9ed8\u8ba4")
+        }.takeIf { it.isNotEmpty() }?.joinToString(" / ")
 
     private fun highlightRuleTypeTitle(rule: ReaderHighlightRule): String =
         when (rule.type) {
@@ -5716,12 +6182,36 @@ class ReaMicroSettingsHook(
         highlight: ReaderHighlightSettingsSnapshot,
         rule: ReaderHighlightRule,
     ): String {
-        val light = highlight.styleById(rule.styleId).name
-        val dark = rule.darkStyleId.takeIf { it.isNotBlank() }?.let { highlight.styleById(it).name }
-        return if (dark.isNullOrBlank() || dark == light) {
+        val light = readerHighlightLightStyleLabel(highlight, rule.styleId)
+        val dark = readerHighlightDarkStyleLabel(highlight, rule.darkStyleId)
+        return if (dark == light) {
             "\u6d45/\u6df1 $light"
         } else {
             "\u6d45 $light / \u6df1 $dark"
+        }
+    }
+
+    private fun readerHighlightLightStyleLabel(
+        highlight: ReaderHighlightSettingsSnapshot,
+        styleId: String,
+    ): String {
+        val id = styleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID }
+        return if (id == ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID) {
+            "\u6d45\u8272\u9ed8\u8ba4\uff08${highlight.defaultLightStyle().name}\uff09"
+        } else {
+            highlight.styleById(id).name
+        }
+    }
+
+    private fun readerHighlightDarkStyleLabel(
+        highlight: ReaderHighlightSettingsSnapshot,
+        styleId: String,
+    ): String {
+        val id = styleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID }
+        return if (id == ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID) {
+            "\u6df1\u8272\u9ed8\u8ba4\uff08${highlight.defaultDarkStyle().name}\uff09"
+        } else {
+            highlight.styleById(id).name
         }
     }
 
@@ -5741,7 +6231,8 @@ class ReaMicroSettingsHook(
             id = uniqueReaderHighlightId("rule"),
             name = if (bookKey.isBlank()) "\u9ad8\u4eae\u89c4\u5219 $index" else "\u672c\u4e66\u89c4\u5219 $index",
             type = ReaderHighlightRuleType.FixedText,
-            styleId = ModuleSettings.DEFAULT_READER_HIGHLIGHT_STYLE_ID,
+            styleId = ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID,
+            darkStyleId = ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID,
             bookKey = bookKey,
             bookTitle = bookTitle,
         )
@@ -6560,6 +7051,40 @@ class ReaMicroSettingsHook(
         return method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, 4).invoke(null, background, 0f, 1, null)
     }
 
+    private fun readerHighlightSheetModifier(composer: Any): Any {
+        val height = method(SIZE_KT_CLASS, HEIGHT_METHOD, 2).invoke(
+            null,
+            modifierInstance(),
+            udp(READER_RULE_SHEET_HEIGHT_DP),
+        )
+        return method(BACKGROUND_KT_CLASS, BACKGROUND_DEFAULT_METHOD, 5).invoke(
+            null,
+            height,
+            colorScheme(composer).longMethod("getSurface"),
+            null,
+            2,
+            null,
+        )
+    }
+
+    private fun readerHighlightSheetListModifier(): Any {
+        val filled = method(SIZE_KT_CLASS, FILL_MAX_SIZE_DEFAULT_METHOD, 4).invoke(
+            null,
+            modifierInstance(),
+            0f,
+            1,
+            null,
+        )
+        return method(PADDING_KT_CLASS, PADDING_HORIZONTAL_DEFAULT_METHOD, 5).invoke(
+            null,
+            filled,
+            udp(18),
+            0f,
+            2,
+            null,
+        )
+    }
+
     private fun rowModifier(visible: Boolean): Any =
         method(SIZE_KT_CLASS, HEIGHT_METHOD, 2).invoke(null, modifierInstance(), udp(if (visible) 56 else 0))
 
@@ -7238,6 +7763,8 @@ class ReaMicroSettingsHook(
         object ReaderHighlightConfigSettings : InjectedRoute("\u9ad8\u4eae\u6837\u5f0f")
         object ReaderHighlightTextSettings : InjectedRoute("\u9ad8\u4eae\u89c4\u5219")
         data class ReaderBookHighlightRules(val bookKey: String, val bookTitle: String) : InjectedRoute(bookTitle)
+        data class ReaderBookOnlyHighlightRules(val bookKey: String, val bookTitle: String) : InjectedRoute("\u5355\u4e66\u9ad8\u4eae\u89c4\u5219")
+        data class ReaderBookGlobalHighlightRules(val bookKey: String, val bookTitle: String) : InjectedRoute("\u8ddf\u968f\u5168\u5c40")
         object ReaderHighlightColorPicker : InjectedRoute("\u5bf9\u8bdd\u989c\u8272")
         object CloudCompletionSettings : InjectedRoute("\u4e91\u76d8\u8865\u5168")
         object RotationCompletionSettings : InjectedRoute("\u65cb\u8f6c\u8865\u5168")
@@ -7371,11 +7898,54 @@ class ReaMicroSettingsHook(
         }
     }
 
-    private companion object {
+    companion object {
+        @Volatile private var activeInstance: ReaMicroSettingsHook? = null
+
+        fun openReaderBookGlobalHighlightRulesFromReader(
+            bookKey: String,
+            bookTitle: String,
+            navGraphScope: Any?,
+        ): Boolean =
+            activeInstance?.openInjectedRouteViaHostNavigation(
+                InjectedRoute.ReaderBookGlobalHighlightRules(bookKey, bookTitle),
+                navGraphScope,
+            ) ?: false
+
+        fun openReaderBookOnlyHighlightRulesFromReader(
+            bookKey: String,
+            bookTitle: String,
+            navGraphScope: Any?,
+        ): Boolean =
+            activeInstance?.openInjectedRouteViaHostNavigation(
+                InjectedRoute.ReaderBookOnlyHighlightRules(bookKey, bookTitle),
+                navGraphScope,
+            ) ?: false
+
+        fun renderReaderHighlightRulesSheetFromReader(
+            globalRules: Boolean,
+            bookKey: String,
+            bookTitle: String,
+            composer: Any,
+            onClose: () -> Unit,
+        ): Boolean =
+            activeInstance?.runCatching {
+                renderReaderHighlightRulesSheetFromReader(
+                    globalRules = globalRules,
+                    bookKey = bookKey,
+                    bookTitle = bookTitle,
+                    composer = composer,
+                    onClose = onClose,
+                )
+                true
+            }?.onFailure {
+                XposedBridge.log("$LOG_PREFIX reader highlight rules sheet render failed: ${it.stackTraceToString()}")
+            }?.getOrDefault(false) ?: false
+
         const val LOG_PREFIX = "ReaMicro LSP"
 
         const val SETTINGS_SCREEN_CLASS = "app.zhendong.reamicro.ui.setting.SettingsScreenKt"
-        const val SETTINGS_LIST_BUILDER_METHOD = "SettingsScreen\$lambda\$0\$0\$1\$0"
+        // 2.2 更名后的设置列表构建 lambda；旧版名称不存在时会回退到签名匹配。
+        const val SETTINGS_LIST_BUILDER_METHOD = "SettingsScreen\$lambda\$0\$1\$0\$0"
         const val ACCOUNT_SECURITY_SCREEN_CLASS = "app.zhendong.reamicro.ui.setting.AccountSecurityScreenKt"
         const val ACCOUNT_SECURITY_DELETE_CONTENT_METHOD = "AccountSecurityScreen\$lambda\$0\$0\$4\$0\$2"
         const val ACCOUNT_SECURITY_DELETE_ITEM_METHOD = "DeleteAccountItem"
@@ -7384,12 +7954,24 @@ class ReaMicroSettingsHook(
         const val ROUTE_ABOUT_CLASS = "app.zhendong.reamicro.Route\$About"
         const val BACK_HANDLER_KT_CLASS = "androidx.activity.compose.BackHandlerKt"
         const val BACK_HANDLER_METHOD = "BackHandler"
+        const val NAVIGATION_EVENT_INFO_NONE_CLASS = "androidx.navigationevent.NavigationEventInfo\$None"
+        const val REMEMBER_NAVIGATION_EVENT_STATE_KT_CLASS = "androidx.navigationevent.compose.RememberNavigationEventStateKt"
+        const val REMEMBER_NAVIGATION_EVENT_STATE_METHOD = "rememberNavigationEventState"
+        const val NAVIGATION_EVENT_HANDLER_KT_CLASS = "androidx.navigationevent.compose.NavigationEventHandlerKt"
+        const val NAVIGATION_BACK_HANDLER_METHOD = "NavigationBackHandler"
         const val ABOUT_SCREEN_CLASS = "app.zhendong.reamicro.ui.setting.AboutScreenKt"
         const val ABOUT_SCREEN_METHOD = "AboutScreen"
         const val APP_ABOUT_CLASS = "app.zhendong.reamicro.ui.setting.components.AppAboutKt"
         const val APP_ABOUT_METHOD = "AppAbout"
         const val APP_TOP_BAR_CLASS = "app.zhendong.reamicro.arch.components.AppTopBarKt"
         const val APP_TOP_BAR_METHOD = "AppTopBar"
+        const val TOP_APP_BAR_DEFAULTS_CLASS = "androidx.compose.material3.TopAppBarDefaults"
+        const val WINDOW_INSETS_CLASS = "androidx.compose.foundation.layout.WindowInsets"
+        const val WINDOW_INSETS_KT_CLASS = "androidx.compose.foundation.layout.WindowInsetsKt"
+        const val WINDOW_INSETS_EXT_ANDROID_KT_CLASS = "app.zhendong.reamicro.ui.insets.WindowInsetsExt_androidKt"
+        const val EVA_ICONS_CLASS = "compose.icons.EvaIcons"
+        const val EVA_OUTLINE_KT_CLASS = "compose.icons.evaicons.__OutlineKt"
+        const val EVA_CLOSE_KT_CLASS = "compose.icons.evaicons.outline.CloseKt"
 
         const val SCAFFOLD_KT_CLASS = "androidx.compose.material3.ScaffoldKt"
         const val SCAFFOLD_METHOD = "Scaffold-TvnljyQ"
@@ -7447,6 +8029,7 @@ class ReaMicroSettingsHook(
         const val FONT_FAMILY_KT_CLASS = "androidx.compose.ui.text.font.FontFamilyKt"
         const val FONT_WEIGHT_CLASS = "androidx.compose.ui.text.font.FontWeight"
         const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
+        const val READER_RULE_SHEET_HEIGHT_DP = 355
         const val ARRANGEMENT_CLASS = "androidx.compose.foundation.layout.Arrangement"
         const val SPACED_BY_METHOD = "spacedBy-0680j_4"
         const val ALIGNMENT_CLASS = "androidx.compose.ui.Alignment"
@@ -7542,7 +8125,7 @@ class ReaMicroSettingsHook(
         const val EXTRA_IMPORT_NAME = "com.reamicro.fix.import.NAME"
         const val ONLINE_SOURCE_REMOVE_CONFIRM_WINDOW_MS = 3_000L
         const val FONT_FILES_CACHE_WINDOW_MS = 500L
-        val READER_HIGHLIGHT_COLOR_OPTIONS = listOf(
+        private val READER_HIGHLIGHT_COLOR_OPTIONS = listOf(
             HighlightColorOption("#FF9800", "\u6a59\u8272"),
             HighlightColorOption("#F59E0B", "\u6696\u6a59"),
             HighlightColorOption("#D97706", "\u6df1\u6a59"),
