@@ -34,6 +34,7 @@ import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
 import android.util.Base64
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
@@ -726,6 +727,14 @@ class ReaMicroSettingsHook(
                     composer = itemComposer,
                 )
             }
+            addLazyItem(lazyListScope, PROFILE_BACKGROUND_SWITCHES_ITEM_KEY) { itemComposer ->
+                renderNestedSettingsEntry(
+                    title = "\u4e3b\u9875\u8865\u5168",
+                    callbackName = "OpenProfileBackgroundSettings",
+                    route = InjectedRoute.ProfileBackgroundSettings,
+                    composer = itemComposer,
+                )
+            }
             addLazyItem(lazyListScope, ROTATION_SWITCHES_ITEM_KEY) { itemComposer ->
                 renderNestedSettingsEntry(
                     title = "\u65cb\u8f6c\u8865\u5168",
@@ -747,14 +756,6 @@ class ReaMicroSettingsHook(
                     title = ABOUT_COMPLETION_TITLE,
                     callbackName = "OpenAboutCompletion",
                     route = InjectedRoute.AboutCompletion,
-                    composer = itemComposer,
-                )
-            }
-            addLazyItem(lazyListScope, PROFILE_BACKGROUND_SWITCHES_ITEM_KEY) { itemComposer ->
-                renderNestedSettingsEntry(
-                    title = "\u4e2a\u4eba\u4e2d\u5fc3\u80cc\u666f",
-                    callbackName = "OpenProfileBackgroundSettings",
-                    route = InjectedRoute.ProfileBackgroundSettings,
                     composer = itemComposer,
                 )
             }
@@ -1552,43 +1553,6 @@ class ReaMicroSettingsHook(
             val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
             profileBackgroundVersionValue()
             val snapshot = settings.snapshot()
-            val switchRows = listOf(
-                ToggleRow(
-                    key = ModuleSettings.KEY_PROFILE_BACKGROUND_ENABLED,
-                    title = "\u542f\u7528\u4e2a\u4eba\u4e2d\u5fc3\u80cc\u666f",
-                    checked = snapshot.profileBackgroundEnabled,
-                    onChanged = { checked, _ ->
-                        settings.setProfileBackgroundEnabled(checked)
-                        bumpProfileBackgroundVersion()
-                        checked
-                    },
-                ),
-                ToggleRow(
-                    key = ModuleSettings.KEY_PROFILE_BACKGROUND_USE_IMAGE,
-                    title = "\u4f7f\u7528\u56fe\u7247\u80cc\u666f",
-                    checked = snapshot.profileBackgroundUseImage,
-                    onChanged = { checked, _ ->
-                        settings.setProfileBackgroundUseImage(checked)
-                        bumpProfileBackgroundVersion()
-                        checked
-                    },
-                ),
-            )
-            addLazyItem(lazyListScope, PROFILE_BACKGROUND_SWITCHES_ITEM_KEY) { itemComposer ->
-                renderHostSettingsCard(switchRows, itemComposer)
-            }
-            val colorRows = listOf(
-                ActionRow(
-                    key = "profile_background_color_entry",
-                    title = "\u80cc\u666f\u989c\u8272",
-                    subtitle = profileBackgroundColorSummary(snapshot.profileBackgroundColor),
-                    singleLineSubtitle = true,
-                    onClick = { openProfileBackgroundColorDialog() },
-                ),
-            )
-            addLazyItem(lazyListScope, PROFILE_BACKGROUND_COLOR_PICKER_ITEM_KEY) { itemComposer ->
-                renderHostActionCard(colorRows, itemComposer)
-            }
             val imageSubtitle = if (snapshot.profileBackgroundImage.isBlank()) {
                 "\u672a\u9009\u62e9"
             } else {
@@ -4618,18 +4582,20 @@ class ReaMicroSettingsHook(
     }
 
     private inner class SettingsDialogColors(context: Context) {
-        val card: Int = Color.rgb(246, 245, 241)
-        val border: Int = Color.rgb(224, 221, 214)
-        val title: Int = Color.rgb(28, 25, 22)
-        val body: Int = Color.rgb(86, 80, 73)
-        val field: Int = Color.rgb(238, 236, 231)
-        val primary: Int = Color.rgb(163, 72, 18)
-        val primarySoft: Int = Color.rgb(246, 226, 211)
-        val primaryText: Int = Color.rgb(145, 62, 14)
-        val neutralSoft: Int = Color.rgb(235, 233, 228)
-        val neutralText: Int = Color.rgb(70, 64, 58)
-        val destructiveSoft: Int = Color.rgb(253, 236, 236)
-        val destructiveText: Int = Color.rgb(190, 54, 54)
+        private val dark = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+        val card: Int = if (dark) Color.rgb(30, 34, 40) else Color.WHITE
+        val border: Int = if (dark) Color.rgb(62, 69, 78) else Color.rgb(226, 230, 236)
+        val title: Int = if (dark) Color.WHITE else Color.rgb(29, 33, 39)
+        val body: Int = if (dark) Color.rgb(190, 198, 208) else Color.rgb(86, 94, 106)
+        val field: Int = if (dark) Color.rgb(39, 44, 51) else Color.rgb(246, 248, 251)
+        val primary: Int = settingsThemeColor(context, android.R.attr.colorAccent, Color.rgb(45, 135, 120))
+        val primarySoft: Int = if (dark) Color.rgb(36, 70, 64) else Color.rgb(230, 244, 241)
+        val primaryText: Int = if (dark) Color.rgb(166, 224, 212) else primary
+        val neutralSoft: Int = if (dark) Color.rgb(43, 48, 55) else Color.rgb(242, 244, 247)
+        val neutralText: Int = if (dark) Color.rgb(218, 223, 230) else Color.rgb(74, 82, 94)
+        val destructiveSoft: Int = if (dark) Color.rgb(82, 39, 42) else Color.rgb(253, 236, 236)
+        val destructiveText: Int = if (dark) Color.rgb(255, 172, 172) else Color.rgb(214, 69, 69)
     }
 
     private fun settingsDialogCard(context: Context, colors: SettingsDialogColors): LinearLayout =
@@ -4983,6 +4949,11 @@ class ReaMicroSettingsHook(
 
     private fun settingsDp(context: Context, value: Int): Int =
         (value * context.resources.displayMetrics.density).toInt()
+
+    private fun settingsThemeColor(context: Context, attr: Int, fallback: Int): Int {
+        val value = TypedValue()
+        return if (context.theme.resolveAttribute(attr, value, true)) value.data else fallback
+    }
 
     private fun openDictionaryPresetDialog() {
         openDictionaryPresetDialog(existing = null)
@@ -7887,7 +7858,7 @@ class ReaMicroSettingsHook(
         data class ReaderBookOnlyHighlightRules(val bookKey: String, val bookTitle: String) : InjectedRoute("\u5355\u4e66\u9ad8\u4eae\u89c4\u5219")
         data class ReaderBookGlobalHighlightRules(val bookKey: String, val bookTitle: String) : InjectedRoute("\u8ddf\u968f\u5168\u5c40")
         object ReaderHighlightColorPicker : InjectedRoute("\u5bf9\u8bdd\u989c\u8272")
-        object ProfileBackgroundSettings : InjectedRoute("\u4e2a\u4eba\u4e2d\u5fc3\u80cc\u666f")
+        object ProfileBackgroundSettings : InjectedRoute("\u4e3b\u9875\u8865\u5168")
         object CloudCompletionSettings : InjectedRoute("\u4e91\u76d8\u8865\u5168")
         object RotationCompletionSettings : InjectedRoute("\u65cb\u8f6c\u8865\u5168")
         object AccountSwitch : InjectedRoute(ACCOUNT_SWITCH_TITLE)

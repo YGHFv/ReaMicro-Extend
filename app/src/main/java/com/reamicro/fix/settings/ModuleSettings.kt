@@ -296,7 +296,7 @@ data class ModuleSettingsSnapshot(
             (rotation.autoEnabled || rotation.portraitLockEnabled || rotation.landscapeLockEnabled)
 
     val canShowProfileBackground: Boolean
-        get() = moduleEnabled && profileBackgroundEnabled
+        get() = moduleEnabled && profileBackgroundUseImage && profileBackgroundImage.isNotBlank()
 
     val enabledAssociationSearchSources: Set<BookSource>
         get() = emptySet()
