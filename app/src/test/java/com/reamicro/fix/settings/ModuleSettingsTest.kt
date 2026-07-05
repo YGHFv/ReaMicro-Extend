@@ -195,7 +195,8 @@ class ModuleSettingsTest {
     fun moduleParentSwitchControlsProfileBackground() {
         val disabledParent = ModuleSettingsSnapshot(
             moduleEnabled = false,
-            profileBackgroundEnabled = true,
+            profileBackgroundUseImage = true,
+            profileBackgroundImage = "/data/profile_background/bg.png",
         )
         val enabledParent = disabledParent.copy(moduleEnabled = true)
 
@@ -232,7 +233,20 @@ class ModuleSettingsTest {
             profileBackgroundEnabled = true,
             profileBackgroundColor = "#FF1F2937",
         )
+        // 颜色值仍会被快照携带（配置保留），但纯色模式已停用，
+        // 只有选择了图片背景才会生效。
         assertEquals("#FF1F2937", snapshot.profileBackgroundColor)
+        assertFalse(snapshot.canShowProfileBackground)
+    }
+
+    @Test
+    fun profileBackgroundImageSelectionEnablesShow() {
+        val snapshot = ModuleSettingsSnapshot(
+            moduleEnabled = true,
+            profileBackgroundUseImage = true,
+            profileBackgroundImage = "/data/profile_background/bg.png",
+        )
+
         assertTrue(snapshot.canShowProfileBackground)
     }
 
