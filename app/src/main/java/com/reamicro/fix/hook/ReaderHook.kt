@@ -2,10 +2,16 @@ package com.reamicro.fix.hook
 
 import android.app.Activity
 import android.app.Dialog
+import android.content.BroadcastReceiver
 import android.content.ComponentCallbacks2
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.Configuration
 import android.os.Build
+import android.os.SystemClock
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -18,6 +24,7 @@ import android.text.Spanned
 import android.text.TextUtils
 import android.text.style.ForegroundColorSpan
 import android.text.style.StyleSpan
+import android.util.Base64
 import android.util.Xml
 import android.view.Gravity
 import android.view.KeyEvent
@@ -39,12 +46,17 @@ import com.reamicro.fix.ai.AiDictionaryPreset
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.ai.AiApiTestResult
 import com.reamicro.fix.reader.SearchHighlightPlanner
+import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.settings.ReaderHighlightBookContext
 import com.reamicro.fix.settings.XposedModuleSettings
+import com.reamicro.fix.tts.ReadAloudIntents
+import com.reamicro.fix.tts.TtsSourceEntry
+import com.reamicro.fix.tts.TtsSourceStore
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
+import java.io.ByteArrayOutputStream
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.io.File
@@ -66,6 +78,7 @@ class ReaderHook(
     private val activityProvider: () -> Activity?,
     private val settingsProvider: () -> ModuleSettingsSnapshot = { ModuleSettingsSnapshot() },
     private val settings: XposedModuleSettings? = null,
+    private val isActivityResumedProvider: () -> Boolean = { true },
 ) {
     private var nativeSelectionHookInstalled: Boolean = false
     private var currentSelectionControllerRef: WeakReference<Any>? = null
@@ -82,7 +95,33 @@ class ReaderHook(
     private var searchOverlayThemeCallbacksActivityRef: WeakReference<Activity>? = null
     private var bottomSearchReceiverRef: WeakReference<Any>? = null
     private var bottomSearchBookRef: WeakReference<Any>? = null
+    private var bottomReadAloudReceiverRef: WeakReference<Any>? = null
+    private var bottomReadAloudBookRef: WeakReference<Any>? = null
     private var currentReaderNavGraphScopeRef: WeakReference<Any>? = null
+    private var readAloudMenuButtonRef: WeakReference<View>? = null
+    private var readAloudMenuButtonActivityRef: WeakReference<Activity>? = null
+    private val readAloudRestartLock = Any()
+    private val readAloudHighlightReceiverLock = Any()
+    private var readAloudHighlightReceiver: BroadcastReceiver? = null
+    private var readAloudHighlightReceiverContextRef: WeakReference<Context>? = null
+    @Volatile private var activeReadAloudBookKey: String = ""
+    @Volatile private var activeReadAloudSessionId: String = ""
+    @Volatile private var activeReadAloudPaused: Boolean = false
+    @Volatile private var lastReadAloudPageKey: String = ""
+    @Volatile private var suppressReadAloudRestartUntilMs: Long = 0L
+    @Volatile private var readAloudRestartSeq: Long = 0L
+    @Volatile private var readAloudPageProbeLogKey: String = ""
+    @Volatile private var activeReadAloudHighlightId: Long? = null
+    @Volatile private var activeReadAloudHighlightMark: Any? = null
+    @Volatile private var lastReadAloudFollowCfi: String = ""
+    @Volatile private var lastReadAloudFollowAtMs: Long = 0L
+    @Volatile private var isDispatchingReadAloudStatistics: Boolean = false
+    @Volatile private var lastReadAloudStatisticsSessionId: String = ""
+    @Volatile private var lastReadAloudStatisticsCfi: String = ""
+    @Volatile private var lastReadAloudStatisticsElapsedMs: Long = 0L
+    @Volatile private var pendingReadAloudProgressRestore: Boolean = false
+    @Volatile private var lastRestoredReadAloudProgressKey: String = ""
+    @Volatile private var lastReadAloudProgressSyncAtMs: Long = 0L
     @Volatile private var pendingReaderHighlightSheet: ReaderHighlightSheetRequest? = null
     private val composeMethodCache = HashMap<String, Method>()
     private val renderingHighlightQuickRow = ThreadLocal.withInitial { false }
@@ -128,6 +167,7 @@ class ReaderHook(
                 refreshReaderHighlightWindow(source)
             } ?: refreshReaderHighlightWindow(source)
         }
+        ensureReadAloudHighlightReceiver()
         hookContentDomRenderTextWidthFallback()
         hookScrollPagerCrashGuard()
         installNativeSelectionHooks()
@@ -155,8 +195,17 @@ class ReaderHook(
         return snapshot.moduleEnabled
     }
 
+    private fun canRunReadAloud(): Boolean =
+        settingsProvider().canRunReaderReadAloud
+
+    private fun canUseReadAloudSelection(): Boolean =
+        settingsProvider().canUseReaderReadAloudSelection && currentEpubRoot() != null
+
     private fun canShowReaderSearchEntry(): Boolean =
         canRunFullTextSearch() && currentEpubRoot() != null && currentPageRef?.get() != null
+
+    private fun canShowReaderReadAloudEntry(): Boolean =
+        canRunReadAloud() && currentEpubRoot() != null && currentPageRef?.get() != null
 
     private fun hookReaderViewModel() {
         runCatching {
@@ -164,22 +213,29 @@ class ReaderHook(
             XposedBridge.hookAllConstructors(cls, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     currentViewModelRef = WeakReference(param.thisObject)
+                    ensureReadAloudHighlightReceiver()
+                    requestReadAloudProgressSync(reason = "viewModel created")
                     param.args?.firstOrNull { it?.javaClass?.name == SESSION_CLASS }
                         ?.let { session ->
                             currentSessionRef = WeakReference(session)
                             restoreTranslateFlipStyleIfScrollCrashed(session, "ReaderViewModel")
-                        }
+                    }
                     XposedBridge.log("$LOG_PREFIX ReaderViewModel created")
                     scheduleRestorePersistedSearchOrigin("viewModel created")
+                    scheduleRestorePersistedReadAloudProgress("viewModel created")
                 }
             })
             XposedBridge.hookAllMethods(cls, "onCleared", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     XposedBridge.log("$LOG_PREFIX ReaderViewModel cleared")
+                    clearReadAloudHighlight(param.thisObject)
                     if (currentViewModelRef?.get() === param.thisObject) currentViewModelRef = null
                     currentSessionRef = null
                     clearScrollCrashPending("ReaderViewModel cleared")
                     currentSelectionControllerRef = null
+                    bottomReadAloudReceiverRef = null
+                    bottomReadAloudBookRef = null
+                    activityProvider()?.runOnUiThread { removeReadAloudMenuButton() }
                     currentEpubRef = null
                     currentPageRef = null
                     resetFullTextSearchState("ReaderViewModel cleared", removeOverlays = true)
@@ -190,12 +246,16 @@ class ReaderHook(
                     val intent = param.args?.getOrNull(0) ?: return
                     if (intent.javaClass.name != "$READER_UI_INTENT_CLASS\$Statistics") return
                     val page = callNoArg(intent, "getPage") ?: return
+                    currentPageRef = WeakReference(page)
                     currentVisiblePageSignature = epubPageSignature(page)
                     currentVisiblePageNumber = epubPageNumber(page)
                     XposedBridge.log(
                         "$LOG_PREFIX full-text search visible page " +
                             "number=${currentVisiblePageNumber ?: -1} sig=${currentVisiblePageSignature.orEmpty()}",
                     )
+                    if (!isDispatchingReadAloudStatistics) {
+                        scheduleReadAloudRestartFromPage(page)
+                    }
                 }
             })
         }.onFailure {
@@ -385,6 +445,7 @@ class ReaderHook(
                             book = param.args?.getOrNull(2),
                             catalog = catalog,
                         )
+                        ensureReadAloudHighlightReceiver()
                         val previousContext = lastCatalogContext
                         if (previousContext != null && isDifferentSearchBook(previousContext, context)) {
                             resetFullTextSearchState("catalog book changed", removeOverlays = true)
@@ -392,8 +453,8 @@ class ReaderHook(
                         lastCatalogContext = context
                         updateReaderHighlightBookContext(bookKey(context), bookTitle(context), "catalog context")
                         injectSearchHighlightIntoReaderCatalog(param)
-                        ensureSearchIndexAsync(context)
                         scheduleRestorePersistedSearchOrigin("catalog context")
+                        scheduleRestorePersistedReadAloudProgress("catalog context")
                     }
                 })
             }
@@ -447,11 +508,15 @@ class ReaderHook(
 
     private fun handleHomeBookshelfRendered(source: String) {
         val hadReaderSearchState = hasFullTextSearchState()
+        stopReadAloudIfPausedOnLeaveReader("home rendered: $source")
         if (activeSearchNavigation != null) {
             returnToSearchOrigin(clearNavigation = true, removeBar = false)
         }
+        removeReadAloudMenuButton()
         currentEpubRef = null
         currentPageRef = null
+        bottomReadAloudReceiverRef = null
+        bottomReadAloudBookRef = null
         readerBottomMenuVisible = false
         updateReaderHighlightBookContext("", "", "home rendered: $source", requestRefresh = false)
         if (hadReaderSearchState) {
@@ -555,10 +620,15 @@ class ReaderHook(
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val statusName = param.args?.getOrNull(3)?.toString().orEmpty()
                         val canShowSearchEntry = canShowReaderSearchEntry()
+                        val canShowReadAloudEntry = canShowReaderReadAloudEntry()
                         readerBottomMenuVisible = canShowSearchEntry && statusName.isNotBlank() && statusName != "Reader"
                         if (canShowSearchEntry && statusName == "Menu") {
                             param.args?.getOrNull(1)?.let { bottomSearchReceiverRef = WeakReference(it) }
                             param.args?.getOrNull(2)?.let { bottomSearchBookRef = WeakReference(it) }
+                        }
+                        if (canShowReadAloudEntry && statusName == "Menu") {
+                            param.args?.getOrNull(1)?.let { bottomReadAloudReceiverRef = WeakReference(it) }
+                            param.args?.getOrNull(2)?.let { bottomReadAloudBookRef = WeakReference(it) }
                         }
                     }
 
@@ -568,8 +638,11 @@ class ReaderHook(
                                 readerBottomMenuVisible = false
                                 bottomSearchReceiverRef = null
                                 bottomSearchBookRef = null
+                                bottomReadAloudReceiverRef = null
+                                bottomReadAloudBookRef = null
                                 removeSearchMenuButton()
                                 removeSearchNavigationBar()
+                                removeReadAloudMenuButton()
                             }
                             return
                         }
@@ -578,15 +651,21 @@ class ReaderHook(
                         val status = param.args?.getOrNull(3)
                         val statusName = status?.toString().orEmpty()
                         val canShowSearchEntry = canShowReaderSearchEntry()
+                        val canShowReadAloudEntry = canShowReaderReadAloudEntry()
                         readerBottomMenuVisible = canShowSearchEntry && statusName.isNotBlank() && statusName != "Reader"
                         if (canShowSearchEntry && statusName == "Menu") {
                             bottomSearchReceiverRef = receiver?.let { WeakReference(it) }
                             bottomSearchBookRef = book?.let { WeakReference(it) }
                         }
+                        if (canShowReadAloudEntry && statusName == "Menu") {
+                            bottomReadAloudReceiverRef = receiver?.let { WeakReference(it) }
+                            bottomReadAloudBookRef = book?.let { WeakReference(it) }
+                        }
                         val activity = activityProvider() ?: return
                         activity.runOnUiThread {
                             removeSearchMenuButton()
                             updateSearchNavigationForBottomState(activity)
+                            removeReadAloudMenuButton()
                         }
                     }
                 })
@@ -1081,6 +1160,57 @@ class ReaderHook(
         maybeUnregisterSearchOverlayThemeCallbacks()
     }
 
+    private fun showReadAloudMenuButton(activity: Activity, receiver: Any?, book: Any?) {
+        if (!canShowReaderReadAloudEntry()) {
+            removeReadAloudMenuButton()
+            return
+        }
+        val decor = activity.window?.decorView as? ViewGroup ?: return
+        val existing = readAloudMenuButtonRef?.get()
+        if (existing != null && readAloudMenuButtonActivityRef?.get() === activity && existing.parent === decor) {
+            (existing as? ReadAloudMenuButtonView)?.refreshColors()
+            existing.visibility = View.VISIBLE
+            existing.bringToFront()
+            bottomReadAloudReceiverRef = receiver?.let { WeakReference(it) } ?: bottomReadAloudReceiverRef
+            bottomReadAloudBookRef = book?.let { WeakReference(it) } ?: bottomReadAloudBookRef
+            return
+        }
+        readAloudMenuButtonRef = null
+        readAloudMenuButtonActivityRef = null
+        bottomReadAloudReceiverRef = receiver?.let { WeakReference(it) } ?: bottomReadAloudReceiverRef
+        bottomReadAloudBookRef = book?.let { WeakReference(it) } ?: bottomReadAloudBookRef
+        decor.post {
+            if (!canShowReaderReadAloudEntry()) return@post
+            removeTaggedViews(decor, READ_ALOUD_MENU_BUTTON_TAG)
+            removeTaggedViews(activity.findViewById(android.R.id.content), READ_ALOUD_MENU_BUTTON_TAG)
+            val button = ReadAloudMenuButtonView(activity).apply {
+                tag = READ_ALOUD_MENU_BUTTON_TAG
+                contentDescription = "\u542c\u4e66"
+                alpha = 0.94f
+                elevation = dp(activity, 6).toFloat()
+                setOnClickListener { openReadAloud() }
+            }
+            decor.addView(button, FrameLayout.LayoutParams(
+                dp(activity, SEARCH_MENU_BUTTON_SIZE_DP),
+                dp(activity, SEARCH_MENU_BUTTON_SIZE_DP),
+            ).apply {
+                gravity = Gravity.BOTTOM or Gravity.END
+                rightMargin = dp(activity, READ_ALOUD_MENU_BUTTON_RIGHT_MARGIN_DP)
+                bottomMargin = dp(activity, SEARCH_MENU_BUTTON_BOTTOM_MARGIN_DP)
+            })
+            button.bringToFront()
+            readAloudMenuButtonRef = WeakReference(button)
+            readAloudMenuButtonActivityRef = WeakReference(activity)
+        }
+    }
+
+    private fun removeReadAloudMenuButton() {
+        val activity = readAloudMenuButtonActivityRef?.get() ?: activityProvider()
+        readAloudMenuButtonRef = null
+        readAloudMenuButtonActivityRef = null
+        postRemoveTaggedViews(activity, READ_ALOUD_MENU_BUTTON_TAG)
+    }
+
     private fun ensureSearchOverlayThemeCallbacks(activity: Activity) {
         if (searchOverlayThemeCallbacksActivityRef?.get() === activity && searchOverlayThemeCallbacks != null) return
         unregisterSearchOverlayThemeCallbacks()
@@ -1148,6 +1278,687 @@ class ReaderHook(
             showFullTextSearchPage(activity, context)
         }
     }
+
+    private fun bottomReadAloudContext(receiver: Any?, book: Any?): CatalogContext? {
+        val root = currentEpubRoot()
+        val existing = lastCatalogContext
+        val targetBook = book
+            ?: existing?.book
+            ?: currentUiStateBook()
+            ?: bottomReadAloudBookRef?.get()
+            ?: bottomSearchBookRef?.get()
+        if (root == null && targetBook == null && existing == null) {
+            XposedBridge.log(
+                "$LOG_PREFIX read aloud context unavailable root=false uiBook=false " +
+                    "page=${currentPageRef?.get()?.javaClass?.name.orEmpty()}",
+            )
+            return null
+        }
+        val catalog = existing?.takeIf { bookKey(it).isNotBlank() }?.catalog.orEmpty()
+        return CatalogContext(receiver ?: existing?.intentReceiver ?: bottomSearchReceiverRef?.get(), targetBook, catalog)
+    }
+
+    private fun ensureReadAloudHighlightReceiver() {
+        val context = activityProvider()?.applicationContext ?: return
+        synchronized(readAloudHighlightReceiverLock) {
+            val existingContext = readAloudHighlightReceiverContextRef?.get()
+            if (readAloudHighlightReceiver != null && existingContext === context) return
+            readAloudHighlightReceiver?.let { receiver ->
+                runCatching { existingContext?.unregisterReceiver(receiver) }
+            }
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    handleReadAloudHighlightBroadcast(intent ?: return)
+                }
+            }
+            val filter = IntentFilter().apply {
+                addAction(ReadAloudIntents.ACTION_CURRENT)
+                addAction(ReadAloudIntents.ACTION_CLEAR)
+            }
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+                } else {
+                    @Suppress("DEPRECATION")
+                    context.registerReceiver(receiver, filter)
+                }
+                readAloudHighlightReceiver = receiver
+                readAloudHighlightReceiverContextRef = WeakReference(context)
+                XposedBridge.log("$LOG_PREFIX read aloud highlight receiver registered")
+                requestReadAloudProgressSync(context, "receiver registered")
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX read aloud highlight receiver failed: ${it.stackTraceToString()}")
+            }
+        }
+    }
+
+    private fun hostApplicationContext(): Context? =
+        activityProvider()?.applicationContext ?: readAloudHighlightReceiverContextRef?.get()
+
+    private fun requestReadAloudProgressSync(context: Context? = hostApplicationContext(), reason: String) {
+        val appContext = context ?: return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastReadAloudProgressSyncAtMs < READ_ALOUD_PROGRESS_SYNC_MIN_INTERVAL_MS) return
+        lastReadAloudProgressSyncAtMs = now
+        runCatching {
+            val intent = Intent(ReadAloudIntents.ACTION_SYNC_PROGRESS).apply {
+                setClassName(ReadAloudIntents.MODULE_PACKAGE_NAME, ReadAloudIntents.COMMAND_RECEIVER_CLASS_NAME)
+            }
+            appContext.sendBroadcast(intent)
+            XposedBridge.log("$LOG_PREFIX read aloud progress sync requested reason=$reason")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX read aloud progress sync request failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun handleReadAloudHighlightBroadcast(intent: Intent) {
+        when (intent.action) {
+            ReadAloudIntents.ACTION_CURRENT -> applyReadAloudHighlight(intent)
+            ReadAloudIntents.ACTION_CLEAR -> clearReadAloudHighlightFromIntent(intent)
+        }
+    }
+
+    private fun clearReadAloudHighlightFromIntent(intent: Intent) {
+        val sessionId = intent.getStringExtra(ReadAloudIntents.EXTRA_SESSION_ID).orEmpty()
+        val bookKey = intent.getStringExtra(ReadAloudIntents.EXTRA_BOOK_KEY).orEmpty()
+        val activeSession = activeReadAloudSessionId
+        val activeBook = activeReadAloudBookKey
+        if (sessionId.isNotBlank() && activeSession.isNotBlank() && sessionId != activeSession &&
+            (bookKey.isBlank() || bookKey != activeBook)
+        ) {
+            return
+        }
+        if (intent.getBooleanExtra(ReadAloudIntents.EXTRA_CLEAR_SESSION, false)) {
+            synchronized(readAloudRestartLock) {
+                readAloudRestartSeq += 1
+            }
+            activeReadAloudSessionId = ""
+            activeReadAloudBookKey = ""
+            activeReadAloudPaused = false
+            lastReadAloudFollowCfi = ""
+            lastReadAloudFollowAtMs = 0L
+            lastReadAloudPageKey = ""
+        }
+        clearReadAloudHighlight()
+    }
+
+    private fun applyReadAloudHighlight(intent: Intent) {
+        val sessionId = intent.getStringExtra(ReadAloudIntents.EXTRA_SESSION_ID).orEmpty()
+        val bookKey = intent.getStringExtra(ReadAloudIntents.EXTRA_BOOK_KEY).orEmpty()
+        val currentBookKey = lastCatalogContext?.let(::bookKey).orEmpty()
+        val isCurrentReaderBook = isReadAloudBookCurrentForUi(bookKey, currentBookKey)
+        val playing = intent.getBooleanExtra(ReadAloudIntents.EXTRA_PLAYING, true)
+        val restoredProgress = intent.getBooleanExtra(ReadAloudIntents.EXTRA_RESTORED_PROGRESS, false)
+        if (!restoredProgress && sessionId.isNotBlank() && activeReadAloudSessionId.isNotBlank() && sessionId != activeReadAloudSessionId) {
+            return
+        }
+        if (!restoredProgress && bookKey.isNotBlank() && activeReadAloudBookKey.isNotBlank() && bookKey != activeReadAloudBookKey) {
+            return
+        }
+        if (!restoredProgress || playing) {
+            if (activeReadAloudSessionId.isBlank()) activeReadAloudSessionId = sessionId
+            if (activeReadAloudBookKey.isBlank()) activeReadAloudBookKey = bookKey
+            activeReadAloudPaused = !playing
+        }
+
+        val startCfi = intent.getStringExtra(ReadAloudIntents.EXTRA_START_CFI).orEmpty()
+        if (startCfi.isBlank()) {
+            clearReadAloudHighlight()
+            return
+        }
+        val spokenText = intent.getStringExtra(ReadAloudIntents.EXTRA_TEXT).orEmpty().trim()
+        if (spokenText.isBlank()) return
+        val highlightText = intent.getStringExtra(ReadAloudIntents.EXTRA_HIGHLIGHT_TEXT)
+            .orEmpty()
+            .trim()
+            .ifBlank { spokenText }
+        val endCfi = intent.getStringExtra(ReadAloudIntents.EXTRA_END_CFI).orEmpty().ifBlank { startCfi }
+        val paragraphIndex = intent.getIntExtra(ReadAloudIntents.EXTRA_PARAGRAPH_INDEX, 0).coerceAtLeast(0)
+        val chapterIndex = intent.getIntExtra(ReadAloudIntents.EXTRA_CHAPTER_INDEX, 0).coerceAtLeast(0)
+        val chapterTitle = intent.getStringExtra(ReadAloudIntents.EXTRA_CHAPTER_TITLE).orEmpty()
+            .ifBlank { fallbackCurrentChapterTitle() }
+        val elapsedMs = intent.getLongExtra(ReadAloudIntents.EXTRA_PLAYBACK_ELAPSED_MS, 0L).coerceAtLeast(0L)
+        val progress = rememberReadAloudProgress(
+            sessionId = sessionId,
+            bookKey = bookKey,
+            bookTitle = intent.getStringExtra(ReadAloudIntents.EXTRA_BOOK_TITLE).orEmpty(),
+            startCfi = startCfi,
+            endCfi = endCfi,
+            paragraphIndex = paragraphIndex,
+            chapterIndex = chapterIndex,
+            chapterTitle = chapterTitle,
+            summary = spokenText,
+            elapsedMs = elapsedMs,
+        )
+        if (isCurrentReaderBook) {
+            dispatchReadAloudStatistics(progress, "current")
+            if (restoredProgress || !playing) {
+                scheduleRestorePersistedReadAloudProgress("read aloud progress broadcast")
+            }
+        } else {
+            XposedBridge.log("$LOG_PREFIX read aloud progress kept for background book cfi=$startCfi")
+            return
+        }
+        val id = READ_ALOUD_HIGHLIGHT_MARK_ID_BASE + (paragraphIndex % READ_ALOUD_HIGHLIGHT_MARK_ID_RANGE)
+        val mark = createReaderMark(
+            id = id,
+            chapter = chapterTitle,
+            startCfi = startCfi,
+            endCfi = endCfi,
+            quote = highlightText,
+            style = MARK_STYLE_FILL,
+            color = MARK_COLOR_RED,
+        ) ?: return
+        activeReadAloudHighlightId = id
+        activeReadAloudHighlightMark = mark
+        XposedBridge.log("$LOG_PREFIX read aloud highlight active ${describeSearchHighlightMark(mark)}")
+        injectReadAloudHighlight(mark)
+        if (playing) {
+            scheduleReadAloudHighlightFollow(
+                expectedBookKey = bookKey,
+                startCfi = startCfi,
+                chapterIndex = chapterIndex,
+                chapterTitle = chapterTitle,
+                text = spokenText,
+                mark = mark,
+            )
+        }
+    }
+
+    private fun scheduleReadAloudHighlightFollow(
+        expectedBookKey: String,
+        startCfi: String,
+        chapterIndex: Int,
+        chapterTitle: String,
+        text: String,
+        mark: Any,
+    ) {
+        if (!shouldFollowReadAloudHighlight(expectedBookKey, startCfi)) return
+        val now = SystemClock.elapsedRealtime()
+        if (startCfi == lastReadAloudFollowCfi && now - lastReadAloudFollowAtMs < READ_ALOUD_FOLLOW_MIN_INTERVAL_MS) {
+            return
+        }
+        lastReadAloudFollowCfi = startCfi
+        lastReadAloudFollowAtMs = now
+        val activity = activityProvider() ?: return
+        val block = {
+            if (shouldFollowReadAloudHighlight(expectedBookKey, startCfi)) {
+                suppressReadAloudRestartUntilMs = SystemClock.elapsedRealtime() + READ_ALOUD_RESTART_SUPPRESS_MS
+                val jumped = runCatching {
+                    jumpToCfi(
+                        receiver = lastCatalogContext?.intentReceiver,
+                        viewModel = currentViewModelRef?.get(),
+                        cfi = startCfi,
+                        mark = mark,
+                        chapterIndex = chapterIndex,
+                        title = chapterTitle,
+                        summary = text.take(120),
+                    )
+                }.onFailure {
+                    XposedBridge.log("$LOG_PREFIX read aloud follow jump failed: ${it.stackTraceToString()}")
+                }.getOrDefault(false)
+                XposedBridge.log("$LOG_PREFIX read aloud follow jump dispatched=$jumped cfi=$startCfi")
+                if (jumped) {
+                    injectReadAloudHighlight(mark)
+                }
+            }
+        }
+        activity.runOnUiThread {
+            activity.window?.decorView?.post(block) ?: block()
+        }
+    }
+
+    private fun shouldFollowReadAloudHighlight(expectedBookKey: String, startCfi: String): Boolean {
+        if (!isActivityResumedProvider()) return false
+        if (startCfi.isBlank() || !isValidEpubCfi(startCfi)) return false
+        if (currentPageRef?.get() == null || currentEpubRoot() == null) return false
+        val currentContext = lastCatalogContext ?: return false
+        val currentBookKey = bookKey(currentContext)
+        if (currentBookKey.isBlank()) return false
+        val normalizedExpectedBookKey = expectedBookKey.ifBlank { activeReadAloudBookKey }
+        return normalizedExpectedBookKey.isNotBlank() &&
+            currentBookKey == normalizedExpectedBookKey &&
+            activeReadAloudBookKey == normalizedExpectedBookKey
+    }
+
+    private fun isReadAloudBookCurrentForUi(incomingBookKey: String, currentBookKey: String): Boolean {
+        if (incomingBookKey.isBlank()) return true
+        if (currentBookKey.isNotBlank()) return currentBookKey == incomingBookKey
+        val currentRoot = currentEpubRoot()?.absolutePath.orEmpty()
+        if (currentRoot.isNotBlank()) return incomingBookKey.contains(currentRoot)
+        return currentViewModelRef?.get() == null && lastCatalogContext == null
+    }
+
+    private fun rememberReadAloudProgress(
+        sessionId: String,
+        bookKey: String,
+        bookTitle: String,
+        startCfi: String,
+        endCfi: String,
+        paragraphIndex: Int,
+        chapterIndex: Int,
+        chapterTitle: String,
+        summary: String,
+        elapsedMs: Long,
+    ): PersistedReadAloudProgress {
+        val existing = readPersistedReadAloudProgress()
+        val recordedElapsedMs = existing
+            ?.takeIf { it.sessionId == sessionId && it.bookKey == bookKey }
+            ?.recordedElapsedMs
+            ?.coerceAtMost(elapsedMs)
+            ?: 0L
+        val context = lastCatalogContext
+        val progress = PersistedReadAloudProgress(
+            timestamp = System.currentTimeMillis(),
+            sessionId = sessionId,
+            bookKey = bookKey,
+            bookIdentity = context?.let(::searchBookIdentity).orEmpty(),
+            epubRoot = currentEpubRoot()?.absolutePath.orEmpty(),
+            bookTitle = bookTitle.ifBlank { context?.let(::bookTitle).orEmpty() }.ifBlank { fallbackCurrentBookTitle() },
+            target = ReadingTarget(
+                cfi = startCfi,
+                chapterIndex = chapterIndex,
+                title = chapterTitle.ifBlank { fallbackCurrentChapterTitle() },
+                summary = summary.take(240),
+            ),
+            endCfi = endCfi.ifBlank { startCfi },
+            paragraphIndex = paragraphIndex,
+            elapsedMs = elapsedMs,
+            recordedElapsedMs = recordedElapsedMs,
+        )
+        persistReadAloudProgress(progress)
+        return progress
+    }
+
+    private fun dispatchReadAloudStatistics(progress: PersistedReadAloudProgress, reason: String): Boolean {
+        val viewModel = currentViewModelRef?.get()
+        val receiver = lastCatalogContext?.intentReceiver
+        if (viewModel == null && receiver == null) return false
+        if (!isPersistedReadAloudProgressForCurrentBook(progress)) return false
+        val page = createReadAloudStatisticsPage(progress) ?: return false
+        val intent = createReaderStatisticsIntent(page) ?: return false
+        if (
+            progress.sessionId == lastReadAloudStatisticsSessionId &&
+            progress.target.cfi == lastReadAloudStatisticsCfi &&
+            progress.elapsedMs <= lastReadAloudStatisticsElapsedMs
+        ) {
+            return false
+        }
+        val durationDeltaMs = (progress.elapsedMs - progress.recordedElapsedMs).coerceAtLeast(0L)
+        if (viewModel != null) {
+            setReaderStatisticsTimer(viewModel, durationDeltaMs)
+        }
+        val sent = runCatching {
+            isDispatchingReadAloudStatistics = true
+            dispatchReaderIntent(receiver, viewModel, intent, "ReadAloudStatistics")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX read aloud statistics dispatch failed: ${it.stackTraceToString()}")
+        }.getOrDefault(false).also {
+            isDispatchingReadAloudStatistics = false
+        }
+        if (!sent) return false
+
+        lastReadAloudStatisticsSessionId = progress.sessionId
+        lastReadAloudStatisticsCfi = progress.target.cfi
+        lastReadAloudStatisticsElapsedMs = progress.elapsedMs
+        persistReadAloudProgress(progress.copy(recordedElapsedMs = progress.elapsedMs))
+        XposedBridge.log(
+            "$LOG_PREFIX read aloud statistics recorded reason=$reason " +
+                "deltaMs=$durationDeltaMs elapsedMs=${progress.elapsedMs} cfi=${progress.target.cfi}",
+        )
+        return true
+    }
+
+    private fun createReadAloudStatisticsPage(progress: PersistedReadAloudProgress): Any? =
+        runCatching {
+            val template = currentPageRef?.get() ?: return@runCatching null
+            val document = callNoArg(template, "getDocument") ?: return@runCatching null
+            val start = createEpubCfi(progress.target.cfi) ?: return@runCatching null
+            val end = createEpubCfi(progress.endCfi.ifBlank { progress.target.cfi }) ?: start
+            val pageClass = classLoader.loadClass(EPUB_PAGE_CLASS)
+            val documentClass = classLoader.loadClass(HTML_DOCUMENT_CLASS)
+            val cfiClass = classLoader.loadClass(EPUB_CFI_CLASS)
+            val page = pageClass
+                .getDeclaredConstructor(documentClass, cfiClass, cfiClass, String::class.java)
+                .newInstance(document, start, end, progress.target.summary)
+            setString(page, "setBookTitle", progress.bookTitle.ifBlank { fallbackCurrentBookTitle() })
+            setInt(page, "setContentType", EPUB_PAGE_CONTENT)
+            setInt(page, "setChapterIndex", progress.target.chapterIndex.coerceAtLeast(0))
+            setInt(page, "setChapterTotal", readAloudChapterTotal(template))
+            setInt(page, "setSpineIndex", readAloudSpineIndex(start, template))
+            setString(page, "setChapter", progress.target.title)
+            setFloat(page, "setPercentage", estimateReadAloudPercentage(progress, template))
+            setInt(page, "setNumber", (callNoArg(template, "getNumber") as? Number)?.toInt() ?: 0)
+            setInt(page, "setMaxNumber", (callNoArg(template, "getMaxNumber") as? Number)?.toInt() ?: 0)
+            page
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX read aloud statistics page failed: ${it.stackTraceToString()}")
+        }.getOrNull()
+
+    private fun createReaderStatisticsIntent(page: Any): Any? =
+        runCatching {
+            val pageClass = classLoader.loadClass(EPUB_PAGE_CLASS)
+            val intentClass = classLoader.loadClass("$READER_UI_INTENT_CLASS\$Statistics")
+            intentClass.getDeclaredConstructor(pageClass).newInstance(page)
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX read aloud statistics intent failed: ${it.stackTraceToString()}")
+        }.getOrNull()
+
+    private fun setReaderStatisticsTimer(viewModel: Any, durationDeltaMs: Long) {
+        val timer = System.currentTimeMillis() - durationDeltaMs.coerceAtLeast(0L)
+        val fieldSet = runCatching {
+            findDeclaredField(viewModel.javaClass, "_timer")?.let { field ->
+                field.isAccessible = true
+                field.setLong(viewModel, timer)
+                true
+            } == true
+        }.getOrDefault(false)
+        if (fieldSet) return
+        runCatching {
+            val accessor = viewModel.javaClass.declaredMethods.firstOrNull { method ->
+                method.name == "access\$set_timer\$p" && method.parameterTypes.size == 2
+            } ?: return
+            accessor.isAccessible = true
+            accessor.invoke(null, viewModel, timer)
+        }.onFailure { error ->
+            XposedBridge.log("$LOG_PREFIX read aloud statistics timer failed: ${error.stackTraceToString()}")
+        }
+    }
+
+    private fun findDeclaredField(type: Class<*>, name: String): java.lang.reflect.Field? {
+        var current: Class<*>? = type
+        while (current != null) {
+            val field = current.declaredFields.firstOrNull { it.name == name }
+            if (field != null) return field
+            current = current.superclass
+        }
+        return null
+    }
+
+    private fun readAloudChapterTotal(template: Any): Int {
+        val fromTemplate = (callNoArg(template, "getChapterTotal") as? Number)?.toInt() ?: 0
+        if (fromTemplate > 0) return fromTemplate
+        return lastCatalogContext?.catalog?.size?.takeIf { it > 0 } ?: 0
+    }
+
+    private fun readAloudSpineIndex(startCfi: Any, template: Any): Int {
+        val fromCfi = (callNoArg(startCfi, "getSpineIndex") as? Number)?.toInt()
+        if (fromCfi != null && fromCfi >= 0) return fromCfi
+        return (callNoArg(template, "getSpineIndex") as? Number)?.toInt() ?: 0
+    }
+
+    private fun estimateReadAloudPercentage(progress: PersistedReadAloudProgress, template: Any): Float {
+        val templateStart = callNoArg(template, "getStart")?.toString().orEmpty()
+        val templateAnchor = callString(template, "getAnchor")
+        if (progress.target.cfi == templateStart || progress.target.cfi == templateAnchor) {
+            return ((callNoArg(template, "getPercentage") as? Number)?.toFloat() ?: 0f).coerceIn(0f, 1f)
+        }
+        val total = readAloudChapterTotal(template)
+        if (total > 0 && progress.target.chapterIndex >= 0) {
+            return (progress.target.chapterIndex.toFloat() / total.toFloat()).coerceIn(0f, 0.9999f)
+        }
+        return ((callNoArg(template, "getPercentage") as? Number)?.toFloat() ?: 0f).coerceIn(0f, 1f)
+    }
+
+    private fun scheduleRestorePersistedReadAloudProgress(reason: String) {
+        if (pendingReadAloudProgressRestore) return
+        val activity = activityProvider() ?: return
+        val persisted = readPersistedReadAloudProgress() ?: return
+        if (!isPersistedReadAloudProgressForCurrentBook(persisted)) return
+        val restoreKey = readAloudProgressRestoreKey(persisted)
+        if (restoreKey == lastRestoredReadAloudProgressKey) return
+        pendingReadAloudProgressRestore = true
+        activity.window?.decorView?.postDelayed({
+            restorePersistedReadAloudProgress(reason)
+        }, READ_ALOUD_PROGRESS_RESTORE_DELAY_MS)
+    }
+
+    private fun restorePersistedReadAloudProgress(reason: String) {
+        val persisted = readPersistedReadAloudProgress()
+        if (persisted == null) {
+            pendingReadAloudProgressRestore = false
+            return
+        }
+        if (!isPersistedReadAloudProgressForCurrentBook(persisted)) {
+            pendingReadAloudProgressRestore = false
+            return
+        }
+        val viewModel = currentViewModelRef?.get()
+        val receiver = lastCatalogContext?.intentReceiver
+        if (viewModel == null && receiver == null) {
+            pendingReadAloudProgressRestore = false
+            return
+        }
+        val restoreKey = readAloudProgressRestoreKey(persisted)
+        suppressReadAloudRestartUntilMs = SystemClock.elapsedRealtime() + READ_ALOUD_RESTART_SUPPRESS_MS
+        val jumped = runCatching {
+            jumpToCfi(
+                receiver = receiver,
+                viewModel = viewModel,
+                cfi = persisted.target.cfi,
+                chapterIndex = persisted.target.chapterIndex,
+                title = persisted.target.title,
+                summary = persisted.target.summary,
+            )
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX read aloud progress restore failed: ${it.stackTraceToString()}")
+        }.getOrDefault(false)
+        if (jumped) {
+            lastRestoredReadAloudProgressKey = restoreKey
+            dispatchReadAloudStatistics(persisted, "restore")
+            XposedBridge.log("$LOG_PREFIX read aloud progress restored reason=$reason cfi=${persisted.target.cfi}")
+        }
+        pendingReadAloudProgressRestore = false
+    }
+
+    private fun persistReadAloudProgress(progress: PersistedReadAloudProgress) {
+        val context = hostApplicationContext() ?: return
+        context
+            .getSharedPreferences(READ_ALOUD_PROGRESS_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(READ_ALOUD_PROGRESS_KEY_TIMESTAMP, progress.timestamp)
+            .putString(READ_ALOUD_PROGRESS_KEY_SESSION, progress.sessionId)
+            .putString(READ_ALOUD_PROGRESS_KEY_BOOK, progress.bookKey)
+            .putString(READ_ALOUD_PROGRESS_KEY_BOOK_IDENTITY, progress.bookIdentity)
+            .putString(READ_ALOUD_PROGRESS_KEY_EPUB_ROOT, progress.epubRoot)
+            .putString(READ_ALOUD_PROGRESS_KEY_BOOK_TITLE, progress.bookTitle)
+            .putString(READ_ALOUD_PROGRESS_KEY_CFI, progress.target.cfi)
+            .putString(READ_ALOUD_PROGRESS_KEY_END_CFI, progress.endCfi)
+            .putInt(READ_ALOUD_PROGRESS_KEY_PARAGRAPH_INDEX, progress.paragraphIndex)
+            .putInt(READ_ALOUD_PROGRESS_KEY_CHAPTER_INDEX, progress.target.chapterIndex)
+            .putString(READ_ALOUD_PROGRESS_KEY_TITLE, progress.target.title)
+            .putString(READ_ALOUD_PROGRESS_KEY_SUMMARY, progress.target.summary)
+            .putLong(READ_ALOUD_PROGRESS_KEY_ELAPSED_MS, progress.elapsedMs)
+            .putLong(READ_ALOUD_PROGRESS_KEY_RECORDED_ELAPSED_MS, progress.recordedElapsedMs)
+            .apply()
+    }
+
+    private fun readPersistedReadAloudProgress(): PersistedReadAloudProgress? {
+        val context = hostApplicationContext() ?: return null
+        val prefs = context.getSharedPreferences(READ_ALOUD_PROGRESS_PREFS, Context.MODE_PRIVATE)
+        val cfi = prefs.getString(READ_ALOUD_PROGRESS_KEY_CFI, null)?.takeIf { it.isNotBlank() } ?: return null
+        return PersistedReadAloudProgress(
+            timestamp = prefs.getLong(READ_ALOUD_PROGRESS_KEY_TIMESTAMP, 0L),
+            sessionId = prefs.getString(READ_ALOUD_PROGRESS_KEY_SESSION, null).orEmpty(),
+            bookKey = prefs.getString(READ_ALOUD_PROGRESS_KEY_BOOK, null).orEmpty(),
+            bookIdentity = prefs.getString(READ_ALOUD_PROGRESS_KEY_BOOK_IDENTITY, null).orEmpty(),
+            epubRoot = prefs.getString(READ_ALOUD_PROGRESS_KEY_EPUB_ROOT, null).orEmpty(),
+            bookTitle = prefs.getString(READ_ALOUD_PROGRESS_KEY_BOOK_TITLE, null).orEmpty(),
+            target = ReadingTarget(
+                cfi = cfi,
+                chapterIndex = prefs.getInt(READ_ALOUD_PROGRESS_KEY_CHAPTER_INDEX, 0),
+                title = prefs.getString(READ_ALOUD_PROGRESS_KEY_TITLE, null).orEmpty().ifBlank { "\u542c\u4e66\u8fdb\u5ea6" },
+                summary = prefs.getString(READ_ALOUD_PROGRESS_KEY_SUMMARY, null).orEmpty(),
+            ),
+            endCfi = prefs.getString(READ_ALOUD_PROGRESS_KEY_END_CFI, null).orEmpty().ifBlank { cfi },
+            paragraphIndex = prefs.getInt(READ_ALOUD_PROGRESS_KEY_PARAGRAPH_INDEX, 0),
+            elapsedMs = prefs.getLong(READ_ALOUD_PROGRESS_KEY_ELAPSED_MS, 0L).coerceAtLeast(0L),
+            recordedElapsedMs = prefs.getLong(READ_ALOUD_PROGRESS_KEY_RECORDED_ELAPSED_MS, 0L).coerceAtLeast(0L),
+        )
+    }
+
+    private fun isPersistedReadAloudProgressForCurrentBook(persisted: PersistedReadAloudProgress): Boolean {
+        if (System.currentTimeMillis() - persisted.timestamp > READ_ALOUD_PROGRESS_MAX_AGE_MS) return false
+        lastCatalogContext?.let { context ->
+            val currentKey = bookKey(context)
+            if (currentKey.isNotBlank() && persisted.bookKey.isNotBlank() && currentKey == persisted.bookKey) {
+                return true
+            }
+            val currentIdentity = searchBookIdentity(context)
+            if (
+                currentIdentity.isNotBlank() &&
+                persisted.bookIdentity.isNotBlank() &&
+                currentIdentity == persisted.bookIdentity
+            ) {
+                return true
+            }
+        }
+        val currentRoot = currentEpubRoot()?.absolutePath.orEmpty()
+        return currentRoot.isNotBlank() &&
+            persisted.epubRoot.isNotBlank() &&
+            currentRoot == persisted.epubRoot
+    }
+
+    private fun readAloudProgressRestoreKey(progress: PersistedReadAloudProgress): String =
+        listOf(progress.sessionId, progress.bookKey, progress.target.cfi, progress.timestamp.toString()).joinToString("|")
+
+    private fun openReadAloud() {
+        val activity = activityProvider() ?: return
+        if (!canShowReaderReadAloudEntry()) {
+            removeReadAloudMenuButton()
+            Toast.makeText(activity, "\u6682\u65e0\u6cd5\u542c\u5f53\u524d\u4e66\u7c4d", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val context = bottomReadAloudContext(bottomReadAloudReceiverRef?.get(), bottomReadAloudBookRef?.get())
+        if (context == null) {
+            Toast.makeText(activity, "\u6682\u65e0\u6cd5\u542c\u5f53\u524d\u4e66\u7c4d", Toast.LENGTH_SHORT).show()
+            return
+        }
+        ensureReadAloudHighlightReceiver()
+        Toast.makeText(activity, "\u6b63\u5728\u51c6\u5907\u542c\u4e66", Toast.LENGTH_SHORT).show()
+        val requestedAt = SystemClock.elapsedRealtime()
+        Thread {
+            var sessionId = ""
+            runCatching {
+                val buildStartedAt = SystemClock.elapsedRealtime()
+                val segments = buildReadAloudSegments(
+                    context = context,
+                    maxSegments = READ_ALOUD_INITIAL_SEGMENTS,
+                    currentFileOnly = true,
+                )
+                val buildMs = SystemClock.elapsedRealtime() - buildStartedAt
+                XposedBridge.log(
+                    "$LOG_PREFIX read aloud initial queue built segments=${segments.size} " +
+                        "chars=${segments.sumOf { it.text.length }} buildMs=$buildMs",
+                )
+                if (segments.isEmpty()) error("empty read-aloud queue")
+                val queueStartedAt = SystemClock.elapsedRealtime()
+                val source = selectedTtsSource(activity)
+                sessionId = startReadAloudService(
+                    activity = activity,
+                    bookKey = bookKey(context),
+                    bookTitle = bookTitle(context).ifBlank { titleFromCurrentEpubRoot() },
+                    coverUri = currentBookCoverUri(context),
+                    segments = segments,
+                    source = source,
+                )
+                appendReadAloudRemainderAsync(activity, context, sessionId, segments.size)
+                XposedBridge.log(
+                    "$LOG_PREFIX read aloud play requested session=$sessionId " +
+                        "source=${source?.name ?: "system"} " +
+                        "queueMs=${SystemClock.elapsedRealtime() - queueStartedAt} " +
+                        "totalMs=${SystemClock.elapsedRealtime() - requestedAt}",
+                )
+                activity.runOnUiThread {
+                    Toast.makeText(
+                        activity,
+                        if (source != null) {
+                            "\u5df2\u5f00\u59cb\u542c\u4e66\uff1a${source.name}"
+                        } else {
+                            "\u5df2\u5f00\u59cb\u542c\u4e66\uff1a\u7cfb\u7edf TTS"
+                        },
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX read aloud start failed: ${it.stackTraceToString()}")
+                if (sessionId.isNotBlank()) stopReadAloudSession(activity, sessionId, "start-failed")
+                activity.runOnUiThread {
+                    Toast.makeText(activity, "\u542c\u4e66\u542f\u52a8\u5931\u8d25", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.apply {
+            name = "ReaMicroReadAloudPrepare"
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun scheduleReadAloudRestartFromPage(page: Any) {
+        val snapshot = settingsProvider()
+        if (!snapshot.canRestartReadAloudOnPageTurn) return
+        if (activeReadAloudSessionId.isBlank() || activeReadAloudBookKey.isBlank()) return
+        val pageKey = currentReadAloudPageKey(page)
+        if (pageKey.isBlank()) return
+        val now = SystemClock.elapsedRealtime()
+        if (now < suppressReadAloudRestartUntilMs) {
+            lastReadAloudPageKey = pageKey
+            return
+        }
+        if (pageKey == lastReadAloudPageKey) return
+        val context = bottomReadAloudContext(bottomReadAloudReceiverRef?.get(), bottomReadAloudBookRef?.get())
+            ?: lastCatalogContext
+            ?: return
+        val currentBookKey = bookKey(context)
+        if (currentBookKey.isBlank() || currentBookKey != activeReadAloudBookKey) return
+        lastReadAloudPageKey = pageKey
+        val seq = synchronized(readAloudRestartLock) {
+            readAloudRestartSeq += 1
+            readAloudRestartSeq
+        }
+        Thread {
+            Thread.sleep(READ_ALOUD_PAGE_RESTART_DELAY_MS)
+            if (seq != readAloudRestartSeq) return@Thread
+            restartReadAloudFromCurrentPage(context, currentBookKey, pageKey)
+        }.apply {
+            name = "ReaMicroReadAloudPageRestart"
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun restartReadAloudFromCurrentPage(context: CatalogContext, expectedBookKey: String, pageKey: String) {
+        val activity = activityProvider() ?: return
+        if (!settingsProvider().canRestartReadAloudOnPageTurn) return
+        if (activeReadAloudBookKey != expectedBookKey) return
+        runCatching {
+            val segments = buildReadAloudSegments(
+                context = context,
+                maxSegments = READ_ALOUD_INITIAL_SEGMENTS,
+                currentFileOnly = true,
+            )
+            if (segments.isEmpty()) error("empty read-aloud queue")
+            val source = selectedTtsSource(activity)
+            val sessionId = startReadAloudService(
+                activity = activity,
+                bookKey = expectedBookKey,
+                bookTitle = bookTitle(context).ifBlank { titleFromCurrentEpubRoot() },
+                coverUri = currentBookCoverUri(context),
+                segments = segments,
+                source = source,
+            )
+            appendReadAloudRemainderAsync(activity, context, sessionId, segments.size)
+            XposedBridge.log("$LOG_PREFIX read aloud restarted after page turn key=$pageKey")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX read aloud page restart failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun currentReadAloudPageKey(page: Any?): String =
+        epubPageSignature(page)
+            ?: epubPageNumber(page)?.let { "n=$it" }
+            ?: callString(page, "getAnchor")
+                .ifBlank { callNoArg(page, "getStart")?.toString().orEmpty() }
 
     private fun closeSearchPage() {
         searchPageDialogRef?.get()?.dismiss()
@@ -1664,6 +2475,10 @@ class ReaderHook(
                             val action = (highlightImageVector() ?: fallbackIcon)?.let(::createNativeHighlightAction)
                             if (action != null) next.add(action)
                         }
+                        if (canUseReadAloudSelection() && original.none { callString(it, "getTitle") == "\u968f\u542c" }) {
+                            val action = (readAloudImageVector() ?: fallbackIcon)?.let(::createNativeReadAloudAction)
+                            if (action != null) next.add(action)
+                        }
                         val compact = if (settingsProvider().canUseCompactReaderSelectionMenu) {
                             compactSelectionMenuActions(next)
                         } else {
@@ -1981,6 +2796,16 @@ class ReaderHook(
             "create native highlight action",
         )
 
+    private fun createNativeReadAloudAction(icon: Any): Any? =
+        createSelectionMenuAction(
+            if (settingsProvider().canUseCompactReaderSelectionMenu) "" else "\u968f\u542c",
+            icon,
+            nativeFunction0 {
+                openNativeSelectionReadAloud()
+            },
+            "create native read aloud action",
+        )
+
     private fun createSelectionMenuAction(title: String, icon: Any, callback: Any, logLabel: String): Any? =
         runCatching {
             val actionClass = classLoader.loadClass("org.epub.ui.SelectionMenuAction")
@@ -2030,6 +2855,23 @@ class ReaderHook(
             HIGHLIGHT_ICON_BORDER_COLOR_CLASS to "getBorderColor",
             HIGHLIGHT_ICON_FORMAT_COLOR_FILL_CLASS to "getFormatColorFill",
             HIGHLIGHT_ICON_MODE_EDIT_CLASS to "getModeEdit",
+        ).firstNotNullOfOrNull { (className, methodName) ->
+            runCatching {
+                classLoader.loadClass(className).declaredMethods.firstOrNull {
+                    it.name == methodName && it.parameterTypes.size == 1
+                }?.apply { isAccessible = true }?.invoke(null, outlined)
+            }.getOrNull()
+        }
+    }
+
+    private fun readAloudImageVector(): Any? {
+        val outlined = runCatching {
+            classLoader.loadClass(ICONS_OUTLINED_CLASS).getField("INSTANCE").get(null)
+        }.getOrNull() ?: return null
+        return listOf(
+            READ_ALOUD_ICON_VOLUME_UP_CLASS to "getVolumeUp",
+            READ_ALOUD_ICON_RECORD_VOICE_OVER_CLASS to "getRecordVoiceOver",
+            DICTIONARY_ICON_AUTO_STORIES_CLASS to "getAutoStories",
         ).firstNotNullOfOrNull { (className, methodName) ->
             runCatching {
                 classLoader.loadClass(className).declaredMethods.firstOrNull {
@@ -2114,6 +2956,7 @@ class ReaderHook(
                                 updateReaderHighlightBookContext(bookKey, bookTitle, "page rendered")
                             }
                             scheduleRestorePersistedSearchOrigin("page rendered")
+                            scheduleRestorePersistedReadAloudProgress("page rendered")
                             val args = param.args ?: return
                             val marksIndex = 4
                             val originalMarks = args.getOrNull(marksIndex) as? List<*> ?: return
@@ -2240,19 +3083,25 @@ class ReaderHook(
                     }
 
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val mark = activeSearchHighlightMark ?: return
-                        val id = searchResultHighlightMarkId(mark) ?: return
                         val current = (param.result as? List<*>)?.filterNotNull().orEmpty()
-                        if (current.any { searchResultHighlightResolvedMarkId(it) == id }) {
-                            logSearchHighlightResolvePage("hit", current.size, mark)
-                            return
+                        val additions = ArrayList<Any>()
+                        activeTransientHighlightMarks().forEach { mark ->
+                            val id = transientHighlightMarkId(mark) ?: return@forEach
+                            if (current.any { transientHighlightResolvedMarkId(it) == id } ||
+                                additions.any { transientHighlightResolvedMarkId(it) == id }
+                            ) {
+                                logSearchHighlightResolvePage("hit", current.size, mark)
+                                return@forEach
+                            }
+                            val resolved = createResolvedSearchHighlightMark(mark) ?: return@forEach
+                            additions += resolved
+                            logSearchHighlightResolvePage("forced", current.size + additions.size, mark)
                         }
-                        val resolved = createResolvedSearchHighlightMark(mark) ?: return
+                        if (additions.isEmpty()) return
                         param.result = ArrayList<Any>(current.size + 1).apply {
                             addAll(current)
-                            add(resolved)
+                            addAll(additions)
                         }
-                        logSearchHighlightResolvePage("forced", current.size + 1, mark)
                     }
                 })
             }
@@ -2276,37 +3125,52 @@ class ReaderHook(
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val args = param.args ?: return
-                        val resolved = createResolvedSearchHighlightMark(activeSearchHighlightMark ?: return) ?: return
                         val current = (args.getOrNull(1) as? List<*>)?.filterNotNull().orEmpty()
-                        val id = searchResultHighlightResolvedMarkId(resolved) ?: return
-                        if (current.any { searchResultHighlightResolvedMarkId(it) == id }) return
+                        val additions = ArrayList<Any>()
+                        activeTransientHighlightMarks().forEach { mark ->
+                            val resolved = createResolvedSearchHighlightMark(mark) ?: return@forEach
+                            val id = transientHighlightResolvedMarkId(resolved) ?: return@forEach
+                            if (current.any { transientHighlightResolvedMarkId(it) == id } ||
+                                additions.any { transientHighlightResolvedMarkId(it) == id }
+                            ) {
+                                return@forEach
+                            }
+                            additions += resolved
+                            logSearchHighlightContentOverlay("input", current.size + additions.size, mark)
+                        }
+                        if (additions.isEmpty()) return
                         args[1] = ArrayList<Any>(current.size + 1).apply {
                             addAll(current)
-                            add(resolved)
+                            addAll(additions)
                         }
-                        logSearchHighlightContentOverlay("input", current.size + 1, activeSearchHighlightMark ?: resolved)
                     }
 
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val mark = activeSearchHighlightMark ?: return
-                        val id = searchResultHighlightMarkId(mark) ?: return
                         val current = (param.result as? List<*>)?.filterNotNull().orEmpty()
-                        if (current.any { searchResultHighlightOverlayMarkId(it) == id }) {
-                            logSearchHighlightContentOverlay("output", current.size, mark)
-                            return
-                        }
                         val args = param.args ?: return
-                        val forced = createSearchHighlightContentOverlay(
-                            contentDom = args.getOrNull(0),
-                            visibleWindow = args.getOrNull(2),
-                            renderedTextLength = (args.getOrNull(3) as? Number)?.toInt() ?: return,
-                            mark = mark,
-                        ) ?: return
+                        val additions = ArrayList<Any>()
+                        activeTransientHighlightMarks().forEach { mark ->
+                            val id = transientHighlightMarkId(mark) ?: return@forEach
+                            if (current.any { searchResultHighlightOverlayMarkId(it) == id } ||
+                                additions.any { searchResultHighlightOverlayMarkId(it) == id }
+                            ) {
+                                logSearchHighlightContentOverlay("output", current.size, mark)
+                                return@forEach
+                            }
+                            val forced = createSearchHighlightContentOverlay(
+                                contentDom = args.getOrNull(0),
+                                visibleWindow = args.getOrNull(2),
+                                renderedTextLength = (args.getOrNull(3) as? Number)?.toInt() ?: return,
+                                mark = mark,
+                            ) ?: return@forEach
+                            additions += forced
+                            logSearchHighlightContentOverlay("forced", current.size + additions.size, mark)
+                        }
+                        if (additions.isEmpty()) return
                         param.result = ArrayList<Any>(current.size + 1).apply {
                             addAll(current)
-                            add(forced)
+                            addAll(additions)
                         }
-                        logSearchHighlightContentOverlay("forced", current.size + 1, mark)
                     }
                 })
             }
@@ -2411,6 +3275,59 @@ class ReaderHook(
         callNoArg(controller, "clearSelection")
         refreshReaderAfterSelectionHighlight()
         Toast.makeText(activity, "\u5df2\u6dfb\u52a0\u672c\u4e66\u9ad8\u4eae", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun openNativeSelectionReadAloud() {
+        val activity = activityProvider() ?: return
+        if (!canUseReadAloudSelection()) return
+        val selection = currentNativeSelectionPayload()
+        val quote = selection.quote
+        if (quote.isBlank()) {
+            Toast.makeText(activity, "\u672a\u83b7\u53d6\u5230\u9009\u4e2d\u6587\u672c", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val context = bottomReadAloudContext(bottomReadAloudReceiverRef?.get(), bottomReadAloudBookRef?.get())
+            ?: lastCatalogContext
+        if (context == null) {
+            Toast.makeText(activity, "\u6682\u65e0\u6cd5\u542c\u5f53\u524d\u4e66\u7c4d", Toast.LENGTH_SHORT).show()
+            return
+        }
+        ensureReadAloudHighlightReceiver()
+        callNoArg(selection.controller, "clearSelection")
+        Toast.makeText(activity, "\u6b63\u5728\u51c6\u5907\u968f\u542c", Toast.LENGTH_SHORT).show()
+        Thread {
+            runCatching {
+                val segments = buildReadAloudSegmentsFromSelection(
+                    context = context,
+                    selection = selection,
+                    maxSegments = READ_ALOUD_INITIAL_SEGMENTS,
+                    currentFileOnly = true,
+                )
+                if (segments.isEmpty()) error("empty read-aloud selection queue")
+                val source = selectedTtsSource(activity)
+                val sessionId = startReadAloudService(
+                    activity = activity,
+                    bookKey = bookKey(context),
+                    bookTitle = bookTitle(context).ifBlank { titleFromCurrentEpubRoot() },
+                    coverUri = currentBookCoverUri(context),
+                    segments = segments,
+                    source = source,
+                )
+                appendReadAloudSelectionRemainderAsync(activity, context, selection, sessionId, segments.size)
+                activity.runOnUiThread {
+                    Toast.makeText(activity, "\u5df2\u4ece\u9009\u4e2d\u6bb5\u843d\u5f00\u59cb\u542c\u4e66", Toast.LENGTH_SHORT).show()
+                }
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX read aloud selection failed: ${it.stackTraceToString()}")
+                activity.runOnUiThread {
+                    Toast.makeText(activity, "\u968f\u542c\u542f\u52a8\u5931\u8d25", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.apply {
+            name = "ReaMicroReadAloudSelection"
+            isDaemon = true
+            start()
+        }
     }
 
     private fun requestDictionaryPreset(
@@ -3351,6 +4268,20 @@ class ReaderHook(
             marks.filterNot(::isSearchResultHighlightMark) + mark
         }
 
+    private fun injectReadAloudHighlight(mark: Any, viewModel: Any? = currentViewModelRef?.get()): Boolean =
+        updateSearchMarks(viewModel, "read-aloud-inject") { marks ->
+            marks.filterNot(::isReadAloudHighlightMark) + mark
+        }
+
+    private fun clearReadAloudHighlight(viewModel: Any? = currentViewModelRef?.get()): Boolean {
+        activeReadAloudHighlightId = null
+        activeReadAloudHighlightMark = null
+        return updateSearchMarks(viewModel, "read-aloud-clear") { marks ->
+            val filtered = marks.filterNot(::isReadAloudHighlightMark)
+            if (filtered.size == marks.size) marks else filtered
+        }
+    }
+
     private fun clearSearchResultHighlight(viewModel: Any? = currentViewModelRef?.get()): Boolean {
         activeSearchHighlightId = null
         activeSearchHighlightMark = null
@@ -3366,39 +4297,49 @@ class ReaderHook(
     }
 
     private fun appendActiveSearchHighlightMark(original: List<*>, label: String? = null): List<Any>? {
-        val searchMark = activeSearchHighlightMark
+        val activeMarks = activeTransientHighlightMarks()
         val cleanMarks = original
             .filterNotNull()
             .filterNot(::isSearchResultHighlightMark)
+            .filterNot(::isReadAloudHighlightMark)
             .filterNot(::isSelectionInjectedHighlightMark)
-        if (searchMark == null) {
+        if (activeMarks.isEmpty()) {
             return if (cleanMarks.size == original.filterNotNull().size) null else ArrayList(cleanMarks)
         }
-        return ArrayList<Any>(cleanMarks.size + 1).apply {
+        return ArrayList<Any>(cleanMarks.size + activeMarks.size).apply {
             addAll(cleanMarks)
-            add(searchMark)
+            addAll(activeMarks)
         }.also { next ->
-            label?.let { logSearchHighlightRenderInput(it, original.size, next.size, searchMark) }
+            label?.let { labelValue ->
+                activeMarks.forEach { mark ->
+                    logSearchHighlightRenderInput(labelValue, original.size, next.size, mark)
+                }
+            }
         }
     }
 
     private fun appendActiveSearchHighlightCatalogItemMap(original: Map<*, *>): Map<Any?, Any?>? {
-        val mark = activeSearchHighlightMark ?: return null
-        val id = searchResultHighlightMarkId(mark) ?: return null
-        if (catalogItemMapContainsSearchHighlight(original, id)) return null
-        val key = resolveActiveSearchHighlightCatalogMapKey(original, mark) ?: return null
-        val currentItems = (original[key] as? List<*>)?.filterNotNull().orEmpty()
-        if (currentItems.any { catalogChapterItemMarkId(it) == id }) return null
-        val item = createSearchHighlightCatalogChapterItem(mark) ?: return null
-        return LinkedHashMap<Any?, Any?>(original.size + 1).apply {
+        val marks = activeTransientHighlightMarks()
+        if (marks.isEmpty()) return null
+        val next = LinkedHashMap<Any?, Any?>(original.size + marks.size).apply {
             original.forEach { (entryKey, entryValue) -> put(entryKey, entryValue) }
-            put(key, ArrayList<Any>(currentItems.size + 1).apply {
+        }
+        var changed = false
+        marks.forEach { mark ->
+            val id = transientHighlightMarkId(mark) ?: return@forEach
+            if (catalogItemMapContainsSearchHighlight(next, id)) return@forEach
+            val key = resolveActiveSearchHighlightCatalogMapKey(next, mark) ?: return@forEach
+            val currentItems = (next[key] as? List<*>)?.filterNotNull().orEmpty()
+            if (currentItems.any { catalogChapterItemMarkId(it) == id }) return@forEach
+            val item = createSearchHighlightCatalogChapterItem(mark) ?: return@forEach
+            next[key] = ArrayList<Any>(currentItems.size + 1).apply {
                 addAll(currentItems)
                 add(item)
-            })
-        }.also {
+            }
+            changed = true
             logSearchHighlightRenderInput("ReaderCatalog", currentItems.size, currentItems.size + 1, mark)
         }
+        return if (changed) next else null
     }
 
     private fun catalogItemMapContainsSearchHighlight(map: Map<*, *>, id: Long): Boolean =
@@ -3407,7 +4348,7 @@ class ReaderHook(
         }
 
     private fun catalogChapterItemMarkId(item: Any?): Long? =
-        callNoArg(item, "getMark")?.let(::searchResultHighlightMarkId)
+        callNoArg(item, "getMark")?.let(::transientHighlightMarkId)
 
     private fun createSearchHighlightCatalogChapterItem(mark: Any): Any? =
         runCatching {
@@ -3463,7 +4404,7 @@ class ReaderHook(
         }.getOrNull()
 
     private fun logSearchHighlightRenderInput(label: String, before: Int, after: Int, mark: Any) {
-        val id = searchResultHighlightMarkId(mark) ?: return
+        val id = transientHighlightMarkId(mark) ?: return
         if (activeSearchHighlightRenderLogId != id) {
             activeSearchHighlightRenderLogId = id
             activeSearchHighlightRenderLogCount = 0
@@ -3477,7 +4418,7 @@ class ReaderHook(
     }
 
     private fun logSearchHighlightResolvePage(status: String, count: Int, mark: Any) {
-        val id = searchResultHighlightMarkId(mark) ?: return
+        val id = transientHighlightMarkId(mark) ?: return
         if (activeSearchHighlightRenderLogId != id) {
             activeSearchHighlightRenderLogId = id
             activeSearchHighlightRenderLogCount = 0
@@ -3491,7 +4432,7 @@ class ReaderHook(
     }
 
     private fun logSearchHighlightContentOverlay(status: String, count: Int, mark: Any) {
-        val id = searchResultHighlightMarkId(mark) ?: searchResultHighlightResolvedMarkId(mark) ?: return
+        val id = transientHighlightMarkId(mark) ?: transientHighlightResolvedMarkId(mark) ?: return
         if (status == "output" || status == "forced") {
             activeSearchHighlightVisibleId = id
             renderingEpubPage.get()?.let { page ->
@@ -3803,9 +4744,12 @@ class ReaderHook(
                 false
             }
             if (!updated) return@runCatching false
+            val activeId = activeSearchHighlightId
+                ?: activeReadAloudHighlightId
+                ?: 0L
             XposedBridge.log(
                 "$LOG_PREFIX full-text search highlight $label marks ${current.size}->${next.size} " +
-                    "active=${activeSearchHighlightId ?: 0L}",
+                    "active=$activeId",
             )
             true
         }.onFailure {
@@ -3815,6 +4759,12 @@ class ReaderHook(
     private fun isSearchResultHighlightMark(mark: Any): Boolean {
         val id = searchResultHighlightMarkId(mark) ?: return false
         return SearchHighlightPlanner.isHighlightId(id, SEARCH_HIGHLIGHT_MARK_ID_BASE, SEARCH_HIGHLIGHT_MARK_ID_RANGE)
+    }
+
+    private fun isReadAloudHighlightMark(mark: Any): Boolean {
+        val id = readAloudHighlightMarkId(mark) ?: return false
+        return id >= READ_ALOUD_HIGHLIGHT_MARK_ID_BASE &&
+            id < READ_ALOUD_HIGHLIGHT_MARK_ID_BASE + READ_ALOUD_HIGHLIGHT_MARK_ID_RANGE
     }
 
     private fun isSelectionInjectedHighlightMark(mark: Any): Boolean {
@@ -3832,6 +4782,20 @@ class ReaderHook(
         }
     }
 
+    private fun readAloudHighlightMarkId(mark: Any): Long? {
+        val id = (callNoArg(mark, "getId") as? Number)?.toLong() ?: return null
+        return if (id >= READ_ALOUD_HIGHLIGHT_MARK_ID_BASE &&
+            id < READ_ALOUD_HIGHLIGHT_MARK_ID_BASE + READ_ALOUD_HIGHLIGHT_MARK_ID_RANGE
+        ) {
+            id
+        } else {
+            null
+        }
+    }
+
+    private fun transientHighlightMarkId(mark: Any): Long? =
+        searchResultHighlightMarkId(mark) ?: readAloudHighlightMarkId(mark)
+
     private fun searchResultHighlightResolvedMarkId(mark: Any): Long? {
         val id = (callNoArg(mark, "getId") as? Number)?.toLong() ?: return null
         return if (SearchHighlightPlanner.isHighlightId(id, SEARCH_HIGHLIGHT_MARK_ID_BASE, SEARCH_HIGHLIGHT_MARK_ID_RANGE)) {
@@ -3841,10 +4805,23 @@ class ReaderHook(
         }
     }
 
+    private fun transientHighlightResolvedMarkId(mark: Any): Long? {
+        val id = (callNoArg(mark, "getId") as? Number)?.toLong() ?: return null
+        return when {
+            SearchHighlightPlanner.isHighlightId(id, SEARCH_HIGHLIGHT_MARK_ID_BASE, SEARCH_HIGHLIGHT_MARK_ID_RANGE) -> id
+            id >= READ_ALOUD_HIGHLIGHT_MARK_ID_BASE &&
+                id < READ_ALOUD_HIGHLIGHT_MARK_ID_BASE + READ_ALOUD_HIGHLIGHT_MARK_ID_RANGE -> id
+            else -> null
+        }
+    }
+
     private fun searchResultHighlightOverlayMarkId(overlay: Any): Long? {
         val mark = callNoArg(overlay, "getMark") ?: return null
-        return searchResultHighlightResolvedMarkId(mark)
+        return transientHighlightResolvedMarkId(mark)
     }
+
+    private fun activeTransientHighlightMarks(): List<Any> =
+        listOfNotNull(activeSearchHighlightMark, activeReadAloudHighlightMark)
 
     private fun applySearchNavigationBarTheme(bar: View, colors: DialogColors) {
         val context = bar.context
@@ -4063,7 +5040,687 @@ class ReaderHook(
         return documents
     }
 
-    private fun forEachSearchDocument(context: CatalogContext, onDocument: (SearchDocument) -> Boolean) {
+    private fun buildReadAloudSegments(
+        context: CatalogContext,
+        maxSegments: Int = MAX_READ_ALOUD_SEGMENTS,
+        currentFileOnly: Boolean = false,
+    ): List<ReadAloudSegment> {
+        val key = bookKey(context)
+        val startChapterIndex = currentPageRef?.get()
+            ?.let { callNoArg(it, "getChapterIndex") as? Number }
+            ?.toInt()
+            ?: -1
+        val cached = searchIndexState
+            ?.takeIf { it.bookKey == key && !currentFileOnly }
+            ?.documents
+        val documents = cached ?: buildReadAloudDocuments(context, maxSegments, currentFileOnly)
+        val filtered = if (currentFileOnly) {
+            documents
+        } else if (startChapterIndex >= 0) {
+            documents.filter { it.chapterIndex < 0 || it.chapterIndex >= startChapterIndex }
+        } else {
+            documents
+        }
+        val result = ArrayList<ReadAloudSegment>()
+        for ((documentIndex, document) in filtered.withIndex()) {
+            val offset = readAloudStartOffsetForDocument(document)
+            splitReadAloudTextParts(document.text, offset).forEach { part ->
+                if (result.size >= maxSegments) return result
+                result += ReadAloudSegment(
+                    chapterTitle = readAloudSegmentChapterTitle(
+                        document,
+                        isCurrentDocument = documentIndex == 0,
+                        textOffset = part.startOffset,
+                    ),
+                    chapterIndex = document.chapterIndex,
+                    text = part.text,
+                    highlightText = part.highlightText,
+                    startCfi = document.indexedText.cfiAt(part.startOffset).orEmpty(),
+                    endCfi = document.indexedText.cfiAtBoundary(part.endOffset)
+                        ?: document.indexedText.cfiAt(part.startOffset).orEmpty(),
+                )
+            }
+            if (result.size >= maxSegments) return result
+        }
+        return result
+    }
+
+    private fun buildReadAloudDocuments(
+        context: CatalogContext,
+        maxSegments: Int,
+        currentFileOnly: Boolean,
+    ): List<SearchDocument> {
+        val root = currentEpubRoot()
+        val epub = currentEpubRef?.get()
+        val itemRefs = (epub?.let { callNoArg(it, "getItemRefs") } as? Iterable<*>)?.filterNotNull().orEmpty()
+        if (root == null) return emptyList()
+        val files = readAloudDocumentFiles(root, context.catalog, itemRefs, currentFileOnly)
+        if (files.isEmpty()) {
+            logReadAloudCurrentPageProbe(root, itemRefs, "no-current-file")
+            return emptyList()
+        }
+        val documents = ArrayList<SearchDocument>()
+        var segmentCount = 0
+        forEachSearchDocument(context, files) { document ->
+            documents += document
+            val offset = readAloudStartOffsetForDocument(document)
+            segmentCount += splitReadAloudTextParts(document.text, offset).size
+            !currentFileOnly && segmentCount < maxSegments
+        }
+        return documents
+    }
+
+    private fun readAloudDocumentFiles(
+        root: File,
+        catalog: List<Any>,
+        itemRefs: List<Any>,
+        currentFileOnly: Boolean,
+    ): List<File> {
+        val currentFile = currentTextContentFile(root, itemRefs)
+        if (currentFileOnly) return listOfNotNull(currentFile)
+        val catalogFiles = catalogTextFiles(root, catalog, itemRefs)
+        if (currentFile == null) return catalogFiles
+        val currentKey = currentFile.absolutePath
+        val currentIndex = catalogFiles.indexOfFirst { file ->
+            (file.canonicalFileSafe() ?: file).absolutePath == currentKey
+        }
+        return if (currentIndex >= 0) {
+            catalogFiles.drop(currentIndex)
+        } else {
+            listOf(currentFile) + catalogFiles
+        }
+    }
+
+    private fun readAloudStartOffsetForDocument(document: SearchDocument): Int {
+        val page = currentPageRef?.get() ?: return 0
+        val currentChapterIndex = (callNoArg(page, "getChapterIndex") as? Number)?.toInt() ?: -1
+        if (currentChapterIndex >= 0 && document.chapterIndex >= 0 && document.chapterIndex != currentChapterIndex) {
+            return 0
+        }
+        val summary = callString(page, "getSummary").trim()
+        if (summary.length >= 8) {
+            val offset = selectionOffsetInDocument(document.text, summary)
+            if (offset >= 0) return offset
+        }
+        return 0
+    }
+
+    private fun buildReadAloudSegmentsFromSelection(
+        context: CatalogContext,
+        selection: NativeSelectionPayload,
+        maxSegments: Int = MAX_READ_ALOUD_SEGMENTS,
+        currentFileOnly: Boolean = false,
+    ): List<ReadAloudSegment> {
+        val key = bookKey(context)
+        val documents = if (currentFileOnly) {
+            buildReadAloudDocuments(context, maxSegments, currentFileOnly = true)
+        } else {
+            searchIndexState
+                ?.takeIf { it.bookKey == key }
+                ?.documents
+                ?: buildReadAloudDocuments(context, maxSegments, currentFileOnly = false)
+        }
+        if (documents.isEmpty()) {
+            return selection.quote.takeIf { it.isNotBlank() }?.let {
+                listOf(
+                    ReadAloudSegment(
+                        fallbackCurrentChapterTitle(),
+                        -1,
+                        it,
+                        it,
+                        selection.startCfi,
+                        selection.endCfi,
+                    ),
+                )
+            }.orEmpty()
+        }
+        val startChapterIndex = currentPageRef?.get()
+            ?.let { callNoArg(it, "getChapterIndex") as? Number }
+            ?.toInt()
+            ?: -1
+        val candidateStart = documents.indexOfFirst { document ->
+            startChapterIndex < 0 || document.chapterIndex < 0 || document.chapterIndex >= startChapterIndex
+        }.takeIf { it >= 0 } ?: 0
+        val location = locateReadAloudSelection(documents, selection.quote, candidateStart)
+        val result = ArrayList<ReadAloudSegment>()
+        if (location == null && selection.quote.isNotBlank()) {
+            result += ReadAloudSegment(
+                chapterTitle = fallbackCurrentChapterTitle(),
+                chapterIndex = startChapterIndex,
+                text = selection.quote,
+                highlightText = selection.quote,
+                startCfi = selection.startCfi,
+                endCfi = selection.endCfi,
+            )
+        }
+        val startIndex = location?.documentIndex ?: candidateStart
+        for (index in startIndex until documents.size) {
+            val document = documents[index]
+            val startOffset = if (index == location?.documentIndex) {
+                location.offset.coerceIn(0, document.text.length)
+            } else {
+                0
+            }
+            splitReadAloudTextParts(document.text, startOffset).forEach { part ->
+                if (result.size >= maxSegments) return@forEach
+                result += ReadAloudSegment(
+                    chapterTitle = readAloudSegmentChapterTitle(
+                        document,
+                        isCurrentDocument = index == startIndex,
+                        textOffset = part.startOffset,
+                    ),
+                    chapterIndex = document.chapterIndex,
+                    text = part.text,
+                    highlightText = part.highlightText,
+                    startCfi = document.indexedText.cfiAt(part.startOffset).orEmpty(),
+                    endCfi = document.indexedText.cfiAtBoundary(part.endOffset)
+                        ?: document.indexedText.cfiAt(part.startOffset).orEmpty(),
+                )
+            }
+            if (result.size >= maxSegments) break
+        }
+        return result
+    }
+
+    private fun locateReadAloudSelection(
+        documents: List<SearchDocument>,
+        quote: String,
+        startIndex: Int,
+    ): ReadAloudSelectionLocation? {
+        val cleanQuote = quote.trim()
+        if (cleanQuote.isBlank()) return null
+        val searchOrder = (startIndex until documents.size).asSequence() + (0 until startIndex).asSequence()
+        searchOrder.forEach { index ->
+            val document = documents[index]
+            val offset = selectionOffsetInDocument(document.text, cleanQuote)
+            if (offset >= 0) return ReadAloudSelectionLocation(index, offset)
+        }
+        return null
+    }
+
+    private fun selectionOffsetInDocument(text: String, quote: String): Int {
+        val exact = text.indexOf(quote)
+        if (exact >= 0) return exact
+        val compactQuote = quote.replace(Regex("\\s+"), " ").trim()
+        if (compactQuote.length >= 12) {
+            val prefix = compactQuote.take(32)
+            val prefixOffset = text.indexOf(prefix)
+            if (prefixOffset >= 0) return prefixOffset
+        }
+        val shortPrefix = quote.take(16).trim()
+        if (shortPrefix.length >= 6) {
+            val shortOffset = text.indexOf(shortPrefix)
+            if (shortOffset >= 0) return shortOffset
+        }
+        return -1
+    }
+
+    private fun splitReadAloudTextParts(
+        text: String,
+        startOffset: Int = 0,
+        endOffset: Int = text.length,
+    ): List<ReadAloudTextPart> {
+        val result = ArrayList<ReadAloudTextPart>()
+        val safeStart = startOffset.coerceIn(0, text.length)
+        val safeEnd = endOffset.coerceIn(safeStart, text.length)
+        var lineStart = safeStart
+        var index = safeStart
+        while (index <= safeEnd) {
+            val atEnd = index == safeEnd
+            val char = if (atEnd) '\u0000' else text[index]
+            if (atEnd || char == '\n' || char == '\r') {
+                appendReadAloudChunks(text, lineStart, index, result)
+                if (!atEnd && char == '\r' && index + 1 < safeEnd && text[index + 1] == '\n') {
+                    index++
+                }
+                lineStart = index + 1
+            }
+            index++
+        }
+        if (result.isEmpty()) {
+            appendReadAloudChunks(text, safeStart, safeEnd, result)
+        }
+        return result
+    }
+
+    private fun appendReadAloudChunks(
+        source: String,
+        rangeStart: Int,
+        rangeEnd: Int,
+        output: MutableList<ReadAloudTextPart>,
+    ) {
+        var start = rangeStart.coerceIn(0, source.length)
+        var end = rangeEnd.coerceIn(start, source.length)
+        while (start < end && source[start].isReadAloudWhitespace()) start++
+        while (end > start && source[end - 1].isReadAloudWhitespace()) end--
+        if (start >= end) return
+        val builder = StringBuilder()
+        var chunkStart = start
+        var previousWasSpace = false
+        fun emit(endExclusive: Int) {
+            val spoken = builder.toString().trim()
+            if (spoken.isNotBlank()) {
+                val safeEnd = endExclusive.coerceIn(chunkStart, source.length)
+                val highlight = source.substring(chunkStart, safeEnd).trim()
+                output += ReadAloudTextPart(
+                    text = spoken,
+                    highlightText = highlight.ifBlank { spoken },
+                    startOffset = chunkStart,
+                    endOffset = safeEnd,
+                )
+            }
+            builder.clear()
+            previousWasSpace = false
+        }
+        var index = start
+        while (index < end) {
+            val char = source[index]
+            if (builder.isEmpty()) {
+                chunkStart = index
+            }
+            val normalized = if (char.isReadAloudWhitespace()) ' ' else char
+            if (normalized == ' ' && (builder.isEmpty() || previousWasSpace)) {
+                if (builder.isEmpty()) chunkStart = index + 1
+                index++
+                continue
+            }
+            builder.append(normalized)
+            previousWasSpace = normalized == ' '
+            val softBreak = char in READ_ALOUD_CHUNK_SOFT_BREAK_CHARS
+            var emitEnd = index + 1
+            if (softBreak) {
+                while (emitEnd < end && source[emitEnd] in READ_ALOUD_CHUNK_TRAILING_CHARS) {
+                    builder.append(source[emitEnd])
+                    previousWasSpace = false
+                    emitEnd++
+                }
+            }
+            val canBreakAtSoftPoint = softBreak && builder.length >= READ_ALOUD_SEGMENT_TARGET_CHARS
+            val forcedBreak = builder.length >= READ_ALOUD_SEGMENT_MAX_CHARS
+            if (canBreakAtSoftPoint || forcedBreak) {
+                emit(emitEnd)
+                index = emitEnd
+                continue
+            }
+            index++
+        }
+        if (builder.isNotBlank()) emit(end)
+    }
+
+    private fun mergeShortReadAloudParts(parts: List<ReadAloudTextPart>): List<ReadAloudTextPart> {
+        if (parts.size <= 1) return parts
+        val merged = ArrayList<ReadAloudTextPart>(parts.size)
+        parts.forEach { part ->
+            if (merged.isNotEmpty() && shouldMergeReadAloudPart(part.text)) {
+                val previous = merged.removeAt(merged.lastIndex)
+                merged += previous.mergeWith(part)
+            } else {
+                merged += part
+            }
+        }
+        return merged
+    }
+
+    private fun shouldMergeReadAloudPart(text: String): Boolean {
+        val clean = text.trim()
+        if (clean.isBlank()) return true
+        val core = clean.trim(*READ_ALOUD_WRAPPER_CHARS)
+        return clean.firstOrNull() in READ_ALOUD_OPEN_WRAPPER_CHARS &&
+            clean.lastOrNull() in READ_ALOUD_CLOSE_WRAPPER_CHARS &&
+            core.none { it in READ_ALOUD_INNER_PUNCTUATION_CHARS }
+    }
+
+    private fun ReadAloudTextPart.mergeWith(next: ReadAloudTextPart): ReadAloudTextPart =
+        ReadAloudTextPart(
+            text = listOf(text, next.text).joinToString("").trim(),
+            highlightText = listOf(highlightText, next.highlightText).joinToString("").trim(),
+            startOffset = minOf(startOffset, next.startOffset),
+            endOffset = maxOf(endOffset, next.endOffset),
+        )
+
+    private fun Char.isReadAloudWhitespace(): Boolean =
+        this == ' ' || this == '\t' || this == '\u000B' || this == '\u000C' || this == '\n' || this == '\r'
+
+    private fun selectedTtsSource(activity: Activity): TtsSourceEntry? {
+        TtsSourceStore.list(activity.applicationContext)
+            .firstOrNull { source -> settings?.isTtsSourceEnabled(source.id) == true }
+            ?.let { return it }
+        if (settings?.isTtsSourceEnabled(ModuleSettings.SYSTEM_TTS_SOURCE_ID) != false) {
+            return null
+        }
+        error("no read-aloud TTS source enabled")
+    }
+
+    private fun startReadAloudService(
+        activity: Activity,
+        bookKey: String,
+        bookTitle: String,
+        coverUri: String,
+        segments: List<ReadAloudSegment>,
+        source: TtsSourceEntry?,
+    ): String {
+        val chunks = readAloudChunks(segments)
+        if (chunks.isEmpty()) error("empty read-aloud chunks")
+        val sessionId = prepareReadAloudService(
+            activity = activity,
+            bookKey = bookKey,
+            bookTitle = bookTitle,
+            coverUri = coverUri,
+            source = source,
+            totalChunks = chunks.size,
+            initialChunk = chunks.first(),
+            autoPlay = true,
+        )
+        sendReadAloudChunks(activity, sessionId, chunks.drop(1), chunkOffset = 1, totalChunks = chunks.size)
+        return sessionId
+    }
+
+    private fun prepareReadAloudService(
+        activity: Activity,
+        bookKey: String,
+        bookTitle: String,
+        coverUri: String,
+        source: TtsSourceEntry?,
+        totalChunks: Int,
+        initialChunk: List<ReadAloudSegment> = emptyList(),
+        autoPlay: Boolean = false,
+    ): String {
+        val sessionId = "read_aloud_${System.currentTimeMillis()}"
+        synchronized(readAloudRestartLock) {
+            readAloudRestartSeq += 1
+        }
+        activeReadAloudBookKey = bookKey
+        activeReadAloudSessionId = sessionId
+        activeReadAloudPaused = false
+        lastReadAloudFollowCfi = ""
+        lastReadAloudFollowAtMs = 0L
+        lastReadAloudPageKey = currentReadAloudPageKey(currentPageRef?.get())
+        suppressReadAloudRestartUntilMs = SystemClock.elapsedRealtime() + READ_ALOUD_RESTART_SUPPRESS_MS
+        sendReadAloudIntent(
+            activity,
+            Intent(ReadAloudIntents.ACTION_PREPARE)
+                .setReadAloudService()
+                .putExtra(ReadAloudIntents.EXTRA_SESSION_ID, sessionId)
+                .putExtra(ReadAloudIntents.EXTRA_BOOK_KEY, bookKey)
+                .putExtra(ReadAloudIntents.EXTRA_BOOK_TITLE, bookTitle)
+                .putExtra(ReadAloudIntents.EXTRA_COVER_URI, coverUri)
+                .putExtra(ReadAloudIntents.EXTRA_SOURCE_JSON, source?.toJson().orEmpty())
+                .putExtra(ReadAloudIntents.EXTRA_TOTAL_CHUNKS, totalChunks.coerceAtLeast(0))
+                .putExtra(ReadAloudIntents.EXTRA_AUTO_PLAY, autoPlay)
+                .putReadAloudChunkExtras(initialChunk)
+                .putExtra(
+                    ReadAloudIntents.EXTRA_IGNORE_AUDIO_FOCUS,
+                    settingsProvider().canIgnoreReaderReadAloudAudioFocus,
+                )
+                .putExtra(
+                    ReadAloudIntents.EXTRA_LYRICON_ENABLED,
+                    settingsProvider().canUseReaderReadAloudLyricon,
+                ),
+        )
+        return sessionId
+    }
+
+    private fun queuePreparedReadAloudService(
+        activity: Activity,
+        sessionId: String,
+        chunks: List<List<ReadAloudSegment>>,
+    ) {
+        sendReadAloudChunks(activity, sessionId, chunks, chunkOffset = 0, totalChunks = chunks.size)
+        sendReadAloudIntent(
+            activity,
+            Intent(ReadAloudIntents.ACTION_PLAY)
+                .setReadAloudService()
+                .putExtra(ReadAloudIntents.EXTRA_SESSION_ID, sessionId),
+        )
+    }
+
+    private fun stopReadAloudSession(activity: Activity, sessionId: String, reason: String) {
+        if (sessionId != activeReadAloudSessionId) return
+        XposedBridge.log("$LOG_PREFIX read aloud stop requested session=$sessionId reason=$reason")
+        activeReadAloudSessionId = ""
+        activeReadAloudBookKey = ""
+        activeReadAloudPaused = false
+        lastReadAloudFollowCfi = ""
+        lastReadAloudFollowAtMs = 0L
+        lastReadAloudPageKey = ""
+        clearReadAloudHighlight()
+        runCatching {
+            sendReadAloudIntent(
+                activity,
+                Intent(ReadAloudIntents.ACTION_STOP)
+                    .setReadAloudService()
+                    .putExtra(ReadAloudIntents.EXTRA_SESSION_ID, sessionId),
+            )
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX read aloud stop delivery failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun stopReadAloudIfPausedOnLeaveReader(reason: String) {
+        val sessionId = activeReadAloudSessionId
+        if (sessionId.isBlank() || !activeReadAloudPaused) return
+        val activity = activityProvider() ?: return
+        XposedBridge.log("$LOG_PREFIX read aloud paused on reader leave, stopping session=$sessionId reason=$reason")
+        stopReadAloudSession(activity, sessionId, reason)
+    }
+
+    private fun appendReadAloudRemainderAsync(
+        activity: Activity,
+        context: CatalogContext,
+        sessionId: String,
+        alreadyQueuedSegments: Int,
+    ) {
+        Thread {
+            runCatching {
+                Thread.sleep(READ_ALOUD_BACKGROUND_APPEND_DELAY_MS)
+                if (sessionId != activeReadAloudSessionId) return@Thread
+                val allSegments = buildReadAloudSegments(
+                    context = context,
+                    maxSegments = MAX_READ_ALOUD_SEGMENTS,
+                    currentFileOnly = false,
+                )
+                if (sessionId != activeReadAloudSessionId) return@Thread
+                val remaining = allSegments.drop(alreadyQueuedSegments)
+                if (remaining.isEmpty()) return@Thread
+                val initialChunkCount = readAloudChunks(allSegments.take(alreadyQueuedSegments)).size
+                val remainingChunks = readAloudChunks(remaining)
+                sendReadAloudChunks(
+                    activity = activity,
+                    sessionId = sessionId,
+                    chunks = remainingChunks,
+                    chunkOffset = initialChunkCount,
+                    totalChunks = initialChunkCount + remainingChunks.size,
+                    delayBetweenChunksMs = READ_ALOUD_REMAINDER_CHUNK_DELAY_MS,
+                )
+                XposedBridge.log(
+                    "$LOG_PREFIX read aloud appended remainder chunks=${remainingChunks.size} segments=${remaining.size}",
+                )
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX read aloud append remainder failed: ${it.stackTraceToString()}")
+            }
+        }.apply {
+            name = "ReaMicroReadAloudAppend"
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun appendReadAloudSelectionRemainderAsync(
+        activity: Activity,
+        context: CatalogContext,
+        selection: NativeSelectionPayload,
+        sessionId: String,
+        alreadyQueuedSegments: Int,
+    ) {
+        Thread {
+            runCatching {
+                Thread.sleep(READ_ALOUD_BACKGROUND_APPEND_DELAY_MS)
+                if (sessionId != activeReadAloudSessionId) return@Thread
+                val allSegments = buildReadAloudSegmentsFromSelection(
+                    context = context,
+                    selection = selection,
+                    maxSegments = MAX_READ_ALOUD_SEGMENTS,
+                    currentFileOnly = false,
+                )
+                if (sessionId != activeReadAloudSessionId) return@Thread
+                val remaining = allSegments.drop(alreadyQueuedSegments)
+                if (remaining.isEmpty()) return@Thread
+                val initialChunkCount = readAloudChunks(allSegments.take(alreadyQueuedSegments)).size
+                val remainingChunks = readAloudChunks(remaining)
+                sendReadAloudChunks(
+                    activity = activity,
+                    sessionId = sessionId,
+                    chunks = remainingChunks,
+                    chunkOffset = initialChunkCount,
+                    totalChunks = initialChunkCount + remainingChunks.size,
+                    delayBetweenChunksMs = READ_ALOUD_REMAINDER_CHUNK_DELAY_MS,
+                )
+                XposedBridge.log(
+                    "$LOG_PREFIX read aloud appended selection remainder chunks=${remainingChunks.size} " +
+                        "segments=${remaining.size}",
+                )
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX read aloud append selection remainder failed: ${it.stackTraceToString()}")
+            }
+        }.apply {
+            name = "ReaMicroReadAloudSelectionAppend"
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun sendReadAloudChunks(
+        activity: Activity,
+        sessionId: String,
+        chunks: List<List<ReadAloudSegment>>,
+        chunkOffset: Int,
+        totalChunks: Int,
+        delayBetweenChunksMs: Long = 0L,
+    ) {
+        chunks.forEachIndexed { index, chunk ->
+            if (sessionId != activeReadAloudSessionId) return
+            sendReadAloudIntent(
+                activity,
+                Intent(ReadAloudIntents.ACTION_APPEND)
+                    .setReadAloudService()
+                    .putExtra(ReadAloudIntents.EXTRA_SESSION_ID, sessionId)
+                    .putExtra(ReadAloudIntents.EXTRA_CHUNK_INDEX, chunkOffset + index)
+                    .putExtra(ReadAloudIntents.EXTRA_TOTAL_CHUNKS, totalChunks)
+                    .putReadAloudChunkExtras(chunk),
+            )
+            if (delayBetweenChunksMs > 0L && index < chunks.lastIndex) {
+                Thread.sleep(delayBetweenChunksMs)
+            }
+        }
+    }
+
+    private fun Intent.putReadAloudChunkExtras(chunk: List<ReadAloudSegment>): Intent =
+        putStringArrayListExtra(ReadAloudIntents.EXTRA_TEXTS, ArrayList(chunk.map { it.text }))
+            .putStringArrayListExtra(ReadAloudIntents.EXTRA_HIGHLIGHT_TEXTS, ArrayList(chunk.map { it.highlightText }))
+            .putStringArrayListExtra(ReadAloudIntents.EXTRA_TITLES, ArrayList(chunk.map { it.chapterTitle }))
+            .putIntegerArrayListExtra(ReadAloudIntents.EXTRA_CHAPTER_INDICES, ArrayList(chunk.map { it.chapterIndex }))
+            .putStringArrayListExtra(ReadAloudIntents.EXTRA_START_CFIS, ArrayList(chunk.map { it.startCfi }))
+            .putStringArrayListExtra(ReadAloudIntents.EXTRA_END_CFIS, ArrayList(chunk.map { it.endCfi }))
+
+    private fun readAloudChunks(segments: List<ReadAloudSegment>): List<List<ReadAloudSegment>> {
+        val chunks = ArrayList<List<ReadAloudSegment>>()
+        var current = ArrayList<ReadAloudSegment>()
+        var currentChars = 0
+        segments.forEach { segment ->
+            val nextChars = currentChars + segment.text.length
+            if (current.isNotEmpty() && (current.size >= READ_ALOUD_SEGMENTS_PER_CHUNK || nextChars >= READ_ALOUD_CHUNK_MAX_CHARS)) {
+                chunks += current
+                current = ArrayList()
+                currentChars = 0
+            }
+            current += segment
+            currentChars += segment.text.length
+        }
+        if (current.isNotEmpty()) chunks += current
+        return chunks
+    }
+
+    private fun Intent.setReadAloudService(): Intent =
+        setClassName(ReadAloudIntents.MODULE_PACKAGE_NAME, ReadAloudIntents.SERVICE_CLASS_NAME)
+
+    private fun Intent.setReadAloudCommandActivity(): Intent =
+        setClassName(ReadAloudIntents.MODULE_PACKAGE_NAME, ReadAloudIntents.COMMAND_ACTIVITY_CLASS_NAME)
+
+    private fun sendReadAloudIntent(activity: Activity, intent: Intent) {
+        val action = intent.action.orEmpty()
+        if (startReadAloudServiceFromContext(activity, intent, "host")) return
+        val moduleContext = runCatching {
+            activity.createPackageContext(ReadAloudIntents.MODULE_PACKAGE_NAME, Context.CONTEXT_IGNORE_SECURITY)
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX read aloud module context unavailable action=$action: ${it.message}")
+        }.getOrNull()
+        if (moduleContext != null && startReadAloudServiceFromContext(moduleContext, intent, "module-context")) return
+        val preferActivity = action == ReadAloudIntents.ACTION_PREPARE
+        if (preferActivity && startReadAloudCommandActivity(activity, intent)) return
+        if (sendReadAloudCommandBroadcast(activity, intent)) return
+        if (!preferActivity && startReadAloudCommandActivity(activity, intent)) return
+        error("read aloud command delivery failed action=$action")
+    }
+
+    private fun sendReadAloudCommandBroadcast(activity: Activity, intent: Intent): Boolean {
+        val action = intent.action.orEmpty()
+        return runCatching {
+            val command = Intent(intent).apply {
+                setClassName(ReadAloudIntents.MODULE_PACKAGE_NAME, ReadAloudIntents.COMMAND_RECEIVER_CLASS_NAME)
+                addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES or Intent.FLAG_RECEIVER_FOREGROUND)
+            }
+            activity.sendBroadcast(command)
+            XposedBridge.log("$LOG_PREFIX read aloud command broadcast sent action=$action")
+            true
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX read aloud command broadcast failed action=$action: ${it.stackTraceToString()}")
+        }.getOrDefault(false)
+    }
+
+    private fun startReadAloudServiceFromContext(context: Context, intent: Intent, label: String): Boolean {
+        val action = intent.action.orEmpty()
+        val started = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(Intent(intent).setReadAloudService())
+            } else {
+                context.startService(Intent(intent).setReadAloudService())
+            }
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX read aloud $label service intent failed action=$action: ${it.stackTraceToString()}")
+        }.getOrNull()
+        if (started == null) {
+            XposedBridge.log("$LOG_PREFIX read aloud $label service returned null action=$action")
+            return false
+        }
+        XposedBridge.log("$LOG_PREFIX read aloud $label service started action=$action component=$started")
+        return true
+    }
+
+    private fun startReadAloudCommandActivity(activity: Activity, intent: Intent): Boolean {
+        val action = intent.action.orEmpty()
+        return runCatching {
+            val command = Intent(intent).apply {
+                setReadAloudCommandActivity()
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
+                addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
+                addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY)
+                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            activity.startActivity(command)
+            XposedBridge.log("$LOG_PREFIX read aloud command activity started action=$action")
+            true
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX read aloud command activity failed action=$action: ${it.stackTraceToString()}")
+        }.getOrDefault(false)
+    }
+
+    private fun forEachSearchDocument(
+        context: CatalogContext,
+        explicitFiles: List<File>? = null,
+        onDocument: (SearchDocument) -> Boolean,
+    ) {
         val epub = currentEpubRef?.get()
         val root = currentEpubRoot() ?: return
         val epubTitlePaths = epubCatalogTitlePaths(root)
@@ -4084,7 +5741,13 @@ class ReaderHook(
             .groupBy({ it.first }, { it.second })
         val itemRefs = (epub?.let { callNoArg(it, "getItemRefs") } as? Iterable<*>)?.filterNotNull().orEmpty()
         val spineCfiIndex = (epub?.let { callNoArg(it, "getSpineCfiIndex") } as? Int) ?: -1
-        val files = catalogTextFiles(root, context.catalog, itemRefs)
+        val catalogFiles = catalogTextFiles(root, context.catalog, itemRefs)
+        val files = explicitFiles
+            ?.map { it.canonicalFileSafe() ?: it }
+            ?.filter { it.isFile && it.isTextContentFile() }
+            ?.distinctBy { it.absolutePath }
+            ?.takeIf { it.isNotEmpty() }
+            ?: catalogFiles
         XposedBridge.log(
             "$LOG_PREFIX full-text catalog title paths catalog=${indexedCatalog.size} " +
                 "pathHits=$pathHitCount hrefKeys=${chaptersByHref.size} files=${files.size}",
@@ -4105,6 +5768,10 @@ class ReaderHook(
                     chapterIndex = chapter?.index ?: -1,
                     chapter = chapter?.entry?.chapter,
                     chapterTitle = searchChapterTitle(raw, chapter?.entry, file, fallbackTitlePath),
+                    readAloudChapterTitle = chooseReadAloudDirectTitle(
+                        readAloudHtmlChapterTitleHint(raw),
+                        directReadAloudChapterTitle(chapter?.entry),
+                    ),
                     text = text,
                     lowerText = text.lowercase(Locale.ROOT),
                     indexedText = indexedText,
@@ -4450,6 +6117,213 @@ class ReaderHook(
     private fun epubDirectory(epub: Any?): String =
         callNoArg(epub, "getDirectory")?.toString().orEmpty()
 
+    private fun currentBookCoverUri(context: CatalogContext): String {
+        val root = currentEpubRoot()
+        listOf(
+            currentUiStateBook(),
+            context.book,
+            bottomReadAloudBookRef?.get(),
+            bottomSearchBookRef?.get(),
+            lastCatalogContext?.book,
+        ).filterNotNull().forEach { book ->
+            coverUriFromBook(book, root)?.let { return prepareCoverUriForService(it) }
+        }
+        return root?.let(::coverUriFromEpubRoot)?.let(::prepareCoverUriForService).orEmpty()
+    }
+
+    private fun prepareCoverUriForService(value: String): String {
+        val raw = value.trim()
+        if (raw.isBlank() || raw.startsWith("data:", ignoreCase = true)) return raw
+        if (raw.startsWith("http://", ignoreCase = true) || raw.startsWith("https://", ignoreCase = true)) return raw
+        val bytes = when {
+            raw.startsWith("content://", ignoreCase = true) -> runCatching {
+                activityProvider()?.contentResolver?.openInputStream(android.net.Uri.parse(raw))?.use { it.readBytes() }
+            }.getOrNull()
+            raw.startsWith("file://", ignoreCase = true) -> runCatching {
+                File(android.net.Uri.parse(raw).path.orEmpty()).takeIf { it.isFile }?.readBytes()
+            }.getOrNull()
+            else -> runCatching {
+                File(raw).takeIf { it.isFile }?.readBytes()
+            }.getOrNull()
+        } ?: return raw
+        return coverDataUriForService(bytes) ?: raw
+    }
+
+    private fun coverDataUriForService(bytes: ByteArray): String? =
+        runCatching {
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+            if (options.outWidth <= 0 || options.outHeight <= 0) return@runCatching null
+            val sample = coverSampleSizeForService(options.outWidth, options.outHeight)
+            val bitmap = BitmapFactory.Options().run {
+                inSampleSize = sample
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, this)
+            } ?: return@runCatching null
+            val output = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 82, output)
+            bitmap.recycle()
+            "data:image/jpeg;base64," + Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX read aloud cover encode failed: ${it.stackTraceToString()}")
+        }.getOrNull()
+
+    private fun coverSampleSizeForService(width: Int, height: Int): Int {
+        var sample = 1
+        var maxEdge = maxOf(width, height)
+        while (maxEdge / sample > READ_ALOUD_COVER_MAX_EDGE_PX) {
+            sample *= 2
+        }
+        return sample.coerceAtLeast(1)
+    }
+
+    private fun coverUriFromBook(book: Any, root: File?): String? {
+        val methodCandidates = listOf(
+            "getCover",
+            "getCoverUrl",
+            "getCoverUri",
+            "getCoverPath",
+            "getImg",
+            "getImage",
+            "getImageUrl",
+            "getThumbnail",
+            "getThumbnailUrl",
+        )
+        methodCandidates
+            .asSequence()
+            .map { callString(book, it) }
+            .mapNotNull { normalizeCoverCandidate(it, root) }
+            .firstOrNull()
+            ?.let { return it }
+
+        val fieldCandidates = setOf(
+            "cover",
+            "coverUrl",
+            "coverUri",
+            "coverPath",
+            "img",
+            "image",
+            "imageUrl",
+            "thumbnail",
+            "thumbnailUrl",
+        )
+        return (book.javaClass.fields.asSequence() + book.javaClass.declaredFields.asSequence())
+            .filter { it.name in fieldCandidates }
+            .mapNotNull { field ->
+                runCatching {
+                    field.isAccessible = true
+                    normalizeCoverCandidate(field.get(book)?.toString().orEmpty(), root)
+                }.getOrNull()
+            }
+            .firstOrNull()
+    }
+
+    private fun normalizeCoverCandidate(value: String, root: File?): String? {
+        val raw = value.trim().takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) } ?: return null
+        if (raw.startsWith("data:", ignoreCase = true) ||
+            raw.startsWith("content://", ignoreCase = true) ||
+            raw.startsWith("file://", ignoreCase = true) ||
+            raw.startsWith("http://", ignoreCase = true) ||
+            raw.startsWith("https://", ignoreCase = true)
+        ) {
+            return raw
+        }
+        val decoded = runCatching { URLDecoder.decode(raw, "UTF-8") }.getOrDefault(raw)
+        File(decoded).takeIf { it.isFile && it.isCoverImageFile() }?.let { return it.absolutePath }
+        val normalized = normalizePath(decoded.substringBefore('#'))
+        if (root != null && normalized.isNotBlank()) {
+            coverFileForHref(root, root, normalized)?.let { return it.absolutePath }
+        }
+        return null
+    }
+
+    private fun coverUriFromEpubRoot(root: File): String {
+        findOpfCoverFile(root)?.let { return it.absolutePath }
+        val commonNames = listOf(
+            "cover.jpg",
+            "cover.jpeg",
+            "cover.png",
+            "cover.webp",
+            "Images/cover.jpg",
+            "Images/cover.jpeg",
+            "Images/cover.png",
+            "Images/cover.webp",
+            "OEBPS/cover.jpg",
+            "OEBPS/cover.jpeg",
+            "OEBPS/cover.png",
+            "OEBPS/cover.webp",
+            "OEBPS/Images/cover.jpg",
+            "OEBPS/Images/cover.jpeg",
+            "OEBPS/Images/cover.png",
+            "OEBPS/Images/cover.webp",
+        )
+        commonNames.forEach { path ->
+            File(root, path).takeIf { it.isFile && it.isCoverImageFile() }?.let { return it.absolutePath }
+        }
+        return root.walkTopDown()
+            .filter { it.isFile && it.isCoverImageFile() }
+            .firstOrNull { it.nameWithoutExtension.contains("cover", ignoreCase = true) }
+            ?.absolutePath
+            .orEmpty()
+    }
+
+    private fun findOpfCoverFile(root: File): File? {
+        for (opf in root.walkTopDown().filter { it.isFile && it.extension.equals("opf", ignoreCase = true) }) {
+            val href = opfCoverHref(opf) ?: continue
+            val base = opf.parentFile ?: root
+            coverFileForHref(base, root, href)?.let { return it }
+        }
+        return null
+    }
+
+    private fun opfCoverHref(opf: File): String? = runCatching {
+        val parser = Xml.newPullParser()
+        parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
+        parser.setInput(opf.inputStream().bufferedReader(StandardCharsets.UTF_8))
+        val manifest = linkedMapOf<String, String>()
+        var coverId = ""
+        var coverImageHref = ""
+        while (parser.eventType != XmlPullParser.END_DOCUMENT) {
+            if (parser.eventType == XmlPullParser.START_TAG) {
+                when (parser.name.lowercase(Locale.ROOT)) {
+                    "meta" -> {
+                        val name = parser.getAttributeValue(null, "name").orEmpty()
+                        if (name.equals("cover", ignoreCase = true)) {
+                            coverId = parser.getAttributeValue(null, "content").orEmpty()
+                        }
+                    }
+                    "item" -> {
+                        val id = parser.getAttributeValue(null, "id").orEmpty()
+                        val href = parser.getAttributeValue(null, "href").orEmpty()
+                        val properties = parser.getAttributeValue(null, "properties").orEmpty()
+                        if (id.isNotBlank() && href.isNotBlank()) manifest[id] = href
+                        if (href.isNotBlank() && properties.split(Regex("\\s+")).any { it == "cover-image" }) {
+                            coverImageHref = href
+                        }
+                    }
+                }
+            }
+            parser.next()
+        }
+        coverImageHref.ifBlank { manifest[coverId].orEmpty() }.takeIf { it.isNotBlank() }
+    }.getOrNull()
+
+    private fun coverFileForHref(base: File, root: File, href: String): File? {
+        val normalized = normalizePath(URLDecoder.decode(href.substringBefore('#'), "UTF-8"))
+        if (normalized.isBlank()) return null
+        val candidates = buildList {
+            add(File(base, normalized))
+            add(File(root, normalized))
+            if ('/' in normalized) add(File(root, normalized.substringAfter('/')))
+            if ('/' in normalized) add(File(root, normalized.substringAfterLast('/')))
+        }
+        return candidates.firstNotNullOfOrNull { candidate ->
+            candidate.canonicalFileSafe()?.takeIf { it.isFile && it.isCoverImageFile() }
+        }
+    }
+
+    private fun File.isCoverImageFile(): Boolean =
+        isFile && extension.lowercase(Locale.ROOT) in COVER_IMAGE_EXTENSIONS
+
     private fun catalogTextFiles(root: File, catalog: List<Any>, itemRefs: List<Any>): List<File> {
         val fromSpine = itemRefs
             .mapIndexedNotNull { position, item ->
@@ -4495,6 +6369,57 @@ class ReaderHook(
         val catalogTitle = chapter?.titlePath.orEmpty().ifBlank { fallbackTitlePath }.normalizeChapterTitle()
         val fileTitle = fileChapterTitleHint(raw)
         return chooseChapterTitle(catalogTitle, fileTitle).ifBlank { file.nameWithoutExtension }
+    }
+
+    private fun directReadAloudChapterTitle(chapter: CatalogChapterEntry?): String =
+        chapter?.chapter
+            ?.let(::catalogChapterTitle)
+            ?.normalizeChapterTitle()
+            .orEmpty()
+
+    private fun readAloudSegmentChapterTitle(
+        document: SearchDocument,
+        isCurrentDocument: Boolean,
+        textOffset: Int,
+    ): String {
+        val anchorTitle = document.chapterAnchors
+            .lastOrNull { it.textStart <= textOffset }
+            ?.let { anchor -> catalogChapterTitle(anchor.chapter).normalizeChapterTitle() }
+            .orEmpty()
+        return chooseReadAloudDirectTitle(document.readAloudChapterTitle, anchorTitle)
+            .ifBlank {
+                if (isCurrentDocument) fallbackCurrentChapterTitle().normalizeChapterTitle() else ""
+            }
+            .ifBlank { document.chapterTitle }
+    }
+
+    private fun chooseReadAloudDirectTitle(primary: String, fallback: String): String {
+        val cleanPrimary = primary.normalizeChapterTitle()
+        val cleanFallback = fallback.normalizeChapterTitle()
+        return when {
+            cleanPrimary.isBlank() -> cleanFallback
+            cleanFallback.isBlank() -> cleanPrimary
+            cleanPrimary == cleanFallback -> cleanPrimary
+            cleanFallback.length >= 4 && cleanPrimary.endsWith(cleanFallback) -> cleanFallback
+            cleanFallback.length >= 4 && cleanPrimary.contains(cleanFallback) -> cleanFallback
+            else -> cleanPrimary
+        }
+    }
+
+    private fun readAloudHtmlChapterTitleHint(raw: String): String {
+        Regex("""(?is)<h[1-3]\b[^>]*>(.*?)</h[1-3]>""")
+            .find(raw)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.normalizeChapterTitle()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
+        return Regex("""(?is)<title\b[^>]*>(.*?)</title>""")
+            .find(raw)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.normalizeChapterTitle()
+            .orEmpty()
     }
 
     private fun fileChapterTitleHint(raw: String): String {
@@ -5308,13 +7233,8 @@ class ReaderHook(
             ?.let { File(it) }
             ?.takeIf { it.isDirectory }
             ?: return emptyList()
-        val page = currentPageRef?.get()
-        val spineIndex = (callNoArg(page, "getSpineIndex") as? Int) ?: -1
         val itemRefs = (currentEpubRef?.get()?.let { callNoArg(it, "getItemRefs") } as? Iterable<*>)?.toList().orEmpty()
-        val currentHref = itemRefs.firstOrNull { (callNoArg(it, "getSpineIndex") as? Int) == spineIndex }
-            ?.let { callString(it, "getHref") }
-            ?.takeIf { it.isNotBlank() }
-        val currentFile = currentHref?.let { File(root, it).canonicalFileSafe() }?.takeIf { it.isTextContentFile() }
+        val currentFile = currentTextContentFile(root, itemRefs)
         val allTextFiles by lazy {
             root.walkTopDown()
                 .filter { it.isFile && it.isTextContentFile() }
@@ -5325,6 +7245,116 @@ class ReaderHook(
             if (currentFile != null) add(currentFile)
             addAll(allTextFiles.filter { currentFile == null || it.absolutePath != currentFile.absolutePath })
         }
+    }
+
+    private fun currentTextContentFile(root: File, itemRefs: Iterable<*>): File? {
+        val page = currentPageRef?.get() ?: return null
+        readAloudPageHrefCandidates(page).forEach { href ->
+            searchFileForHref(root, href)?.let { file ->
+                XposedBridge.log("$LOG_PREFIX read aloud current file by href href=$href file=${relativePath(root, file)}")
+                return file
+            }
+        }
+        val cfi = callString(page, "getAnchor")
+            .ifBlank { callNoArg(page, "getStart")?.toString().orEmpty() }
+        val cfiItemRefIndex = Regex("""epubcfi\(/\d+/(\d+)""")
+            .find(cfi)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+            ?: -1
+        if (cfiItemRefIndex >= 0) {
+            val byCfi = itemRefs.firstOrNull { item ->
+                (callNoArg(item, "getIndex") as? Number)?.toInt() == cfiItemRefIndex ||
+                    (callNoArg(item, "getSpineIndex") as? Number)?.toInt() == cfiItemRefIndex
+            }?.let { item ->
+                searchFileForHref(root, callString(item, "getHref"))
+            }
+            if (byCfi != null) {
+                XposedBridge.log(
+                    "$LOG_PREFIX read aloud current file by cfi itemRef=$cfiItemRefIndex file=${relativePath(root, byCfi)}",
+                )
+                return byCfi
+            }
+        }
+        val spineIndex = (callNoArg(page, "getSpineIndex") as? Number)?.toInt() ?: -1
+        if (spineIndex < 0) {
+            logReadAloudCurrentPageProbe(root, itemRefs, "missing-spine-index")
+            return null
+        }
+        val currentHref = itemRefs.firstOrNull {
+            (callNoArg(it, "getSpineIndex") as? Number)?.toInt() == spineIndex ||
+                (callNoArg(it, "getIndex") as? Number)?.toInt() == spineIndex
+        }
+            ?.let { callString(it, "getHref") }
+            ?.takeIf { it.isNotBlank() }
+            ?: run {
+                logReadAloudCurrentPageProbe(root, itemRefs, "spine-index-not-in-itemRefs")
+                return null
+            }
+        return searchFileForHref(root, currentHref).also { file ->
+            if (file == null) logReadAloudCurrentPageProbe(root, itemRefs, "href-not-found:$currentHref")
+        }
+    }
+
+    private fun readAloudPageHrefCandidates(page: Any): List<String> =
+        buildList {
+            listOf(
+                "getHref",
+                "getPath",
+                "getFile",
+                "getFileName",
+                "getSource",
+                "getSrc",
+            ).forEach { method ->
+                callString(page, method).takeIf { it.isNotBlank() }?.let(::add)
+            }
+            val chapter = callNoArg(page, "getChapter")
+            listOf("getHref", "getPath", "getFile", "getSource", "getSrc").forEach { method ->
+                callString(chapter, method).takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }.distinct()
+
+    private fun logReadAloudCurrentPageProbe(root: File, itemRefs: Iterable<*>, reason: String) {
+        val page = currentPageRef?.get()
+        val key = listOf(
+            reason,
+            root.absolutePath,
+            page?.javaClass?.name.orEmpty(),
+            callString(page, "getAnchor"),
+            callString(page, "getSummary").take(48),
+        ).joinToString("|")
+        if (key == readAloudPageProbeLogKey) return
+        readAloudPageProbeLogKey = key
+        val methodDump = listOf(
+            "getAnchor",
+            "getStart",
+            "getSpineIndex",
+            "getChapterIndex",
+            "getPageIndex",
+            "getSummary",
+            "getHref",
+            "getPath",
+            "getFile",
+        ).joinToString(";") { method ->
+            "$method=${callNoArg(page, method)?.toString()?.take(120).orEmpty()}"
+        }
+        val fieldDump = page?.javaClass?.declaredFields
+            ?.take(16)
+            ?.joinToString(";") { field ->
+                runCatching {
+                    field.isAccessible = true
+                    "${field.name}=${field.get(page)?.toString()?.take(120).orEmpty()}"
+                }.getOrDefault("${field.name}=?")
+            }
+            .orEmpty()
+        val itemRefDump = itemRefs.take(8).joinToString(";") { item ->
+            "href=${callString(item, "getHref")},index=${callNoArg(item, "getIndex")},spine=${callNoArg(item, "getSpineIndex")}"
+        }
+        XposedBridge.log(
+            "$LOG_PREFIX read aloud current file probe reason=$reason page=${page?.javaClass?.name} " +
+                "methods=[$methodDump] fields=[$fieldDump] itemRefs=[$itemRefDump]",
+        )
     }
 
     private fun replaceUniqueTextInFile(file: File, oldText: String, newText: String): Boolean {
@@ -5424,6 +7454,24 @@ class ReaderHook(
     private fun callString(target: Any?, name: String): String =
         callNoArg(target, name)?.toString().orEmpty()
 
+    private fun setString(target: Any, name: String, value: String) {
+        target.javaClass.methods.firstOrNull {
+            it.name == name && it.parameterTypes.size == 1 && it.parameterTypes[0] == String::class.java
+        }?.invoke(target, value)
+    }
+
+    private fun setInt(target: Any, name: String, value: Int) {
+        target.javaClass.methods.firstOrNull {
+            it.name == name && it.parameterTypes.size == 1 && it.parameterTypes[0] == Int::class.javaPrimitiveType
+        }?.invoke(target, value)
+    }
+
+    private fun setFloat(target: Any, name: String, value: Float) {
+        target.javaClass.methods.firstOrNull {
+            it.name == name && it.parameterTypes.size == 1 && it.parameterTypes[0] == Float::class.javaPrimitiveType
+        }?.invoke(target, value)
+    }
+
     private data class ReaderHighlightSheetRequest(
         val globalRules: Boolean,
         val bookKey: String,
@@ -5450,6 +7498,9 @@ class ReaderHook(
         const val SCROLL_PAGER_KT_CLASS = "app.zhendong.reamicro.ui.reader.components.ScrollPagerKt"
         const val SESSION_CLASS = "app.zhendong.reamicro.repository.core.Session"
         const val PREF_KEYS_CLASS = "app.zhendong.reamicro.constants.PrefKeys"
+        const val EPUB_PAGE_CLASS = "app.zhendong.reamicro.data.epub.EpubPage"
+        const val HTML_DOCUMENT_CLASS = "org.epub.html.HtmlDocument"
+        const val EPUB_CFI_CLASS = "org.epub.html.EpubCFI"
         const val CONTENT_DOM_CLASS = "org.epub.html.node.ContentDom"
         const val UI_EPUB_WINDOW_CLASS = "org.epub.UIEpubWindow"
         const val HOME_SCREEN_CLASS = "app.zhendong.reamicro.ui.home.HomeScreenKt"
@@ -5465,6 +7516,8 @@ class ReaderHook(
         const val HIGHLIGHT_ICON_BORDER_COLOR_CLASS = "androidx.compose.material.icons.outlined.BorderColorKt"
         const val HIGHLIGHT_ICON_FORMAT_COLOR_FILL_CLASS = "androidx.compose.material.icons.outlined.FormatColorFillKt"
         const val HIGHLIGHT_ICON_MODE_EDIT_CLASS = "androidx.compose.material.icons.outlined.ModeEditKt"
+        const val READ_ALOUD_ICON_VOLUME_UP_CLASS = "androidx.compose.material.icons.outlined.VolumeUpKt"
+        const val READ_ALOUD_ICON_RECORD_VOICE_OVER_CLASS = "androidx.compose.material.icons.outlined.RecordVoiceOverKt"
         const val ICONS_OUTLINED_CLASS = "androidx.compose.material.icons.Icons\$Outlined"
         const val LOG_PREFIX = "ReaMicro LSP"
         const val FLIP_STYLE_TRANSLATE = 0
@@ -5527,9 +7580,27 @@ class ReaderHook(
         const val SEARCH_EMIT_INTERVAL_MS = 320L
         const val SEARCH_NAV_BAR_TAG = 0x524d5331
         const val SEARCH_MENU_BUTTON_TAG = 0x524d5333
+        const val READ_ALOUD_MENU_BUTTON_TAG = 0x524d5334
         const val SEARCH_MENU_BUTTON_SIZE_DP = 44
         const val SEARCH_MENU_BUTTON_RIGHT_MARGIN_DP = 28
+        const val READ_ALOUD_MENU_BUTTON_RIGHT_MARGIN_DP = 84
         const val SEARCH_MENU_BUTTON_BOTTOM_MARGIN_DP = 166
+        const val READ_ALOUD_SEGMENT_TARGET_CHARS = 160
+        const val READ_ALOUD_SEGMENT_MAX_CHARS = 260
+        const val READ_ALOUD_INITIAL_SEGMENTS = 24
+        const val READ_ALOUD_SEGMENTS_PER_CHUNK = 48
+        const val READ_ALOUD_CHUNK_MAX_CHARS = 18_000
+        const val READ_ALOUD_BACKGROUND_APPEND_DELAY_MS = 8_000L
+        const val READ_ALOUD_REMAINDER_CHUNK_DELAY_MS = 80L
+        const val MAX_READ_ALOUD_SEGMENTS = 5000
+        const val READ_ALOUD_PAGE_RESTART_DELAY_MS = 450L
+        const val READ_ALOUD_RESTART_SUPPRESS_MS = 1_500L
+        const val READ_ALOUD_FOLLOW_MIN_INTERVAL_MS = 650L
+        const val READ_ALOUD_COVER_MAX_EDGE_PX = 512
+        const val READ_ALOUD_PROGRESS_RESTORE_DELAY_MS = 420L
+        const val READ_ALOUD_PROGRESS_SYNC_MIN_INTERVAL_MS = 1_500L
+        const val READ_ALOUD_PROGRESS_MAX_AGE_MS = 7L * 24L * 60L * 60L * 1000L
+        const val EPUB_PAGE_CONTENT = 0
         const val SEARCH_NAVIGATION_READER_BOTTOM_MARGIN_DP = 8
         const val SEARCH_NAVIGATION_MENU_BOTTOM_MARGIN_DP = 190
         const val SEARCH_JUMP_SINGLE_CORRECTION_DELAY_MS = 760L
@@ -5545,6 +7616,21 @@ class ReaderHook(
         const val SEARCH_ORIGIN_KEY_SUMMARY = "summary"
         const val SEARCH_ORIGIN_RESTORE_DELAY_MS = 360L
         const val SEARCH_ORIGIN_MAX_AGE_MS = 24L * 60L * 60L * 1000L
+        const val READ_ALOUD_PROGRESS_PREFS = "reamicro_read_aloud_progress"
+        const val READ_ALOUD_PROGRESS_KEY_TIMESTAMP = "timestamp"
+        const val READ_ALOUD_PROGRESS_KEY_SESSION = "session"
+        const val READ_ALOUD_PROGRESS_KEY_BOOK = "book"
+        const val READ_ALOUD_PROGRESS_KEY_BOOK_IDENTITY = "book_identity"
+        const val READ_ALOUD_PROGRESS_KEY_EPUB_ROOT = "epub_root"
+        const val READ_ALOUD_PROGRESS_KEY_BOOK_TITLE = "book_title"
+        const val READ_ALOUD_PROGRESS_KEY_CFI = "cfi"
+        const val READ_ALOUD_PROGRESS_KEY_END_CFI = "end_cfi"
+        const val READ_ALOUD_PROGRESS_KEY_PARAGRAPH_INDEX = "paragraph_index"
+        const val READ_ALOUD_PROGRESS_KEY_CHAPTER_INDEX = "chapter_index"
+        const val READ_ALOUD_PROGRESS_KEY_TITLE = "title"
+        const val READ_ALOUD_PROGRESS_KEY_SUMMARY = "summary"
+        const val READ_ALOUD_PROGRESS_KEY_ELAPSED_MS = "elapsed_ms"
+        const val READ_ALOUD_PROGRESS_KEY_RECORDED_ELAPSED_MS = "recorded_elapsed_ms"
         const val MARK_KIND_HIGHLIGHT = 0
         const val MARK_STYLE_FILL = 0
         const val MARK_STYLE_LINE = 1
@@ -5555,6 +7641,8 @@ class ReaderHook(
         const val SEARCH_HIGHLIGHT_MARK_ID_RANGE = 100_000L
         const val SELECTION_HIGHLIGHT_MARK_ID_BASE = -9_223_372_036_853_800_000L
         const val SELECTION_HIGHLIGHT_MARK_ID_RANGE = 100_000L
+        const val READ_ALOUD_HIGHLIGHT_MARK_ID_BASE = -9_223_372_036_853_700_000L
+        const val READ_ALOUD_HIGHLIGHT_MARK_ID_RANGE = 100_000L
         val BLOCK_SEARCH_TAGS = setOf(
             "p", "div", "section", "article", "li", "blockquote", "pre",
             "h1", "h2", "h3", "h4", "h5", "h6",
@@ -5563,6 +7651,31 @@ class ReaderHook(
         val SEARCH_VOID_TAGS = setOf(
             "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr",
         )
+        val READ_ALOUD_CHUNK_SOFT_BREAK_CHARS = setOf(
+            '\u3002', '\uff01', '\uff1f', '\uff1b', '\uff0c', '\u3001', '\uff1a',
+            '.', '!', '?', ';', ',', ':',
+        )
+        val READ_ALOUD_CHUNK_TRAILING_CHARS = setOf(
+            '\u3002', '\uff01', '\uff1f', '\uff1b', '\uff0c', '\u3001', '\uff1a',
+            '.', '!', '?', ';', ',', ':',
+            '\u2019', '\u201d', '\u3011', '\uff09', '\u300b', '\u3009',
+            '\'', '"', ')', ']', '}', '>',
+        )
+        val READ_ALOUD_OPEN_WRAPPER_CHARS = setOf(
+            '\u2018', '\u201c', '\u3010', '\uff08', '(', '[', '{', '<', '\u300a', '\u3008', '\'', '"',
+        )
+        val READ_ALOUD_CLOSE_WRAPPER_CHARS = setOf(
+            '\u2019', '\u201d', '\u3011', '\uff09', ')', ']', '}', '>', '\u300b', '\u3009', '\'', '"',
+        )
+        val READ_ALOUD_WRAPPER_CHARS = charArrayOf(
+            '\u2018', '\u2019', '\u201c', '\u201d', '\u3010', '\u3011', '\uff08', '\uff09',
+            '(', ')', '[', ']', '{', '}', '<', '>', '\u300a', '\u300b', '\u3008', '\u3009', '\'', '"',
+        )
+        val READ_ALOUD_INNER_PUNCTUATION_CHARS = setOf(
+            '\u3002', '\uff01', '\uff1f', '\uff1b', '\uff0c', '\u3001', '\uff1a',
+            '.', '!', '?', ';', ',', ':',
+        )
+        val COVER_IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp")
     }
 
     private data class CatalogContext(
@@ -5594,10 +7707,32 @@ class ReaderHook(
         val chapterIndex: Int,
         val chapter: Any?,
         val chapterTitle: String,
+        val readAloudChapterTitle: String,
         val text: String,
         val lowerText: String,
         val indexedText: IndexedSearchText,
         val chapterAnchors: List<ChapterAnchor>,
+    )
+
+    private data class ReadAloudSegment(
+        val chapterTitle: String,
+        val chapterIndex: Int,
+        val text: String,
+        val highlightText: String = text,
+        val startCfi: String = "",
+        val endCfi: String = "",
+    )
+
+    private data class ReadAloudTextPart(
+        val text: String,
+        val highlightText: String,
+        val startOffset: Int,
+        val endOffset: Int,
+    )
+
+    private data class ReadAloudSelectionLocation(
+        val documentIndex: Int,
+        val offset: Int,
     )
 
     private data class ReadingTarget(
@@ -5618,6 +7753,20 @@ class ReaderHook(
         val bookKey: String,
         val epubRoot: String,
         val returnTarget: ReadingTarget,
+    )
+
+    private data class PersistedReadAloudProgress(
+        val timestamp: Long,
+        val sessionId: String,
+        val bookKey: String,
+        val bookIdentity: String,
+        val epubRoot: String,
+        val bookTitle: String,
+        val target: ReadingTarget,
+        val endCfi: String,
+        val paragraphIndex: Int,
+        val elapsedMs: Long,
+        val recordedElapsedMs: Long,
     )
 
     private data class IndexedChapter(
@@ -5792,6 +7941,73 @@ class ReaderHook(
                 lensCy + lensRadius * 1.55f,
                 iconPaint,
             )
+        }
+    }
+
+    private class ReadAloudMenuButtonView(context: Context) : View(context) {
+        private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+        }
+        private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = dp(context, 1).toFloat()
+        }
+        private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = dp(context, 3).toFloat()
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+
+        init {
+            refreshColors()
+        }
+
+        fun refreshColors() {
+            val colors = DialogColors(context)
+            fillPaint.color = colors.cardBackground
+            strokePaint.color = colors.stroke
+            iconPaint.color = colors.actionBackground
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val cx = width / 2f
+            val cy = height / 2f
+            val radius = (minOf(width, height) / 2f) - dp(context, 1)
+            canvas.drawCircle(cx, cy, radius, fillPaint)
+            canvas.drawCircle(cx, cy, radius, strokePaint)
+            val left = cx - dp(context, 10)
+            val top = cy - dp(context, 7)
+            val mid = cy
+            val bottom = cy + dp(context, 7)
+            val right = cx - dp(context, 2)
+            canvas.drawLine(left, top, right, top - dp(context, 2), iconPaint)
+            canvas.drawLine(left, bottom, right, bottom + dp(context, 2), iconPaint)
+            canvas.drawLine(left, top, left, bottom, iconPaint)
+            canvas.drawLine(right, top - dp(context, 2), right, bottom + dp(context, 2), iconPaint)
+            canvas.drawArc(
+                cx - dp(context, 3).toFloat(),
+                cy - dp(context, 12).toFloat(),
+                cx + dp(context, 14).toFloat(),
+                cy + dp(context, 12).toFloat(),
+                -38f,
+                76f,
+                false,
+                iconPaint,
+            )
+            canvas.drawArc(
+                cx + dp(context, 2).toFloat(),
+                cy - dp(context, 7).toFloat(),
+                cx + dp(context, 10).toFloat(),
+                cy + dp(context, 7).toFloat(),
+                -38f,
+                76f,
+                false,
+                iconPaint,
+            )
+            canvas.drawPoint(right, mid, iconPaint)
         }
     }
 

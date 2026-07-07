@@ -3,9 +3,14 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <queries>
         <package android:name="app.zhendong.reamicro" />
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
     </queries>
 
     <application
@@ -13,7 +18,8 @@
         android:description="@string/module_description"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/module_name"
-        android:theme="@style/AppTheme">
+        android:theme="@style/AppTheme"
+        android:usesCleartextTraffic="true">
         <meta-data
             android:name="xposedmodule"
             android:value="true" />
@@ -26,6 +32,15 @@
         <meta-data
             android:name="xposedscope"
             android:resource="@array/xposed_scope" />
+        <meta-data
+            android:name="lyricon_module"
+            android:value="true" />
+        <meta-data
+            android:name="lyricon_module_author"
+            android:value="ReaMicro Extend" />
+        <meta-data
+            android:name="lyricon_module_description"
+            android:value="Send ReaMicro read-aloud captions to Lyricon" />
 
         <receiver
             android:name=".notification.OnlineCompletionNotificationReceiver"
@@ -34,6 +49,23 @@
             <intent-filter>
                 <action android:name="com.reamicro.fix.ONLINE_COMPLETION_NOTIFICATION" />
                 <action android:name="com.reamicro.fix.ONLINE_COMPLETION_CANCEL" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".tts.ReadAloudCommandReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.reamicro.fix.READ_ALOUD_PREPARE" />
+                <action android:name="com.reamicro.fix.READ_ALOUD_APPEND" />
+                <action android:name="com.reamicro.fix.READ_ALOUD_PLAY" />
+                <action android:name="com.reamicro.fix.READ_ALOUD_PAUSE" />
+                <action android:name="com.reamicro.fix.READ_ALOUD_RESUME" />
+                <action android:name="com.reamicro.fix.READ_ALOUD_STOP" />
+                <action android:name="com.reamicro.fix.READ_ALOUD_PREV" />
+                <action android:name="com.reamicro.fix.READ_ALOUD_NEXT" />
+                <action android:name="com.reamicro.fix.READ_ALOUD_SYNC_PROGRESS" />
             </intent-filter>
         </receiver>
 
@@ -76,11 +108,25 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".tts.ReadAloudCommandActivity"
+            android:enabled="true"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:theme="@style/NoDisplayTheme" />
+
 
         <service
             android:name=".notification.OnlineCompletionNotificationService"
             android:enabled="true"
             android:exported="true"
             android:foregroundServiceType="dataSync" />
+
+        <service
+            android:name=".tts.ReadAloudService"
+            android:enabled="true"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback" />
     </application>
 </manifest>

@@ -22,6 +22,7 @@ import java.lang.ref.WeakReference
  */
 class ReaMicroHookEntry {
     private var currentActivityRef: WeakReference<Activity>? = null
+    @Volatile private var currentActivityResumed: Boolean = false
     private val moduleSettings = XposedModuleSettings { currentActivityRef?.get() }
     private val installedFeatureIds = linkedSetOf<String>()
 
@@ -34,6 +35,7 @@ class ReaMicroHookEntry {
             activityProvider = { currentActivityRef?.get() },
             settingsProvider = moduleSettings::snapshot,
             settings = moduleSettings,
+            isActivityResumedProvider = { currentActivityResumed },
         ).install()
         ReaderAutoPageHook(
             classLoader = classLoader,
@@ -150,6 +152,7 @@ class ReaMicroHookEntry {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val activity = param.thisObject as? Activity ?: return
                         currentActivityRef = WeakReference(activity)
+                        currentActivityResumed = false
                         moduleSettings.attachContext(activity)
                         installExternalFeatures(classLoader)
                         RotationOrientationController.apply(activity, moduleSettings.snapshot())
@@ -160,6 +163,7 @@ class ReaMicroHookEntry {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val activity = param.thisObject as? Activity ?: return
                         currentActivityRef = WeakReference(activity)
+                        currentActivityResumed = false
                         moduleSettings.attachContext(activity)
                         installExternalFeatures(classLoader)
                     }
@@ -173,6 +177,7 @@ class ReaMicroHookEntry {
                         override fun afterHookedMethod(param: MethodHookParam) {
                             val activity = param.thisObject as? Activity ?: return
                             currentActivityRef = WeakReference(activity)
+                            currentActivityResumed = true
                             moduleSettings.attachContext(activity)
                             installExternalFeatures(classLoader)
                             RotationOrientationController.apply(activity, moduleSettings.snapshot())
@@ -181,6 +186,22 @@ class ReaMicroHookEntry {
                 )
             }.onFailure {
                 XposedBridge.log("$LOG_PREFIX MainActivity does not override onResume; using onCreate ref only")
+            }
+            runCatching {
+                XposedHelpers.findAndHookMethod(
+                    mainActivityClass,
+                    "onPause",
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            val activity = param.thisObject as? Activity ?: return
+                            if (currentActivityRef?.get() === activity) {
+                                currentActivityResumed = false
+                            }
+                        }
+                    },
+                )
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX MainActivity does not override onPause; background state may be conservative")
             }
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to hook MainActivity: ${it.stackTraceToString()}")

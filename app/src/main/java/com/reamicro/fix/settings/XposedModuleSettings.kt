@@ -72,6 +72,26 @@ class XposedModuleSettings(
         putBoolean(ModuleSettings.KEY_READER_LONG_PRESS_ENABLED, enabled)
     }
 
+    fun setReaderReadAloudEnabled(enabled: Boolean) {
+        putBoolean(ModuleSettings.KEY_READER_READ_ALOUD_ENABLED, enabled)
+    }
+
+    fun setReaderReadAloudIgnoreAudioFocus(enabled: Boolean) {
+        putBoolean(ModuleSettings.KEY_READER_READ_ALOUD_IGNORE_AUDIO_FOCUS, enabled)
+    }
+
+    fun setReaderReadAloudRestartOnPageTurn(enabled: Boolean) {
+        putBoolean(ModuleSettings.KEY_READER_READ_ALOUD_RESTART_ON_PAGE_TURN, enabled)
+    }
+
+    fun setReaderReadAloudSelectionEnabled(enabled: Boolean) {
+        putBoolean(ModuleSettings.KEY_READER_READ_ALOUD_SELECTION_ENABLED, enabled)
+    }
+
+    fun setReaderReadAloudLyriconEnabled(enabled: Boolean) {
+        putBoolean(ModuleSettings.KEY_READER_READ_ALOUD_LYRICON_ENABLED, enabled)
+    }
+
     fun setReaderAutoPageEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_READER_AUTO_PAGE_ENABLED, enabled)
     }
@@ -231,6 +251,16 @@ class XposedModuleSettings(
 
     fun isOnlineSourceEnabled(sourceId: String): Boolean =
         prefs()?.getBoolean(ModuleSettings.onlineSourceKey(sourceId), false) ?: false
+
+    fun setTtsSourceEnabled(sourceId: String, enabled: Boolean) {
+        putBoolean(ModuleSettings.ttsSourceKey(sourceId), enabled)
+    }
+
+    fun isTtsSourceEnabled(sourceId: String): Boolean =
+        prefs()?.getBoolean(
+            ModuleSettings.ttsSourceKey(sourceId),
+            sourceId == ModuleSettings.SYSTEM_TTS_SOURCE_ID,
+        ) ?: (sourceId == ModuleSettings.SYSTEM_TTS_SOURCE_ID)
 
     fun fontSettings(): FontSettingsSnapshot {
         val now = System.currentTimeMillis()
@@ -593,6 +623,26 @@ class XposedModuleSettings(
             XposedBridge.log("ReaMicro LSP reader long-press menu disabled by migration")
         }
         val readerLongPressEnabled = false
+        val readerReadAloudEnabled = prefs.getBoolean(
+            ModuleSettings.KEY_READER_READ_ALOUD_ENABLED,
+            ModuleSettings.DEFAULT_READER_READ_ALOUD_ENABLED,
+        )
+        val readerReadAloudIgnoreAudioFocus = prefs.getBoolean(
+            ModuleSettings.KEY_READER_READ_ALOUD_IGNORE_AUDIO_FOCUS,
+            ModuleSettings.DEFAULT_READER_READ_ALOUD_IGNORE_AUDIO_FOCUS,
+        )
+        val readerReadAloudRestartOnPageTurn = prefs.getBoolean(
+            ModuleSettings.KEY_READER_READ_ALOUD_RESTART_ON_PAGE_TURN,
+            ModuleSettings.DEFAULT_READER_READ_ALOUD_RESTART_ON_PAGE_TURN,
+        )
+        val readerReadAloudSelectionEnabled = prefs.getBoolean(
+            ModuleSettings.KEY_READER_READ_ALOUD_SELECTION_ENABLED,
+            ModuleSettings.DEFAULT_READER_READ_ALOUD_SELECTION_ENABLED,
+        )
+        val readerReadAloudLyriconEnabled = prefs.getBoolean(
+            ModuleSettings.KEY_READER_READ_ALOUD_LYRICON_ENABLED,
+            ModuleSettings.DEFAULT_READER_READ_ALOUD_LYRICON_ENABLED,
+        )
         val readerAutoPageEnabled = prefs.getBoolean(
             ModuleSettings.KEY_READER_AUTO_PAGE_ENABLED,
             ModuleSettings.DEFAULT_READER_AUTO_PAGE_ENABLED,
@@ -677,6 +727,11 @@ class XposedModuleSettings(
             readerEnabled = prefs.getBoolean(
                 ModuleSettings.KEY_READER_ENABLED,
                 readerLongPressEnabled ||
+                    readerReadAloudEnabled ||
+                    readerReadAloudIgnoreAudioFocus ||
+                    readerReadAloudRestartOnPageTurn ||
+                    readerReadAloudSelectionEnabled ||
+                    readerReadAloudLyriconEnabled ||
                     readerAutoPageEnabled ||
                     readerOverwriteCheckEnabled ||
                     readerEditOverwriteEnabled ||
@@ -686,6 +741,11 @@ class XposedModuleSettings(
                     ModuleSettings.DEFAULT_READER_ENABLED,
             ),
             readerLongPressEnabled = readerLongPressEnabled,
+            readerReadAloudEnabled = readerReadAloudEnabled,
+            readerReadAloudIgnoreAudioFocus = readerReadAloudIgnoreAudioFocus,
+            readerReadAloudRestartOnPageTurn = readerReadAloudRestartOnPageTurn,
+            readerReadAloudSelectionEnabled = readerReadAloudSelectionEnabled,
+            readerReadAloudLyriconEnabled = readerReadAloudLyriconEnabled,
             readerAutoPageEnabled = readerAutoPageEnabled,
             readerOverwriteCheckEnabled = readerOverwriteCheckEnabled,
             readerEditOverwriteEnabled = readerEditOverwriteEnabled,
@@ -1250,6 +1310,11 @@ class XposedModuleSettings(
             snapshot.associationCoverFixEnabled,
             snapshot.readerEnabled,
             snapshot.readerLongPressEnabled,
+            snapshot.readerReadAloudEnabled,
+            snapshot.readerReadAloudIgnoreAudioFocus,
+            snapshot.readerReadAloudRestartOnPageTurn,
+            snapshot.readerReadAloudSelectionEnabled,
+            snapshot.readerReadAloudLyriconEnabled,
             snapshot.readerAutoPageEnabled,
             snapshot.readerOverwriteCheckEnabled,
             snapshot.readerEditOverwriteEnabled,
@@ -1297,6 +1362,11 @@ class XposedModuleSettings(
                     "coverFix=${snapshot.associationCoverFixEnabled}, " +
                     "reader=${snapshot.readerEnabled}, " +
                     "readerLongPress=${snapshot.readerLongPressEnabled}, " +
+                    "readerReadAloud=${snapshot.readerReadAloudEnabled}, " +
+                    "readerReadAloudIgnoreFocus=${snapshot.readerReadAloudIgnoreAudioFocus}, " +
+                    "readerReadAloudRestartOnPageTurn=${snapshot.readerReadAloudRestartOnPageTurn}, " +
+                    "readerReadAloudSelection=${snapshot.readerReadAloudSelectionEnabled}, " +
+                    "readerReadAloudLyricon=${snapshot.readerReadAloudLyriconEnabled}, " +
                     "readerAutoPage=${snapshot.readerAutoPageEnabled}, " +
                     "readerOverwriteCheck=${snapshot.readerOverwriteCheckEnabled}, " +
                     "readerEditOverwrite=${snapshot.readerEditOverwriteEnabled}, " +

@@ -52,8 +52,8 @@ android {
         applicationId = "com.reamicro.fix"
         minSdk = 26
         targetSdk = 35
-        versionCode = 33
-        versionName = "1.2.5"
+        versionCode = 37
+        versionName = "1.3.0"
     }
 
     compileOptions {
@@ -100,6 +100,8 @@ tasks.matching { task -> task.name.contains("lint", ignoreCase = true) }.configu
 }
 
 dependencies {
+    implementation("io.github.proify.lyricon:provider:0.1.70")
+
     compileOnly("io.github.libxposed:api:101.0.1")
 
     testImplementation("junit:junit:4.13.2")

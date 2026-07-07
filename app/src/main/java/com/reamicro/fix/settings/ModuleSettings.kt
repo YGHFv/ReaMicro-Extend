@@ -12,6 +12,11 @@ object ModuleSettings {
     const val KEY_ASSOCIATION_COVER_FIX_ENABLED = "association_cover_fix_enabled"
     const val KEY_READER_ENABLED = "reader_enabled"
     const val KEY_READER_LONG_PRESS_ENABLED = "reader_long_press_enabled"
+    const val KEY_READER_READ_ALOUD_ENABLED = "reader_read_aloud_enabled"
+    const val KEY_READER_READ_ALOUD_IGNORE_AUDIO_FOCUS = "reader_read_aloud_ignore_audio_focus"
+    const val KEY_READER_READ_ALOUD_RESTART_ON_PAGE_TURN = "reader_read_aloud_restart_on_page_turn"
+    const val KEY_READER_READ_ALOUD_SELECTION_ENABLED = "reader_read_aloud_selection_enabled"
+    const val KEY_READER_READ_ALOUD_LYRICON_ENABLED = "reader_read_aloud_lyricon_enabled"
     const val KEY_READER_AUTO_PAGE_ENABLED = "reader_auto_page_enabled"
     const val KEY_READER_OVERWRITE_CHECK_ENABLED = "reader_overwrite_check_enabled"
     const val KEY_READER_EDIT_OVERWRITE_ENABLED = "reader_edit_overwrite_enabled"
@@ -52,6 +57,8 @@ object ModuleSettings {
 
     private const val KEY_ASSOCIATION_SOURCE_PREFIX = "association_source_"
     private const val KEY_ONLINE_SOURCE_PREFIX = "online_source_"
+    private const val KEY_TTS_SOURCE_PREFIX = "tts_source_"
+    const val SYSTEM_TTS_SOURCE_ID = "system_tts"
     const val DEFAULT_MODULE_ENABLED = true
     const val DEFAULT_ASSOCIATION_ENABLED = true
     const val DEFAULT_ASSOCIATION_MANUAL_EDIT_ENABLED = false
@@ -59,6 +66,11 @@ object ModuleSettings {
     const val DEFAULT_ASSOCIATION_COVER_FIX_ENABLED = false
     const val DEFAULT_READER_ENABLED = true
     const val DEFAULT_READER_LONG_PRESS_ENABLED = false
+    const val DEFAULT_READER_READ_ALOUD_ENABLED = true
+    const val DEFAULT_READER_READ_ALOUD_IGNORE_AUDIO_FOCUS = false
+    const val DEFAULT_READER_READ_ALOUD_RESTART_ON_PAGE_TURN = false
+    const val DEFAULT_READER_READ_ALOUD_SELECTION_ENABLED = false
+    const val DEFAULT_READER_READ_ALOUD_LYRICON_ENABLED = false
     const val DEFAULT_READER_AUTO_PAGE_ENABLED = false
     const val DEFAULT_READER_OVERWRITE_CHECK_ENABLED = false
     const val DEFAULT_READER_EDIT_OVERWRITE_ENABLED = false
@@ -140,6 +152,8 @@ object ModuleSettings {
 
     fun onlineSourceKey(sourceId: String): String = "$KEY_ONLINE_SOURCE_PREFIX$sourceId"
 
+    fun ttsSourceKey(sourceId: String): String = "$KEY_TTS_SOURCE_PREFIX$sourceId"
+
     fun defaultAssociationSearchSources(): Map<String, Boolean> =
         DEFAULT_SEARCH_SOURCE_GROUP_IDS.associateWith { true }
 
@@ -176,6 +190,11 @@ data class ModuleSettingsSnapshot(
     val associationCoverFixEnabled: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_COVER_FIX_ENABLED,
     val readerEnabled: Boolean = ModuleSettings.DEFAULT_READER_ENABLED,
     val readerLongPressEnabled: Boolean = ModuleSettings.DEFAULT_READER_LONG_PRESS_ENABLED,
+    val readerReadAloudEnabled: Boolean = ModuleSettings.DEFAULT_READER_READ_ALOUD_ENABLED,
+    val readerReadAloudIgnoreAudioFocus: Boolean = ModuleSettings.DEFAULT_READER_READ_ALOUD_IGNORE_AUDIO_FOCUS,
+    val readerReadAloudRestartOnPageTurn: Boolean = ModuleSettings.DEFAULT_READER_READ_ALOUD_RESTART_ON_PAGE_TURN,
+    val readerReadAloudSelectionEnabled: Boolean = ModuleSettings.DEFAULT_READER_READ_ALOUD_SELECTION_ENABLED,
+    val readerReadAloudLyriconEnabled: Boolean = ModuleSettings.DEFAULT_READER_READ_ALOUD_LYRICON_ENABLED,
     val readerAutoPageEnabled: Boolean = ModuleSettings.DEFAULT_READER_AUTO_PAGE_ENABLED,
     val readerOverwriteCheckEnabled: Boolean = ModuleSettings.DEFAULT_READER_OVERWRITE_CHECK_ENABLED,
     val readerEditOverwriteEnabled: Boolean = ModuleSettings.DEFAULT_READER_EDIT_OVERWRITE_ENABLED,
@@ -230,6 +249,21 @@ data class ModuleSettingsSnapshot(
 
     val canRunReaderLongPress: Boolean
         get() = moduleEnabled && readerLongPressEnabled
+
+    val canRunReaderReadAloud: Boolean
+        get() = moduleEnabled
+
+    val canIgnoreReaderReadAloudAudioFocus: Boolean
+        get() = moduleEnabled && readerReadAloudIgnoreAudioFocus
+
+    val canRestartReadAloudOnPageTurn: Boolean
+        get() = moduleEnabled && readerReadAloudRestartOnPageTurn
+
+    val canUseReaderReadAloudSelection: Boolean
+        get() = moduleEnabled && readerReadAloudSelectionEnabled
+
+    val canUseReaderReadAloudLyricon: Boolean
+        get() = moduleEnabled && readerReadAloudLyriconEnabled
 
     val canRunReaderAutoPage: Boolean
         get() = moduleEnabled && readerAutoPageEnabled
