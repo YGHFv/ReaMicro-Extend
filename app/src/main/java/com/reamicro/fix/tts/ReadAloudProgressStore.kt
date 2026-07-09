@@ -17,6 +17,7 @@ object ReadAloudProgressStore {
     private const val KEY_START_CFI = "start_cfi"
     private const val KEY_END_CFI = "end_cfi"
     private const val KEY_PLAYING = "playing"
+    private const val KEY_PLAYBACK_STARTED = "playback_started"
     private const val KEY_ELAPSED_MS = "elapsed_ms"
     private const val MAX_TEXT_CHARS = 4_000
 
@@ -46,6 +47,7 @@ object ReadAloudProgressStore {
             .putString(KEY_START_CFI, paragraph.startCfi)
             .putString(KEY_END_CFI, paragraph.endCfi)
             .putBoolean(KEY_PLAYING, playing)
+            .putBoolean(KEY_PLAYBACK_STARTED, true)
             .putLong(KEY_ELAPSED_MS, elapsedMs.coerceAtLeast(0L))
             .apply()
     }
@@ -62,6 +64,7 @@ object ReadAloudProgressStore {
         val sessionId = prefs.getString(KEY_SESSION_ID, null).orEmpty()
         val bookKey = prefs.getString(KEY_BOOK_KEY, null).orEmpty()
         if (sessionId.isBlank() || bookKey.isBlank()) return null
+        if (!prefs.getBoolean(KEY_PLAYBACK_STARTED, false)) return null
         val text = prefs.getString(KEY_TEXT, null).orEmpty()
         if (text.isBlank()) return null
         return PersistedReadAloudProgress(
@@ -119,6 +122,8 @@ object ReadAloudProgressStore {
                 putExtra(ReadAloudIntents.EXTRA_START_CFI, startCfi)
                 putExtra(ReadAloudIntents.EXTRA_END_CFI, endCfi)
                 putExtra(ReadAloudIntents.EXTRA_PLAYING, false)
+                putExtra(ReadAloudIntents.EXTRA_PLAYBACK_STARTED, true)
+                putExtra(ReadAloudIntents.EXTRA_PROGRESS_RECORDABLE, true)
                 putExtra(ReadAloudIntents.EXTRA_PLAYBACK_ELAPSED_MS, elapsedMs)
                 putExtra(ReadAloudIntents.EXTRA_RESTORED_PROGRESS, true)
             }

@@ -40,6 +40,8 @@ object ReadAloudIntents {
     const val EXTRA_START_CFI = "start_cfi"
     const val EXTRA_END_CFI = "end_cfi"
     const val EXTRA_PLAYING = "playing"
+    const val EXTRA_PLAYBACK_STARTED = "playback_started"
+    const val EXTRA_PROGRESS_RECORDABLE = "progress_recordable"
     const val EXTRA_PLAYBACK_ELAPSED_MS = "playback_elapsed_ms"
     const val EXTRA_RESTORED_PROGRESS = "restored_progress"
     const val EXTRA_IGNORE_AUDIO_FOCUS = "ignore_audio_focus"

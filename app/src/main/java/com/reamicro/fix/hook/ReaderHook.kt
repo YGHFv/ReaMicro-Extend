@@ -1389,6 +1389,8 @@ class ReaderHook(
         val isCurrentReaderBook = isReadAloudBookCurrentForUi(bookKey, currentBookKey)
         val playing = intent.getBooleanExtra(ReadAloudIntents.EXTRA_PLAYING, true)
         val restoredProgress = intent.getBooleanExtra(ReadAloudIntents.EXTRA_RESTORED_PROGRESS, false)
+        val playbackStarted = intent.getBooleanExtra(ReadAloudIntents.EXTRA_PLAYBACK_STARTED, restoredProgress)
+        val progressRecordable = intent.getBooleanExtra(ReadAloudIntents.EXTRA_PROGRESS_RECORDABLE, restoredProgress)
         if (!restoredProgress && sessionId.isNotBlank() && activeReadAloudSessionId.isNotBlank() && sessionId != activeReadAloudSessionId) {
             return
         }
@@ -1399,6 +1401,11 @@ class ReaderHook(
             if (activeReadAloudSessionId.isBlank()) activeReadAloudSessionId = sessionId
             if (activeReadAloudBookKey.isBlank()) activeReadAloudBookKey = bookKey
             activeReadAloudPaused = !playing
+        }
+        if (!playbackStarted) {
+            if (!playing) clearReadAloudHighlight()
+            XposedBridge.log("$LOG_PREFIX read aloud progress ignored before playback start session=$sessionId")
+            return
         }
 
         val startCfi = intent.getStringExtra(ReadAloudIntents.EXTRA_START_CFI).orEmpty()
@@ -1418,21 +1425,25 @@ class ReaderHook(
         val chapterTitle = intent.getStringExtra(ReadAloudIntents.EXTRA_CHAPTER_TITLE).orEmpty()
             .ifBlank { fallbackCurrentChapterTitle() }
         val elapsedMs = intent.getLongExtra(ReadAloudIntents.EXTRA_PLAYBACK_ELAPSED_MS, 0L).coerceAtLeast(0L)
-        val progress = rememberReadAloudProgress(
-            sessionId = sessionId,
-            bookKey = bookKey,
-            bookTitle = intent.getStringExtra(ReadAloudIntents.EXTRA_BOOK_TITLE).orEmpty(),
-            startCfi = startCfi,
-            endCfi = endCfi,
-            paragraphIndex = paragraphIndex,
-            chapterIndex = chapterIndex,
-            chapterTitle = chapterTitle,
-            summary = spokenText,
-            elapsedMs = elapsedMs,
-        )
+        val progress = if (progressRecordable) {
+            rememberReadAloudProgress(
+                sessionId = sessionId,
+                bookKey = bookKey,
+                bookTitle = intent.getStringExtra(ReadAloudIntents.EXTRA_BOOK_TITLE).orEmpty(),
+                startCfi = startCfi,
+                endCfi = endCfi,
+                paragraphIndex = paragraphIndex,
+                chapterIndex = chapterIndex,
+                chapterTitle = chapterTitle,
+                summary = spokenText,
+                elapsedMs = elapsedMs,
+            )
+        } else {
+            null
+        }
         if (isCurrentReaderBook) {
-            dispatchReadAloudStatistics(progress, "current")
-            if (restoredProgress || !playing) {
+            if (progress != null) dispatchReadAloudStatistics(progress, "current")
+            if (progress != null && (restoredProgress || !playing)) {
                 scheduleRestorePersistedReadAloudProgress("read aloud progress broadcast")
             }
         } else {
@@ -1770,6 +1781,7 @@ class ReaderHook(
             .putString(READ_ALOUD_PROGRESS_KEY_SUMMARY, progress.target.summary)
             .putLong(READ_ALOUD_PROGRESS_KEY_ELAPSED_MS, progress.elapsedMs)
             .putLong(READ_ALOUD_PROGRESS_KEY_RECORDED_ELAPSED_MS, progress.recordedElapsedMs)
+            .putBoolean(READ_ALOUD_PROGRESS_KEY_PLAYBACK_STARTED, true)
             .apply()
     }
 
@@ -1777,6 +1789,7 @@ class ReaderHook(
         val context = hostApplicationContext() ?: return null
         val prefs = context.getSharedPreferences(READ_ALOUD_PROGRESS_PREFS, Context.MODE_PRIVATE)
         val cfi = prefs.getString(READ_ALOUD_PROGRESS_KEY_CFI, null)?.takeIf { it.isNotBlank() } ?: return null
+        if (!prefs.getBoolean(READ_ALOUD_PROGRESS_KEY_PLAYBACK_STARTED, false)) return null
         return PersistedReadAloudProgress(
             timestamp = prefs.getLong(READ_ALOUD_PROGRESS_KEY_TIMESTAMP, 0L),
             sessionId = prefs.getString(READ_ALOUD_PROGRESS_KEY_SESSION, null).orEmpty(),
@@ -7631,6 +7644,7 @@ class ReaderHook(
         const val READ_ALOUD_PROGRESS_KEY_SUMMARY = "summary"
         const val READ_ALOUD_PROGRESS_KEY_ELAPSED_MS = "elapsed_ms"
         const val READ_ALOUD_PROGRESS_KEY_RECORDED_ELAPSED_MS = "recorded_elapsed_ms"
+        const val READ_ALOUD_PROGRESS_KEY_PLAYBACK_STARTED = "playback_started"
         const val MARK_KIND_HIGHLIGHT = 0
         const val MARK_STYLE_FILL = 0
         const val MARK_STYLE_LINE = 1

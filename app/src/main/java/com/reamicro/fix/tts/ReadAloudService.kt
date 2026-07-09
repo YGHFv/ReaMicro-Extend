@@ -62,6 +62,8 @@ class ReadAloudService : Service() {
     @Volatile private var tts: TextToSpeech? = null
     @Volatile private var ttsReady = false
     @Volatile private var mediaPlayer: MediaPlayer? = null
+    @Volatile private var verifiedProgressSessionId = ""
+    @Volatile private var verifiedProgressIndex = -1
     private var mediaSession: MediaSession? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var audioFocusRequested = false
@@ -114,6 +116,8 @@ class ReadAloudService : Service() {
             loadedChunks = 0
             paragraphs.clear()
             currentIndex = 0
+            verifiedProgressSessionId = ""
+            verifiedProgressIndex = -1
             playbackGeneration++
             paused = false
             stopRequested = false
@@ -181,7 +185,6 @@ class ReadAloudService : Service() {
     private fun playPreparedSession() {
         paused = false
         stopRequested = false
-        setPlaybackElapsedActive(true)
         if (ignoreAudioFocus) {
             abandonAudioFocus()
         } else {
@@ -248,18 +251,18 @@ class ReadAloudService : Service() {
             }
             acquireWakeLock()
             Log.i(LOG_TAG, "speak index=$currentIndex title=${paragraph.title} chars=${paragraph.text.length}")
-            sendCurrentParagraph(paragraph, currentIndex, playing = true)
             ensureForeground(status = paragraph.title.ifBlank { "\u6b63\u5728\u6717\u8bfb" })
             val networkSource = source
             if (networkSource != null) {
                 scheduleNetworkPrefetch(currentIndex + 1, generation)
             }
             val completed = if (networkSource != null) {
-                playNetwork(currentIndex, paragraph.text, networkSource, generation)
+                playNetwork(currentIndex, paragraph, networkSource, generation)
             } else {
-                speakSystem(paragraph.text, generation)
+                speakSystem(paragraph, currentIndex, generation)
             }
             if (completed && !paused && !stopRequested) {
+                sendCurrentParagraph(paragraph, currentIndex, playing = true, recordProgress = true)
                 currentIndex++
                 consecutiveFailures = 0
             } else if (!paused && !stopRequested && generation == playbackGeneration) {
@@ -272,7 +275,7 @@ class ReadAloudService : Service() {
                         done = true,
                     )
                     syncLyriconPlaybackState(false)
-                    sendCurrentParagraph(paragraph, currentIndex, playing = false)
+                    sendCurrentParagraph(paragraph, currentIndex, playing = false, recordProgress = false)
                     break
                 }
                 Thread.sleep(SPEAK_FAILURE_RETRY_DELAY_MS)
@@ -312,14 +315,18 @@ class ReadAloudService : Service() {
         cancelNetworkPrefetch()
         releaseWakeLock()
         syncLyriconPlaybackState(false)
-        sendCurrentParagraph(synchronized(stateLock) { paragraphs.getOrNull(currentIndex) }, currentIndex, playing = false)
+        sendCurrentParagraph(
+            synchronized(stateLock) { paragraphs.getOrNull(currentIndex) },
+            currentIndex,
+            playing = false,
+            recordProgress = true,
+        )
         ensureForeground(status = "\u5df2\u6682\u505c")
     }
 
     private fun resume() {
         if (!paused) return
         paused = false
-        setPlaybackElapsedActive(true)
         acquireWakeLock()
         syncLyriconPlaybackState(true)
         ensureForeground(status = "\u7ee7\u7eed\u542c\u4e66")
@@ -330,7 +337,12 @@ class ReadAloudService : Service() {
         stopRequested = true
         paused = false
         setPlaybackElapsedActive(false)
-        sendCurrentParagraph(synchronized(stateLock) { paragraphs.getOrNull(currentIndex) }, currentIndex, playing = false)
+        sendCurrentParagraph(
+            synchronized(stateLock) { paragraphs.getOrNull(currentIndex) },
+            currentIndex,
+            playing = false,
+            recordProgress = true,
+        )
         tts?.stop()
         releasePlayer()
         cancelNetworkPrefetch()
@@ -347,6 +359,7 @@ class ReadAloudService : Service() {
     private fun jumpBy(delta: Int) {
         synchronized(stateLock) {
             currentIndex = (currentIndex + delta).coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
+            verifiedProgressIndex = -1
             playbackGeneration++
         }
         cancelNetworkPrefetch()
@@ -355,7 +368,6 @@ class ReadAloudService : Service() {
         releasePlayer()
         paused = false
         stopRequested = false
-        setPlaybackElapsedActive(true)
         acquireWakeLock()
         startWorkerIfNeeded()
         ensureForeground(status = "\u6b63\u5728\u5207\u6362")
@@ -383,6 +395,7 @@ class ReadAloudService : Service() {
         }
         synchronized(stateLock) {
             currentIndex = targetIndex.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
+            verifiedProgressIndex = -1
             playbackGeneration++
         }
         cancelNetworkPrefetch()
@@ -391,7 +404,6 @@ class ReadAloudService : Service() {
         releasePlayer()
         paused = false
         stopRequested = false
-        setPlaybackElapsedActive(true)
         acquireWakeLock()
         startWorkerIfNeeded()
         ensureForeground(status = synchronized(stateLock) {
@@ -407,10 +419,19 @@ class ReadAloudService : Service() {
             "t:${paragraph.title}"
         }
 
-    private fun sendCurrentParagraph(paragraph: ReadAloudParagraph?, index: Int, playing: Boolean) {
+    private fun sendCurrentParagraph(
+        paragraph: ReadAloudParagraph?,
+        index: Int,
+        playing: Boolean,
+        recordProgress: Boolean = false,
+    ) {
         paragraph ?: return
         val elapsedMs = currentPlaybackElapsedMs()
-        persistProgress(paragraph, index, playing, elapsedMs)
+        val playbackStarted = isVerifiedPlaybackProgress(index)
+        val progressRecordable = playbackStarted && recordProgress
+        if (progressRecordable) {
+            persistProgress(paragraph, index, playing, elapsedMs)
+        }
         val intent = Intent(ReadAloudIntents.ACTION_CURRENT).apply {
             setPackage(ReadAloudIntents.HOST_PACKAGE_NAME)
             putExtra(ReadAloudIntents.EXTRA_SESSION_ID, currentSessionId)
@@ -424,6 +445,8 @@ class ReadAloudService : Service() {
             putExtra(ReadAloudIntents.EXTRA_START_CFI, paragraph.startCfi)
             putExtra(ReadAloudIntents.EXTRA_END_CFI, paragraph.endCfi)
             putExtra(ReadAloudIntents.EXTRA_PLAYING, playing)
+            putExtra(ReadAloudIntents.EXTRA_PLAYBACK_STARTED, playbackStarted)
+            putExtra(ReadAloudIntents.EXTRA_PROGRESS_RECORDABLE, progressRecordable)
             putExtra(ReadAloudIntents.EXTRA_PLAYBACK_ELAPSED_MS, elapsedMs)
         }
         sendBroadcast(intent)
@@ -432,8 +455,22 @@ class ReadAloudService : Service() {
     private fun persistCurrentProgress(playing: Boolean) {
         val index = currentIndex
         val paragraph = synchronized(stateLock) { paragraphs.getOrNull(index) } ?: return
+        if (!isVerifiedPlaybackProgress(index)) return
         persistProgress(paragraph, index, playing, currentPlaybackElapsedMs())
     }
+
+    private fun markPlaybackStarted(paragraph: ReadAloudParagraph?, index: Int) {
+        paragraph ?: return
+        verifiedProgressSessionId = currentSessionId
+        verifiedProgressIndex = index
+        setPlaybackElapsedActive(true)
+        sendCurrentParagraph(paragraph, index, playing = true, recordProgress = false)
+    }
+
+    private fun isVerifiedPlaybackProgress(index: Int): Boolean =
+        currentSessionId.isNotBlank() &&
+            verifiedProgressSessionId == currentSessionId &&
+            verifiedProgressIndex == index
 
     private fun persistProgress(paragraph: ReadAloudParagraph, index: Int, playing: Boolean, elapsedMs: Long) {
         ReadAloudProgressStore.save(
@@ -492,6 +529,8 @@ class ReadAloudService : Service() {
             loadedChunks = 0
             paragraphs.clear()
             currentIndex = 0
+            verifiedProgressSessionId = ""
+            verifiedProgressIndex = -1
             playbackGeneration++
             source = null
             lyriconEnabled = false
@@ -530,37 +569,43 @@ class ReadAloudService : Service() {
             }
         }
 
-    private fun speakSystem(text: String, generation: Long): Boolean {
+    private fun speakSystem(paragraph: ReadAloudParagraph, index: Int, generation: Long): Boolean {
         if (generation != playbackGeneration) return false
         val engine = ensureTts() ?: return false
         if (!ttsReady) return false
+        val text = paragraph.text
         val utteranceId = "reamicro_${System.nanoTime()}"
         val latch = CountDownLatch(1)
         var utteranceFailed = false
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {
+                markPlaybackStarted(paragraph, index)
                 sendLyriconText(text, true)
             }
 
             override fun onDone(utteranceId: String?) {
+                setPlaybackElapsedActive(false)
                 latch.countDown()
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
                 utteranceFailed = true
+                setPlaybackElapsedActive(false)
                 Log.i(LOG_TAG, "system tts onError utterance=$utteranceId")
                 latch.countDown()
             }
 
             override fun onError(utteranceId: String?, errorCode: Int) {
                 utteranceFailed = true
+                setPlaybackElapsedActive(false)
                 Log.i(LOG_TAG, "system tts onError utterance=$utteranceId code=$errorCode")
                 latch.countDown()
             }
 
             override fun onStop(utteranceId: String?, interrupted: Boolean) {
                 utteranceFailed = interrupted
+                setPlaybackElapsedActive(false)
                 latch.countDown()
             }
         })
@@ -622,7 +667,8 @@ class ReadAloudService : Service() {
         return created.takeIf { ttsReady }
     }
 
-    private fun playNetwork(index: Int, text: String, source: NetworkTtsSource, generation: Long): Boolean {
+    private fun playNetwork(index: Int, paragraph: ReadAloudParagraph, source: NetworkTtsSource, generation: Long): Boolean {
+        val text = paragraph.text
         val audio = getNetworkAudio(index, text, source, generation, waitForInflight = true, prefetch = false)
             ?: return false
         if (generation != playbackGeneration) return false
@@ -630,6 +676,7 @@ class ReadAloudService : Service() {
         val file = File(cacheDir, "read_aloud_audio.tmp")
         runCatching { file.writeBytes(audio) }.getOrElse { return false }
         val latch = CountDownLatch(1)
+        var playerFailed = false
         return runCatching {
             val player = MediaPlayer().apply {
                 setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
@@ -647,6 +694,7 @@ class ReadAloudService : Service() {
                 setDataSource(file.absolutePath)
                 setOnCompletionListener { latch.countDown() }
                 setOnErrorListener { _, _, _ ->
+                    playerFailed = true
                     latch.countDown()
                     true
                 }
@@ -655,11 +703,13 @@ class ReadAloudService : Service() {
             mediaPlayer = player
             sendLyriconText(text, true)
             player.start()
+            markPlaybackStarted(paragraph, index)
             while (!stopRequested && !paused && generation == playbackGeneration) {
-                if (latch.await(200, TimeUnit.MILLISECONDS)) return@runCatching true
+                if (latch.await(200, TimeUnit.MILLISECONDS)) return@runCatching !playerFailed
             }
             false
         }.getOrDefault(false).also {
+            setPlaybackElapsedActive(false)
             releasePlayer()
         }
     }

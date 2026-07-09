@@ -11,6 +11,7 @@ import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.NinePatchDrawable
 import com.reamicro.fix.compat.ReaMicroHostCompat
+import com.reamicro.fix.reader.DialogueHighlightRangeFinder
 import com.reamicro.fix.settings.ReaderHighlightRule
 import com.reamicro.fix.settings.ReaderHighlightBookContext
 import com.reamicro.fix.settings.ReaderHighlightRuleType
@@ -30,6 +31,7 @@ class ReaderDialogueHighlightHook(
     private val hostCompat = ReaMicroHostCompat(classLoader)
     private val fontFamilyCache = HashMap<String, Any>()
     private val failedFontFamilyLogKeys = HashSet<String>()
+    private val doubleQuoteCarryLock = Object()
     private val ninePatchDrawableCache = HashMap<String, CachedImage>()
     private val reedenBoxStyleCache = object : LinkedHashMap<String, ReedenBoxStyle>(32, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ReedenBoxStyle>?): Boolean =
@@ -55,6 +57,7 @@ class ReaderDialogueHighlightHook(
     @Volatile private var lastNinePatchLogKey: String = ""
     @Volatile private var lastAppliedLogKey: String = ""
     @Volatile private var lastHighlightPerformanceLogAtMs: Long = 0L
+    @Volatile private var doubleQuoteCarry: DoubleQuoteCarryState? = null
 
     fun install() {
         hostCompat.contentDomClassCandidates().forEach(::hookContentDom)
@@ -129,7 +132,12 @@ class ReaderDialogueHighlightHook(
         val protectedRanges = contentDom?.let { protectedStyledElementRanges(it, text) }.orEmpty()
         val singleQuoteRanges = enabledRules
             .filter { it.type == ReaderHighlightRuleType.SingleQuotePhrase }
-            .flatMap { findQuoteRanges(text, SINGLE_QUOTES) }
+            .flatMap { DialogueHighlightRangeFinder.findQuoteRanges(text, SINGLE_QUOTES) }
+        val doubleQuoteRanges = if (enabledRules.any { it.type == ReaderHighlightRuleType.DoubleQuoteDialogue }) {
+            findDoubleQuoteDialogueRanges(text, contentDom != null, currentBookKey, currentBookTitle)
+        } else {
+            emptyList()
+        }
         val ninePatchAnnotations = ArrayList<NinePatchAnnotation>()
         val markerRanges = ArrayList<IntRange>()
         val rangeObjects = enabledRules
@@ -140,6 +148,7 @@ class ReaderDialogueHighlightHook(
                     rule = rule,
                     protectedRanges = protectedRanges,
                     singleQuoteRanges = singleQuoteRanges,
+                    doubleQuoteRanges = doubleQuoteRanges,
                 )
                 if (ranges.isEmpty()) return@flatMap emptyList()
                 val highlightStyle = highlight.styleById(rule.styleIdForTheme(dark))
@@ -182,16 +191,40 @@ class ReaderDialogueHighlightHook(
         rule: ReaderHighlightRule,
         protectedRanges: List<IntRange>,
         singleQuoteRanges: List<IntRange>,
+        doubleQuoteRanges: List<IntRange>,
     ): List<IntRange> =
         when (rule.type) {
             ReaderHighlightRuleType.DoubleQuoteDialogue -> {
                 val excluded = protectedRanges + singleQuoteRanges
-                findQuoteRanges(text, DOUBLE_QUOTES).flatMap { range -> subtractRanges(range, excluded) }
+                doubleQuoteRanges.flatMap { range -> subtractRanges(range, excluded) }
             }
-            ReaderHighlightRuleType.SingleQuotePhrase -> findQuoteRanges(text, SINGLE_QUOTES)
+            ReaderHighlightRuleType.SingleQuotePhrase -> DialogueHighlightRangeFinder.findQuoteRanges(text, SINGLE_QUOTES)
             ReaderHighlightRuleType.FixedText -> findFixedTextRanges(text, rule.pattern)
             ReaderHighlightRuleType.Regex -> findRegexRanges(text, rule.pattern)
         }
+
+    private fun findDoubleQuoteDialogueRanges(
+        text: String,
+        allowCrossContentDom: Boolean,
+        bookKey: String,
+        bookTitle: String,
+    ): List<IntRange> {
+        if (!allowCrossContentDom) {
+            return DialogueHighlightRangeFinder.findQuoteRanges(text, DOUBLE_QUOTES, MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS)
+        }
+        val stateKey = listOf(bookKey, bookTitle, isNightMode().toString()).joinToString("|")
+        synchronized(doubleQuoteCarryLock) {
+            val incoming = doubleQuoteCarry?.takeIf { it.key == stateKey }?.carry
+            val result = DialogueHighlightRangeFinder.findQuoteRangesInSegment(
+                text = text,
+                quotes = DOUBLE_QUOTES,
+                incomingCarry = incoming,
+                maxParagraphs = MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS,
+            )
+            doubleQuoteCarry = result.carry?.let { DoubleQuoteCarryState(stateKey, it) }
+            return result.ranges
+        }
+    }
 
     private fun protectedStyledElementRanges(contentDom: Any, renderedText: String): List<IntRange> {
         val children = callNoArg(contentDom, "getChildren") as? List<*> ?: return emptyList()
@@ -259,37 +292,6 @@ class ReaderDialogueHighlightHook(
 
     private fun exclusiveRange(start: Int, endExclusive: Int): IntRange =
         start..endExclusive
-
-    private fun findQuoteRanges(text: String, quotes: Map<Char, Char>): List<IntRange> {
-        val ranges = ArrayList<IntRange>()
-        var index = 0
-        while (index < text.length) {
-            val close = quotes[text[index]]
-            if (close == null) {
-                index++
-                continue
-            }
-            val end = findClosingQuote(text, index + 1, close)
-            if (end > index + 1) {
-                ranges.add(index..(end + 1))
-                index = end + 1
-            } else {
-                index++
-            }
-        }
-        return ranges
-    }
-
-    private fun findClosingQuote(text: String, start: Int, close: Char): Int {
-        var index = start
-        while (index < text.length) {
-            val char = text[index]
-            if (char == '\n' || char == '\r') return -1
-            if (char == close) return index
-            index++
-        }
-        return -1
-    }
 
     private fun findFixedTextRanges(text: String, pattern: String): List<IntRange> {
         if (pattern.isBlank()) return emptyList()
@@ -1490,6 +1492,7 @@ class ReaderDialogueHighlightHook(
         const val MAX_CACHED_NINE_SLICES = 64
         const val HIGHLIGHT_PERFORMANCE_LOG_INTERVAL_MS = 1500L
         const val REEDEN_BOX_EDGE_SCALE = 0.78f
+        const val MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS = 3
         const val HIGHLIGHT_ANNOTATION_TAG = "reamicro.highlight.span"
         const val NINE_PATCH_ANNOTATION_TAG = "reamicro.highlight.ninepatch"
         const val NINE_PATCH_ANNOTATION_SEPARATOR = "\u001F"
@@ -1555,6 +1558,11 @@ class ReaderDialogueHighlightHook(
     private data class NormalizedText(
         val text: String,
         val sourceIndices: List<Int>,
+    )
+
+    private data class DoubleQuoteCarryState(
+        val key: String,
+        val carry: DialogueHighlightRangeFinder.QuoteCarry,
     )
 
     private data class TextBox(
