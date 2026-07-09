@@ -7,11 +7,16 @@ import android.graphics.BitmapShader
 import android.graphics.Shader
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
+import com.reamicro.fix.settings.XposedModuleSettings
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import java.io.File
+import java.io.InputStream
 import java.lang.reflect.Method
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.Locale
 
 /**
  * Stage 4: paints a configurable solid color OR image over the
@@ -39,9 +44,12 @@ import java.lang.reflect.Method
 class ProfileBackgroundHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
-    private val settingsProvider: () -> ModuleSettingsSnapshot = { ModuleSettingsSnapshot() },
+    private val settings: XposedModuleSettings,
+    private val settingsProvider: () -> ModuleSettingsSnapshot = settings::snapshot,
 ) {
+    private val inProfileScreen = ThreadLocal<Int>()
     private val inProfileLambda = ThreadLocal<Boolean>()
+    private val resolvingHostBackground = ThreadLocal<Boolean>()
     private val backgroundCallCount = ThreadLocal<Int>()
     private val fillMaxSizeCallCount = ThreadLocal<Int>()
     private val methodCache = HashMap<String, Method>()
@@ -51,16 +59,52 @@ class ProfileBackgroundHook(
     private var cachedHeaderBitmapKey: String? = null
     private var cachedScreenBackgroundBitmap: Bitmap? = null
     private var cachedScreenBackgroundBitmapKey: String? = null
-    private var cachedCardBackgroundBitmap: Bitmap? = null
-    private var cachedCardBackgroundBitmapKey: String? = null
     @Volatile private var cachedColorScheme: Any? = null
+    @Volatile private var autoRandomRefreshAttempted: Boolean = false
+    @Volatile private var randomRefreshRunning: Boolean = false
 
     fun install() {
+        activeInstance = this
+        installProfileScreenHook()
         installProfileScreenLambdaHook()
+        installThemeBackgroundHooks()
         installColorHook()
+        installProfileSurfaceColorHooks()
         installFillMaxSizeHook()
         installBackgroundFactoryHook()
         installProfileDividerHook()
+    }
+
+    private fun installProfileScreenHook() {
+        runCatching {
+            val target = findProfileScreenMethod() ?: run {
+                XposedBridge.log("$LOG_PREFIX ProfileScreen not found")
+                return
+            }
+            XposedBridge.hookMethod(
+                target,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val snapshot = settingsProvider()
+                        if (!canUseProfileImageBackground(snapshot)) return
+                        cacheColorSchemeFromArgs(param.args)
+                        inProfileScreen.set((inProfileScreen.get() ?: 0) + 1)
+                    }
+
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val depth = inProfileScreen.get() ?: return
+                        if (depth <= 1) {
+                            inProfileScreen.remove()
+                        } else {
+                            inProfileScreen.set(depth - 1)
+                        }
+                    }
+                },
+            )
+            XposedBridge.log("$LOG_PREFIX ProfileScreen hook installed")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX failed to hook ProfileScreen: ${it.stackTraceToString()}")
+        }
     }
 
     private fun installProfileDividerHook() {
@@ -101,7 +145,7 @@ class ProfileBackgroundHook(
                 target,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (!settingsProvider().canShowProfileBackground) return
+                        if (!canHandleProfileBackground(settingsProvider())) return
                         cacheColorSchemeFromArgs(param.args)
                         inProfileLambda.set(true)
                         backgroundCallCount.set(0)
@@ -121,6 +165,36 @@ class ProfileBackgroundHook(
         }
     }
 
+    private fun installThemeBackgroundHooks() {
+        runCatching {
+            val themeKtClass = XposedHelpers.findClass(THEME_KT_CLASS, classLoader)
+            var installed = 0
+            PROFILE_BACKGROUND_THEME_METHODS.forEach { methodName ->
+                val target = themeKtClass.declaredMethods.firstOrNull { method ->
+                    method.name == methodName && method.parameterTypes.size == 1
+                } ?: return@forEach
+                XposedBridge.hookMethod(
+                    target,
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (resolvingHostBackground.get() == true) return
+                            val snapshot = settingsProvider()
+                            if (!canUseProfileImageBackground(snapshot)) return
+                            val inProfile = (inProfileScreen.get() ?: 0) > 0 || inProfileLambda.get() == true
+                            if (!inProfile) return
+                            param.args?.firstOrNull()?.let { cachedColorScheme = it }
+                            param.result = colorLongFromArgb(PROFILE_BACKGROUND_HOUMO_SURFACE_ARGB)
+                        }
+                    },
+                )
+                installed++
+            }
+            XposedBridge.log("$LOG_PREFIX ThemeKt transparent background hooks installed: $installed")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX failed to hook ThemeKt backgrounds: ${it.stackTraceToString()}")
+        }
+    }
+
     private fun installColorHook() {
         runCatching {
             val colorSchemeClass = XposedHelpers.findClass(COLOR_SCHEME_CLASS, classLoader)
@@ -135,6 +209,7 @@ class ProfileBackgroundHook(
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         if (inProfileLambda.get() != true) return
+                        if (resolvingHostBackground.get() == true) return
                         // 始终缓存 ColorScheme,不管图片模式还是颜色模式。
                         // 图片模式下 fillMaxSize hook 需要用它读 getBackgroundAuto。
                         cachedColorScheme = param.thisObject
@@ -149,6 +224,36 @@ class ProfileBackgroundHook(
             XposedBridge.log("$LOG_PREFIX ColorScheme.$SURFACE_CONTAINER_HIGH_METHOD hook installed")
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to hook ColorScheme: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun installProfileSurfaceColorHooks() {
+        runCatching {
+            val colorSchemeClass = XposedHelpers.findClass(COLOR_SCHEME_CLASS, classLoader)
+            var installed = 0
+            PROFILE_BACKGROUND_SURFACE_COLOR_METHODS.forEach { methodName ->
+                val target = colorSchemeClass.declaredMethods.firstOrNull { method ->
+                    method.name == methodName && method.parameterTypes.isEmpty()
+                } ?: return@forEach
+                XposedBridge.hookMethod(
+                    target,
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (inProfileLambda.get() != true) return
+                            if (resolvingHostBackground.get() == true) return
+                            cachedColorScheme = param.thisObject
+                            val snapshot = settingsProvider()
+                            if (!snapshot.canShowProfileBackground) return
+                            if (!snapshot.profileBackgroundUseImage) return
+                            param.result = colorLongFromArgb(PROFILE_BACKGROUND_HOUMO_SURFACE_ARGB)
+                        }
+                    },
+                )
+                installed++
+            }
+            XposedBridge.log("$LOG_PREFIX ColorScheme transparent surface hooks installed: $installed")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX failed to hook transparent surface colors: ${it.stackTraceToString()}")
         }
     }
 
@@ -177,7 +282,7 @@ class ProfileBackgroundHook(
                         val colorArg = param.args?.getOrNull(1)
                         if (colorArg is java.lang.Long) {
                             param.args[1] = java.lang.Long.valueOf(
-                                colorLongFromArgb(profileBackgroundCardArgb(snapshot)),
+                                colorLongFromArgb(PROFILE_BACKGROUND_HOUMO_SURFACE_ARGB),
                             )
                         }
                     }
@@ -197,11 +302,6 @@ class ProfileBackgroundHook(
                             param.result = modifier
                             return
                         }
-                        if (snapshot.profileBackgroundCardTransparency <= 0) return
-                        val bitmap = loadBitmap(path) ?: return
-                        val brush = profileBackgroundCardBrush(path, bitmap, snapshot) ?: return
-                        val shape = param.args?.getOrNull(2)
-                        param.result = invokeBrushBackground(modifier, brush, shape) ?: param.result
                     }
                 },
             )
@@ -215,6 +315,13 @@ class ProfileBackgroundHook(
         val profileScreenClass = XposedHelpers.findClass(PROFILE_SCREEN_CLASS, classLoader)
         return profileScreenClass.declaredMethods.firstOrNull { method ->
             method.name == "ProfileScreen\$lambda\$0\$1"
+        }
+    }
+
+    private fun findProfileScreenMethod(): Method? {
+        val profileScreenClass = XposedHelpers.findClass(PROFILE_SCREEN_CLASS, classLoader)
+        return profileScreenClass.declaredMethods.firstOrNull { method ->
+            method.name == "ProfileScreen" && method.parameterTypes.size == 3
         }
     }
 
@@ -244,23 +351,17 @@ class ProfileBackgroundHook(
                     override fun afterHookedMethod(param: MethodHookParam) {
                         if (inProfileLambda.get() != true) return
                         val snapshot = settingsProvider()
+                        val count = (fillMaxSizeCallCount.get() ?: 0) + 1
+                        fillMaxSizeCallCount.set(count)
+                        if (count != 1) return
+                        var patchedModifier = param.result ?: return
                         if (!snapshot.canShowProfileBackground) return
                         if (!snapshot.profileBackgroundUseImage) return
                         val path = snapshot.profileBackgroundImage
                         if (path.isBlank()) return
-                        val count = (fillMaxSizeCallCount.get() ?: 0) + 1
-                        fillMaxSizeCallCount.set(count)
-                        if (count != 1) return
-                        val originalModifier = param.result ?: return
                         val bitmap = loadBitmap(path) ?: return
                         val imageBrush = profileBackgroundImageBrush(path, bitmap, snapshot) ?: return
-                        val washBrush = profileBackgroundWashBrush(
-                            hostBackgroundArgb() ?: profileBackgroundPageFallbackArgb(),
-                        )
-                        var patchedModifier = invokeBrushBackground(originalModifier, imageBrush, null) ?: return
-                        if (washBrush != null) {
-                            patchedModifier = invokeBrushBackground(patchedModifier, washBrush, null) ?: patchedModifier
-                        }
+                        patchedModifier = invokeBrushBackground(patchedModifier, imageBrush, null) ?: return
                         param.result = patchedModifier
                     }
                 },
@@ -269,6 +370,131 @@ class ProfileBackgroundHook(
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to hook fillMaxSize: ${it.stackTraceToString()}")
         }
+    }
+
+    fun refreshRandomImageFor(activity: Activity?, force: Boolean = false) {
+        activity ?: return
+        val snapshot = settings.snapshot()
+        if (!canHandleProfileBackground(snapshot)) return
+        val url = profileBackgroundImageUrlOrNull(snapshot.profileBackgroundImageUrl) ?: return
+        if (!force && autoRandomRefreshAttempted) return
+        if (!force) autoRandomRefreshAttempted = true
+        if (randomRefreshRunning) return
+        randomRefreshRunning = true
+        Thread {
+            runCatching {
+                val target = downloadRandomProfileBackground(activity, url)
+                settings.setProfileBackgroundImage(target.absolutePath)
+                settings.setProfileBackgroundUseImage(true)
+                settings.setProfileBackgroundEnabled(true)
+                val updatedBackground = createActiveProfileBackgroundBitmap(target.absolutePath, settings.snapshot())
+                activity.runOnUiThread {
+                    if (!activity.isFinishing && !activity.isDestroyed) {
+                        if (updatedBackground != null) {
+                            replaceActiveProfileBackgroundBitmap(updatedBackground)
+                        } else {
+                            invalidateImageCaches()
+                        }
+                        activity.window?.decorView?.postInvalidateOnAnimation()
+                    }
+                }
+                XposedBridge.log("$LOG_PREFIX random image refreshed: ${target.name}")
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX random image refresh failed: ${it.stackTraceToString()}")
+            }
+            randomRefreshRunning = false
+        }.apply { name = "ReaMicro-ProfileRandomImage" }.start()
+    }
+
+    private fun canHandleProfileBackground(snapshot: ModuleSettingsSnapshot): Boolean =
+        snapshot.moduleEnabled && snapshot.profileBackgroundEnabled
+
+    private fun canUseProfileImageBackground(snapshot: ModuleSettingsSnapshot): Boolean =
+        canHandleProfileBackground(snapshot) &&
+            snapshot.profileBackgroundUseImage &&
+            snapshot.profileBackgroundImage.isNotBlank()
+
+    private fun profileBackgroundImageUrlOrNull(text: String): String? {
+        val candidate = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
+            .find(text)
+            ?.value
+            ?.trim()
+            ?.trimEnd('.', ',', ';', '\'', '"', ')', ']', '}', '\u3002', '\uff0c')
+            ?: return null
+        if (candidate.length > PROFILE_BACKGROUND_IMAGE_URL_MAX_LENGTH) return null
+        return candidate.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }
+    }
+
+    private fun downloadRandomProfileBackground(activity: Activity, url: String): File {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = RANDOM_IMAGE_CONNECT_TIMEOUT_MS
+            readTimeout = RANDOM_IMAGE_READ_TIMEOUT_MS
+            instanceFollowRedirects = true
+            useCaches = false
+            setRequestProperty("User-Agent", RANDOM_IMAGE_USER_AGENT)
+            setRequestProperty("Cache-Control", "no-cache")
+            setRequestProperty("Pragma", "no-cache")
+            setRequestProperty("Accept", "image/*,*/*;q=0.8")
+        }
+        try {
+            val code = connection.responseCode
+            if (code !in 200..299) error("HTTP $code")
+            val bytes = connection.inputStream.use { readLimited(it, MAX_RANDOM_IMAGE_BYTES) }
+            validateImageBytes(bytes)
+            val targetDir = File(activity.filesDir, "profile_background").apply { mkdirs() }
+            targetDir.listFiles()
+                ?.filter { it.name.startsWith(RANDOM_IMAGE_FILE_PREFIX) }
+                ?.forEach { it.delete() }
+            val extension = imageExtension(connection.contentType, url)
+            val target = File(targetDir, "$RANDOM_IMAGE_FILE_PREFIX${System.currentTimeMillis()}.$extension")
+            target.writeBytes(bytes)
+            return target
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun readLimited(input: InputStream, maxBytes: Int): ByteArray {
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        val output = java.io.ByteArrayOutputStream()
+        var total = 0
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            total += read
+            if (total > maxBytes) error("\u56fe\u7247\u8fc7\u5927")
+            output.write(buffer, 0, read)
+        }
+        return output.toByteArray()
+    }
+
+    private fun validateImageBytes(bytes: ByteArray) {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+        if (options.outWidth <= 0 || options.outHeight <= 0) error("\u4e0d\u662f\u6709\u6548\u56fe\u7247")
+    }
+
+    private fun imageExtension(contentType: String?, url: String): String {
+        val type = contentType.orEmpty().lowercase(Locale.ROOT)
+        return when {
+            "png" in type -> "png"
+            "webp" in type -> "webp"
+            "gif" in type -> "gif"
+            "jpeg" in type || "jpg" in type -> "jpg"
+            else -> url.substringBefore('?').substringAfterLast('.', "")
+                .lowercase(Locale.ROOT)
+                .takeIf { it in setOf("jpg", "jpeg", "png", "webp", "gif") }
+                ?: "jpg"
+        }
+    }
+
+    private fun invalidateImageCaches() {
+        cachedBitmap = null
+        cachedImagePath = null
+        cachedHeaderBitmap = null
+        cachedHeaderBitmapKey = null
+        cachedScreenBackgroundBitmap = null
+        cachedScreenBackgroundBitmapKey = null
     }
 
     private fun bottomEdgeAverageColor(bitmap: Bitmap): Int {
@@ -372,55 +598,14 @@ class ProfileBackgroundHook(
         val screenW = activity.resources.displayMetrics.widthPixels.coerceAtLeast(1)
         val screenH = activity.resources.displayMetrics.heightPixels.coerceAtLeast(1)
         val pageArgb = hostBackgroundArgb() ?: profileBackgroundPageFallbackArgb()
-        val key = listOf(
-            path,
-            screenW,
-            screenH,
-            snapshot.profileBackgroundCropPosition,
-            snapshot.profileBackgroundDisplayMode,
-            snapshot.profileBackgroundBlur,
-            snapshot.profileBackgroundTransparency,
-            pageArgb,
-        ).joinToString("|")
+        val key = profileBackgroundBitmapKey(path, screenW, screenH, snapshot, pageArgb)
         val brushBitmap = if (cachedScreenBackgroundBitmapKey == key && cachedScreenBackgroundBitmap != null) {
             cachedScreenBackgroundBitmap!!
         } else {
-            val composed = Bitmap.createBitmap(screenW, screenH, Bitmap.Config.ARGB_8888).also { target ->
-                val canvas = android.graphics.Canvas(target)
-                canvas.drawColor(pageArgb or 0xFF000000.toInt())
-                val paint = android.graphics.Paint(
-                    android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG,
-                ).apply {
-                    alpha = ((100 - snapshot.profileBackgroundTransparency.coerceIn(0, 100)) * 255) / 100
-                }
-                canvas.drawBitmap(
-                    bitmap,
-                    null,
-                    destinationRect(
-                        bitmap = bitmap,
-                        screenW = screenW,
-                        screenH = screenH,
-                        displayMode = snapshot.profileBackgroundDisplayMode,
-                        cropPosition = snapshot.profileBackgroundCropPosition,
-                    ),
-                    paint,
-                )
-            }
-            val radius = profileBackgroundBlurRadius(snapshot.profileBackgroundBlur)
-            val rendered = if (radius <= 0) {
-                composed
-            } else {
-                val downscale = PROFILE_BACKGROUND_BLUR_DOWNSCALE
-                val smallW = (screenW * downscale).toInt().coerceAtLeast(1)
-                val smallH = (screenH * downscale).toInt().coerceAtLeast(1)
-                boxBlur(
-                    Bitmap.createScaledBitmap(composed, smallW, smallH, true),
-                    radius = radius,
-                )
-            }
-            cachedScreenBackgroundBitmap = rendered
+            val composed = createProfileBackgroundBitmap(bitmap, screenW, screenH, snapshot, pageArgb)
+            cachedScreenBackgroundBitmap = composed
             cachedScreenBackgroundBitmapKey = key
-            rendered
+            composed
         }
         val matrix = android.graphics.Matrix()
         val scaleX = screenW.toFloat() / brushBitmap.width.toFloat().coerceAtLeast(1f)
@@ -440,8 +625,316 @@ class ProfileBackgroundHook(
         null
     }
 
-    private fun profileBackgroundBlurRadius(value: Int): Int =
-        (value.coerceIn(0, 100) * PROFILE_BACKGROUND_BLUR_RADIUS_MAX) / 100
+    private fun profileBackgroundBitmapKey(
+        path: String,
+        screenW: Int,
+        screenH: Int,
+        snapshot: ModuleSettingsSnapshot,
+        pageArgb: Int,
+    ): String = listOf(
+        "deepink2",
+        path,
+        screenW,
+        screenH,
+        snapshot.profileBackgroundCropPosition,
+        snapshot.profileBackgroundDisplayMode,
+        pageArgb,
+    ).joinToString("|")
+
+    private fun createActiveProfileBackgroundBitmap(
+        path: String,
+        snapshot: ModuleSettingsSnapshot,
+    ): Pair<Bitmap, String>? = runCatching {
+        val active = cachedScreenBackgroundBitmap ?: return@runCatching null
+        if (active.isRecycled) return@runCatching null
+        val bitmap = loadBitmap(path) ?: return@runCatching null
+        val pageArgb = hostBackgroundArgb() ?: profileBackgroundPageFallbackArgb()
+        val key = profileBackgroundBitmapKey(path, active.width, active.height, snapshot, pageArgb)
+        createProfileBackgroundBitmap(bitmap, active.width, active.height, snapshot, pageArgb) to key
+    }.getOrElse {
+        XposedBridge.log("$LOG_PREFIX create active profile background failed: ${it.stackTraceToString()}")
+        null
+    }
+
+    private fun replaceActiveProfileBackgroundBitmap(updated: Pair<Bitmap, String>) {
+        val active = cachedScreenBackgroundBitmap
+        val bitmap = updated.first
+        if (active == null || active.isRecycled ||
+            active.width != bitmap.width || active.height != bitmap.height
+        ) {
+            cachedScreenBackgroundBitmap = bitmap
+        } else {
+            android.graphics.Canvas(active).drawBitmap(bitmap, 0f, 0f, null)
+        }
+        cachedScreenBackgroundBitmapKey = updated.second
+    }
+
+    private fun createProfileBackgroundBitmap(
+        bitmap: Bitmap,
+        screenW: Int,
+        screenH: Int,
+        snapshot: ModuleSettingsSnapshot,
+        pageArgb: Int,
+    ): Bitmap = Bitmap.createBitmap(screenW, screenH, Bitmap.Config.ARGB_8888).also { target ->
+        val canvas = android.graphics.Canvas(target)
+        val imageAlpha = PROFILE_BACKGROUND_HOUMO_IMAGE_ALPHA
+        canvas.drawColor(pageArgb or 0xFF000000.toInt())
+        val imageRect = destinationRect(
+            bitmap = bitmap,
+            screenW = screenW,
+            screenH = screenH,
+            displayMode = snapshot.profileBackgroundDisplayMode,
+            cropPosition = snapshot.profileBackgroundCropPosition,
+        )
+        val blurredBase = profileBackgroundBlurredBaseBitmap(
+            bitmap = bitmap,
+            screenW = screenW,
+            screenH = screenH,
+            pageArgb = pageArgb,
+            destination = imageRect,
+            imageAlpha = imageAlpha,
+            blurRadius = PROFILE_BACKGROUND_HOUMO_BLUR_RADIUS,
+        )
+        canvas.drawBitmap(
+            blurredBase,
+            null,
+            android.graphics.RectF(0f, 0f, screenW.toFloat(), screenH.toFloat()),
+            null,
+        )
+        val activity = activityProvider()
+        val headerHeight = if (activity != null) {
+            profileBackgroundHeaderHeightPx(activity, screenH)
+        } else {
+            screenH * 0.32f
+        }
+        val clearFadeEnd = drawProfileBackgroundClearImage(
+            canvas = canvas,
+            bitmap = bitmap,
+            destination = imageRect,
+            screenW = screenW,
+            screenH = screenH,
+            headerHeight = headerHeight,
+            imageAlpha = imageAlpha,
+        )
+        drawProfileBackgroundTopScrim(canvas, screenW, headerHeight)
+        drawProfileBackgroundSurfaceVeil(
+            canvas = canvas,
+            screenW = screenW,
+            screenH = screenH,
+            imageBottomY = imageRect.bottom.coerceIn(1f, screenH.toFloat()),
+            fogArgb = profileBackgroundFogArgb(
+                bitmap = bitmap,
+                pageArgb = pageArgb,
+                destination = imageRect,
+                sampleScreenY = minOf(clearFadeEnd, imageRect.bottom - 1f),
+            ),
+            pageArgb = pageArgb,
+        )
+    }
+
+    private fun profileBackgroundBlurredBaseBitmap(
+        bitmap: Bitmap,
+        screenW: Int,
+        screenH: Int,
+        pageArgb: Int,
+        destination: android.graphics.RectF,
+        imageAlpha: Int,
+        blurRadius: Int,
+    ): Bitmap {
+        val base = Bitmap.createBitmap(screenW, screenH, Bitmap.Config.ARGB_8888).also { target ->
+            val canvas = android.graphics.Canvas(target)
+            canvas.drawColor(pageArgb or 0xFF000000.toInt())
+            val paint = android.graphics.Paint(
+                android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG,
+            ).apply {
+                alpha = imageAlpha.coerceIn(0, 255)
+            }
+            canvas.drawBitmap(bitmap, null, destination, paint)
+        }
+        if (blurRadius <= 0) return base
+        val downscale = PROFILE_BACKGROUND_BLUR_DOWNSCALE
+        val smallW = (screenW * downscale).toInt().coerceAtLeast(1)
+        val smallH = (screenH * downscale).toInt().coerceAtLeast(1)
+        return boxBlur(
+            Bitmap.createScaledBitmap(base, smallW, smallH, true),
+            radius = blurRadius,
+        )
+    }
+
+    private fun profileBackgroundHeaderHeightPx(activity: Activity, screenH: Int): Float {
+        val density = activity.resources.displayMetrics.density.coerceAtLeast(1f)
+        return (PROFILE_BACKGROUND_HEADER_HEIGHT_DP * density)
+            .coerceIn(screenH * 0.24f, screenH * 0.40f)
+    }
+
+    private fun drawProfileBackgroundClearImage(
+        canvas: android.graphics.Canvas,
+        bitmap: Bitmap,
+        destination: android.graphics.RectF,
+        screenW: Int,
+        screenH: Int,
+        headerHeight: Float,
+        imageAlpha: Int,
+    ): Float {
+        val fadeStart = (headerHeight * PROFILE_BACKGROUND_HOUMO_CLEAR_FADE_START_RATIO)
+            .coerceIn(1f, screenH.toFloat())
+        val fadeEnd = (headerHeight * PROFILE_BACKGROUND_HOUMO_CLEAR_FADE_END_RATIO)
+            .coerceIn(fadeStart + 1f, screenH.toFloat())
+        val paint = android.graphics.Paint(
+            android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG,
+        ).apply {
+            alpha = imageAlpha.coerceIn(0, 255)
+        }
+        val solidSave = canvas.save()
+        canvas.clipRect(0f, 0f, screenW.toFloat(), fadeStart)
+        canvas.drawBitmap(bitmap, null, destination, paint)
+        canvas.restoreToCount(solidSave)
+
+        val layerBounds = android.graphics.RectF(0f, fadeStart, screenW.toFloat(), fadeEnd)
+        val layerSave = canvas.saveLayer(layerBounds, null)
+        canvas.drawBitmap(bitmap, null, destination, paint)
+        val maskPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            shader = android.graphics.LinearGradient(
+                0f,
+                fadeStart,
+                0f,
+                fadeEnd,
+                intArrayOf(0xFF000000.toInt(), 0x00000000),
+                floatArrayOf(0f, 1f),
+                Shader.TileMode.CLAMP,
+            )
+            xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_IN)
+        }
+        canvas.drawRect(layerBounds, maskPaint)
+        maskPaint.xfermode = null
+        canvas.restoreToCount(layerSave)
+        return fadeEnd
+    }
+
+    private fun drawProfileBackgroundTopScrim(
+        canvas: android.graphics.Canvas,
+        screenW: Int,
+        headerHeight: Float,
+    ) {
+        val endY = (headerHeight * 0.58f).coerceAtLeast(1f)
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            shader = android.graphics.LinearGradient(
+                0f,
+                0f,
+                0f,
+                endY,
+                intArrayOf(0x26000000, 0x00000000),
+                floatArrayOf(0f, 1f),
+                Shader.TileMode.CLAMP,
+            )
+        }
+        canvas.drawRect(0f, 0f, screenW.toFloat(), endY, paint)
+    }
+
+    private fun drawProfileBackgroundSurfaceVeil(
+        canvas: android.graphics.Canvas,
+        screenW: Int,
+        screenH: Int,
+        imageBottomY: Float,
+        fogArgb: Int,
+        pageArgb: Int,
+    ) {
+        val startY = (imageBottomY - screenH * PROFILE_BACKGROUND_HOUMO_VEIL_LEAD_RATIO)
+            .coerceIn(0f, screenH.toFloat())
+        val settleY = (imageBottomY + screenH * PROFILE_BACKGROUND_HOUMO_VEIL_SETTLE_RATIO)
+            .coerceIn(startY + 1f, screenH.toFloat())
+        val imageStop = ((imageBottomY - startY) / (screenH - startY).coerceAtLeast(1f))
+            .coerceIn(0.08f, 0.68f)
+        val settleStop = ((settleY - startY) / (screenH - startY).coerceAtLeast(1f))
+            .coerceIn(imageStop + 0.04f, 0.92f)
+        val dark = isDarkArgb(pageArgb)
+        val edgeAlpha = if (dark) 0xC8 else 0xE8
+        val settleAlpha = if (dark) 0xF0 else 0xFA
+        val bottomAlpha = if (dark) 0xF8 else 0xFF
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            shader = android.graphics.LinearGradient(
+                0f,
+                startY,
+                0f,
+                screenH.toFloat(),
+                intArrayOf(
+                    argbWithAlpha(fogArgb, 0x00),
+                    argbWithAlpha(blendArgb(pageArgb, fogArgb, 0.46f), edgeAlpha),
+                    argbWithAlpha(pageArgb, settleAlpha),
+                    argbWithAlpha(pageArgb, bottomAlpha),
+                ),
+                floatArrayOf(0f, imageStop, settleStop, 1f),
+                Shader.TileMode.CLAMP,
+            )
+        }
+        canvas.drawRect(0f, startY, screenW.toFloat(), screenH.toFloat(), paint)
+    }
+
+    private fun profileBackgroundFogArgb(
+        bitmap: Bitmap,
+        pageArgb: Int,
+        destination: android.graphics.RectF,
+        sampleScreenY: Float,
+    ): Int {
+        val sample = displayedImageAverageColor(bitmap, destination, sampleScreenY)
+            ?: bottomEdgeAverageColor(bitmap)
+        val page = pageArgb or 0xFF000000.toInt()
+        val sampleWeight = if (isDarkArgb(page)) 0.50f else 0.74f
+        return blendArgb(page, sample, sampleWeight) or 0xFF000000.toInt()
+    }
+
+    private fun displayedImageAverageColor(
+        bitmap: Bitmap,
+        destination: android.graphics.RectF,
+        sampleScreenY: Float,
+    ): Int? {
+        val dstW = destination.width().coerceAtLeast(1f)
+        val dstH = destination.height().coerceAtLeast(1f)
+        val sampleYFraction = ((sampleScreenY - destination.top) / dstH).coerceIn(0f, 1f)
+        val centerY = (sampleYFraction * (bitmap.height - 1)).toInt().coerceIn(0, bitmap.height - 1)
+        val radiusY = (bitmap.height * PROFILE_BACKGROUND_HOUMO_SAMPLE_BAND_RATIO)
+            .toInt()
+            .coerceAtLeast(1)
+        val startY = (centerY - radiusY).coerceAtLeast(0)
+        val endY = (centerY + radiusY).coerceAtMost(bitmap.height - 1)
+        val startX = 0
+        val endX = bitmap.width - 1
+        val stepX = ((endX - startX) / PROFILE_BACKGROUND_HOUMO_SAMPLE_COLUMNS).coerceAtLeast(1)
+        val stepY = ((endY - startY) / PROFILE_BACKGROUND_HOUMO_SAMPLE_ROWS).coerceAtLeast(1)
+        var r = 0
+        var g = 0
+        var b = 0
+        var count = 0
+        var y = startY
+        while (y <= endY) {
+            var x = startX
+            while (x <= endX) {
+                val p = bitmap.getPixel(x, y)
+                r += (p ushr 16) and 0xff
+                g += (p ushr 8) and 0xff
+                b += p and 0xff
+                count++
+                x += stepX
+            }
+            y += stepY
+        }
+        if (count == 0) return null
+        return (0xFF shl 24) or ((r / count) shl 16) or ((g / count) shl 8) or (b / count)
+    }
+
+    private fun blendArgb(baseArgb: Int, overlayArgb: Int, overlayWeight: Float): Int {
+        val weight = overlayWeight.coerceIn(0f, 1f)
+        val inverse = 1f - weight
+        fun channel(shift: Int): Int {
+            val base = (baseArgb ushr shift) and 0xff
+            val overlay = (overlayArgb ushr shift) and 0xff
+            return ((base * inverse) + (overlay * weight)).toInt().coerceIn(0, 255)
+        }
+        return (0xFF shl 24) or
+            (channel(16) shl 16) or
+            (channel(8) shl 8) or
+            channel(0)
+    }
 
     private fun destinationRect(
         bitmap: Bitmap,
@@ -474,154 +967,6 @@ class ProfileBackgroundHook(
         }
         return android.graphics.RectF(left, top, left + scaledW, top + scaledH)
     }
-
-    private fun profileBackgroundWashBrush(backgroundArgb: Int): Any? = runCatching {
-        val dark = isDarkArgb(backgroundArgb)
-        val stops = if (dark) {
-            listOf(
-                argbWithAlpha(backgroundArgb, 0x22),
-                argbWithAlpha(backgroundArgb, 0x88),
-                argbWithAlpha(backgroundArgb, 0xF2),
-            )
-        } else {
-            listOf(
-                argbWithAlpha(backgroundArgb, 0x9A),
-                argbWithAlpha(backgroundArgb, 0xD8),
-                argbWithAlpha(backgroundArgb, 0xF6),
-            )
-        }
-        verticalGradientBrush(stops)
-    }.getOrElse {
-        XposedBridge.log("$LOG_PREFIX profileBackgroundWashBrush failed: ${it.stackTraceToString()}")
-        null
-    }
-
-    private fun profileBackgroundCardBrush(
-        path: String,
-        bitmap: Bitmap,
-        snapshot: ModuleSettingsSnapshot,
-    ): Any? = runCatching {
-        val activity = activityProvider() ?: return@runCatching null
-        val screenW = activity.resources.displayMetrics.widthPixels.coerceAtLeast(1)
-        val screenH = activity.resources.displayMetrics.heightPixels.coerceAtLeast(1)
-        val pageArgb = hostBackgroundArgb() ?: profileBackgroundPageFallbackArgb()
-        val cardBaseArgb = profileBackgroundCardBaseArgb()
-        val cardAlpha = profileBackgroundCardAlpha(snapshot)
-        val key = listOf(
-            "card",
-            path,
-            screenW,
-            screenH,
-            snapshot.profileBackgroundCropPosition,
-            snapshot.profileBackgroundDisplayMode,
-            snapshot.profileBackgroundTransparency,
-            snapshot.profileBackgroundCardBlur,
-            snapshot.profileBackgroundCardTransparency,
-            pageArgb,
-            cardBaseArgb,
-        ).joinToString("|")
-        val brushBitmap = if (cachedCardBackgroundBitmapKey == key && cachedCardBackgroundBitmap != null) {
-            cachedCardBackgroundBitmap!!
-        } else {
-            val composed = Bitmap.createBitmap(screenW, screenH, Bitmap.Config.ARGB_8888).also { target ->
-                val canvas = android.graphics.Canvas(target)
-                canvas.drawColor(pageArgb or 0xFF000000.toInt())
-                val paint = android.graphics.Paint(
-                    android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG,
-                ).apply {
-                    alpha = ((100 - snapshot.profileBackgroundTransparency.coerceIn(0, 100)) * 255) / 100
-                }
-                canvas.drawBitmap(
-                    bitmap,
-                    null,
-                    destinationRect(
-                        bitmap = bitmap,
-                        screenW = screenW,
-                        screenH = screenH,
-                        displayMode = snapshot.profileBackgroundDisplayMode,
-                        cropPosition = snapshot.profileBackgroundCropPosition,
-                    ),
-                    paint,
-                )
-            }
-            val radius = profileBackgroundBlurRadius(snapshot.profileBackgroundCardBlur)
-            val background = if (radius <= 0) {
-                composed
-            } else {
-                val downscale = PROFILE_BACKGROUND_BLUR_DOWNSCALE
-                val smallW = (screenW * downscale).toInt().coerceAtLeast(1)
-                val smallH = (screenH * downscale).toInt().coerceAtLeast(1)
-                boxBlur(
-                    Bitmap.createScaledBitmap(composed, smallW, smallH, true),
-                    radius = radius,
-                )
-            }
-            val rendered = background.copy(Bitmap.Config.ARGB_8888, true).also { target ->
-                android.graphics.Canvas(target).drawColor(argbWithAlpha(cardBaseArgb, cardAlpha))
-            }
-            cachedCardBackgroundBitmap = rendered
-            cachedCardBackgroundBitmapKey = key
-            rendered
-        }
-        val matrix = android.graphics.Matrix()
-        val scaleX = screenW.toFloat() / brushBitmap.width.toFloat().coerceAtLeast(1f)
-        val scaleY = screenH.toFloat() / brushBitmap.height.toFloat().coerceAtLeast(1f)
-        matrix.setScale(scaleX, scaleY)
-        val shader = BitmapShader(brushBitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).apply {
-            setLocalMatrix(matrix)
-        }
-        val brushKtClass = XposedHelpers.findClass(BRUSH_KT_CLASS, classLoader)
-        val factory = brushKtClass.declaredMethods.firstOrNull { m ->
-            m.name == SHADER_BRUSH_METHOD && m.parameterTypes.size == 1 &&
-                m.parameterTypes[0] == Shader::class.java
-        }?.apply { isAccessible = true } ?: return@runCatching null
-        factory.invoke(null, shader)
-    }.getOrElse {
-        XposedBridge.log("$LOG_PREFIX profileBackgroundCardBrush failed: ${it.stackTraceToString()}")
-        null
-    }
-
-    private fun profileBackgroundCardArgb(snapshot: ModuleSettingsSnapshot): Int =
-        argbWithAlpha(profileBackgroundCardBaseArgb(), profileBackgroundCardAlpha(snapshot))
-
-    private fun profileBackgroundCardBaseArgb(): Int {
-        val background = hostBackgroundArgb() ?: profileBackgroundPageFallbackArgb()
-        return if (isDarkArgb(background)) {
-            0xFF1E2228.toInt()
-        } else {
-            0xFFFFFFFF.toInt()
-        }
-    }
-
-    private fun profileBackgroundCardAlpha(snapshot: ModuleSettingsSnapshot): Int =
-        ((100 - snapshot.profileBackgroundCardTransparency.coerceIn(0, 100)) * 255) / 100
-
-    private fun verticalGradientBrush(colorsArgb: List<Int>): Any? = runCatching {
-        val activity = activityProvider() ?: return@runCatching null
-        val brushCompanionClass = XposedHelpers.findClass(BRUSH_COMPANION_CLASS, classLoader)
-            .getDeclaredField("Companion").apply { isAccessible = true }.get(null)
-        val companionClass = XposedHelpers.findClass("$BRUSH_COMPANION_CLASS\$Companion", classLoader)
-        val gradientMethod = companionClass.declaredMethods.firstOrNull { m ->
-            m.name == VERTICAL_GRADIENT_DEFAULT_METHOD && m.parameterTypes.size == 7
-        }?.apply { isAccessible = true } ?: return@runCatching null
-        val colorClass = XposedHelpers.findClass(COLOR_CLASS, classLoader)
-        val boxMethod = colorClass.getDeclaredMethod(COLOR_BOX_METHOD, java.lang.Long.TYPE).apply { isAccessible = true }
-        val colors = java.util.ArrayList<Any>(colorsArgb.size).apply {
-            colorsArgb.forEach { argb ->
-                add(boxMethod.invoke(null, colorLongFromArgb(argb)) ?: return@runCatching null)
-            }
-        }
-        gradientMethod.invoke(
-            null,
-            brushCompanionClass,
-            colors,
-            0f,
-            activity.resources.displayMetrics.heightPixels.toFloat(),
-            0,
-            0,
-            null,
-        )
-    }.getOrNull()
 
     private fun isDarkArgb(argb: Int): Boolean {
         val r = (argb ushr 16) and 0xff
@@ -779,7 +1124,12 @@ class ProfileBackgroundHook(
         val method = themeKtClass.declaredMethods.firstOrNull { m ->
             m.name == THEME_GET_BACKGROUND_AUTO_METHOD && m.parameterTypes.size == 1
         }?.apply { isAccessible = true } ?: return@runCatching null
-        val colorLong = method.invoke(null, scheme) as Long
+        resolvingHostBackground.set(true)
+        val colorLong = try {
+            method.invoke(null, scheme) as Long
+        } finally {
+            resolvingHostBackground.remove()
+        }
         colorLongToArgb(colorLong)
     }.getOrNull()
 
@@ -1146,7 +1496,7 @@ class ProfileBackgroundHook(
     private fun argbWithAlpha(argb: Int, alpha: Int): Int =
         (alpha.coerceIn(0, 255) shl 24) or (argb and 0x00FFFFFF)
 
-    private companion object {
+    companion object {
         const val LOG_PREFIX = "ReaMicro LSP profile background"
 
         const val BACKGROUND_ARGB_FALLBACK = 0x80000000.toInt()
@@ -1157,12 +1507,23 @@ class ProfileBackgroundHook(
         const val PROFILE_BACKGROUND_BANNER_FADE_MIN_DP = 220f
         const val PROFILE_BACKGROUND_BANNER_FADE_MAX_DP = 360f
         const val PROFILE_BACKGROUND_BLUR_DOWNSCALE = 0.25f
-        const val PROFILE_BACKGROUND_BLUR_RADIUS_MAX = 16
+        const val PROFILE_BACKGROUND_HOUMO_SURFACE_ARGB = 0x00FFFFFF
+        const val PROFILE_BACKGROUND_HOUMO_IMAGE_ALPHA = 248
+        const val PROFILE_BACKGROUND_HOUMO_BLUR_RADIUS = 24
+        const val PROFILE_BACKGROUND_HOUMO_CLEAR_FADE_START_RATIO = 0.34f
+        const val PROFILE_BACKGROUND_HOUMO_CLEAR_FADE_END_RATIO = 1.46f
+        const val PROFILE_BACKGROUND_HOUMO_VEIL_LEAD_RATIO = 0.24f
+        const val PROFILE_BACKGROUND_HOUMO_VEIL_SETTLE_RATIO = 0.28f
+        const val PROFILE_BACKGROUND_HOUMO_SAMPLE_BAND_RATIO = 0.035f
+        const val PROFILE_BACKGROUND_HOUMO_SAMPLE_COLUMNS = 28
+        const val PROFILE_BACKGROUND_HOUMO_SAMPLE_ROWS = 6
 
         const val PROFILE_SCREEN_CLASS = "app.zhendong.reamicro.ui.profile.ProfileScreenKt"
 
         const val THEME_KT_CLASS = "app.zhendong.reamicro.arch.theme.ThemeKt"
         const val THEME_GET_BACKGROUND_AUTO_METHOD = "getBackgroundAuto"
+        const val THEME_GET_BACKGROUND_DIM_METHOD = "getBackgroundDim"
+        const val THEME_GET_BACKGROUND_BRIGHT_METHOD = "getBackgroundBright"
         const val MATERIAL_THEME_CLASS = "androidx.compose.material3.MaterialTheme"
         const val COMPOSER_CLASS = "androidx.compose.runtime.Composer"
 
@@ -1171,6 +1532,22 @@ class ProfileBackgroundHook(
 
         const val COLOR_SCHEME_CLASS = "androidx.compose.material3.ColorScheme"
         const val SURFACE_CONTAINER_HIGH_METHOD = "getSurfaceContainerHigh-0d7_KjU"
+        val PROFILE_BACKGROUND_SURFACE_COLOR_METHODS = arrayOf(
+            "getSurface-0d7_KjU",
+            "getSurfaceDim-0d7_KjU",
+            "getSurfaceBright-0d7_KjU",
+            "getSurfaceContainerLowest-0d7_KjU",
+            "getSurfaceContainerLow-0d7_KjU",
+            "getSurfaceContainer-0d7_KjU",
+            SURFACE_CONTAINER_HIGH_METHOD,
+            "getSurfaceContainerHighest-0d7_KjU",
+            "getSurfaceVariant-0d7_KjU",
+        )
+        val PROFILE_BACKGROUND_THEME_METHODS = arrayOf(
+            THEME_GET_BACKGROUND_AUTO_METHOD,
+            THEME_GET_BACKGROUND_DIM_METHOD,
+            THEME_GET_BACKGROUND_BRIGHT_METHOD,
+        )
 
         const val BACKGROUND_KT_CLASS = "androidx.compose.foundation.BackgroundKt"
         const val COLOR_BACKGROUND_DEFAULT_METHOD = "background-bw27NRU\$default"
@@ -1192,5 +1569,17 @@ class ProfileBackgroundHook(
 
         const val COLOR_CLASS = "androidx.compose.ui.graphics.Color"
         const val COLOR_BOX_METHOD = "box-impl"
+        const val PROFILE_BACKGROUND_IMAGE_URL_MAX_LENGTH = 2048
+        const val RANDOM_IMAGE_CONNECT_TIMEOUT_MS = 12_000
+        const val RANDOM_IMAGE_READ_TIMEOUT_MS = 25_000
+        const val MAX_RANDOM_IMAGE_BYTES = 24 * 1024 * 1024
+        const val RANDOM_IMAGE_FILE_PREFIX = "profile_random_"
+        const val RANDOM_IMAGE_USER_AGENT = "ReaMicro-Extend/profile-background"
+
+        @Volatile private var activeInstance: ProfileBackgroundHook? = null
+
+        fun refreshRandomBackgroundNow(activity: Activity?, force: Boolean = false) {
+            activeInstance?.refreshRandomImageFor(activity, force)
+        }
     }
 }

@@ -1492,7 +1492,7 @@ class ReaderDialogueHighlightHook(
         const val MAX_CACHED_NINE_SLICES = 64
         const val HIGHLIGHT_PERFORMANCE_LOG_INTERVAL_MS = 1500L
         const val REEDEN_BOX_EDGE_SCALE = 0.78f
-        const val MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS = 3
+        const val MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS = 5
         const val HIGHLIGHT_ANNOTATION_TAG = "reamicro.highlight.span"
         const val NINE_PATCH_ANNOTATION_TAG = "reamicro.highlight.ninepatch"
         const val NINE_PATCH_ANNOTATION_SEPARATOR = "\u001F"

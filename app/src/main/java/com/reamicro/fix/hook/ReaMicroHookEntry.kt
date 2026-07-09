@@ -83,11 +83,13 @@ class ReaMicroHookEntry {
             activityProvider = { currentActivityRef?.get() },
             settingsProvider = moduleSettings::snapshot,
         ).install()
-        ProfileBackgroundHook(
+        val profileBackgroundHook = ProfileBackgroundHook(
             classLoader = classLoader,
             activityProvider = { currentActivityRef?.get() },
+            settings = moduleSettings,
             settingsProvider = moduleSettings::snapshot,
-        ).install()
+        )
+        profileBackgroundHook.install()
         val bookDetailsAssociationActionHook = BookDetailsAssociationActionHook(
             classLoader = classLoader,
             activityProvider = { currentActivityRef?.get() },
@@ -108,7 +110,7 @@ class ReaMicroHookEntry {
             settingsProvider = moduleSettings::snapshot,
         )
         webDavDriveHook.install()
-        hookMainActivity(classLoader, webDavDriveHook)
+        hookMainActivity(classLoader, webDavDriveHook, profileBackgroundHook)
     }
 
     private fun disableSearchSource(source: BookSource, message: String) {
@@ -138,7 +140,11 @@ class ReaMicroHookEntry {
         }
     }
 
-    private fun hookMainActivity(classLoader: ClassLoader, webDavDriveHook: WebDavDriveHook) {
+    private fun hookMainActivity(
+        classLoader: ClassLoader,
+        webDavDriveHook: WebDavDriveHook,
+        profileBackgroundHook: ProfileBackgroundHook,
+    ) {
         runCatching {
             val mainActivityClass = XposedHelpers.findClass("app.zhendong.reamicro.MainActivity", classLoader)
             // Most feature hooks need a live Activity for Compose state, storage, and toasts.
@@ -157,6 +163,7 @@ class ReaMicroHookEntry {
                         installExternalFeatures(classLoader)
                         RotationOrientationController.apply(activity, moduleSettings.snapshot())
                         webDavDriveHook.cleanupStartupCacheIfNeeded(activity)
+                        profileBackgroundHook.refreshRandomImageFor(activity)
                         XposedBridge.log("$LOG_PREFIX MainActivity.onCreate hooked")
                     }
 
@@ -181,6 +188,7 @@ class ReaMicroHookEntry {
                             moduleSettings.attachContext(activity)
                             installExternalFeatures(classLoader)
                             RotationOrientationController.apply(activity, moduleSettings.snapshot())
+                            profileBackgroundHook.refreshRandomImageFor(activity)
                         }
                     },
                 )

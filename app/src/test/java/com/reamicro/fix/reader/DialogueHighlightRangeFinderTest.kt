@@ -12,10 +12,10 @@ class DialogueHighlightRangeFinderTest {
     )
 
     @Test
-    fun doubleQuoteDialogueCanSpanUpToThreeParagraphsInOneRenderedText() {
-        val text = "before \u201cfirst paragraph\nsecond paragraph\nthird paragraph\u201d after"
+    fun doubleQuoteDialogueCanSpanUpToFiveParagraphsInOneRenderedText() {
+        val text = "before \u201cfirst paragraph\nsecond paragraph\nthird paragraph\nfourth paragraph\nfifth paragraph\u201d after"
 
-        val ranges = DialogueHighlightRangeFinder.findQuoteRanges(text, doubleQuotes, maxParagraphs = 3)
+        val ranges = DialogueHighlightRangeFinder.findQuoteRanges(text, doubleQuotes, maxParagraphs = 5)
 
         assertEquals(1, ranges.size)
         assertEquals(text.indexOf('\u201c'), ranges.single().first)
@@ -23,10 +23,10 @@ class DialogueHighlightRangeFinderTest {
     }
 
     @Test
-    fun doubleQuoteDialogueStopsPastThreeParagraphsInOneRenderedText() {
-        val text = "before \u201cfirst\nsecond\nthird\nfourth\u201d after"
+    fun doubleQuoteDialogueStopsPastFiveParagraphsInOneRenderedText() {
+        val text = "before \u201cfirst\nsecond\nthird\nfourth\nfifth\nsixth\u201d after"
 
-        val ranges = DialogueHighlightRangeFinder.findQuoteRanges(text, doubleQuotes, maxParagraphs = 3)
+        val ranges = DialogueHighlightRangeFinder.findQuoteRanges(text, doubleQuotes, maxParagraphs = 5)
 
         assertTrue(ranges.isEmpty())
     }
@@ -50,19 +50,19 @@ class DialogueHighlightRangeFinderTest {
             text = first,
             quotes = doubleQuotes,
             incomingCarry = null,
-            maxParagraphs = 3,
+            maxParagraphs = 5,
         )
         val secondResult = DialogueHighlightRangeFinder.findQuoteRangesInSegment(
             text = second,
             quotes = doubleQuotes,
             incomingCarry = firstResult.carry,
-            maxParagraphs = 3,
+            maxParagraphs = 5,
         )
         val thirdResult = DialogueHighlightRangeFinder.findQuoteRangesInSegment(
             text = third,
             quotes = doubleQuotes,
             incomingCarry = secondResult.carry,
-            maxParagraphs = 3,
+            maxParagraphs = 5,
         )
 
         assertEquals(listOf(first.indexOf('\u201c')..first.length), firstResult.ranges)
@@ -72,26 +72,38 @@ class DialogueHighlightRangeFinderTest {
     }
 
     @Test
-    fun doubleQuoteDialogueDropsCarryAfterThreeSeparateRenderedSegments() {
+    fun doubleQuoteDialogueDropsCarryAfterFiveSeparateRenderedSegments() {
         val firstResult = DialogueHighlightRangeFinder.findQuoteRangesInSegment(
             text = "before \u201cfirst",
             quotes = doubleQuotes,
             incomingCarry = null,
-            maxParagraphs = 3,
+            maxParagraphs = 5,
         )
         val secondResult = DialogueHighlightRangeFinder.findQuoteRangesInSegment(
             text = "second",
             quotes = doubleQuotes,
             incomingCarry = firstResult.carry,
-            maxParagraphs = 3,
+            maxParagraphs = 5,
         )
         val thirdResult = DialogueHighlightRangeFinder.findQuoteRangesInSegment(
             text = "third",
             quotes = doubleQuotes,
             incomingCarry = secondResult.carry,
-            maxParagraphs = 3,
+            maxParagraphs = 5,
+        )
+        val fourthResult = DialogueHighlightRangeFinder.findQuoteRangesInSegment(
+            text = "fourth",
+            quotes = doubleQuotes,
+            incomingCarry = thirdResult.carry,
+            maxParagraphs = 5,
+        )
+        val fifthResult = DialogueHighlightRangeFinder.findQuoteRangesInSegment(
+            text = "fifth",
+            quotes = doubleQuotes,
+            incomingCarry = fourthResult.carry,
+            maxParagraphs = 5,
         )
 
-        assertNull(thirdResult.carry)
+        assertNull(fifthResult.carry)
     }
 }

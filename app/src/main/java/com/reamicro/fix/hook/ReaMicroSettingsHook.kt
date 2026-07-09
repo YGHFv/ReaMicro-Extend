@@ -782,8 +782,8 @@ class ReaMicroSettingsHook(
         PROFILE_BACKGROUND_DISPLAY_MODE_OPTIONS.firstOrNull { it.value == value }?.title
             ?: PROFILE_BACKGROUND_DISPLAY_MODE_OPTIONS.first().title
 
-    private fun profileBackgroundPercentSummary(value: Int): String =
-        "${value.coerceIn(0, 100)}%"
+    private fun profileBackgroundRandomUrlSummary(value: String): String =
+        value.trim().ifBlank { "\u672a\u8bbe\u7f6e" }
 
     private fun completionEntryRow(key: String, title: String, enabled: Boolean, route: InjectedRoute): ActionRow =
         ActionRow(
@@ -1679,15 +1679,38 @@ class ReaMicroSettingsHook(
             } else {
                 snapshot.profileBackgroundImage.substringAfterLast('/')
             }
+            val switchRows = listOf(
+                ToggleRow(
+                    key = ModuleSettings.KEY_PROFILE_BACKGROUND_ENABLED,
+                    title = "\u56fe\u7247\u80cc\u666f",
+                    checked = snapshot.profileBackgroundEnabled,
+                    onChanged = { checked, _ ->
+                        settings.setProfileBackgroundEnabled(checked)
+                        if (checked) settings.setProfileBackgroundUseImage(true)
+                        bumpProfileBackgroundVersion()
+                        checked
+                    },
+                ),
+            )
             val imageRows = listOf(
                 ActionRow(
                     key = "profile_background_image_entry",
-                    title = "\u80cc\u666f\u56fe\u7247",
+                    title = "\u672c\u5730\u80cc\u666f\u56fe\u7247",
                     subtitle = imageSubtitle,
                     singleLineSubtitle = true,
                     onClick = { openProfileBackgroundImagePicker() },
                     onLongClick = if (snapshot.profileBackgroundImage.isBlank()) null else {
                         { removeProfileBackgroundImage() }
+                    },
+                ),
+                ActionRow(
+                    key = "profile_background_random_url_entry",
+                    title = "\u968f\u673a\u56fe\u7247\u94fe\u63a5",
+                    subtitle = profileBackgroundRandomUrlSummary(snapshot.profileBackgroundImageUrl),
+                    singleLineSubtitle = true,
+                    onClick = { importProfileBackgroundRandomUrlFromClipboard() },
+                    onLongClick = if (snapshot.profileBackgroundImageUrl.isBlank()) null else {
+                        { clearProfileBackgroundRandomUrl() }
                     },
                 ),
                 ActionRow(
@@ -1704,60 +1727,11 @@ class ReaMicroSettingsHook(
                     singleLineSubtitle = true,
                     onClick = { openProfileBackgroundCropPositionDialog() },
                 ),
-                ActionRow(
-                    key = "profile_background_blur_entry",
-                    title = "\u6a21\u7cca\u5f3a\u5ea6",
-                    subtitle = profileBackgroundPercentSummary(snapshot.profileBackgroundBlur),
-                    singleLineSubtitle = true,
-                    onClick = {
-                        openProfileBackgroundPercentDialog(
-                            title = "\u6a21\u7cca\u5f3a\u5ea6",
-                            initialValue = settings.snapshot().profileBackgroundBlur,
-                            onApply = settings::setProfileBackgroundBlur,
-                        )
-                    },
-                ),
-                ActionRow(
-                    key = "profile_background_transparency_entry",
-                    title = "\u56fe\u7247\u900f\u660e\u5ea6",
-                    subtitle = profileBackgroundPercentSummary(snapshot.profileBackgroundTransparency),
-                    singleLineSubtitle = true,
-                    onClick = {
-                        openProfileBackgroundPercentDialog(
-                            title = "\u56fe\u7247\u900f\u660e\u5ea6",
-                            initialValue = settings.snapshot().profileBackgroundTransparency,
-                            onApply = settings::setProfileBackgroundTransparency,
-                        )
-                    },
-                ),
-                ActionRow(
-                    key = "profile_background_card_transparency_entry",
-                    title = "\u5bb9\u5668\u900f\u660e\u5ea6",
-                    subtitle = profileBackgroundPercentSummary(snapshot.profileBackgroundCardTransparency),
-                    singleLineSubtitle = true,
-                    onClick = {
-                        openProfileBackgroundPercentDialog(
-                            title = "\u5bb9\u5668\u900f\u660e\u5ea6",
-                            initialValue = settings.snapshot().profileBackgroundCardTransparency,
-                            onApply = settings::setProfileBackgroundCardTransparency,
-                        )
-                    },
-                ),
-                ActionRow(
-                    key = "profile_background_card_blur_entry",
-                    title = "\u5bb9\u5668\u6a21\u7cca\u611f",
-                    subtitle = profileBackgroundPercentSummary(snapshot.profileBackgroundCardBlur),
-                    singleLineSubtitle = true,
-                    onClick = {
-                        openProfileBackgroundPercentDialog(
-                            title = "\u5bb9\u5668\u6a21\u7cca\u611f",
-                            initialValue = settings.snapshot().profileBackgroundCardBlur,
-                            onApply = settings::setProfileBackgroundCardBlur,
-                        )
-                    },
-                ),
             )
-            addLazyItem(lazyListScope, PROFILE_BACKGROUND_COLOR_PICKER_ITEM_KEY + 1) { itemComposer ->
+            addLazyItem(lazyListScope, PROFILE_BACKGROUND_ENABLE_ITEM_KEY) { itemComposer ->
+                renderHostSettingsCard(switchRows, itemComposer)
+            }
+            addLazyItem(lazyListScope, PROFILE_BACKGROUND_CONTENT_ITEM_KEY) { itemComposer ->
                 renderHostActionCard(imageRows, itemComposer)
             }
             targetUnit()
@@ -1858,55 +1832,6 @@ class ReaMicroSettingsHook(
             onSelected = settings::setProfileBackgroundDisplayMode,
             logName = "display mode",
         )
-    }
-
-    private fun openProfileBackgroundPercentDialog(
-        title: String,
-        initialValue: Int,
-        onApply: (Int) -> Unit,
-    ) {
-        val activity = activityProvider() ?: return
-        activity.runOnUiThread {
-            runCatching {
-                val colors = SettingsDialogColors(activity)
-                val dialog = Dialog(activity)
-                val card = settingsDialogCard(activity, colors)
-                card.addView(settingsDialogTitle(activity, title, colors))
-                val input = settingsDialogInput(activity, "\u8f93\u5165 0-100", singleLine = true, colors = colors).apply {
-                    inputType = InputType.TYPE_CLASS_NUMBER
-                    setText(initialValue.coerceIn(0, 100).toString())
-                    selectAll()
-                }
-                card.addView(input)
-                card.addView(settingsDialogStatus(activity, "\u8303\u56f4 0-100\uff0c\u4fdd\u5b58\u540e\u7acb\u5373\u751f\u6548\u3002", colors))
-                val actions = settingsDialogActions(activity)
-                actions.addView(
-                    settingsDialogButton(activity, "\u53d6\u6d88", colors, SettingsDialogButtonRole.Neutral).apply {
-                        setOnClickListener { dialog.dismiss() }
-                    },
-                    settingsDialogButtonParams(activity),
-                )
-                actions.addView(
-                    settingsDialogButton(activity, "\u5b8c\u6210", colors).apply {
-                        setOnClickListener {
-                            val value = input.text?.toString()?.trim()?.toIntOrNull()
-                            if (value == null || value !in 0..100) {
-                                Toast.makeText(activity, "\u8bf7\u8f93\u5165 0-100", Toast.LENGTH_SHORT).show()
-                                return@setOnClickListener
-                            }
-                            onApply(value)
-                            dialog.dismiss()
-                            bumpProfileBackgroundVersion()
-                        }
-                    },
-                    settingsDialogButtonParams(activity),
-                )
-                card.addView(actions)
-                showSettingsDialog(dialog, card, activity)
-            }.onFailure {
-                XposedBridge.log("$LOG_PREFIX profile background percent dialog failed: ${it.stackTraceToString()}")
-            }
-        }
     }
 
     private fun openProfileBackgroundCropPositionDialog() {
@@ -2645,6 +2570,8 @@ class ReaMicroSettingsHook(
         runCatching {
             val target = copyProfileBackgroundImageUri(activity, uri)
             settings.setProfileBackgroundImage(target.absolutePath)
+            settings.setProfileBackgroundImageUrl("")
+            settings.setProfileBackgroundEnabled(true)
             settings.setProfileBackgroundUseImage(true)
             showToast("\u5df2\u9009\u62e9\u80cc\u666f\u56fe\u7247\uff1a${target.name}")
             bumpProfileBackgroundVersion()
@@ -2652,6 +2579,38 @@ class ReaMicroSettingsHook(
             showToast(it.message ?: "\u9009\u62e9\u80cc\u666f\u56fe\u7247\u5931\u8d25")
             XposedBridge.log("$LOG_PREFIX import profile background image failed: ${it.stackTraceToString()}")
         }
+    }
+
+    private fun importProfileBackgroundRandomUrlFromClipboard() {
+        val activity = activityProvider() ?: return
+        val url = profileBackgroundImageUrlOrNull(readClipboardText(activity))
+        if (url == null) {
+            showToast("\u526a\u8d34\u677f\u4e2d\u6ca1\u6709\u56fe\u7247\u94fe\u63a5")
+            return
+        }
+        settings.setProfileBackgroundImageUrl(url)
+        settings.setProfileBackgroundEnabled(true)
+        settings.setProfileBackgroundUseImage(true)
+        showToast("\u5df2\u4fdd\u5b58\u968f\u673a\u56fe\u7247\u94fe\u63a5")
+        bumpProfileBackgroundVersion()
+        ProfileBackgroundHook.refreshRandomBackgroundNow(activity, force = true)
+    }
+
+    private fun clearProfileBackgroundRandomUrl() {
+        settings.setProfileBackgroundImageUrl("")
+        showToast("\u5df2\u6e05\u9664\u968f\u673a\u56fe\u7247\u94fe\u63a5")
+        bumpProfileBackgroundVersion()
+    }
+
+    private fun profileBackgroundImageUrlOrNull(text: String): String? {
+        val candidate = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
+            .find(text)
+            ?.value
+            ?.trim()
+            ?.trimEnd('.', ',', ';', '\'', '"', ')', ']', '}', '\u3002', '\uff0c')
+            ?: return null
+        if (candidate.length > PROFILE_BACKGROUND_IMAGE_URL_MAX_LENGTH) return null
+        return candidate.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }
     }
 
     private fun removeProfileBackgroundImage() {
@@ -2665,6 +2624,7 @@ class ReaMicroSettingsHook(
             // \u4f7f canShowProfileBackground \u81ea\u52a8\u5931\u6548\uff0c\u6240\u6709\u4e3b\u9875\u8865\u5168\u80cc\u666f\u529f\u80fd\u4e0d\u518d\u751f\u6548\u3002
             File(activity.filesDir, "profile_background").listFiles()?.forEach { it.delete() }
             settings.setProfileBackgroundImage("")
+            settings.setProfileBackgroundImageUrl("")
             settings.setProfileBackgroundUseImage(false)
             settings.setProfileBackgroundEnabled(false)
             showToast("\u5df2\u79fb\u9664\u80cc\u666f\u56fe\u7247")
@@ -8709,6 +8669,8 @@ class ReaMicroSettingsHook(
         const val READER_READ_ALOUD_SETTINGS_ITEM_KEY = 0x524D467F
         const val READER_READ_ALOUD_SOURCES_ITEM_KEY = 0x524D4680
         const val READER_SELECTION_MENU_SETTINGS_ITEM_KEY = 0x524D4681
+        const val PROFILE_BACKGROUND_ENABLE_ITEM_KEY = 0x524D4682
+        const val PROFILE_BACKGROUND_CONTENT_ITEM_KEY = 0x524D4683
         const val ACCOUNT_CREDENTIAL_DOCUMENT_REQUEST_CODE = 0x524D47
         const val ACCOUNT_DATA_DOCUMENT_REQUEST_CODE = 0x524D48
         const val ONLINE_SOURCE_DOCUMENT_REQUEST_CODE = 0x524D49
@@ -8726,6 +8688,7 @@ class ReaMicroSettingsHook(
         const val TEXT_WITH_FONT_FAMILY_MASK = 130938
         const val TEXT_SINGLE_LINE_MASK = 73722
         const val PRESET_PROMPT_PREVIEW_MAX_CHARS = 32
+        const val PROFILE_BACKGROUND_IMAGE_URL_MAX_LENGTH = 2048
         const val PREVIEW_REEDEN_BOX_EDGE_SCALE = 0.78f
         const val FAMILY_SYSTEM = "system"
         const val FAMILY_SOURCE_HAN_SERIF = "serif"

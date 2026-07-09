@@ -48,6 +48,7 @@ object ModuleSettings {
     const val KEY_PROFILE_BACKGROUND_COLOR = "profile_background_color"
     const val KEY_PROFILE_BACKGROUND_USE_IMAGE = "profile_background_use_image"
     const val KEY_PROFILE_BACKGROUND_IMAGE = "profile_background_image"
+    const val KEY_PROFILE_BACKGROUND_IMAGE_URL = "profile_background_image_url"
     const val KEY_PROFILE_BACKGROUND_CROP_POSITION = "profile_background_crop_position"
     const val KEY_PROFILE_BACKGROUND_DISPLAY_MODE = "profile_background_display_mode"
     const val KEY_PROFILE_BACKGROUND_BLUR = "profile_background_blur"
@@ -104,6 +105,7 @@ object ModuleSettings {
     const val DEFAULT_PROFILE_BACKGROUND_COLOR = "#80000000"
     const val DEFAULT_PROFILE_BACKGROUND_USE_IMAGE = false
     const val DEFAULT_PROFILE_BACKGROUND_IMAGE = ""
+    const val DEFAULT_PROFILE_BACKGROUND_IMAGE_URL = ""
     const val PROFILE_BACKGROUND_CROP_TOP = "top"
     const val PROFILE_BACKGROUND_CROP_CENTER = "center"
     const val PROFILE_BACKGROUND_CROP_BOTTOM = "bottom"
@@ -224,6 +226,7 @@ data class ModuleSettingsSnapshot(
     val profileBackgroundColor: String = ModuleSettings.DEFAULT_PROFILE_BACKGROUND_COLOR,
     val profileBackgroundUseImage: Boolean = ModuleSettings.DEFAULT_PROFILE_BACKGROUND_USE_IMAGE,
     val profileBackgroundImage: String = ModuleSettings.DEFAULT_PROFILE_BACKGROUND_IMAGE,
+    val profileBackgroundImageUrl: String = ModuleSettings.DEFAULT_PROFILE_BACKGROUND_IMAGE_URL,
     val profileBackgroundCropPosition: String = ModuleSettings.DEFAULT_PROFILE_BACKGROUND_CROP_POSITION,
     val profileBackgroundDisplayMode: String = ModuleSettings.DEFAULT_PROFILE_BACKGROUND_DISPLAY_MODE,
     val profileBackgroundBlur: Int = ModuleSettings.DEFAULT_PROFILE_BACKGROUND_BLUR,
@@ -330,7 +333,7 @@ data class ModuleSettingsSnapshot(
             (rotation.autoEnabled || rotation.portraitLockEnabled || rotation.landscapeLockEnabled)
 
     val canShowProfileBackground: Boolean
-        get() = moduleEnabled && profileBackgroundUseImage && profileBackgroundImage.isNotBlank()
+        get() = moduleEnabled && profileBackgroundEnabled && profileBackgroundUseImage && profileBackgroundImage.isNotBlank()
 
     val enabledAssociationSearchSources: Set<BookSource>
         get() = emptySet()

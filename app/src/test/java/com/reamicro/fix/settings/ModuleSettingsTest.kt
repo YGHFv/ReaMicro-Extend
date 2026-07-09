@@ -195,6 +195,7 @@ class ModuleSettingsTest {
     fun moduleParentSwitchControlsProfileBackground() {
         val disabledParent = ModuleSettingsSnapshot(
             moduleEnabled = false,
+            profileBackgroundEnabled = true,
             profileBackgroundUseImage = true,
             profileBackgroundImage = "/data/profile_background/bg.png",
         )
@@ -243,11 +244,24 @@ class ModuleSettingsTest {
     fun profileBackgroundImageSelectionEnablesShow() {
         val snapshot = ModuleSettingsSnapshot(
             moduleEnabled = true,
+            profileBackgroundEnabled = true,
             profileBackgroundUseImage = true,
             profileBackgroundImage = "/data/profile_background/bg.png",
         )
 
         assertTrue(snapshot.canShowProfileBackground)
+    }
+
+    @Test
+    fun profileBackgroundImageSwitchDisablesShow() {
+        val snapshot = ModuleSettingsSnapshot(
+            moduleEnabled = true,
+            profileBackgroundEnabled = false,
+            profileBackgroundUseImage = true,
+            profileBackgroundImage = "/data/profile_background/bg.png",
+        )
+
+        assertFalse(snapshot.canShowProfileBackground)
     }
 
     @Test

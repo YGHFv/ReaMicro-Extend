@@ -217,6 +217,10 @@ class XposedModuleSettings(
         putString(ModuleSettings.KEY_PROFILE_BACKGROUND_IMAGE, path)
     }
 
+    fun setProfileBackgroundImageUrl(url: String) {
+        putString(ModuleSettings.KEY_PROFILE_BACKGROUND_IMAGE_URL, url.trim())
+    }
+
     fun setProfileBackgroundCropPosition(position: String) {
         putString(ModuleSettings.KEY_PROFILE_BACKGROUND_CROP_POSITION, normalizeProfileBackgroundCropPosition(position))
     }
@@ -816,6 +820,10 @@ class XposedModuleSettings(
                 ModuleSettings.KEY_PROFILE_BACKGROUND_IMAGE,
                 ModuleSettings.DEFAULT_PROFILE_BACKGROUND_IMAGE,
             ) ?: ModuleSettings.DEFAULT_PROFILE_BACKGROUND_IMAGE,
+            profileBackgroundImageUrl = prefs.getString(
+                ModuleSettings.KEY_PROFILE_BACKGROUND_IMAGE_URL,
+                ModuleSettings.DEFAULT_PROFILE_BACKGROUND_IMAGE_URL,
+            )?.trim() ?: ModuleSettings.DEFAULT_PROFILE_BACKGROUND_IMAGE_URL,
             profileBackgroundCropPosition = normalizeProfileBackgroundCropPosition(
                 prefs.getString(
                     ModuleSettings.KEY_PROFILE_BACKGROUND_CROP_POSITION,
@@ -1342,6 +1350,7 @@ class XposedModuleSettings(
             snapshot.profileBackgroundColor,
             snapshot.profileBackgroundUseImage,
             snapshot.profileBackgroundImage,
+            snapshot.profileBackgroundImageUrl,
             snapshot.profileBackgroundCropPosition,
             snapshot.profileBackgroundDisplayMode,
             snapshot.profileBackgroundBlur,
@@ -1394,6 +1403,7 @@ class XposedModuleSettings(
                     "profileBackgroundColor=${snapshot.profileBackgroundColor}, " +
                     "profileBackgroundUseImage=${snapshot.profileBackgroundUseImage}, " +
                     "profileBackgroundImage=${snapshot.profileBackgroundImage}, " +
+                    "profileBackgroundImageUrl=${snapshot.profileBackgroundImageUrl}, " +
                     "profileBackgroundCropPosition=${snapshot.profileBackgroundCropPosition}, " +
                     "profileBackgroundDisplayMode=${snapshot.profileBackgroundDisplayMode}, " +
                     "profileBackgroundBlur=${snapshot.profileBackgroundBlur}, " +
