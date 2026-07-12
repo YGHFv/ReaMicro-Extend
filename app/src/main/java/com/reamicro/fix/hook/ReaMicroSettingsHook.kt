@@ -34,7 +34,6 @@ import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
 import android.util.Base64
-import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
@@ -592,6 +591,7 @@ class ReaMicroSettingsHook(
             805306416,
             445,
         )
+        updateModuleDialogTheme(composer)
     }
 
     private fun renderInjectedBackHandler(route: InjectedRoute, composer: Any) {
@@ -1774,7 +1774,7 @@ class ReaMicroSettingsHook(
                     status.setTextColor(colors.body)
                     previewRow.background = settingsRoundedRect(
                         profileBackgroundColorValue(normalized),
-                        settingsDp(activity, 14),
+                        settingsDp(activity, 8),
                         colors.border,
                     )
                 }
@@ -1893,7 +1893,7 @@ class ReaMicroSettingsHook(
         colors: SettingsDialogColors,
     ): View =
         View(context).apply {
-            background = settingsRoundedRect(profileBackgroundColorValue(hex), settingsDp(context, 14), colors.border)
+            background = settingsRoundedRect(profileBackgroundColorValue(hex), settingsDp(context, 8), colors.border)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 settingsDp(context, 52),
@@ -2102,7 +2102,7 @@ class ReaMicroSettingsHook(
                 settingsDp(context, 12),
                 settingsDp(context, 10),
             )
-            background = settingsRoundedRect(colors.field, settingsDp(context, 12), colors.border)
+            background = settingsRoundedRect(colors.field, settingsDp(context, 8), colors.border)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -2126,7 +2126,7 @@ class ReaMicroSettingsHook(
             ?: parseSettingsColor(cssValues["background"].orEmpty())
             ?: colors.field
         preview.setTextColor(textColor)
-        preview.background = settingsRoundedRect(colors.field, settingsDp(preview.context, 12), colors.border)
+        preview.background = settingsRoundedRect(colors.field, settingsDp(preview.context, 8), colors.border)
         (preview as? ReaderHighlightPreviewTextView)?.setHighlightPreview(
             css = css,
             path = ninePatchPath,
@@ -3907,26 +3907,25 @@ class ReaMicroSettingsHook(
         val progress = ExportProgress()
         activity.runOnUiThread {
             runCatching {
-                val dark =
-                    (activity.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
                 val dp = activity.resources.displayMetrics.density
-                val textColor = if (dark) Color.parseColor("#A3ACBA") else Color.parseColor("#8F96A3")
-                val titleColor = if (dark) Color.parseColor("#E5E6EB") else Color.parseColor("#20242D")
-                val cardColor = if (dark) Color.parseColor("#1C2128") else Color.parseColor("#F4F6FB")
+                val colors = SettingsDialogColors(activity)
                 val messageView = TextView(activity).apply {
                     text = message
                     textSize = 13f
                     gravity = Gravity.CENTER
-                    setTextColor(textColor)
+                    setTextColor(colors.body)
                     includeFontPadding = false
                 }
                 val card = LinearLayout(activity).apply {
                     orientation = LinearLayout.VERTICAL
                     gravity = Gravity.CENTER
                     setPadding((26 * dp).toInt(), (24 * dp).toInt(), (26 * dp).toInt(), (22 * dp).toInt())
-                    background = roundedRect(cardColor, 22 * dp)
+                    background = roundedRect(colors.card, 8 * dp, colors.border)
                     addView(
-                        ProgressBar(activity).apply { isIndeterminate = true },
+                        ProgressBar(activity).apply {
+                            isIndeterminate = true
+                            ModuleDialogTheme.tintProgress(this, colors.primary)
+                        },
                         LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.WRAP_CONTENT,
                             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -3937,7 +3936,7 @@ class ReaMicroSettingsHook(
                             text = title
                             textSize = 16f
                             gravity = Gravity.CENTER
-                            setTextColor(titleColor)
+                            setTextColor(colors.title)
                             includeFontPadding = false
                         },
                         LinearLayout.LayoutParams(
@@ -3999,6 +3998,11 @@ class ReaMicroSettingsHook(
             shape = GradientDrawable.RECTANGLE
             cornerRadius = radius
             setColor(color)
+        }
+
+    private fun roundedRect(color: Int, radius: Float, strokeColor: Int): GradientDrawable =
+        roundedRect(color, radius).apply {
+            setStroke(1, strokeColor)
         }
 
     private class ExportProgress {
@@ -4687,20 +4691,19 @@ class ReaMicroSettingsHook(
     }
 
     private inner class SettingsDialogColors(context: Context) {
-        private val dark = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-            Configuration.UI_MODE_NIGHT_YES
-        val card: Int = if (dark) Color.rgb(30, 34, 40) else Color.WHITE
-        val border: Int = if (dark) Color.rgb(62, 69, 78) else Color.rgb(226, 230, 236)
-        val title: Int = if (dark) Color.WHITE else Color.rgb(29, 33, 39)
-        val body: Int = if (dark) Color.rgb(190, 198, 208) else Color.rgb(86, 94, 106)
-        val field: Int = if (dark) Color.rgb(39, 44, 51) else Color.rgb(246, 248, 251)
-        val primary: Int = settingsThemeColor(context, android.R.attr.colorAccent, Color.rgb(45, 135, 120))
-        val primarySoft: Int = if (dark) Color.rgb(36, 70, 64) else Color.rgb(230, 244, 241)
-        val primaryText: Int = if (dark) Color.rgb(166, 224, 212) else primary
-        val neutralSoft: Int = if (dark) Color.rgb(43, 48, 55) else Color.rgb(242, 244, 247)
-        val neutralText: Int = if (dark) Color.rgb(218, 223, 230) else Color.rgb(74, 82, 94)
-        val destructiveSoft: Int = if (dark) Color.rgb(82, 39, 42) else Color.rgb(253, 236, 236)
-        val destructiveText: Int = if (dark) Color.rgb(255, 172, 172) else Color.rgb(214, 69, 69)
+        private val palette = ModuleDialogTheme.palette(context)
+        val card: Int = palette.pageBackground
+        val border: Int = palette.border
+        val title: Int = palette.title
+        val body: Int = palette.body
+        val field: Int = palette.rowBackground
+        val primary: Int = palette.primary
+        val primarySoft: Int = palette.rowBackground
+        val primaryText: Int = palette.primaryText
+        val neutralSoft: Int = palette.rowBackground
+        val neutralText: Int = palette.neutralText
+        val destructiveSoft: Int = palette.rowBackground
+        val destructiveText: Int = palette.destructiveText
     }
 
     private fun settingsDialogCard(context: Context, colors: SettingsDialogColors): LinearLayout =
@@ -4712,7 +4715,7 @@ class ReaMicroSettingsHook(
                 settingsDp(context, 20),
                 settingsDp(context, 18),
             )
-            background = settingsRoundedRect(colors.card, settingsDp(context, 22), colors.border)
+            background = settingsRoundedRect(colors.card, settingsDp(context, 8), colors.border)
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -4755,7 +4758,7 @@ class ReaMicroSettingsHook(
                 settingsDp(context, 12),
                 settingsDp(context, 8),
             )
-            background = settingsRoundedRect(colors.field, settingsDp(context, 12), colors.border)
+            background = settingsRoundedRect(colors.field, settingsDp(context, 8), colors.border)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -4805,15 +4808,15 @@ class ReaMicroSettingsHook(
             when (role) {
                 SettingsDialogButtonRole.Primary -> {
                     setTextColor(colors.primaryText)
-                    background = settingsRoundedRect(colors.primarySoft, settingsDp(context, 12), colors.border)
+                    background = settingsRoundedRect(colors.primarySoft, settingsDp(context, 8), colors.border)
                 }
                 SettingsDialogButtonRole.Neutral -> {
                     setTextColor(colors.neutralText)
-                    background = settingsRoundedRect(colors.neutralSoft, settingsDp(context, 12), colors.border)
+                    background = settingsRoundedRect(colors.neutralSoft, settingsDp(context, 8), colors.border)
                 }
                 SettingsDialogButtonRole.Destructive -> {
                     setTextColor(colors.destructiveText)
-                    background = settingsRoundedRect(colors.destructiveSoft, settingsDp(context, 12), colors.border)
+                    background = settingsRoundedRect(colors.destructiveSoft, settingsDp(context, 8), colors.border)
                 }
             }
         }
@@ -4916,7 +4919,7 @@ class ReaMicroSettingsHook(
                 settingsDp(context, 12),
                 settingsDp(context, 10),
             )
-            background = settingsRoundedRect(colors.field, settingsDp(context, 12), colors.border)
+            background = settingsRoundedRect(colors.field, settingsDp(context, 8), colors.border)
             setOnClickListener { onClick() }
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -5028,7 +5031,7 @@ class ReaMicroSettingsHook(
                 settingsDp(context, 12),
                 settingsDp(context, 10),
             )
-            background = settingsRoundedRect(colors.field, settingsDp(context, 12), colors.border)
+            background = settingsRoundedRect(colors.field, settingsDp(context, 8), colors.border)
             setOnClickListener { onClick() }
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -5054,11 +5057,6 @@ class ReaMicroSettingsHook(
 
     private fun settingsDp(context: Context, value: Int): Int =
         (value * context.resources.displayMetrics.density).toInt()
-
-    private fun settingsThemeColor(context: Context, attr: Int, fallback: Int): Int {
-        val value = TypedValue()
-        return if (context.theme.resolveAttribute(attr, value, true)) value.data else fallback
-    }
 
     private fun openDictionaryPresetDialog() {
         openDictionaryPresetDialog(existing = null)
@@ -5374,6 +5372,7 @@ class ReaMicroSettingsHook(
                 val progress = ProgressBar(activity).apply {
                     visibility = View.GONE
                     isIndeterminate = true
+                    ModuleDialogTheme.tintProgress(this, colors.primary)
                 }
                 val finishButton = settingsDialogButton(activity, "\u5b8c\u6210", colors)
                 val deleteButton = existing?.let {
@@ -7583,6 +7582,7 @@ class ReaMicroSettingsHook(
     }
 
     private fun settingsCardModifier(composer: Any): Any {
+        updateModuleDialogTheme(composer)
         val shape = method(SHAPE_KT_CLASS, ROUNDED_SHAPE_METHOD, 0).invoke(null)
         val scheme = colorScheme(composer)
         val clipped = method(CLIP_KT_CLASS, CLIP_METHOD, 2).invoke(null, modifierInstance(), shape)
@@ -7602,6 +7602,41 @@ class ReaMicroSettingsHook(
             null,
         )
         return method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, 4).invoke(null, background, 0f, 1, null)
+    }
+
+    private fun updateModuleDialogTheme(composer: Any) {
+        runCatching {
+            val scheme = colorScheme(composer)
+            val pageBackground = composeColorToArgb(backgroundDim(composer))
+            val rowBackground = composeColorToArgb(
+                method(THEME_KT_CLASS, BACKGROUND_AUTO_METHOD, 1).invoke(null, scheme) as Long,
+            )
+            val border = composeColorToArgb(
+                method(THEME_KT_CLASS, BORDER_VARIANT_METHOD, 1).invoke(null, scheme) as Long,
+            )
+            val title = composeColorToArgb(scheme.longMethod("getOnBackground"))
+            val body = composeColorToArgb(
+                runCatching { scheme.longMethod("getOnSurfaceVariant") }
+                    .getOrElse { method(THEME_KT_CLASS, "getOnBackgroundVariant", 1).invoke(null, scheme) as Long },
+            )
+            val primary = composeColorToArgb(scheme.longMethod("getPrimary"))
+            ModuleDialogTheme.update(
+                ModuleDialogTheme.Palette(
+                    pageBackground = pageBackground,
+                    rowBackground = rowBackground,
+                    border = border,
+                    title = title,
+                    body = body,
+                    primary = primary,
+                    primarySoft = rowBackground,
+                    primaryText = primary,
+                    neutralText = title,
+                    destructiveText = if (primary == 0) title else primary,
+                ),
+            )
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX update module dialog theme failed: ${it.stackTraceToString()}")
+        }
     }
 
     private fun readerHighlightSheetModifier(composer: Any): Any {
@@ -8247,6 +8282,22 @@ class ReaMicroSettingsHook(
     private fun Any.longMethod(name: String): Long =
         method0(name) as Long
 
+    private fun composeColorToArgb(color: Long): Int =
+        runCatching {
+            cls(COLOR_KT_CLASS).declaredMethods.firstOrNull { method ->
+                method.name.contains("toArgb", ignoreCase = true) &&
+                    method.parameterTypes.size == 1 &&
+                    method.parameterTypes[0] == Long::class.javaPrimitiveType
+            }?.apply { isAccessible = true }?.invoke(null, color) as? Int
+        }.getOrNull() ?: composeColorFallbackToArgb(color)
+
+    private fun composeColorFallbackToArgb(color: Long): Int =
+        if ((color and 0x3fL) == 0L) {
+            (color ushr 32).toInt()
+        } else {
+            0
+        }
+
     private fun targetUnit(): Any? = runCatching {
         staticObject("kotlin.Unit", "INSTANCE")
     }.getOrNull()
@@ -8598,6 +8649,7 @@ class ReaMicroSettingsHook(
         const val BORDER_VARIANT_METHOD = "getBorderVariant"
         const val MATERIAL_THEME_CLASS = "androidx.compose.material3.MaterialTheme"
         const val COLOR_CLASS = "androidx.compose.ui.graphics.Color"
+        const val COLOR_KT_CLASS = "androidx.compose.ui.graphics.ColorKt"
         const val COLOR_TRANSPARENT_METHOD = "getTransparent-0d7_KjU"
         const val FONT_PROVIDER_CLASS = "org.epub.FontProvider"
         const val FONT_FAMILY_CLASS = "androidx.compose.ui.text.font.FontFamily"

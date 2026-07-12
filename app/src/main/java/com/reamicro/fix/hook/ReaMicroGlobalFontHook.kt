@@ -1,6 +1,11 @@
 package com.reamicro.fix.hook
 
 import android.app.Activity
+import android.app.Dialog
+import android.graphics.Typeface
+import android.view.View
+import android.view.ViewGroup
+import android.widget.TextView
 import com.reamicro.fix.settings.XposedModuleSettings
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -15,6 +20,7 @@ class ReaMicroGlobalFontHook(
 ) {
     private val methodCache = HashMap<String, Method>()
     private val fontFamilyCache = HashMap<String, Any>()
+    private val androidTypefaceCache = HashMap<String, Typeface>()
     private val failedFontFamilyLogKeys = HashSet<String>()
     private val readerTextDepth = ThreadLocal.withInitial { 0 }
     private val fontPreviewDepth = ThreadLocal.withInitial { 0 }
@@ -26,10 +32,14 @@ class ReaMicroGlobalFontHook(
         hookReaderFontPreviewScopes()
         hookThemeSerifFont()
         hookMaterialTextFallback()
+        hookAndroidDialogTextFallback()
     }
 
     fun invalidateGlobalFontCache() {
         cachedGlobalFont = null
+        synchronized(androidTypefaceCache) {
+            androidTypefaceCache.clear()
+        }
     }
 
     private fun hookThemeSerifFont() {
@@ -144,6 +154,56 @@ class ReaMicroGlobalFontHook(
         }
     }
 
+    private fun hookAndroidDialogTextFallback() {
+        runCatching {
+            XposedHelpers.findAndHookMethod(Dialog::class.java, "show", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val dialog = param.thisObject as? Dialog ?: return
+                    applyGlobalFontToDialog(dialog)
+                }
+            })
+            XposedBridge.log("$LOG_PREFIX global UI font Android Dialog hook installed")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX global UI font Android Dialog hook failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun applyGlobalFontToDialog(dialog: Dialog) {
+        val decor = dialog.window?.decorView ?: return
+        val resolved = resolveGlobalAndroidTypefaceCached() ?: return
+        applyGlobalFontToViewTree(decor, resolved.typeface)
+        decor.post { applyGlobalFontToViewTree(decor, resolved.typeface) }
+        decor.postDelayed({ applyGlobalFontToViewTree(decor, resolved.typeface) }, 120L)
+        logApplied("dialog", resolved.selection)
+    }
+
+    private fun applyGlobalFontToViewTree(view: View, baseTypeface: Typeface) {
+        if (view is TextView) applyGlobalFontToTextView(view, baseTypeface)
+        if (view is ViewGroup) {
+            for (index in 0 until view.childCount) {
+                applyGlobalFontToViewTree(view.getChildAt(index), baseTypeface)
+            }
+        }
+    }
+
+    private fun applyGlobalFontToTextView(textView: TextView, baseTypeface: Typeface) {
+        val current = textView.typeface
+        if (current === Typeface.MONOSPACE) return
+        if (current != null && !isStandardAndroidTypeface(current)) return
+        val style = current?.style ?: Typeface.NORMAL
+        textView.typeface = Typeface.create(baseTypeface, style)
+    }
+
+    private fun isStandardAndroidTypeface(typeface: Typeface): Boolean =
+        typeface === Typeface.DEFAULT ||
+            typeface === Typeface.DEFAULT_BOLD ||
+            typeface === Typeface.SANS_SERIF ||
+            typeface === Typeface.SERIF ||
+            typeface == Typeface.DEFAULT ||
+            typeface == Typeface.DEFAULT_BOLD ||
+            typeface == Typeface.SANS_SERIF ||
+            typeface == Typeface.SERIF
+
     private fun clearDefaultMask(args: Array<Any?>, parameterIndex: Int) {
         if (parameterIndex !in 0..30) return
         val maskIndex = args.lastIndex
@@ -188,6 +248,34 @@ class ReaMicroGlobalFontHook(
         if (selection.isBlank()) return null
         val family = resolveFontFamily(selection) ?: return null
         return ResolvedGlobalFont(selection, family)
+    }
+
+    private fun resolveGlobalAndroidTypefaceCached(): ResolvedAndroidTypeface? {
+        if (!settings.snapshot().canUseFontSettings) return null
+        val selection = settings.fontSettings().globalFamily
+        if (selection.isBlank()) return null
+        val typeface = resolveAndroidTypeface(selection) ?: return null
+        return ResolvedAndroidTypeface(selection, typeface)
+    }
+
+    private fun resolveAndroidTypeface(selection: String): Typeface? {
+        synchronized(androidTypefaceCache) {
+            androidTypefaceCache[selection]?.let { return it }
+        }
+        val resolved = when (selection) {
+            FAMILY_SYSTEM -> Typeface.DEFAULT
+            FAMILY_SOURCE_HAN_SERIF -> Typeface.SERIF
+            else -> {
+                val file = resolveFontFile(selection) ?: return null
+                runCatching { Typeface.createFromFile(file) }
+                    .onFailure { logResolveFontFamilyFailure(selection, it) }
+                    .getOrNull()
+            }
+        } ?: return null
+        synchronized(androidTypefaceCache) {
+            androidTypefaceCache[selection] = resolved
+        }
+        return resolved
     }
 
     private fun resolveFontFamily(selection: String): Any? {
@@ -384,6 +472,11 @@ class ReaMicroGlobalFontHook(
     private data class ResolvedGlobalFont(
         val selection: String,
         val family: Any,
+    )
+
+    private data class ResolvedAndroidTypeface(
+        val selection: String,
+        val typeface: Typeface,
     )
 
     private data class CachedGlobalFont(

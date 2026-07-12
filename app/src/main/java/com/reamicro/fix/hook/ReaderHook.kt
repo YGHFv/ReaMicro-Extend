@@ -1372,6 +1372,7 @@ class ReaderHook(
             synchronized(readAloudRestartLock) {
                 readAloudRestartSeq += 1
             }
+            clearPersistedReadAloudProgress("clear session broadcast")
             activeReadAloudSessionId = ""
             activeReadAloudBookKey = ""
             activeReadAloudPaused = false
@@ -1715,6 +1716,7 @@ class ReaderHook(
         if (pendingReadAloudProgressRestore) return
         val activity = activityProvider() ?: return
         val persisted = readPersistedReadAloudProgress() ?: return
+        if (!canRestoreReadAloudProgress(persisted, reason)) return
         if (!isPersistedReadAloudProgressForCurrentBook(persisted)) return
         val restoreKey = readAloudProgressRestoreKey(persisted)
         if (restoreKey == lastRestoredReadAloudProgressKey) return
@@ -1731,6 +1733,10 @@ class ReaderHook(
             return
         }
         if (!isPersistedReadAloudProgressForCurrentBook(persisted)) {
+            pendingReadAloudProgressRestore = false
+            return
+        }
+        if (!canRestoreReadAloudProgress(persisted, reason)) {
             pendingReadAloudProgressRestore = false
             return
         }
@@ -1762,6 +1768,29 @@ class ReaderHook(
         pendingReadAloudProgressRestore = false
     }
 
+    private fun canRestoreReadAloudProgress(progress: PersistedReadAloudProgress, reason: String): Boolean {
+        val activeSession = activeReadAloudSessionId
+        if (activeSession.isBlank()) {
+            XposedBridge.log("$LOG_PREFIX read aloud progress restore skipped without active session reason=$reason")
+            clearPersistedReadAloudProgress("restore skipped without active session: $reason")
+            return false
+        }
+        if (activeReadAloudPaused) {
+            XposedBridge.log("$LOG_PREFIX read aloud progress restore skipped while paused reason=$reason")
+            clearPersistedReadAloudProgress("restore skipped while paused: $reason")
+            return false
+        }
+        if (progress.sessionId.isNotBlank() && progress.sessionId != activeSession) {
+            XposedBridge.log(
+                "$LOG_PREFIX read aloud progress restore skipped stale session " +
+                    "active=$activeSession persisted=${progress.sessionId} reason=$reason",
+            )
+            clearPersistedReadAloudProgress("restore skipped stale session: $reason")
+            return false
+        }
+        return true
+    }
+
     private fun persistReadAloudProgress(progress: PersistedReadAloudProgress) {
         val context = hostApplicationContext() ?: return
         context
@@ -1783,6 +1812,32 @@ class ReaderHook(
             .putLong(READ_ALOUD_PROGRESS_KEY_RECORDED_ELAPSED_MS, progress.recordedElapsedMs)
             .putBoolean(READ_ALOUD_PROGRESS_KEY_PLAYBACK_STARTED, true)
             .apply()
+    }
+
+    private fun clearPersistedReadAloudProgress(reason: String) {
+        pendingReadAloudProgressRestore = false
+        lastRestoredReadAloudProgressKey = ""
+        hostApplicationContext()
+            ?.getSharedPreferences(READ_ALOUD_PROGRESS_PREFS, Context.MODE_PRIVATE)
+            ?.edit()
+            ?.clear()
+            ?.apply()
+        requestReadAloudProgressStoreClear(reason)
+        XposedBridge.log("$LOG_PREFIX read aloud persisted progress cleared reason=$reason")
+    }
+
+    private fun requestReadAloudProgressStoreClear(reason: String) {
+        val context = hostApplicationContext() ?: return
+        runCatching {
+            context.sendBroadcast(
+                Intent(ReadAloudIntents.ACTION_CLEAR_PROGRESS).apply {
+                    setClassName(ReadAloudIntents.MODULE_PACKAGE_NAME, ReadAloudIntents.COMMAND_RECEIVER_CLASS_NAME)
+                },
+            )
+            XposedBridge.log("$LOG_PREFIX read aloud module progress clear requested reason=$reason")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX read aloud module progress clear request failed: ${it.stackTraceToString()}")
+        }
     }
 
     private fun readPersistedReadAloudProgress(): PersistedReadAloudProgress? {
@@ -5496,6 +5551,7 @@ class ReaderHook(
         lastReadAloudFollowCfi = ""
         lastReadAloudFollowAtMs = 0L
         lastReadAloudPageKey = ""
+        clearPersistedReadAloudProgress("stop session: $reason")
         clearReadAloudHighlight()
         runCatching {
             sendReadAloudIntent(
@@ -7046,7 +7102,7 @@ class ReaderHook(
             setPadding(dp(20), dp(18), dp(20), dp(14))
             background = GradientDrawable().apply {
                 setColor(colors.cardBackground)
-                cornerRadius = dp(22).toFloat()
+                cornerRadius = dp(24).toFloat()
                 setStroke(dp(1), colors.stroke)
             }
             addView(title, LinearLayout.LayoutParams(

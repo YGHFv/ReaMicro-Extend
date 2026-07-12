@@ -4,7 +4,6 @@ import android.app.Activity
 import android.app.Dialog
 import android.content.ContentValues
 import android.content.Context
-import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
@@ -16,7 +15,6 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.text.InputType
 import android.util.Base64
-import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -101,8 +99,9 @@ class BookOverviewImageSelectionHook(
             val itemsClass = cls(BOOK_OVERVIEW_ITEMS_CLASS)
             val methods = itemsClass.declaredMethods.filter { method ->
                 method.name == methodName &&
-                    method.parameterTypes.size == 6 &&
-                    method.parameterTypes.getOrNull(1)?.name == FUNCTION0_CLASS
+                    method.parameterTypes.firstOrNull() == Boolean::class.javaPrimitiveType &&
+                    method.parameterTypes.count { it.name == FUNCTION0_CLASS } >= 3 &&
+                    method.parameterTypes.any { it.name == COMPOSER_CLASS }
             }
             if (methods.isEmpty()) error("$methodName not found")
             methods.forEach { method ->
@@ -112,9 +111,16 @@ class BookOverviewImageSelectionHook(
                         val context = currentBookContext() ?: return
                         val activity = activityProvider() ?: return
                         val hasSecondaryAction = param.args?.getOrNull(0) as? Boolean ?: false
-                        val originalOnPick = param.args?.getOrNull(1) ?: return
-                        val secondaryAction = param.args?.getOrNull(2)
-                        val onDismiss = param.args?.getOrNull(3)
+                        val callbacks = method.parameterTypes
+                            .mapIndexedNotNull { index, type ->
+                                if (type.name == FUNCTION0_CLASS) param.args?.getOrNull(index) else null
+                            }
+                        val originalOnPick = callbacks.getOrNull(0) ?: return
+                        val secondaryAction = when {
+                            target == ImageTarget.Cover && callbacks.size >= 4 -> callbacks.getOrNull(2)
+                            else -> callbacks.getOrNull(1)
+                        }
+                        val onDismiss = callbacks.lastOrNull()
                         param.result = null
                         val key = sourceDialogKey(context.book, target)
                         if (!activeSourceDialogs.add(key)) return
@@ -218,6 +224,7 @@ class BookOverviewImageSelectionHook(
             val progress = ProgressBar(activity).apply {
                 visibility = View.GONE
                 isIndeterminate = true
+                ModuleDialogTheme.tintProgress(this, colors.primary)
             }
             card.addView(progress, centeredWrapParams(activity))
             card.addView(status)
@@ -319,6 +326,7 @@ class BookOverviewImageSelectionHook(
             val progress = ProgressBar(activity).apply {
                 visibility = View.GONE
                 isIndeterminate = true
+                ModuleDialogTheme.tintProgress(this, colors.primary)
             }
             card.addView(progress, centeredWrapParams(activity))
             card.addView(status)
@@ -1132,18 +1140,17 @@ class BookOverviewImageSelectionHook(
     }
 
     class DialogColors(context: Context) {
-        private val dark = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-            Configuration.UI_MODE_NIGHT_YES
-        val card: Int = if (dark) Color.rgb(30, 34, 40) else Color.WHITE
-        val border: Int = if (dark) Color.rgb(64, 70, 78) else Color.rgb(226, 230, 236)
-        val title: Int = if (dark) Color.WHITE else Color.rgb(28, 31, 36)
-        val body: Int = if (dark) Color.rgb(190, 198, 208) else Color.rgb(88, 96, 108)
-        val field: Int = if (dark) Color.rgb(38, 43, 50) else Color.rgb(246, 248, 251)
-        val primary: Int = themeColor(context, android.R.attr.colorAccent, Color.rgb(57, 126, 184))
-        val primarySoft: Int = if (dark) Color.rgb(42, 68, 88) else Color.rgb(232, 242, 251)
-        val primaryText: Int = if (dark) Color.rgb(184, 221, 250) else Color.rgb(29, 93, 145)
-        val neutralSoft: Int = if (dark) Color.rgb(42, 46, 52) else Color.rgb(241, 243, 246)
-        val neutralText: Int = if (dark) Color.rgb(218, 223, 230) else Color.rgb(73, 80, 90)
+        private val palette = ModuleDialogTheme.palette(context)
+        val card: Int = palette.pageBackground
+        val border: Int = palette.border
+        val title: Int = palette.title
+        val body: Int = palette.body
+        val field: Int = palette.rowBackground
+        val primary: Int = palette.primary
+        val primarySoft: Int = palette.rowBackground
+        val primaryText: Int = palette.primaryText
+        val neutralSoft: Int = palette.rowBackground
+        val neutralText: Int = palette.neutralText
     }
 
     private companion object {
@@ -1153,6 +1160,7 @@ class BookOverviewImageSelectionHook(
         private const val BOOK_COVER_BANNER_ITEM_METHOD = "BookCoverBannerItem"
         private const val COVER_BOTTOM_SHEET_METHOD = "CoverBottomSheet"
         private const val BANNER_BOTTOM_SHEET_METHOD = "BannerBottomSheet"
+        private const val COMPOSER_CLASS = "androidx.compose.runtime.Composer"
         private const val FUNCTION0_CLASS = "kotlin.jvm.functions.Function0"
         private const val FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
         private const val KOTLIN_UNIT_CLASS = "kotlin.Unit"
@@ -1176,7 +1184,7 @@ private fun dialogCard(context: Context, colors: BookOverviewImageSelectionHook.
         setPadding(dp(context, 16), dp(context, 10), dp(context, 16), dp(context, 14))
         background = GradientDrawable().apply {
             setColor(colors.card)
-            cornerRadius = dp(context, 22).toFloat()
+            cornerRadius = dp(context, 8).toFloat()
         }
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1228,7 +1236,7 @@ private fun actionRow(
         textSize = if (subtitle.isBlank()) 15f else 14f
         setTextColor(if (subtitle.isBlank()) colors.neutralText else colors.title)
         setPadding(dp(context, 14), dp(context, 12), dp(context, 14), dp(context, 12))
-        background = rounded(colors.neutralSoft, colors.border, dp(context, 12))
+        background = rounded(colors.neutralSoft, colors.border, dp(context, 8))
         gravity = Gravity.CENTER_VERTICAL
         setOnClickListener { onClick() }
         layoutParams = LinearLayout.LayoutParams(
@@ -1269,7 +1277,7 @@ private fun editText(
         setTextColor(colors.title)
         setHintTextColor(colors.body)
         setPadding(dp(context, 12), dp(context, 8), dp(context, 12), dp(context, 8))
-        background = rounded(colors.field, colors.border, dp(context, 12))
+        background = rounded(colors.field, colors.border, dp(context, 8))
         layoutParams = fieldParams(context)
     }
 
@@ -1329,7 +1337,7 @@ private fun compactButton(
         typeface = Typeface.DEFAULT_BOLD
         setTextColor(if (neutral) colors.neutralText else colors.primaryText)
         setPadding(dp(context, 8), dp(context, 11), dp(context, 8), dp(context, 11))
-        background = rounded(if (neutral) colors.neutralSoft else colors.primarySoft, colors.border, dp(context, 12))
+        background = rounded(if (neutral) colors.neutralSoft else colors.primarySoft, colors.border, dp(context, 8))
     }
 
 private fun imageDialog(activity: Activity): Dialog =
@@ -1403,11 +1411,6 @@ private fun rounded(fill: Int, stroke: Int, radiusPx: Int): GradientDrawable =
 
 private fun dp(context: Context, value: Int): Int =
     (value * context.resources.displayMetrics.density).toInt()
-
-private fun themeColor(context: Context, attr: Int, fallback: Int): Int {
-    val value = TypedValue()
-    return if (context.theme.resolveAttribute(attr, value, true)) value.data else fallback
-}
 
 private fun Activity.toast(message: String) {
     runOnUiThread { Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }

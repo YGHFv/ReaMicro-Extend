@@ -14,6 +14,11 @@ class ReadAloudCommandReceiver : BroadcastReceiver() {
             Log.i(LOG_TAG, "receiver sync progress sent=$sent")
             return
         }
+        if (action == ReadAloudIntents.ACTION_CLEAR_PROGRESS) {
+            ReadAloudProgressStore.clear(context)
+            Log.i(LOG_TAG, "receiver cleared persisted progress")
+            return
+        }
         if (action !in COMMAND_ACTIONS) return
         val serviceIntent = Intent(intent).apply {
             setClass(context, ReadAloudService::class.java)

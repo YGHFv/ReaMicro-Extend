@@ -58,6 +58,14 @@ object ReadAloudProgressStore {
         return true
     }
 
+    fun clear(context: Context) {
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .apply()
+    }
+
     fun read(context: Context): PersistedReadAloudProgress? {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val startCfi = prefs.getString(KEY_START_CFI, null)?.takeIf { it.isNotBlank() } ?: return null

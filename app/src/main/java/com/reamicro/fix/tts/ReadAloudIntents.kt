@@ -18,6 +18,7 @@ object ReadAloudIntents {
     const val ACTION_CURRENT = "com.reamicro.fix.READ_ALOUD_CURRENT"
     const val ACTION_CLEAR = "com.reamicro.fix.READ_ALOUD_CLEAR"
     const val ACTION_SYNC_PROGRESS = "com.reamicro.fix.READ_ALOUD_SYNC_PROGRESS"
+    const val ACTION_CLEAR_PROGRESS = "com.reamicro.fix.READ_ALOUD_CLEAR_PROGRESS"
 
     const val EXTRA_SESSION_ID = "session_id"
     const val EXTRA_BOOK_KEY = "book_key"

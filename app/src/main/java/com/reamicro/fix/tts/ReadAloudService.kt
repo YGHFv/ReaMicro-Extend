@@ -343,6 +343,7 @@ class ReadAloudService : Service() {
             playing = false,
             recordProgress = true,
         )
+        ReadAloudProgressStore.clear(applicationContext)
         tts?.stop()
         releasePlayer()
         cancelNetworkPrefetch()

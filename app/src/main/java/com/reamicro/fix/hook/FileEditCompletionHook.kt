@@ -6,7 +6,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.content.res.Configuration
 import android.content.res.Resources
 import android.graphics.Color
 import android.graphics.Typeface
@@ -629,7 +628,7 @@ class FileEditCompletionHook(
                     InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 setHorizontallyScrolling(false)
                 setPadding(dp(activity, 16), dp(activity, 12), dp(activity, 16), dp(activity, 12))
-                background = roundedDrawable(colors.cardBackground, colors.border, 12)
+                background = roundedDrawable(colors.cardBackground, colors.border, 8)
             }
             content.removeAllViews()
             content.addView(createEditorContainer(editor!!), FrameLayout.LayoutParams(
@@ -647,7 +646,7 @@ class FileEditCompletionHook(
                     setPadding(dp(activity, 20), dp(activity, 2), dp(activity, 20), dp(activity, 24))
                     addView(LinearLayout(activity).apply {
                         orientation = LinearLayout.VERTICAL
-                        background = roundedDrawable(colors.cardBackground, colors.border, 12)
+                        background = roundedDrawable(colors.cardBackground, colors.border, 8)
                         items.forEachIndexed { index, item ->
                             if (index > 0) addView(createInsetDivider())
                             addView(createFileRow(item))
@@ -882,20 +881,18 @@ class FileEditCompletionHook(
     )
 
     private class HostColors(context: Context) {
-        private val dark: Boolean =
-            (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-                Configuration.UI_MODE_NIGHT_YES
+        private val palette = ModuleDialogTheme.palette(context)
 
-        val pageBackground: Int = if (dark) 0xFF111318.toInt() else 0xFFF4F5F7.toInt()
-        val cardBackground: Int = if (dark) 0xFF191C20.toInt() else 0xFFFFFFFF.toInt()
+        val pageBackground: Int = palette.pageBackground
+        val cardBackground: Int = palette.rowBackground
         val background: Int = cardBackground
-        val primaryText: Int = if (dark) 0xFFE2E2E9.toInt() else 0xFF1E1B13.toInt()
-        val secondaryText: Int = withAlpha(primaryText, if (dark) 166 else 150)
-        val accent: Int = if (dark) 0xFFE2E2E9.toInt() else 0xFFFA6724.toInt()
-        val trailing: Int = if (dark) 0xFF282A2F.toInt() else 0xFFEAEBED.toInt()
-        val border: Int = if (dark) 0xFF282A2F.toInt() else 0xFFEAEBED.toInt()
-        val divider: Int = if (dark) 0xFF282A2F.toInt() else 0xFFEAEBED.toInt()
-        val chipBackground: Int = if (dark) 0xFF202020.toInt() else 0xFFFAF3E5.toInt()
+        val primaryText: Int = palette.title
+        val secondaryText: Int = palette.body
+        val accent: Int = palette.primary
+        val trailing: Int = palette.border
+        val border: Int = palette.border
+        val divider: Int = palette.border
+        val chipBackground: Int = palette.rowBackground
         val editorBackground: Int = cardBackground
     }
 
@@ -1578,11 +1575,6 @@ class FileEditCompletionHook(
 
 private fun dp(context: Context, value: Int): Int =
     (value * context.resources.displayMetrics.density).toInt()
-
-private fun themeColor(context: Context, attr: Int, fallback: Int): Int {
-    val value = TypedValue()
-    return if (context.theme.resolveAttribute(attr, value, true)) value.data else fallback
-}
 
 private fun roundedDrawable(fill: Int, stroke: Int, radiusDp: Int): GradientDrawable =
     GradientDrawable().apply {

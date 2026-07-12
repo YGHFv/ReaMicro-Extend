@@ -3,7 +3,6 @@ package com.reamicro.fix.hook
 import android.app.Activity
 import android.app.Dialog
 import android.content.Context
-import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
@@ -417,12 +416,11 @@ class ReaderImportOverwriteHook(
         var resolved = false
         val dialog = Dialog(activity)
         val dp = activity.resources.displayMetrics.density
-        val primary = activity.resolveThemeColor(android.R.attr.colorAccent, Color.rgb(57, 126, 184))
-        val colors = DialogColors(activity, primary)
+        val colors = DialogColors(activity)
         val card = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding((22 * dp).toInt(), (22 * dp).toInt(), (22 * dp).toInt(), (18 * dp).toInt())
-            background = roundedDrawable(colors.card, 24 * dp)
+            background = roundedDrawable(colors.card, 8 * dp)
         }
         card.addView(TextView(activity).apply {
             text = "原：$oldTitle\n新：$newTitle"
@@ -489,7 +487,7 @@ class ReaderImportOverwriteHook(
             gravity = Gravity.CENTER
             setTextColor(textColor)
             includeFontPadding = false
-            background = roundedDrawable(backgroundColor, 10 * dp)
+            background = roundedDrawable(backgroundColor, 8 * dp)
             setOnClickListener { onClick() }
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -505,22 +503,16 @@ class ReaderImportOverwriteHook(
             setColor(color)
         }
 
-    private class DialogColors(context: Context, primary: Int) {
-        private val dark =
-            (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
-        val card: Int = if (dark) Color.rgb(25, 28, 32) else Color.WHITE
-        val title: Int = if (dark) Color.rgb(229, 230, 235) else Color.rgb(32, 36, 40)
-        val primarySoft: Int = if (dark) Color.rgb(32, 51, 65) else Color.rgb(232, 242, 250)
-        val primaryText: Int = if (dark) Color.rgb(184, 215, 234) else primary
-        val neutralSoft: Int = if (dark) Color.rgb(43, 45, 50) else Color.rgb(242, 244, 247)
-        val neutralText: Int = if (dark) Color.rgb(220, 224, 230) else Color.rgb(64, 70, 78)
-        val dangerSoft: Int = if (dark) Color.rgb(64, 33, 38) else Color.rgb(244, 236, 239)
-        val dangerText: Int = if (dark) Color.rgb(255, 180, 200) else Color.rgb(145, 54, 78)
-    }
-
-    private fun Context.resolveThemeColor(attr: Int, fallback: Int): Int {
-        val typedValue = android.util.TypedValue()
-        return if (theme.resolveAttribute(attr, typedValue, true)) typedValue.data else fallback
+    private class DialogColors(context: Context) {
+        private val palette = ModuleDialogTheme.palette(context)
+        val card: Int = palette.pageBackground
+        val title: Int = palette.title
+        val primarySoft: Int = palette.rowBackground
+        val primaryText: Int = palette.primaryText
+        val neutralSoft: Int = palette.rowBackground
+        val neutralText: Int = palette.neutralText
+        val dangerSoft: Int = palette.rowBackground
+        val dangerText: Int = palette.destructiveText
     }
 
     private fun findExistingBookByExactTitle(repository: Any, title: String, importUuid: String): Any? {
