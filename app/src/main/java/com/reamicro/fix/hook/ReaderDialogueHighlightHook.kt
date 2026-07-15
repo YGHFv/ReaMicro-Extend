@@ -540,6 +540,7 @@ class ReaderDialogueHighlightHook(
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         refreshAnnotatedStringForCurrentTheme(param.args?.getOrNull(0))?.let { param.args[0] = it }
+                        forceJustifyTextRefreshForHighlight(param)
                         rememberNinePatchRanges(param.args?.getOrNull(0))
                     }
                 })
@@ -549,6 +550,14 @@ class ReaderDialogueHighlightHook(
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX nine-patch draw hook failed: ${it.stackTraceToString()}")
         }
+    }
+
+    private fun forceJustifyTextRefreshForHighlight(param: XC_MethodHook.MethodHookParam) {
+        val annotatedString = param.args?.getOrNull(0) ?: return
+        if (!hasCurrentReaderHighlightMarker(annotatedString)) return
+        val flags = param.args?.getOrNull(JUSTIFY_TEXT_CHANGED_FLAGS_INDEX) as? Int ?: return
+        param.args[JUSTIFY_TEXT_CHANGED_FLAGS_INDEX] =
+            (flags and JUSTIFY_TEXT_TEXT_DIRTY_MASK.inv()) or JUSTIFY_TEXT_TEXT_CHANGED
     }
 
     private fun hookActivityConfigurationChanges() {
@@ -1484,6 +1493,9 @@ class ReaderDialogueHighlightHook(
         const val SPAN_STYLE_MASK_BACKGROUND = 2048
         const val JUSTIFY_TEXT_DEFAULT_MODIFIER = 2
         const val JUSTIFY_TEXT_DEFAULT_ON_TEXT_LAYOUT = 16
+        const val JUSTIFY_TEXT_CHANGED_FLAGS_INDEX = 6
+        const val JUSTIFY_TEXT_TEXT_DIRTY_MASK = 0x0E
+        const val JUSTIFY_TEXT_TEXT_CHANGED = 0x04
         const val BASIC_TEXT_DEFAULT_MODIFIER = 2
         const val BASIC_TEXT_DEFAULT_ON_TEXT_LAYOUT = 8
         const val MAX_REMEMBERED_NINE_PATCH_TEXTS = 128
