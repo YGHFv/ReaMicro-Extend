@@ -1105,16 +1105,30 @@ class WebDavDriveHook(
             XposedBridge.hookMethod(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val type = (param.args?.getOrNull(1) as? Number)?.toInt() ?: return
-                    if (!isOnlineCompletionRenderType(type)) return
-                    pushOnlineCompletionCloudTitle(onlineCompletionTitleForType(type))
-                    pushWebDavIcon()
+                    // Compose 重组时会直接重新调用 CloudResultList 方法（绕过 addHomeWebDavSearchSection
+                    // 里 withWebDavIcon{}/pushLocalLibraryIcon() 的调用点包裹），导致标题图标 getYun115
+                    // 在 depth=0 下透传原始 115 图标——即"展开后概率变 115、折叠仍是 115"。
+                    // 在方法 hook 里按稳定的 type 参数设 depth，初次合成与重组都覆盖。
+                    when {
+                        isOnlineCompletionRenderType(type) -> {
+                            pushOnlineCompletionCloudTitle(onlineCompletionTitleForType(type))
+                            pushWebDavIcon()
+                        }
+                        type == BACKUP_TYPE_WEBDAV -> pushWebDavIcon()
+                        type == BACKUP_TYPE_LOCAL_LIBRARY -> pushLocalLibraryIcon()
+                    }
                 }
 
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val type = (param.args?.getOrNull(1) as? Number)?.toInt() ?: return
-                    if (!isOnlineCompletionRenderType(type)) return
-                    popWebDavIcon()
-                    popOnlineCompletionCloudTitle()
+                    when {
+                        isOnlineCompletionRenderType(type) -> {
+                            popWebDavIcon()
+                            popOnlineCompletionCloudTitle()
+                        }
+                        type == BACKUP_TYPE_WEBDAV -> popWebDavIcon()
+                        type == BACKUP_TYPE_LOCAL_LIBRARY -> popLocalLibraryIcon()
+                    }
                 }
             })
             logWebDav("home cloud result render context hook installed")
@@ -2584,7 +2598,7 @@ class WebDavDriveHook(
 
     private fun hookHomeSearchTapCancellation() {
         runCatching {
-            val method = method(HOME_SEARCH_BAR_CLASS, HOME_SEARCH_TAP_METHOD, 2)
+            val method = homeSearchTapMethod()
             XposedBridge.hookMethod(method, object : XC_MethodHook(XCallback.PRIORITY_HIGHEST) {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val book = param.args?.getOrNull(1) ?: return
@@ -6316,7 +6330,7 @@ class WebDavDriveHook(
                                     if (isOnlineCompletionPath(cloudPathOf(book))) {
                                         handleOnlineCompletionSearchTap(book)
                                     } else if (!tryHandleRunningCloudDownloadTap(book, type)) {
-                                        method(HOME_SEARCH_BAR_CLASS, HOME_SEARCH_TAP_METHOD, 2).invoke(
+                                        homeSearchTapMethod().invoke(
                                             null,
                                             intentReceiver,
                                             book,
@@ -6696,44 +6710,47 @@ class WebDavDriveHook(
     private fun newOnlineCompletionLocalBook(path: String, result: OnlineBookSearchResult): Any {
         val now = System.currentTimeMillis()
         val bookClass = cls(BOOK_CLASS)
+        // 2.2.0 起 Book 主构造为 25 参（旧版 23/24），且存在带 Serialization/DefaultConstructorMarker
+        // 的重载。此处不再写死参数个数，改为取“首参为 long 的最长构造器”（即真实全参构造，
+        // 规避首参为 int 位掩码的序列化构造），按类型填默认值后仅设置关键字段（按 Book 字段声明顺序），
+        // 抗后续字段增减。字段顺序：id,uuid,uid,title,subtitle,author,cover,size,uri,group,created,
+        // cfiVersion,embeddedFonts,epubcfi,chapter,progress,total,finished,updated,pinnedAt,cloudId,
+        // backupType,backupId,backupCode,publisher
         val constructor = bookClass.declaredConstructors
-            .filter { it.parameterTypes.size == 24 || it.parameterTypes.size == 23 }
+            .filter { it.parameterTypes.size >= 23 && it.parameterTypes[0] == java.lang.Long.TYPE }
             .maxByOrNull { it.parameterTypes.size }
             ?.apply { isAccessible = true }
             ?: error("Book constructor not found")
-        val args = mutableListOf<Any?>(
-            0L,
-            UUID.nameUUIDFromBytes(path.toByteArray(Charsets.UTF_8)).toString(),
-            0L,
-            result.name,
-            "",
-            result.author,
-            result.coverUrl,
-            0L,
-            result.detailUrl.ifBlank { path },
-            "",
-            now,
-            0,
-        )
-        if (constructor.parameterTypes.size == 24) {
-            args.add(0)
+        val types = constructor.parameterTypes
+        val args = arrayOfNulls<Any?>(types.size)
+        for (i in types.indices) {
+            args[i] = when (types[i]) {
+                java.lang.Long.TYPE -> 0L
+                java.lang.Integer.TYPE -> 0
+                java.lang.Float.TYPE -> 0f
+                java.lang.Double.TYPE -> 0.0
+                java.lang.Boolean.TYPE -> false
+                java.lang.Byte.TYPE -> 0.toByte()
+                java.lang.Short.TYPE -> 0.toShort()
+                java.lang.Character.TYPE -> ' '
+                String::class.java -> ""
+                else -> null
+            }
         }
-        args.addAll(
-            listOf(
-                "",
-                "",
-                0f,
-                0L,
-                0L,
-                now,
-                0L,
-                BACKUP_TYPE_ONLINE_COMPLETION,
-                path,
-                "",
-                result.sourceName,
-            ),
-        )
-        return constructor.newInstance(*args.toTypedArray())
+        fun set(index: Int, value: Any?) {
+            if (index in args.indices) args[index] = value
+        }
+        set(0, 0L) // id
+        set(1, UUID.nameUUIDFromBytes(path.toByteArray(Charsets.UTF_8)).toString()) // uuid
+        set(3, result.name) // title
+        set(5, result.author) // author
+        set(6, result.coverUrl) // cover
+        set(8, result.detailUrl.ifBlank { path }) // uri
+        set(10, now) // created
+        set(21, BACKUP_TYPE_ONLINE_COMPLETION) // backupType
+        set(22, path) // backupId
+        set(24, result.sourceName) // publisher
+        return constructor.newInstance(*args)
     }
 
     private fun syntheticWebDavBookEntry(path: String): WebDavEntry {
@@ -10394,29 +10411,66 @@ img{max-width:100%;max-height:100%;height:auto;}
         val credentials = webDavCredentials() ?: error("WebDAV not authorized")
         outputFile.parentFile?.mkdirs()
         val normalizedPath = normalizeWebDavPath(path)
-        try {
-            webDavRemoteClient.requestToFile(credentials, "GET", normalizedPath, outputFile, onProgress)
-        } catch (e: IllegalStateException) {
-            val msg = e.message.orEmpty()
-            val looksTruncated = normalizedPath.contains("...") || normalizedPath.contains('…')
-            if (!msg.contains("HTTP 404") || !looksTruncated) throw e
-            // 文件名含省略号时，重新编码往往与服务器原始编码不一致导致 404。
-            // 通过 PROPFIND 匹配到条目后，直接用其 href 的绝对 URL 下载，绕过重新编码。
-            val href = resolveTruncatedWebDavHref(normalizedPath)
-            if (href.isNullOrBlank()) {
-                logWebDav("GET 404 truncated path unresolvable path=$normalizedPath")
-                throw e
+
+        // 先按原路径尝试标准 GET（+ href 兜底）。浏览产生的路径命中此路。
+        if (tryWebDavGetWithHref(credentials, normalizedPath, outputFile, onProgress)) return
+
+        // OpenList/AList 场景：搜索走 fs API 返回的路径带挂载点前缀（如 /OnedriveE5/书库/...），
+        // 而 WebDAV dav 端点的命名空间根即挂载内容（路径为 /书库/...，无挂载前缀），标准 GET 必 404。
+        // 浏览已证明剥掉挂载前缀的路径可用，故这里逐段剥掉开头前缀重试——与具体挂载点名无关，
+        // 直接复用浏览验证过的 WebDAV 命名空间。
+        val segments = normalizedPath.trim('/').split('/').filter { it.isNotBlank() }
+        val maxStrip = minOf(2, segments.size - 1).coerceAtLeast(0)
+        for (strip in 1..maxStrip) {
+            val candidate = "/" + segments.drop(strip).joinToString("/")
+            logWebDav("GET 404 retry with mount prefix stripped ($strip): $candidate")
+            if (tryWebDavGetWithHref(credentials, candidate, outputFile, onProgress)) {
+                logWebDav("GET 404 recovered by stripping $strip leading segment(s): $normalizedPath -> $candidate")
+                return
             }
-            val absoluteUrl = webDavRemoteClient.absoluteUrlFromHref(credentials.url, href)
-            logWebDav("GET 404 retry via href from=$normalizedPath url=${absoluteUrl.redactWebDavUrl()}")
-            outputFile.delete()
-            webDavRemoteClient.requestToFileByUrl(credentials, absoluteUrl, outputFile, onProgress)
+        }
+
+        // 最后再尝试 AList fs/get 取 raw_url 直链（部分部署 WebDAV 与 fs 命名空间无法互通时的兜底）。
+        outputFile.delete()
+        if (webDavRemoteClient.tryAlistDownloadFallback(credentials, normalizedPath, outputFile, onProgress)) {
+            logWebDav("GET 404 recovered via AList raw_url path=$normalizedPath")
+            return
+        }
+
+        logWebDav("GET 404 path unresolvable after all fallbacks path=$normalizedPath")
+        error("WebDAV GET failed: HTTP 404")
+    }
+
+    // 执行单条路径的 WebDAV GET；404 时用 PROPFIND 父目录 + 骨架匹配拿到服务器原始 href 再下，
+    // 兼容文件名含全角括号/空白/省略号等重新编码不一致的情况。成功返回 true，
+    // 404 且无法通过 href 兜底恢复时返回 false（供上层继续尝试剥前缀），其它错误抛出。
+    private fun tryWebDavGetWithHref(
+        credentials: WebDavCredentials,
+        candidatePath: String,
+        outputFile: File,
+        onProgress: ((Int) -> Unit)?,
+    ): Boolean {
+        outputFile.delete()
+        try {
+            webDavRemoteClient.requestToFile(credentials, "GET", candidatePath, outputFile, onProgress)
+            return true
+        } catch (e: IllegalStateException) {
+            if (!e.message.orEmpty().contains("HTTP 404")) throw e
+            val href = resolveWebDavHref(candidatePath) ?: return false
+            if (href.isBlank()) return false
+            return runCatching {
+                val absoluteUrl = webDavRemoteClient.absoluteUrlFromHref(credentials.url, href)
+                logWebDav("GET 404 retry via href from=$candidatePath url=${absoluteUrl.redactWebDavUrl()}")
+                outputFile.delete()
+                webDavRemoteClient.requestToFileByUrl(credentials, absoluteUrl, outputFile, onProgress)
+                true
+            }.getOrDefault(false)
         }
     }
 
     // host app 渲染列表时会把长文件名截断成带 "..." 或 "…" 的显示名并污染 CloudBook.path。
     // 这里用 PROPFIND 列出父目录，按骨架字符模糊匹配真实条目，返回其原始 href。
-    private fun resolveTruncatedWebDavHref(truncatedPath: String): String? {
+    private fun resolveWebDavHref(truncatedPath: String): String? {
         val parent = parentWebDavPath(truncatedPath)
         val truncatedName = truncatedPath.substringAfterLast('/')
         if (truncatedName.isBlank()) return null
@@ -10428,12 +10482,10 @@ img{max-width:100%;max-height:100%;height:auto;}
             singleEllipsisIndex >= 0 -> singleEllipsisIndex
             else -> -1
         }
-        if (splitIndex < 0) {
-            logWebDav("truncated resolve no ellipsis name=$truncatedName")
-            return null
-        }
-        val prefix = truncatedName.substring(0, splitIndex)
-        val suffix = truncatedName.substring(splitIndex + if (ellipsisIndex >= 0) 3 else 1)
+        // 无省略号时（如全角括号/空格等编码差异导致的 404），退化为整名骨架精确匹配：
+        // prefix=整名骨架、suffix 空，仍能命中服务器上编码不同但字符等价的原始条目。
+        val prefix = if (splitIndex < 0) truncatedName else truncatedName.substring(0, splitIndex)
+        val suffix = if (splitIndex < 0) "" else truncatedName.substring(splitIndex + if (ellipsisIndex >= 0) 3 else 1)
         // 请求名与服务器名之间存在大量等价字符差异（全角/半角括号、各种空白、"…"/"..."、
         // 省略号位置的空格等），精确 startsWith/endsWith 极易失配。改用「骨架字符」比较：
         // 剥离所有标点、空白、省略号后只保留核心字符（中英文数字），再比对前后缀骨架。
@@ -10441,7 +10493,10 @@ img{max-width:100%;max-height:100%;height:auto;}
         val suffixSkeleton = skeletonForMatch(suffix)
         val entries = runCatching { listWebDav(parent) }.getOrNull().orEmpty()
             .filterNot { it.isDirectory }
+        // 整名场景优先取骨架完全相等的条目，避免误命中同前缀的更长文件名。
         val match = entries.firstOrNull { entry ->
+            entry.name.isNotBlank() && skeletonForMatch(entry.name) == prefixSkeleton && suffixSkeleton.isEmpty()
+        } ?: entries.firstOrNull { entry ->
             val nameSkeleton = skeletonForMatch(entry.name)
             entry.name.isNotBlank() &&
                 (prefixSkeleton.isEmpty() || nameSkeleton.startsWith(prefixSkeleton)) &&
@@ -11363,6 +11418,31 @@ img{max-width:100%;max-height:100%;height:auto;}
         }
     }
 
+    /**
+     * 按签名解析首页搜索结果行的点击回调。
+     * 2.2.0 起该 lambda 名从 SearchResult$lambda$0$0$1$0$0$0 变化，段数随混淆浮动，
+     * 因此不再写死方法名，改为匹配 HomeSearchBarKt 内签名为 (IntentReceiver, CloudBook) 且
+     * 名称以 SearchResult 开头的静态方法（唯一真实目标，另一个同签名为 $r8$lambda 合成桥接）。
+     */
+    private fun homeSearchTapMethod(): Method = synchronized(methodCache) {
+        methodCache.getOrPut("$HOME_SEARCH_BAR_CLASS#homeSearchTap") {
+            val candidates = cls(HOME_SEARCH_BAR_CLASS).methods.asSequence() +
+                cls(HOME_SEARCH_BAR_CLASS).declaredMethods.asSequence()
+            val matched = candidates.filter { candidate ->
+                val types = candidate.parameterTypes
+                types.size == 2 &&
+                    types[0].name == INTENT_RECEIVER_CLASS &&
+                    types[1].name == CLOUD_BOOK_CLASS
+            }.toList()
+            (
+                matched.firstOrNull { it.name.startsWith("SearchResult") }
+                    ?: matched.firstOrNull { !it.name.startsWith("\$r8\$lambda") }
+                    ?: matched.firstOrNull()
+                )?.apply { isAccessible = true }
+                ?: error("$HOME_SEARCH_BAR_CLASS home search tap (IntentReceiver,CloudBook) not found")
+        }
+    }
+
     private fun staticObject(className: String, fieldName: String): Any {
         val clazz = cls(className)
         val field = runCatching { clazz.getDeclaredField(fieldName) }
@@ -12185,6 +12265,7 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val HOME_CLOUD_RESULT_LIST_METHOD = "CloudResultList"
         const val HOME_CLOUD_BOOK_ROW_METHOD = "CloudBookRow"
         const val HOME_SEARCH_TAP_METHOD = "SearchResult\$lambda\$0\$0\$1\$0\$0\$0\$0"
+        const val INTENT_RECEIVER_CLASS = "app.zhendong.reamicro.arch.IntentReceiver"
         const val BOOK_LOCAL_SHEET_CLASS = "app.zhendong.reamicro.ui.home.components.BookLocalSheetKt"
         const val BOOK_LOCAL_SHEET_METHOD = "BookLocalSheet"
         const val BOOK_LOCAL_SHEET_CONTENT_METHOD = "BookLocalSheet\$lambda\$2"
@@ -12287,6 +12368,8 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val YUN115_ICON_METHOD = "getYun115"
         const val FILE_FOLDER_ICON_CLASS = "app.zhendong.reamicro.arch.icons.colored.FileFolderKt"
         const val FILE_FOLDER_ICON_METHOD = "getFileFolder"
+        const val CLOUD_ROW_ICON_CLASS = "app.zhendong.reamicro.ui.storage.components.BookRowInfoKt"
+        const val CLOUD_ROW_ICON_METHOD = "getIconForFileType"
         const val ANDROID_OS_ICON_CLASS = "app.zhendong.reamicro.arch.icons.colored.AndroidOsKt"
         const val ANDROID_OS_ICON_METHOD = "getAndroidOs"
         const val FUNCTION0_CLASS = "kotlin.jvm.functions.Function0"

@@ -823,61 +823,64 @@ class ReaderImportOverwriteHook(
             XposedBridge.log("$LOG_PREFIX failed to overwrite opf before import: ${it.stackTraceToString()}")
         }.getOrDefault(this)
 
+    /**
+     * 把 opf 的 uuid 改写为目标值。
+     *
+     * 2.2.0 的 org.epub.structure.opf.Metadata.uuid 仍是 org.epub.structure.metadata.Identifier 对象，
+     * 真正的 uuid 字符串保存在 Identifier.value（private final String）字段里。旧代码试图用
+     * Metadata.copy(20 参) / Identifier.copy(getId/getType/getRefinements) 重建，但 2.2.0 的
+     * Metadata.copy 是 19 参、Identifier.copy 是 (IdentifierId, value, IdentifierType, List)，
+     * 逐字段 getter 名与参数个数全部失配 → NoSuchElementException → getOrDefault(this) 静默返回原 opf，
+     * 覆盖导入退化为新建。
+     *
+     * Opf→metadata→uuid(Identifier) 均为对象引用，直接原地改写 Identifier.value 字段即可，
+     * 所有读取点（resolveImportUuid 读 metadata.uuid.value、overwriteToRoot 序列化同一对象）即时生效，
+     * 无需重建对象，彻底规避 copy 签名随混淆变化。
+     */
     private fun Any.withUuid(uuid: String): Any =
         runCatching {
-            val metadata = javaClass.methods.first { it.name == "getMetadata" && it.parameterTypes.isEmpty() }
-                .invoke(this)
-            val oldIdentifier = metadata.javaClass.methods.first { it.name == "getUuid" && it.parameterTypes.isEmpty() }
-                .invoke(metadata)
-            val newIdentifier = oldIdentifier.javaClass.methods.first {
-                it.name == "copy" && it.parameterTypes.size == 4
-            }.invoke(
-                oldIdentifier,
-                oldIdentifier.javaClass.methods.first { it.name == "getId" && it.parameterTypes.isEmpty() }.invoke(oldIdentifier),
-                oldIdentifier.javaClass.methods.first { it.name == "getType" && it.parameterTypes.isEmpty() }.invoke(oldIdentifier),
-                uuid,
-                oldIdentifier.javaClass.methods.first { it.name == "getRefinements" && it.parameterTypes.isEmpty() }
-                    .invoke(oldIdentifier),
-            )
-            val newMetadata = metadata.javaClass.methods.first {
-                it.name == "copy" && it.parameterTypes.size == 20
-            }.invoke(
-                metadata,
-                metadata.javaClass.methods.first { it.name == "getTitle" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                newIdentifier,
-                metadata.javaClass.methods.first { it.name == "getSubtitle" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getCover" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getAuthors" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getContributors" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getIsbn" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getDoi" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getUri" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getLanguage" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getSubject" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getPublisher" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getDate" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getDescription" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getFormat" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getSource" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getRelation" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getCoverage" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getRights" && it.parameterTypes.isEmpty() }.invoke(metadata),
-                metadata.javaClass.methods.first { it.name == "getMetas" && it.parameterTypes.isEmpty() }.invoke(metadata),
-            )
-            javaClass.methods.first { it.name == "copy" && it.parameterTypes.size == 8 }.invoke(
-                this,
-                javaClass.methods.first { it.name == "getPath" && it.parameterTypes.isEmpty() }.invoke(this),
-                javaClass.methods.first { it.name == "getVersion" && it.parameterTypes.isEmpty() }.invoke(this),
-                javaClass.methods.first { it.name == "getUniqueIdentifier" && it.parameterTypes.isEmpty() }.invoke(this),
-                newMetadata,
-                javaClass.methods.first { it.name == "getManifest" && it.parameterTypes.isEmpty() }.invoke(this),
-                javaClass.methods.first { it.name == "getSpine" && it.parameterTypes.isEmpty() }.invoke(this),
-                javaClass.methods.first { it.name == "getGuide" && it.parameterTypes.isEmpty() }.invoke(this),
-                javaClass.methods.first { it.name == "getSpineCfiIndex" && it.parameterTypes.isEmpty() }.invoke(this),
-            )
+            val metadata = (
+                javaClass.methods.firstOrNull { it.name == "getMetadata" && it.parameterTypes.isEmpty() }
+                    ?: error("getMetadata not found")
+                ).invoke(this)
+            val identifier = (
+                metadata.javaClass.methods.firstOrNull { it.name == "getUuid" && it.parameterTypes.isEmpty() }
+                    ?: error("Metadata.getUuid not found")
+                ).invoke(metadata) ?: error("Metadata.uuid is null")
+            if (rewriteIdentifierValue(identifier, uuid)) {
+                return this
+            }
+            error("Identifier value field not writable")
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to rewrite import opf uuid: ${it.stackTraceToString()}")
         }.getOrDefault(this)
+
+    /**
+     * 原地改写 Identifier.value（存放 uuid 字符串的 String 字段）。成功返回 true。
+     * 优先按字段名 value 定位，回退到“值等于 getValue() 返回值”的唯一 String 字段。
+     */
+    private fun rewriteIdentifierValue(identifier: Any, uuid: String): Boolean = runCatching {
+        val currentValue = runCatching {
+            identifier.javaClass.methods.firstOrNull { it.name == "getValue" && it.parameterTypes.isEmpty() }
+                ?.invoke(identifier) as? String
+        }.getOrNull()
+        val fields = identifier.javaClass.declaredFields.filter { it.type == String::class.java }
+        val target = fields.firstOrNull { it.name == "value" }
+            ?: fields.firstOrNull { field ->
+                currentValue != null && runCatching {
+                    field.isAccessible = true
+                    field.get(identifier) == currentValue
+                }.getOrDefault(false)
+            }
+            ?: return false
+        target.isAccessible = true
+        target.set(identifier, uuid)
+        XposedBridge.log("$LOG_PREFIX rewrote identifier value field '${target.name}' -> $uuid")
+        true
+    }.getOrElse {
+        XposedBridge.log("$LOG_PREFIX rewrite identifier value failed: ${it.stackTraceToString()}")
+        false
+    }
 
     private fun duplicateBookException(message: String): RuntimeException =
         runCatching {

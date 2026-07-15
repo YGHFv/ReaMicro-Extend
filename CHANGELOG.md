@@ -1,6 +1,18 @@
 # 更新记录
 
-## 未发布
+## 1.3.2 - 2026-07-15
+
+### 首页云盘/书库
+- 修复首页搜索结果中 WebDAV、本地书库分组标题图标在展开后概率性变成 115 图标、折叠后也不恢复的问题。根因是 Compose 重组会直接重跑 `CloudResultList` 绕过调用点的图标 depth 包裹，改为在 `CloudResultList` 方法 hook 内按 `type` 参数设置/弹出 depth，初次合成与重组都覆盖。
+
+### WebDAV 下载
+- 兼容 OpenList/AList 部署（WebDAV 端点根即某挂载点内容）：搜索经 fs API 得到的路径带挂载前缀，直接 GET 会 404。现在 GET 404 时逐段剥离挂载前缀重试，仍失败则回退到 AList `fs/get` 的免鉴权直链 `raw_url` 下载，与搜索使用的 API 命名空间一致。
+
+### 2.2.0 适配
+- 覆盖导入元数据同步：适配 2.2.0 `Book.copy` 25 参（在 `updated` 与 `cloudId` 间新增 `pinnedAt`），修复覆盖导入后进度/封面/出版方同步不过去（旧写法 `NoSuchElementException` 静默失败）。
+- 在线补全本地书构造：适配 2.2.0 Book 25 参构造器，改为取“首参为 long 的最长构造器”并按类型填默认值、按字段顺序赋关键字段，抗后续字段增减。
+- 关联封面修复：适配 2.2.0 起点书的 BookOverview 页（`BookOverviewViewModel`/`BookOverviewUiState`），修复封面修复上下文从未捕获、恒提示“当前页面无法执行封面修复”的问题。
+- 阅读自动翻页：适配 2.2.0 `ReaderSettings` 签名变化（新增 `Function0` 首参），改为只要求末两参为 `(Composer, Int)` 匹配。
 
 ### 主页补全（原「个人中心背景」）
 - 补全设置入口「个人中心背景」更名为「主页补全」，并从列表末尾移动到「旋转补全」上方。

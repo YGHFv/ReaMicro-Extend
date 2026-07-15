@@ -183,12 +183,15 @@ class ReaderAutoPageHook(
 
     private fun isReaderSettingsScopeMethod(method: Method, composerClass: Class<*>): Boolean {
         val parameterTypes = method.parameterTypes
-        return (method.name == READER_SETTINGS_PRIVATE_METHOD &&
-            parameterTypes.contentEquals(arrayOf(composerClass, Int::class.javaPrimitiveType))) ||
-            (method.name == READER_SETTINGS_CONTENT_LAMBDA_METHOD &&
-                parameterTypes.size == 5 &&
-                parameterTypes[3] == composerClass &&
-                parameterTypes[4] == Int::class.javaPrimitiveType)
+        // 阅微 2.2.0 起 Settings 的签名从 (Composer, Int) 变为 (Function0, Composer, Int)，
+        // ReaderSettings$lambda$2 从 5 参变为 6 参 (…, Composer, Int)。
+        // 不再写死参数个数/位置，只要求“末两参为 (Composer, Int)”即可匹配，抗后续版本变动。
+        val endsWithComposerInt = parameterTypes.size >= 2 &&
+            parameterTypes[parameterTypes.size - 2] == composerClass &&
+            parameterTypes[parameterTypes.size - 1] == Int::class.javaPrimitiveType
+        if (!endsWithComposerInt) return false
+        return method.name == READER_SETTINGS_PRIVATE_METHOD ||
+            method.name == READER_SETTINGS_CONTENT_LAMBDA_METHOD
     }
 
     private fun renderAutoPageSection(composer: Any) {

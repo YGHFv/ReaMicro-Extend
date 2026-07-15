@@ -150,6 +150,52 @@ internal class WebDavRemoteClient(
             log("AList upload fallback failed path=$path error=${it.message}")
         }.getOrDefault(false)
 
+    // 部分 OpenList/AList 部署的 WebDAV 端点根 = 某个挂载点内容（如 dav 根直接是 OnedriveE5），
+    // 而 AList /api/fs 命名空间需要完整挂载路径（/OnedriveE5/...）。搜索走 fs API 拿到的 path
+    // 带挂载前缀，拿去请求 WebDAV GET 会 404。这里用 fs/get 拿免鉴权直链 raw_url 再下载，
+    // 与搜索使用的 AList API 命名空间一致，绕过 WebDAV 路径前缀差异。成功返回 true。
+    fun tryAlistDownloadFallback(
+        credentials: WebDavCredentials,
+        path: String,
+        outputFile: File,
+        onProgress: ((Int) -> Unit)? = null,
+    ): Boolean =
+        runCatching {
+            val endpoint = alistApiEndpoint(credentials.url) ?: return false
+            val cacheKey = alistCacheKey(endpoint, credentials)
+            if (isAlistUnsupported(cacheKey)) return false
+            val token = cachedAlistToken(endpoint, credentials, cacheKey) ?: return false
+            val fsPath = childWebDavPath(endpoint.rootPath, normalizeWebDavPath(path).trimStart('/'))
+            val response = executeRawOkHttpRequest(
+                url = "${endpoint.apiBase}/fs/get",
+                method = "POST",
+                headers = mapOf(
+                    "Authorization" to token,
+                    "Content-Type" to "application/json",
+                ),
+                requestBodyOverride = newOkHttpStringRequestBody(
+                    JSONObject().put("path", fsPath).put("password", "").toString(),
+                    "application/json; charset=utf-8",
+                ),
+            )
+            val body = response.bodyString.orEmpty()
+            if (response.code !in 200..299 || !alistResponseOk(body)) {
+                log("AList download fallback fs/get rejected path=$fsPath code=${response.code} body=${body.take(160)}")
+                return false
+            }
+            val rawUrl = JSONObject(body).optJSONObject("data")?.optString("raw_url").orEmpty()
+            if (rawUrl.isBlank()) {
+                log("AList download fallback no raw_url path=$fsPath")
+                return false
+            }
+            outputFile.delete()
+            requestToFileByUrl(credentials, rawUrl, outputFile, onProgress)
+            log("AList download fallback ok path=$fsPath")
+            true
+        }.onFailure {
+            log("AList download fallback failed path=$path error=${it.message}")
+        }.getOrDefault(false)
+
     fun searchAlistBooks(
         credentials: WebDavCredentials,
         query: String,
