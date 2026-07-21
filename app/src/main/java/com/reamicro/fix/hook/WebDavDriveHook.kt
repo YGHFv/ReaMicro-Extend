@@ -8420,6 +8420,7 @@ class WebDavDriveHook(
             error("EPUB Text directory escapes book dir")
         }
         textDir.mkdirs()
+        writeOnlineCompletionDefaultStyle(root)
         newChapters.forEachIndexed { offset, chapter ->
             val order = existingCount + offset + 1
             val file = File(textDir, "chapter_${order.toString().padStart(4, '0')}.xhtml").canonicalFile
@@ -8503,6 +8504,7 @@ class WebDavDriveHook(
             error("EPUB Text directory escapes book dir")
         }
         textDir.mkdirs()
+        writeOnlineCompletionDefaultStyle(root)
         val file = File(textDir, "chapter_${(index + 1).toString().padStart(4, '0')}.xhtml").canonicalFile
         if (!file.path.startsWith(rootPrefix)) error("EPUB chapter path escapes book dir")
         val temp = File(textDir, "${file.name}.tmp-${Thread.currentThread().id}-${System.nanoTime()}").canonicalFile
@@ -8648,6 +8650,7 @@ class WebDavDriveHook(
                 "META-INF/container.xml",
                 """<?xml version="1.0" encoding="UTF-8"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>""",
             )
+            writeTextZipEntry(zip, ONLINE_COMPLETION_DEFAULT_STYLE_PATH, ONLINE_COMPLETION_DEFAULT_CSS)
             val coverExt = onlineCoverExt(cover)
             cover?.let {
                 writeBytesZipEntry(zip, "OEBPS/Images/cover.$coverExt", it.bytes)
@@ -9232,24 +9235,34 @@ class WebDavDriveHook(
         zip.closeEntry()
     }
 
+    private fun writeOnlineCompletionDefaultStyle(bookDir: File) {
+        val root = bookDir.canonicalFile
+        val styleFile = File(root, ONLINE_COMPLETION_DEFAULT_STYLE_PATH).canonicalFile
+        val rootPrefix = root.path.trimEnd(File.separatorChar) + File.separator
+        if (!styleFile.path.startsWith(rootPrefix)) error("EPUB style path escapes book dir")
+        styleFile.parentFile?.mkdirs()
+        styleFile.writeText(ONLINE_COMPLETION_DEFAULT_CSS, Charsets.UTF_8)
+    }
+
     private fun chapterXhtml(title: String, content: String): String {
         val bodyLines = stripDuplicatedChapterTitle(title, content.lineSequence()
             .map { it.trim() }
             .filter { it.isNotBlank() }
             .toList())
-        val paragraphs = bodyLines.joinToString("\n") { "<p>${it.xmlEscape()}</p>" }
+        val paragraphs = bodyLines.joinToString("\n", transform = ::chapterParagraphHtml)
         val heading = chapterHeadingHtml(title)
         return """<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml">
-<head><title>${title.xmlEscape()}</title><style type="text/css">
-body{line-height:1.75;}
-h1{font-size:1.12em;line-height:1.45;text-align:center;margin:1.1em 0 .9em;font-weight:600;}
-p{margin:.75em 0;}
-</style></head>
-<body><h1>$heading</h1>
+<head><title>${title.xmlEscape()}</title><link rel="stylesheet" type="text/css" href="../Styles/default.css"/></head>
+<body><h1 class="te-chapter-title">$heading</h1>
 $paragraphs
 </body>
 </html>"""
+    }
+
+    private fun chapterParagraphHtml(line: String): String {
+        val cssClass = if (ONLINE_DIVIDER_LINE_REGEX.matches(line)) " class=\"divider-line\"" else ""
+        return "<p$cssClass>${line.xmlEscape()}</p>"
     }
 
     private fun stripDuplicatedChapterTitle(title: String, lines: List<String>): List<String> {
@@ -9337,8 +9350,13 @@ $paragraphs
         return line.substring(removeEnd).trimChapterHeadingSeparator()
     }
 
-    private fun chapterHeadingHtml(title: String): String =
-        splitChapterHeading(title).joinToString("<br/>") { it.xmlEscape() }
+    private fun chapterHeadingHtml(title: String): String {
+        val parts = splitChapterHeading(title)
+        if (parts.size < 2) return parts.firstOrNull().orEmpty().xmlEscape()
+        val number = parts.first().xmlEscape()
+        val subtitle = parts.drop(1).joinToString("<br/>") { it.xmlEscape() }
+        return "<span class=\"te-chapter-number\">$number</span><br/>$subtitle"
+    }
 
     private fun splitChapterHeading(title: String): List<String> {
         val clean = title.trim()
@@ -9440,6 +9458,7 @@ $points  </navMap>
         }
         val manifestItems = listOf(
             """    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>""",
+            """    <item id="default-style" href="Styles/default.css" media-type="text/css"/>""",
             coverManifest,
             manifestChapters,
         ).filter { it.isNotBlank() }.joinToString("\n")
@@ -12443,6 +12462,57 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val ONLINE_COMPLETION_BOOK_PREFIX = "reamicro-online-book://"
         const val ONLINE_COMPLETION_UUID_PREFIX = "reamicro-online-"
         const val ONLINE_COMPLETION_CACHE_ROOT = "reamicro-online-completion"
+        const val ONLINE_COMPLETION_DEFAULT_STYLE_PATH = "OEBPS/Styles/default.css"
+        val ONLINE_COMPLETION_DEFAULT_CSS = """
+            /* 正文页面 */
+            body {
+                font-family: "楷体", serif;
+                line-height: 130%;
+                margin-left: 1%;
+                margin-right: 1%;
+                text-align: justify;
+                background-color: transparent;
+            }
+
+            /* 正文段落 */
+            p {
+                font-family: "楷体", serif;
+                line-height: 130%;
+                margin-left: 1%;
+                margin-right: 1%;
+                text-align: justify;
+                text-indent: 2em;
+            }
+
+            /* 章节标题 */
+            .te-chapter-title {
+                font-family: "宋体", serif;
+                font-size: 1.2em;
+                color: #c2181e;
+                text-align: center;
+                font-weight: 900;
+                margin: 3em 0 2em 0;
+            }
+
+            /* 章节序号 */
+            .te-chapter-number {
+                font-family: "宋体", serif;
+                font-size: 0.8em;
+                color: #413245;
+                line-height: 130%;
+                font-weight: 900;
+                padding: 0;
+            }
+
+            /* 分割线 */
+            p.divider-line {
+                text-align: center;
+                text-indent: 0;
+                margin: 1em 0;
+                padding: 0;
+                line-height: 130%;
+            }
+        """.trimIndent()
         const val ONLINE_COMPLETION_FAILED_CHAPTER_LOG = "reamicro-online-failed-chapters.json"
         const val ONLINE_COMPLETION_NOTIFICATION_CHANNEL = "reamicro_online_completion_download"
         const val MODULE_PACKAGE_NAME = "com.reamicro.fix"
@@ -12593,6 +12663,7 @@ img{max-width:100%;max-height:100%;height:auto;}
             Regex("(?:下载|重试)?章节\\s*(\\d+)\\s*/\\s*(\\d+)")
         val ONLINE_COMPLETION_FAILED_COUNT_REGEX = Regex("失败\\s*(\\d+)\\s*章")
         val ONLINE_COMPLETION_CHAPTER_FILE_REGEX = Regex("""chapter_(\d+)\.xhtml""", RegexOption.IGNORE_CASE)
+        val ONLINE_DIVIDER_LINE_REGEX = Regex("""^[=_~*·•…⋯・◆◇■□●○※＊\-‐‑‒–—―]{2,}$""")
         const val ONLINE_CHAPTER_TITLE_SCAN_LINES = 8
         val BOOK_EXTENSIONS = setOf(".epub", ".mobi", ".azw3", ".txt")
         val WEBDAV_UPLOAD_RETRY_CODES = setOf(405, 409, 412, 423)
