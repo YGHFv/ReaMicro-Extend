@@ -20,6 +20,7 @@ import com.reamicro.fix.settings.XposedModuleSettings
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import java.io.File
+import java.lang.ref.WeakReference
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 
@@ -138,7 +139,7 @@ class ReaderDialogueHighlightHook(
             .filter { it.type == ReaderHighlightRuleType.SingleQuotePhrase }
             .flatMap { DialogueHighlightRangeFinder.findQuoteRanges(text, SINGLE_QUOTES) }
         val doubleQuoteRanges = if (enabledRules.any { it.type == ReaderHighlightRuleType.DoubleQuoteDialogue }) {
-            findDoubleQuoteDialogueRanges(text, contentDom != null, currentBookKey, currentBookTitle)
+            findDoubleQuoteDialogueRanges(text, original, contentDom, currentBookKey, currentBookTitle)
         } else {
             emptyList()
         }
@@ -209,24 +210,66 @@ class ReaderDialogueHighlightHook(
 
     private fun findDoubleQuoteDialogueRanges(
         text: String,
-        allowCrossContentDom: Boolean,
+        original: Any,
+        contentDom: Any?,
         bookKey: String,
         bookTitle: String,
     ): List<IntRange> {
-        if (!allowCrossContentDom) {
+        if (contentDom == null) {
             return DialogueHighlightRangeFinder.findQuoteRanges(text, DOUBLE_QUOTES, MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS)
         }
-        val stateKey = listOf(bookKey, bookTitle, isNightMode().toString()).joinToString("|")
+        val stateKey = doubleQuoteStateKey(contentDom, bookKey, bookTitle)
         synchronized(doubleQuoteCarryLock) {
-            val incoming = doubleQuoteCarry?.takeIf { it.key == stateKey }?.carry
+            val previous = doubleQuoteCarry
+            if (previous != null && previous.key != stateKey) {
+                rollbackUnclosedContinuationHighlights(previous.pendingContinuations)
+                doubleQuoteCarry = null
+            }
+            val active = doubleQuoteCarry?.takeIf { it.key == stateKey }
             val result = DialogueHighlightRangeFinder.findQuoteRangesInSegment(
                 text = text,
                 quotes = DOUBLE_QUOTES,
-                incomingCarry = incoming,
+                incomingCarry = active?.carry,
                 maxParagraphs = MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS,
             )
-            doubleQuoteCarry = result.carry?.let { DoubleQuoteCarryState(stateKey, it) }
+            if (result.carryExpired) {
+                rollbackUnclosedContinuationHighlights(active?.pendingContinuations.orEmpty())
+                doubleQuoteCarry = null
+                return result.ranges
+            }
+            doubleQuoteCarry = result.carry?.let { carry ->
+                val pending = if (result.carryStartedInCurrentSegment) {
+                    emptyList()
+                } else {
+                    active?.pendingContinuations.orEmpty() + PendingCrossSegmentHighlight(
+                        contentDom = WeakReference(contentDom),
+                        originalContent = original,
+                    )
+                }
+                DoubleQuoteCarryState(stateKey, carry, pending)
+            }
             return result.ranges
+        }
+    }
+
+    private fun doubleQuoteStateKey(contentDom: Any, bookKey: String, bookTitle: String): String {
+        val location = callNoArg(contentDom, "getLocation")
+        val spine = callNoArg(location, "getSpine")?.toString().orEmpty()
+        val itemref = callNoArg(location, "getItemref")?.toString().orEmpty()
+        val chapter = "$spine|$itemref".takeIf { spine.isNotBlank() || itemref.isNotBlank() }
+            ?: "dom:${System.identityHashCode(callNoArg(contentDom, "getParent") ?: contentDom)}"
+        return listOf(bookKey, bookTitle, chapter, isNightMode().toString()).joinToString("|")
+    }
+
+    private fun rollbackUnclosedContinuationHighlights(pending: List<PendingCrossSegmentHighlight>) {
+        pending.forEach { item ->
+            val contentDom = item.contentDom.get() ?: return@forEach
+            val fallback = highlightedAnnotatedString(item.originalContent, contentDom = null)
+                ?: item.originalContent
+            runCatching { field(contentDom.javaClass.name, "content").set(contentDom, fallback) }
+                .onFailure {
+                    XposedBridge.log("$LOG_PREFIX dialogue highlight rollback failed: ${it.message.orEmpty()}")
+                }
         }
     }
 
@@ -618,9 +661,9 @@ class ReaderDialogueHighlightHook(
         if (previous == null || previous == current) return
         if (ReaderHighlightBookContext.bookKey.isBlank()) return
         if (!settings.snapshot().canHighlightReaderDialogue) return
-        ReaderHighlightBookContext.bumpVersion("night-mode", requestRefresh = false)
+        ReaderHighlightBookContext.bumpVersion("night-mode")
         checkHighlightRuntimeVersion()
-        activity.window?.decorView?.post { activity.window?.decorView?.invalidate() }
+        XposedBridge.log("$LOG_PREFIX reader night-mode highlight refresh requested dark=$current")
     }
 
     private fun checkHighlightRuntimeVersion() {
@@ -631,6 +674,10 @@ class ReaderDialogueHighlightHook(
     }
 
     private fun clearHighlightRuntimeCaches() {
+        synchronized(doubleQuoteCarryLock) {
+            doubleQuoteCarry?.let { rollbackUnclosedContinuationHighlights(it.pendingContinuations) }
+            doubleQuoteCarry = null
+        }
         synchronized(ninePatchDrawableCache) { ninePatchDrawableCache.clear() }
         synchronized(reedenBoxStyleCache) { reedenBoxStyleCache.clear() }
         synchronized(nineSliceCache) { nineSliceCache.clear() }
@@ -1535,7 +1582,7 @@ class ReaderDialogueHighlightHook(
         const val MAX_REMEMBERED_HIGHLIGHT_SPAN_STYLES = 64
         const val HIGHLIGHT_PERFORMANCE_LOG_INTERVAL_MS = 1500L
         const val REEDEN_BOX_EDGE_SCALE = 0.78f
-        const val MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS = 5
+        const val MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS = 7
         const val HIGHLIGHT_ANNOTATION_TAG = "reamicro.highlight.span"
         const val NINE_PATCH_ANNOTATION_TAG = "reamicro.highlight.ninepatch"
         const val NINE_PATCH_ANNOTATION_SEPARATOR = "\u001F"
@@ -1606,6 +1653,12 @@ class ReaderDialogueHighlightHook(
     private data class DoubleQuoteCarryState(
         val key: String,
         val carry: DialogueHighlightRangeFinder.QuoteCarry,
+        val pendingContinuations: List<PendingCrossSegmentHighlight>,
+    )
+
+    private data class PendingCrossSegmentHighlight(
+        val contentDom: WeakReference<Any>,
+        val originalContent: Any,
     )
 
     private data class TextBox(
