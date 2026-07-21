@@ -230,7 +230,7 @@ class WebDavDriveHook(
     private val onlineCompletionNotificationBlockedLogged = AtomicBoolean(false)
     private val onlineCompletionCancelReceiverRegistered = AtomicBoolean(false)
     private val onlineCompletionModuleActivityPromptAt = ConcurrentHashMap<Int, Long>()
-    private val onlineCompletionZeroUpdatedRepairAt = AtomicLong(0L)
+    private val onlineCompletionMetadataRepairAt = AtomicLong(0L)
     @Volatile private var lastHomeSearchWebDavResults: List<Any> = emptyList()
     @Volatile private var lastHomeSearchLocalResults: List<Any> = emptyList()
     private val cloudStorageScreenRefreshAt = ConcurrentHashMap<String, Long>()
@@ -2409,6 +2409,7 @@ class WebDavDriveHook(
                     val localSeq = localLibraryHomeSearchSeq.incrementAndGet()
                     val onlineSeq = onlineCompletionHomeSearchSeq.incrementAndGet()
                     rememberHomeSearchSnapshot(emptyList(), emptyList())
+                    if (query.isBlank()) return
                     updateHomeOnlineCompletionSearchResults(
                         param.thisObject,
                         onlineCompletionPendingSearchGroups(query),
@@ -3456,6 +3457,8 @@ class WebDavDriveHook(
         cover: String? = null,
         size: Long? = null,
         updated: Long? = null,
+        pinnedAt: Long? = null,
+        cloudId: Long? = null,
     ): Any {
         val copyMethod = book.javaClass.methods
             .filter { it.name == "copy" && it.parameterTypes.size in 23..25 }
@@ -3487,12 +3490,12 @@ class WebDavDriveHook(
                 book.callLong("getTotal"),
                 book.callLong("getFinished"),
                 updated?.takeIf { it > 0L } ?: book.callLong("getUpdated"),
-                book.callLong("getCloudId"),
             ),
         )
-        if (copyMethod.parameterTypes.size - args.size == 5) {
-            args.add(book.callLong("getPinnedAt"))
+        if (copyMethod.parameterTypes.size - args.size == 6) {
+            args.add(pinnedAt ?: book.callLong("getPinnedAt"))
         }
+        args.add(cloudId ?: book.callLong("getCloudId"))
         args.addAll(listOf(backupType, backupId, backupCode, publisher))
         check(args.size == copyMethod.parameterTypes.size) {
             "Book.copy argument mismatch: expected=${copyMethod.parameterTypes.size} actual=${args.size}"
@@ -9972,7 +9975,7 @@ img{max-width:100%;max-height:100%;height:auto;}
     private fun rememberBookshelfRepository(repository: Any?) {
         if (repository == null) return
         bookshelfRepositoryRef = WeakReference(repository)
-        repairOnlineCompletionZeroUpdatedBooksSoon(repository)
+        repairOnlineCompletionBookMetadataSoon(repository)
     }
 
     private fun rememberWorkerManager(workerManager: Any?) {
@@ -10009,29 +10012,35 @@ img{max-width:100%;max-height:100%;height:auto;}
         workTrackerRef?.get()
             ?: workerManagerRef?.get()?.let { fieldValue(it, "tracker") }
 
-    private fun repairOnlineCompletionZeroUpdatedBooksSoon(repository: Any) {
+    private fun repairOnlineCompletionBookMetadataSoon(repository: Any) {
         val now = System.currentTimeMillis()
-        val last = onlineCompletionZeroUpdatedRepairAt.get()
-        if (last > 0L && now - last < ONLINE_COMPLETION_ZERO_UPDATED_REPAIR_INTERVAL_MS) return
-        if (!onlineCompletionZeroUpdatedRepairAt.compareAndSet(last, now)) return
+        val last = onlineCompletionMetadataRepairAt.get()
+        if (last > 0L && now - last < ONLINE_COMPLETION_METADATA_REPAIR_INTERVAL_MS) return
+        if (!onlineCompletionMetadataRepairAt.compareAndSet(last, now)) return
         Thread({
             runCatching {
-                repairOnlineCompletionZeroUpdatedBooks(repository)
+                repairOnlineCompletionBookMetadata(repository)
             }.onFailure {
-                XposedBridge.log("$LOG_PREFIX online completion timestamp repair failed: ${it.stackTraceToString()}")
+                XposedBridge.log("$LOG_PREFIX online completion metadata repair failed: ${it.stackTraceToString()}")
             }
         }, "ReaMicroOnlineCompletionRepair").start()
     }
 
-    private fun repairOnlineCompletionZeroUpdatedBooks(repository: Any) {
+    private fun repairOnlineCompletionBookMetadata(repository: Any) {
         val books = listLocalBooks(repository) ?: return
-        val now = System.currentTimeMillis()
         var repaired = 0
         books.forEach { book ->
             if (book == null) return@forEach
             if (bookBackupTypeOf(book) != BACKUP_TYPE_ONLINE_COMPLETION) return@forEach
-            if (book.callLong("getUpdated") > 0L) return@forEach
-            val size = runCatching { bookDirectorySize(bookDirectory(book).canonicalFile) }.getOrNull()
+            val currentPinnedAt = book.callLong("getPinnedAt")
+            val currentCloudId = book.callLong("getCloudId")
+            val needsPinnedCloudRepair = currentCloudId == 0L &&
+                currentPinnedAt in 1 until ONLINE_COMPLETION_PINNED_TIMESTAMP_FLOOR
+            if (!needsPinnedCloudRepair) return@forEach
+            logWebDav(
+                "online completion repairing swapped pinned/cloud title=${book.callString("getTitle")} " +
+                    "pinnedAt=$currentPinnedAt cloudId=$currentCloudId",
+            )
             val updatedBook = copyBookWithBackupAndPublisher(
                 book = book,
                 backupType = BACKUP_TYPE_ONLINE_COMPLETION,
@@ -10039,14 +10048,14 @@ img{max-width:100%;max-height:100%;height:auto;}
                 backupCode = book.callString("getBackupCode"),
                 publisher = book.callString("getPublisher"),
                 cover = book.callString("getCover"),
-                size = size,
-                updated = now + repaired,
+                pinnedAt = 0L,
+                cloudId = currentPinnedAt,
             )
             updateLocalBook(updatedBook)
             repaired++
         }
         if (repaired > 0) {
-            logWebDav("online completion repaired zero updated books count=$repaired")
+            logWebDav("online completion repaired book metadata count=$repaired")
         }
     }
 
@@ -12949,7 +12958,8 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val ONLINE_COMPLETION_RETRY_DELAY_MAX_MS = 60_000L
         const val ONLINE_COMPLETION_NOTIFICATION_MIN_INTERVAL_MS = 1_000L
         const val ONLINE_COMPLETION_MODULE_ACTIVITY_RETRY_MS = 15_000L
-        const val ONLINE_COMPLETION_ZERO_UPDATED_REPAIR_INTERVAL_MS = 5 * 60_000L
+        const val ONLINE_COMPLETION_METADATA_REPAIR_INTERVAL_MS = 5 * 60_000L
+        const val ONLINE_COMPLETION_PINNED_TIMESTAMP_FLOOR = 1_000_000_000_000L
         const val CLOUD_STORAGE_SCREEN_REFRESH_DEBOUNCE_MS = 1_000L
         const val STRING_KEY_UPLOAD_TO_115 = "upload_to_115"
         const val HOME_SEARCH_DEBOUNCE_MS = 250L

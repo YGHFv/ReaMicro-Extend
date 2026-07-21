@@ -20,7 +20,6 @@ import com.reamicro.fix.settings.XposedModuleSettings
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import java.io.File
-import java.lang.ref.WeakReference
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 
@@ -32,7 +31,6 @@ class ReaderDialogueHighlightHook(
     private val hostCompat = ReaMicroHostCompat(classLoader)
     private val fontFamilyCache = HashMap<String, Any>()
     private val failedFontFamilyLogKeys = HashSet<String>()
-    private val doubleQuoteCarryLock = Object()
     private val ninePatchDrawableCache = HashMap<String, CachedImage>()
     private val reedenBoxStyleCache = object : LinkedHashMap<String, ReedenBoxStyle>(32, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ReedenBoxStyle>?): Boolean =
@@ -62,8 +60,6 @@ class ReaderDialogueHighlightHook(
     @Volatile private var lastNinePatchLogKey: String = ""
     @Volatile private var lastAppliedLogKey: String = ""
     @Volatile private var lastHighlightPerformanceLogAtMs: Long = 0L
-    @Volatile private var doubleQuoteCarry: DoubleQuoteCarryState? = null
-
     fun install() {
         hostCompat.contentDomClassCandidates().forEach(::hookContentDom)
         hookJustifyTextNinePatchDraw()
@@ -139,7 +135,7 @@ class ReaderDialogueHighlightHook(
             .filter { it.type == ReaderHighlightRuleType.SingleQuotePhrase }
             .flatMap { DialogueHighlightRangeFinder.findQuoteRanges(text, SINGLE_QUOTES) }
         val doubleQuoteRanges = if (enabledRules.any { it.type == ReaderHighlightRuleType.DoubleQuoteDialogue }) {
-            findDoubleQuoteDialogueRanges(text, original, contentDom, currentBookKey, currentBookTitle)
+            findDoubleQuoteDialogueRanges(text, contentDom)
         } else {
             emptyList()
         }
@@ -210,67 +206,40 @@ class ReaderDialogueHighlightHook(
 
     private fun findDoubleQuoteDialogueRanges(
         text: String,
-        original: Any,
         contentDom: Any?,
-        bookKey: String,
-        bookTitle: String,
     ): List<IntRange> {
         if (contentDom == null) {
             return DialogueHighlightRangeFinder.findQuoteRanges(text, DOUBLE_QUOTES, MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS)
         }
-        val stateKey = doubleQuoteStateKey(contentDom, bookKey, bookTitle)
-        synchronized(doubleQuoteCarryLock) {
-            val previous = doubleQuoteCarry
-            if (previous != null && previous.key != stateKey) {
-                rollbackUnclosedContinuationHighlights(previous.pendingContinuations)
-                doubleQuoteCarry = null
-            }
-            val active = doubleQuoteCarry?.takeIf { it.key == stateKey }
-            val result = DialogueHighlightRangeFinder.findQuoteRangesInSegment(
-                text = text,
-                quotes = DOUBLE_QUOTES,
-                incomingCarry = active?.carry,
-                maxParagraphs = MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS,
+        val context = dialogueParagraphContext(contentDom, text)
+            ?: return DialogueHighlightRangeFinder.findQuoteRanges(
+                text,
+                DOUBLE_QUOTES,
+                MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS,
             )
-            if (result.carryExpired) {
-                rollbackUnclosedContinuationHighlights(active?.pendingContinuations.orEmpty())
-                doubleQuoteCarry = null
-                return result.ranges
-            }
-            doubleQuoteCarry = result.carry?.let { carry ->
-                val pending = if (result.carryStartedInCurrentSegment) {
-                    emptyList()
-                } else {
-                    active?.pendingContinuations.orEmpty() + PendingCrossSegmentHighlight(
-                        contentDom = WeakReference(contentDom),
-                        originalContent = original,
-                    )
-                }
-                DoubleQuoteCarryState(stateKey, carry, pending)
-            }
-            return result.ranges
-        }
+        return DialogueHighlightRangeFinder.findQuoteRangesInContext(
+            segments = context.segments,
+            currentSegmentIndex = context.currentIndex,
+            quotes = DOUBLE_QUOTES,
+            maxParagraphs = MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS,
+        )
     }
 
-    private fun doubleQuoteStateKey(contentDom: Any, bookKey: String, bookTitle: String): String {
-        val location = callNoArg(contentDom, "getLocation")
-        val spine = callNoArg(location, "getSpine")?.toString().orEmpty()
-        val itemref = callNoArg(location, "getItemref")?.toString().orEmpty()
-        val chapter = "$spine|$itemref".takeIf { spine.isNotBlank() || itemref.isNotBlank() }
-            ?: "dom:${System.identityHashCode(callNoArg(contentDom, "getParent") ?: contentDom)}"
-        return listOf(bookKey, bookTitle, chapter, isNightMode().toString()).joinToString("|")
-    }
-
-    private fun rollbackUnclosedContinuationHighlights(pending: List<PendingCrossSegmentHighlight>) {
-        pending.forEach { item ->
-            val contentDom = item.contentDom.get() ?: return@forEach
-            val fallback = highlightedAnnotatedString(item.originalContent, contentDom = null)
-                ?: item.originalContent
-            runCatching { field(contentDom.javaClass.name, "content").set(contentDom, fallback) }
-                .onFailure {
-                    XposedBridge.log("$LOG_PREFIX dialogue highlight rollback failed: ${it.message.orEmpty()}")
-                }
+    private fun dialogueParagraphContext(contentDom: Any, renderedText: String): DialogueParagraphContext? {
+        val containerDom = callNoArg(contentDom, "getParent") ?: return null
+        val element = callNoArg(containerDom, "getElement") ?: return null
+        val parentElement = callNoArg(element, "parent") ?: return null
+        val siblings = callNoArg(parentElement, "children") as? List<*> ?: return null
+        val elementIndex = siblings.indexOfFirst { it === element }
+        if (elementIndex < 0) return null
+        val radius = MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS - 1
+        val start = maxOf(0, elementIndex - radius)
+        val endExclusive = minOf(siblings.size, elementIndex + radius + 1)
+        val segments = siblings.subList(start, endExclusive).mapIndexed { index, sibling ->
+            if (start + index == elementIndex) renderedText
+            else callNoArg(sibling, "text")?.toString().orEmpty()
         }
+        return DialogueParagraphContext(segments, elementIndex - start)
     }
 
     private fun protectedStyledElementRanges(contentDom: Any, renderedText: String): List<IntRange> {
@@ -674,10 +643,6 @@ class ReaderDialogueHighlightHook(
     }
 
     private fun clearHighlightRuntimeCaches() {
-        synchronized(doubleQuoteCarryLock) {
-            doubleQuoteCarry?.let { rollbackUnclosedContinuationHighlights(it.pendingContinuations) }
-            doubleQuoteCarry = null
-        }
         synchronized(ninePatchDrawableCache) { ninePatchDrawableCache.clear() }
         synchronized(reedenBoxStyleCache) { reedenBoxStyleCache.clear() }
         synchronized(nineSliceCache) { nineSliceCache.clear() }
@@ -1650,15 +1615,9 @@ class ReaderDialogueHighlightHook(
         val sourceIndices: List<Int>,
     )
 
-    private data class DoubleQuoteCarryState(
-        val key: String,
-        val carry: DialogueHighlightRangeFinder.QuoteCarry,
-        val pendingContinuations: List<PendingCrossSegmentHighlight>,
-    )
-
-    private data class PendingCrossSegmentHighlight(
-        val contentDom: WeakReference<Any>,
-        val originalContent: Any,
+    private data class DialogueParagraphContext(
+        val segments: List<String>,
+        val currentIndex: Int,
     )
 
     private data class TextBox(
