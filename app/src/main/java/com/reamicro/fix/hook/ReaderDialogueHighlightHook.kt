@@ -41,6 +41,10 @@ class ReaderDialogueHighlightHook(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, NineSlice?>?): Boolean =
             size > MAX_CACHED_NINE_SLICES
     }
+    private val injectedHighlightSpanStyles = object : LinkedHashMap<Any, Unit>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Any, Unit>?): Boolean =
+            size > MAX_REMEMBERED_HIGHLIGHT_SPAN_STYLES
+    }
     private val rememberedNinePatchRanges = object : LinkedHashMap<String, RememberedNinePatchText>(32, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, RememberedNinePatchText>?): Boolean =
             size > MAX_REMEMBERED_NINE_PATCH_TEXTS
@@ -166,9 +170,9 @@ class ReaderDialogueHighlightHook(
                 ranges.mapNotNull { range -> createAnnotatedRange(style, range.first, range.last) }
             }
         if (rangeObjects.isEmpty()) return null
-        val originalSpanStyles = callNoArg(original, "getSpanStyles") as? List<*> ?: emptyList<Any>()
+        val originalSpanStyles = spanStylesWithoutInjectedHighlights(original)
         val nextSpanStyles = ArrayList<Any>(originalSpanStyles.size + rangeObjects.size).apply {
-            addAll(originalSpanStyles.filterNotNull())
+            addAll(originalSpanStyles)
             addAll(rangeObjects)
         }
         logHighlightPerformance {
@@ -350,7 +354,33 @@ class ReaderDialogueHighlightHook(
             null,
             mask,
             null,
-        )
+        ).also(::rememberInjectedHighlightSpanStyle)
+    }
+
+    private fun rememberInjectedHighlightSpanStyle(spanStyle: Any) {
+        synchronized(injectedHighlightSpanStyles) {
+            injectedHighlightSpanStyles[spanStyle] = Unit
+        }
+    }
+
+    private fun spanStylesWithoutInjectedHighlights(annotatedString: Any): List<Any> {
+        val spanStyles = (callNoArg(annotatedString, "getSpanStyles") as? List<*>)
+            ?.filterNotNull()
+            .orEmpty()
+        val markedRanges = highlightMarkerRanges(annotatedString)
+            .mapTo(HashSet()) { it.first to it.last }
+        if (spanStyles.isEmpty() || markedRanges.isEmpty()) return spanStyles
+        val injectedStyles = synchronized(injectedHighlightSpanStyles) {
+            injectedHighlightSpanStyles.keys.toList()
+        }
+        if (injectedStyles.isEmpty()) return spanStyles
+        return spanStyles.filterNot { range ->
+            val start = callNoArg(range, "getStart") as? Int ?: return@filterNot false
+            val end = callNoArg(range, "getEnd") as? Int ?: return@filterNot false
+            if ((start to end) !in markedRanges) return@filterNot false
+            val item = callNoArg(range, "getItem") ?: return@filterNot false
+            injectedStyles.any { it == item }
+        }
     }
 
     private fun isNightMode(): Boolean {
@@ -755,9 +785,9 @@ class ReaderDialogueHighlightHook(
             )
         }
         if (refreshed.isEmpty()) return null
-        val originalSpanStyles = callNoArg(annotatedString, "getSpanStyles") as? List<*> ?: emptyList<Any>()
+        val originalSpanStyles = spanStylesWithoutInjectedHighlights(annotatedString)
         val nextSpanStyles = ArrayList<Any>(originalSpanStyles.size + refreshed.size).apply {
-            addAll(originalSpanStyles.filterNotNull())
+            addAll(originalSpanStyles)
             addAll(refreshed.map { it.spanRange })
         }
         return newAnnotatedStringWithNinePatchAnnotations(
@@ -1502,6 +1532,7 @@ class ReaderDialogueHighlightHook(
         const val MAX_DERIVED_NINE_PATCH_TEXTS = 128
         const val MAX_CACHED_REEDEN_STYLES = 64
         const val MAX_CACHED_NINE_SLICES = 64
+        const val MAX_REMEMBERED_HIGHLIGHT_SPAN_STYLES = 64
         const val HIGHLIGHT_PERFORMANCE_LOG_INTERVAL_MS = 1500L
         const val REEDEN_BOX_EDGE_SCALE = 0.78f
         const val MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS = 5
