@@ -24,12 +24,11 @@ class ReaderAutoPageHook(
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val methodCache = HashMap<String, Method>()
-    private val settingsDepth = ThreadLocal.withInitial { 0 }
-    private val injectedInCurrentSettings = ThreadLocal.withInitial { false }
-    private val settingsRowCount = ThreadLocal.withInitial { 0 }
-    private val settingsRowDepth = ThreadLocal.withInitial { 0 }
-    private val settingsRowTopLevelStack = ThreadLocal.withInitial { ArrayDeque<Boolean>() }
+    private val readerSettingsBuildDepth = ThreadLocal.withInitial { 0 }
+    private val autoPageItemInjected = ThreadLocal.withInitial { false }
     private val renderingAutoPageSection = ThreadLocal.withInitial { false }
+    // 更多设置页面构建时捕获的 Composer，用于向 LazyListScope 注入自动翻页 item
+    private val readerSettingsComposer = ThreadLocal<Any?>()
 
     private var currentIntentReceiverRef: WeakReference<Any>? = null
     private var currentViewModelRef: WeakReference<Any>? = null
@@ -43,6 +42,7 @@ class ReaderAutoPageHook(
     private var pausedRemainingMs: Long = Long.MAX_VALUE
 
     fun install() {
+        activeInstance = this
         hookReaderViewModel()
         hookTapGesturesBox()
         hookReaderSettings()
@@ -94,108 +94,87 @@ class ReaderAutoPageHook(
     private fun hookReaderSettings() {
         runCatching {
             val settingsClass = cls(READER_SETTINGS_CLASS)
+            // 更多设置内部是 LazyColumn，不能在 SectionTitle 的 before 里直接 emit Row（会破坏 slot table）。
+            // 正确方案：hook ReaderMoreSettingScreen 设置深度标记，
+            // 再 hook LazyListScope.item$default，在第一个 item 前插入自动翻页 item。
+            val screenMethod = settingsClass.declaredMethods.firstOrNull {
+                it.name == READER_SETTINGS_SCREEN_METHOD
+            } ?: error("$READER_SETTINGS_CLASS.$READER_SETTINGS_SCREEN_METHOD not found")
+            screenMethod.isAccessible = true
+
             val composerClass = cls(COMPOSER_CLASS)
-            var scopeHookCount = 0
-            settingsClass.declaredMethods
-                .filter {
-                    isReaderSettingsScopeMethod(it, composerClass)
+            val composerIndex = screenMethod.parameterTypes.indexOfFirst { it == composerClass }
+            if (composerIndex < 0) error("Composer param not found in $READER_SETTINGS_SCREEN_METHOD")
+
+            // hook 屏幕方法：进入时设置深度+捕获 composer，退出时清除
+            XposedBridge.hookMethod(screenMethod, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    // 直接置 1（不累加），避免 LazyColumn content lambda 延迟执行导致 depth 一直累加
+                    readerSettingsBuildDepth.set(1)
+                    autoPageItemInjected.set(false)
+                    readerSettingsComposer.set(param.args.getOrNull(composerIndex))
+                    log("ReaderMoreSettingScreen before depth=${readerSettingsBuildDepth.get()}")
                 }
-                .forEach { method ->
-                    method.isAccessible = true
-                    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            val depth = settingsDepth.get()
-                            if (depth == 0) {
-                                injectedInCurrentSettings.set(false)
-                                settingsRowCount.set(0)
-                                settingsRowDepth.set(0)
-                                settingsRowTopLevelStack.get().clear()
-                            }
-                            settingsDepth.set(depth + 1)
-                        }
-
-                        override fun afterHookedMethod(param: MethodHookParam) {
-                            settingsDepth.set((settingsDepth.get() - 1).coerceAtLeast(0))
-                        }
-                    })
-                    scopeHookCount++
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    log("ReaderMoreSettingScreen after depth=${readerSettingsBuildDepth.get()} injected=${autoPageItemInjected.get()}")
+                    // LazyColumn content lambda 在方法返回后才执行，用 post 延迟清零，
+                    // 确保 item$default 注入完成后再清除，防止 depth 泄漏到其他页面
+                    Handler(Looper.getMainLooper()).post {
+                        readerSettingsBuildDepth.set(0)
+                        readerSettingsComposer.set(null)
+                    }
                 }
-            if (scopeHookCount == 0) {
-                XposedBridge.log("$LOG_PREFIX Reader auto page settings scope hook not found")
-            }
+            })
 
-            method(TEXT_KT_CLASS, TEXT_METHOD, 22).let { textMethod ->
-                XposedBridge.hookMethod(textMethod, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (renderingAutoPageSection.get()) return
-                        val text = param.args.getOrNull(0) as? String ?: return
-                        if (text !in DISPLAY_TITLE_CANDIDATES) return
-                        if (!canRunAutoPage()) return
-                        val scopedByHook = settingsDepth.get() > 0
-                        if (!scopedByHook && !isReaderSettingsStack()) return
-                        if (injectedInCurrentSettings.get()) return
-                        val composer = param.args.getOrNull(18) ?: return
-                        injectedInCurrentSettings.set(true)
-                        renderingAutoPageSection.set(true)
-                        try {
-                            renderAutoPageSection(composer)
-                        } finally {
-                            renderingAutoPageSection.set(false)
-                        }
-                        param.args[1] = sectionTitleModifier(
-                            top = NATIVE_TYPE_GROUP_TOP_PADDING,
-                            bottom = NATIVE_SECTION_TITLE_BOTTOM_PADDING,
-                        )
-                    }
-                })
-            }
-            method(ROW_KT_CLASS, ROW_METHOD, 7).let { rowMethod ->
-                XposedBridge.hookMethod(rowMethod, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (settingsDepth.get() <= 0) return
-                        val depth = settingsRowDepth.get()
-                        settingsRowTopLevelStack.get().addLast(depth == 0)
-                        settingsRowDepth.set(depth + 1)
-                    }
+            // hook LazyListScope.item$default：在第一个 item 前插入自动翻页 item
+            val lazyListScopeClass = cls(LAZY_LIST_SCOPE_CLASS)
+            val itemDefaultMethod = lazyListScopeClass.declaredMethods.firstOrNull {
+                it.name == LAZY_ITEM_DEFAULT_METHOD && it.parameterTypes.size == 6
+            } ?: error("LazyListScope.$LAZY_ITEM_DEFAULT_METHOD not found")
+            itemDefaultMethod.isAccessible = true
 
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (settingsDepth.get() <= 0) return
-                        val depth = (settingsRowDepth.get() - 1).coerceAtLeast(0)
-                        settingsRowDepth.set(depth)
-                        val isTopLevel = settingsRowTopLevelStack.get().removeLastOrNull() == true
-                        if (!isTopLevel || injectedInCurrentSettings.get()) return
-                        val rowIndex = settingsRowCount.get()
-                        settingsRowCount.set(rowIndex + 1)
-                        if (rowIndex == 0) {
-                            if (!canRunAutoPage()) return
-                            val composer = param.args.getOrNull(4) ?: return
-                            injectedInCurrentSettings.set(true)
-                            renderAutoPageSection(composer)
-                        }
-                    }
-                })
-            }
-            XposedBridge.log("$LOG_PREFIX Reader auto page settings UI hook installed ($scopeHookCount scope hooks)")
+            XposedBridge.hookMethod(itemDefaultMethod, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (renderingAutoPageSection.get()) return
+                    // 用 composer 引用判断是否在更多设置页面，比 depth 计数器更可靠
+                    val composer = readerSettingsComposer.get() ?: return
+                    if (autoPageItemInjected.get()) return
+                    autoPageItemInjected.set(true)
+                    val lazyListScope = param.args[0] ?: return
+                    insertAutoPageItem(lazyListScope, composer)
+                }
+            })
+
+            XposedBridge.log("$LOG_PREFIX Reader auto page settings UI hook installed (LazyListScope.item)")
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX Reader auto page settings UI hook failed: ${it.stackTraceToString()}")
         }
     }
 
-    private fun isReaderSettingsScopeMethod(method: Method, composerClass: Class<*>): Boolean {
-        val parameterTypes = method.parameterTypes
-        // 阅微 2.2.0 起 Settings 的签名从 (Composer, Int) 变为 (Function0, Composer, Int)，
-        // ReaderSettings$lambda$2 从 5 参变为 6 参 (…, Composer, Int)。
-        // 不再写死参数个数/位置，只要求“末两参为 (Composer, Int)”即可匹配，抗后续版本变动。
-        val endsWithComposerInt = parameterTypes.size >= 2 &&
-            parameterTypes[parameterTypes.size - 2] == composerClass &&
-            parameterTypes[parameterTypes.size - 1] == Int::class.javaPrimitiveType
-        if (!endsWithComposerInt) return false
-        return method.name == READER_SETTINGS_PRIVATE_METHOD ||
-            method.name == READER_SETTINGS_CONTENT_LAMBDA_METHOD
+    private fun insertAutoPageItem(lazyListScope: Any, composer: Any) {
+        renderingAutoPageSection.set(true)
+        runCatching {
+            val itemContent = functionProxy("AutoPageItem", FUNCTION3_CLASS) { args ->
+                val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
+                renderAutoPageSection(innerComposer)
+                targetUnit()
+            }
+            // item$default 是静态合成方法：invoke(null, $this, key, contentType, content, mask, obj)
+            // mask=2 表示 contentType 使用默认值（null），key 由我们显式传入
+            method(LAZY_LIST_SCOPE_CLASS, LAZY_ITEM_DEFAULT_METHOD, 6).invoke(
+                null, lazyListScope, AUTO_PAGE_ITEM_KEY, null, itemContent, 2, null
+            )
+        }.onFailure {
+            log("insertAutoPageItem failed: ${it.message}")
+        }
+        renderingAutoPageSection.set(false)
+        // 注入完成后清除深度标记（LazyColumn content lambda 在 ReaderMoreSettingScreen 返回后才执行，
+        // 所以不能在 afterHookedMethod 里清除，而是在这里清除）
+        readerSettingsBuildDepth.set(0)
+        readerSettingsComposer.set(null)
     }
 
     private fun renderAutoPageSection(composer: Any) {
-        if (!canRunAutoPage()) return
         runCatching {
             ensureUiStates()
             log("render auto page section")
@@ -203,13 +182,12 @@ class ReaderAutoPageHook(
                 val rowScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
                 val innerComposer = args.getOrNull(1) ?: return@functionProxy targetUnit()
                 renderTimerSlider(rowScope, innerComposer)
-                renderStartStopButton(innerComposer)
                 renderIntervalSlider(rowScope, innerComposer)
                 targetUnit()
             }
             method(ROW_KT_CLASS, ROW_METHOD, 7).invoke(
                 null,
-                fillMaxWidth(sectionTitleModifier(top = AUTO_PAGE_SECTION_TOP_PADDING, bottom = 0)),
+                fillMaxWidth(sectionTitleModifier(top = 8, bottom = 0)),
                 spacedBy(20),
                 alignmentTop(),
                 rowContent,
@@ -608,31 +586,28 @@ class ReaderAutoPageHook(
     private fun mutableState(value: Any): Any =
         method(SNAPSHOT_STATE_KT_CLASS, MUTABLE_STATE_OF_DEFAULT_METHOD, 4).invoke(null, value, null, 2, null)
 
+    private fun circleShape(): Any =
+        method(FOUNDATION_SHAPE_KT_CLASS, CIRCLE_SHAPE_METHOD, 0).invoke(null)
+
+    private fun clipModifier(modifier: Any): Any =
+        method(CLIP_KT_CLASS, CLIP_METHOD, 2).invoke(null, modifier, circleShape())
+
+    private fun borderModifier(modifier: Any, color: Long): Any =
+        method(BORDER_KT_CLASS, BORDER_METHOD, 4).invoke(null, modifier, udp(1), color, circleShape())
+
     private fun circleButtonModifier(composer: Any): Any {
-        val positioned = method(PADDING_KT_CLASS, PADDING_ABSOLUTE_DEFAULT_METHOD, 7).invoke(
-            null,
-            modifierInstance(),
-            0f,
-            udp(AUTO_PAGE_BUTTON_TOP_PADDING),
-            0f,
-            0f,
-            13,
-            null,
-        )
+        val padded = method(PADDING_KT_CLASS, PADDING_ABSOLUTE_DEFAULT_METHOD, 7).invoke(
+            null, modifierInstance(), 0f, udp(AUTO_PAGE_BUTTON_TOP_PADDING), 0f, 0f, 13, null)
+        val sized = sizeModifier(padded, AUTO_PAGE_BUTTON_SIZE)
+        val bordered = borderModifier(sized, borderVariant(composer))
+        val clipped = clipModifier(bordered)
         return method(CLICKABLE_KT_CLASS, CLICKABLE_DEFAULT_METHOD, 9).invoke(
-            null,
-            sizeModifier(positioned, AUTO_PAGE_BUTTON_SIZE),
-            null,
-            null,
-            false,
-            null,
-            null,
+            null, clipped, null, null, false, null, null,
             functionProxy("AutoPageToggle", FUNCTION0_CLASS) {
                 toggleAutoPage()
                 targetUnit()
             },
-            28,
-            null,
+            28, null,
         )
     }
 
@@ -662,10 +637,10 @@ class ReaderAutoPageHook(
         return method(MATERIAL_SLIDER_DEFAULTS_CLASS, SLIDER_DEFAULT_COLORS_METHOD, 14).invoke(
             defaults,
             sliderBrushColor(backgroundBright(composer)),
-            null,
-            sliderBrushColor(borderVariant(composer)),
-            null,
             sliderBrushColor(backgroundDim(composer)),
+            sliderBrushColor(borderVariant(composer)),
+            sliderBrushColor(backgroundDim(composer)),
+            sliderBrushColor(borderVariant(composer)),
             null,
             sliderBrushColor(transparentColor()),
             sliderBrushColor(transparentColor()),
@@ -674,7 +649,7 @@ class ReaderAutoPageHook(
             composer,
             0,
             6,
-            810,
+            800,
         )
     }
 
@@ -814,14 +789,6 @@ class ReaderAutoPageHook(
     private fun targetUnit(): Any =
         staticObject(UNIT_CLASS, "INSTANCE")
 
-    private fun isReaderSettingsStack(): Boolean =
-        Thread.currentThread().stackTrace.any {
-            it.className == READER_SETTINGS_CLASS &&
-                (it.methodName == READER_SETTINGS_PRIVATE_METHOD ||
-                    it.methodName == READER_SETTINGS_CONTENT_LAMBDA_METHOD ||
-                    it.methodName.startsWith("ReaderSettings"))
-        }
-
     private fun log(message: String) {
         XposedBridge.log("$LOG_PREFIX $message")
         Log.i(ANDROID_LOG_TAG, message)
@@ -857,14 +824,20 @@ class ReaderAutoPageHook(
     private fun formatHours(value: Float): String =
         String.format(Locale.US, "%.1f", value)
 
-    private companion object {
+    companion object {
         const val LOG_PREFIX = "ReaMicro LSP"
         const val ANDROID_LOG_TAG = "ReaMicroAutoPage"
 
         const val READER_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.reader.ReaderViewModel"
-        const val READER_SETTINGS_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderSettingsKt"
-        const val READER_SETTINGS_PRIVATE_METHOD = "Settings"
-        const val READER_SETTINGS_CONTENT_LAMBDA_METHOD = "ReaderSettings\$lambda\$2"
+        // 阅微 2.3.0：阅读设置界面由 ReaderSettingsKt 重构为 ReaderMoreSettingScreenKt
+        const val READER_SETTINGS_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderMoreSettingScreenKt"
+        const val READER_SETTINGS_SCREEN_METHOD = "ReaderMoreSettingScreen"
+        const val SECTION_TITLE_METHOD = "SectionTitle"
+        // 更多设置是 LazyColumn，通过 hook LazyListScope.item$default 在第一个 item 前插入自动翻页项
+        const val LAZY_LIST_SCOPE_CLASS = "androidx.compose.foundation.lazy.LazyListScope"
+        const val LAZY_ITEM_DEFAULT_METHOD = "item\$default"
+        // 自动翻页 item 的唯一 key，避免与宿主 item key 冲突
+        const val AUTO_PAGE_ITEM_KEY = 0x7A70_0001
         const val TAP_GESTURES_BOX_CLASS = "app.zhendong.reamicro.ui.reader.components.TapGesturesBoxKt"
         const val TAP_GESTURES_BOX_METHOD = "TapGesturesBox"
         const val TAP_DIRECTION_CLASS = "app.zhendong.reamicro.ui.reader.ReaderUiIntent\$TapDirection"
@@ -893,6 +866,8 @@ class ReaderAutoPageHook(
         const val CLICKABLE_DEFAULT_METHOD = "clickable-O2vRcR0\$default"
         const val BACKGROUND_KT_CLASS = "androidx.compose.foundation.BackgroundKt"
         const val BACKGROUND_DEFAULT_METHOD = "background-bw27NRU\$default"
+        const val BORDER_KT_CLASS = "androidx.compose.foundation.BorderKt"
+        const val BORDER_METHOD = "border-xT4_qwU"
         const val CLIP_KT_CLASS = "androidx.compose.ui.draw.ClipKt"
         const val CLIP_METHOD = "clip"
         const val SHAPE_KT_CLASS = "app.zhendong.reamicro.arch.components.ShapeKt"
@@ -949,5 +924,24 @@ class ReaderAutoPageHook(
         const val AUTO_PAGE_BUTTON_SIZE = 34
         val AUTO_PAGE_TOKEN = Any()
         val DISPLAY_TITLE_CANDIDATES = setOf("\u663e\u793a", "\u93c4\u5267\u305a")
+
+        @Volatile private var activeInstance: ReaderAutoPageHook? = null
+
+        // 自动阅读开关是否开启（模块设置里的总开关）。
+        fun isAutoPageEnabled(): Boolean =
+            activeInstance?.canRunAutoPage() ?: false
+
+        // 自动阅读是否正在运行（已启动且未暂停）。
+        fun isAutoPageRunning(): Boolean =
+            activeInstance?.isRunning() ?: false
+
+        // 切换自动阅读开始/暂停状态。
+        fun toggleAutoPage() {
+            activeInstance?.toggleAutoPage()
+        }
+
+        // 获取自动阅读图标（运行中=暂停图标，停止=播放图标）。
+        fun autoPageIcon(running: Boolean): Any? =
+            activeInstance?.runCatching { autoPageIcon(running) }?.getOrNull()
     }
 }

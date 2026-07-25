@@ -84,6 +84,11 @@ class ReaderHook(
     private var currentSelectionControllerRef: WeakReference<Any>? = null
     private var currentEpubRef: WeakReference<Any>? = null
     private var currentPageRef: WeakReference<Any>? = null
+    // 强引用镜像：currentEpubRef/currentPageRef 是弱引用，会被 GC 随机回收，
+    // 导致 canShowReaderSearchEntry() 判定失败、宿主弹"暂无法搜索当前书籍"。
+    // 阅读会话期间用强引用持有当前 epub/page，防止被回收；退出阅读/切书时清空避免泄漏。
+    private var currentEpubStrong: Any? = null
+    private var currentPageStrong: Any? = null
     private var currentViewModelRef: WeakReference<Any>? = null
     private var currentSessionRef: WeakReference<Any>? = null
     private var searchPageDialogRef: WeakReference<Dialog>? = null
@@ -123,14 +128,13 @@ class ReaderHook(
     @Volatile private var lastRestoredReadAloudProgressKey: String = ""
     @Volatile private var lastReadAloudProgressSyncAtMs: Long = 0L
     @Volatile private var pendingReaderHighlightSheet: ReaderHighlightSheetRequest? = null
+    // 高亮页面（ReaderHighlightScreen）的 onBack 回调（Function0），点击"补全计划"时先关闭高亮页
+    // 再打开阅读页底部的高亮规则 sheet，避免 sheet 被高亮页盖住。
+    @Volatile private var readerHighlightScreenBackRef: WeakReference<Any>? = null
     private val composeMethodCache = HashMap<String, Method>()
-    private val renderingHighlightQuickRow = ThreadLocal.withInitial { false }
-    private val pendingReaderTypeSettingFontTitle = ThreadLocal<PendingReaderTypeSettingTitle?>()
-    private val readerTypeSettingDepth = ThreadLocal.withInitial { 0 }
-    private val readerTypeSettingInjected = ThreadLocal.withInitial { false }
-    private val readerTypeSettingRowCount = ThreadLocal.withInitial { 0 }
-    private val readerTypeSettingRowDepth = ThreadLocal.withInitial { 0 }
-    private val readerTypeSettingRowTopLevelStack = ThreadLocal.withInitial { ArrayDeque<Boolean>() }
+    private val renderingHighlightScreenEntry = ThreadLocal.withInitial { false }
+    private val highlightScreenEntryInjected = ThreadLocal.withInitial { false }
+
     // Rendering hooks run on the host reader pipeline. ThreadLocal keeps the current page
     // available to downstream text/cfi hooks without leaking it across concurrent renders.
     private val renderingEpubPage = ThreadLocal<Any?>()
@@ -175,7 +179,7 @@ class ReaderHook(
         hookReaderCatalog()
         hookReaderBottomBar()
         hookInlineSearchIcon()
-        hookReaderTypeSettingHighlightRow()
+        hookReaderHighlightScreenEntry()
         hookReaderHighlightRuleSheet()
         hookReaderFamilySheetHeight()
         hookHomeBookshelfScreen()
@@ -202,10 +206,13 @@ class ReaderHook(
         settingsProvider().canUseReaderReadAloudSelection && currentEpubRoot() != null
 
     private fun canShowReaderSearchEntry(): Boolean =
-        canRunFullTextSearch() && currentEpubRoot() != null && currentPageRef?.get() != null
+        canRunFullTextSearch() && currentEpubRoot() != null && currentReaderPage() != null
 
     private fun canShowReaderReadAloudEntry(): Boolean =
-        canRunReadAloud() && currentEpubRoot() != null && currentPageRef?.get() != null
+        canRunReadAloud() && currentEpubRoot() != null && currentReaderPage() != null
+
+    private fun currentReaderPage(): Any? =
+        currentPageStrong ?: currentPageRef?.get()
 
     private fun hookReaderViewModel() {
         runCatching {
@@ -238,6 +245,8 @@ class ReaderHook(
                     activityProvider()?.runOnUiThread { removeReadAloudMenuButton() }
                     currentEpubRef = null
                     currentPageRef = null
+                    currentEpubStrong = null
+                    currentPageStrong = null
                     resetFullTextSearchState("ReaderViewModel cleared", removeOverlays = true)
                 }
             })
@@ -247,6 +256,7 @@ class ReaderHook(
                     if (intent.javaClass.name != "$READER_UI_INTENT_CLASS\$Statistics") return
                     val page = callNoArg(intent, "getPage") ?: return
                     currentPageRef = WeakReference(page)
+                    currentPageStrong = page
                     currentVisiblePageSignature = epubPageSignature(page)
                     currentVisiblePageNumber = epubPageNumber(page)
                     XposedBridge.log(
@@ -438,7 +448,11 @@ class ReaderHook(
                             }
                             return
                         }
-                        if (status?.toString() != "Catalog") return
+                        if (status?.toString() != "Catalog") {
+                            XposedBridge.log("$LOG_PREFIX catalog skip status='${status}'")
+                            return
+                        }
+                        XposedBridge.log("$LOG_PREFIX catalog captured status='${status}'")
                         val catalog = (param.args?.getOrNull(4) as? List<*>)?.filterNotNull().orEmpty()
                         val context = CatalogContext(
                             intentReceiver = param.args?.getOrNull(0),
@@ -513,14 +527,23 @@ class ReaderHook(
             returnToSearchOrigin(clearNavigation = true, removeBar = false)
         }
         removeReadAloudMenuButton()
-        currentEpubRef = null
-        currentPageRef = null
-        bottomReadAloudReceiverRef = null
-        bottomReadAloudBookRef = null
-        readerBottomMenuVisible = false
-        updateReaderHighlightBookContext("", "", "home rendered: $source", requestRefresh = false)
-        if (hadReaderSearchState) {
-            resetFullTextSearchState("home rendered: $source", removeOverlays = true)
+        // HomeScreen/BookshelfScreen 这两个 Composable 会在阅读页仍在前台时被 Compose 后台重组，
+        // 若无条件清空 epub/page 强引用与搜索上下文，会导致"同一本书忽然搜不了"的间歇性失败。
+        // 仅当 ReaderViewModel 已销毁（真正离开阅读页，onCleared 未覆盖时的兜底）才清空这些引用；
+        // 否则保留，等切书时由 Epub.read 的换书检测或 onCleared 负责重置。
+        val readerGone = currentViewModelRef?.get() == null
+        if (readerGone) {
+            currentEpubRef = null
+            currentPageRef = null
+            currentEpubStrong = null
+            currentPageStrong = null
+            bottomReadAloudReceiverRef = null
+            bottomReadAloudBookRef = null
+            readerBottomMenuVisible = false
+            updateReaderHighlightBookContext("", "", "home rendered: $source", requestRefresh = false)
+            if (hadReaderSearchState) {
+                resetFullTextSearchState("home rendered: $source", removeOverlays = true)
+            }
         }
     }
 
@@ -618,17 +641,32 @@ class ReaderHook(
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        val statusName = param.args?.getOrNull(3)?.toString().orEmpty()
+                        // 阅微 2.3.0：ReaderBottomBar 参数为 (IntentReceiver, Book, UiStatus, Flow, onNavigateBack, ...)
+                        // 旧版为 (?, receiver, book, status)，此处按新签名取值：receiver=0/book=1/status=2。
+                        val status = param.args?.getOrNull(2)
+                        val statusName = status?.javaClass?.simpleName.orEmpty()
+                        val menuVisible = statusName.isNotBlank() && statusName != "Reader"
+                        // 自动阅读开关开启时，把底栏最左返回键（p4 onNavigateBack, Function0）替换为切换开始/暂停。
+                        // 与全文搜索互斥：搜索只用主题键，返回键固定归自动阅读。
+                        if (menuVisible && ReaderAutoPageHook.isAutoPageEnabled()) {
+                            // 把 p4 onNavigateBack（第一个 Function0）替换为切换自动阅读开始/暂停。
+                            val args = param.args ?: return
+                            val backIdx = args.indexOfFirst { it != null &&
+                                it.javaClass.interfaces.any { iface -> iface.name == "kotlin.jvm.functions.Function0" } }
+                            if (backIdx >= 0) {
+                                args[backIdx] = nativeFunction0 { ReaderAutoPageHook.toggleAutoPage() }
+                            }
+                        }
                         val canShowSearchEntry = canShowReaderSearchEntry()
                         val canShowReadAloudEntry = canShowReaderReadAloudEntry()
-                        readerBottomMenuVisible = canShowSearchEntry && statusName.isNotBlank() && statusName != "Reader"
+                        readerBottomMenuVisible = canShowSearchEntry && menuVisible
                         if (canShowSearchEntry && statusName == "Menu") {
-                            param.args?.getOrNull(1)?.let { bottomSearchReceiverRef = WeakReference(it) }
-                            param.args?.getOrNull(2)?.let { bottomSearchBookRef = WeakReference(it) }
+                            param.args?.getOrNull(0)?.let { bottomSearchReceiverRef = WeakReference(it) }
+                            param.args?.getOrNull(1)?.let { bottomSearchBookRef = WeakReference(it) }
                         }
                         if (canShowReadAloudEntry && statusName == "Menu") {
-                            param.args?.getOrNull(1)?.let { bottomReadAloudReceiverRef = WeakReference(it) }
-                            param.args?.getOrNull(2)?.let { bottomReadAloudBookRef = WeakReference(it) }
+                            param.args?.getOrNull(0)?.let { bottomReadAloudReceiverRef = WeakReference(it) }
+                            param.args?.getOrNull(1)?.let { bottomReadAloudBookRef = WeakReference(it) }
                         }
                     }
 
@@ -646,10 +684,10 @@ class ReaderHook(
                             }
                             return
                         }
-                        val receiver = param.args?.getOrNull(1)
-                        val book = param.args?.getOrNull(2)
-                        val status = param.args?.getOrNull(3)
-                        val statusName = status?.toString().orEmpty()
+                        val receiver = param.args?.getOrNull(0)
+                        val book = param.args?.getOrNull(1)
+                        val status = param.args?.getOrNull(2)
+                        val statusName = status?.javaClass?.simpleName.orEmpty()
                         val canShowSearchEntry = canShowReaderSearchEntry()
                         val canShowReadAloudEntry = canShowReaderReadAloudEntry()
                         readerBottomMenuVisible = canShowSearchEntry && statusName.isNotBlank() && statusName != "Reader"
@@ -678,10 +716,25 @@ class ReaderHook(
 
     @Volatile private var nextIconIsDarkLightToggle = false
     @Volatile private var nextIconIsReaderBack = false
+    @Volatile private var nextIconIsAutoPage = false
 
     private fun hookInlineSearchIcon() {
         runCatching {
-            // hook getDarkMode/getLightMode：设置标志位，下一个 Icon 调用替换为搜索图标
+            // hook getArrowBack：自动阅读开关开启时设置标志位，下一个 Icon 调用替换为播放/暂停图标。
+            runCatching {
+                val cls = classLoader.loadClass(ARROW_BACK_ICON_CLASS)
+                cls.declaredMethods.filter { it.name == "getArrowBack" && it.parameterTypes.size == 1 }.forEach { m ->
+                    m.isAccessible = true
+                    XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!ReaderAutoPageHook.isAutoPageEnabled()) return
+                            if (!readerBottomMenuVisible) return
+                            nextIconIsAutoPage = true
+                        }
+                    })
+                }
+            }
+            // hook getDarkMode/getLightMode：inlineSearchIconEnabled 模式下设置标志位，下一个 Icon 替换为搜索图标。
             listOf(DARK_MODE_ICON_CLASS to "getDarkMode", LIGHT_MODE_ICON_CLASS to "getLightMode").forEach { (className, methodName) ->
                 runCatching {
                     val cls = classLoader.loadClass(className)
@@ -697,20 +750,7 @@ class ReaderHook(
                     }
                 }
             }
-            // hook Icon-ww6aTOc：替换 imageVector 为 Search 图标
-            runCatching {
-                val cls = classLoader.loadClass(ARROW_BACK_ICON_CLASS)
-                cls.declaredMethods.filter { it.name == "getArrowBack" && it.parameterTypes.size == 1 }.forEach { m ->
-                    m.isAccessible = true
-                    XposedBridge.hookMethod(m, object : XC_MethodHook() {
-                        override fun afterHookedMethod(param: MethodHookParam) {
-                            if (settingsProvider().inlineSearchIconEnabled) return
-                            if (!canRunFullTextSearch() || !readerBottomMenuVisible) return
-                            nextIconIsReaderBack = true
-                        }
-                    })
-                }
-            }
+            // hook Icon-ww6aTOc：替换 imageVector（自动阅读图标优先，其次搜索图标）
             val iconClass = classLoader.loadClass("androidx.compose.material3.IconKt")
             iconClass.declaredMethods.filter {
                 it.name == "Icon-ww6aTOc" && it.parameterTypes.size == 7
@@ -718,20 +758,25 @@ class ReaderHook(
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (!canRunFullTextSearch() || !readerBottomMenuVisible) return
-                        val replace = if (settingsProvider().inlineSearchIconEnabled) {
-                            nextIconIsDarkLightToggle.also { nextIconIsDarkLightToggle = false }
-                        } else {
-                            nextIconIsReaderBack.also { nextIconIsReaderBack = false }
+                        // 自动阅读图标替换（优先级最高）
+                        if (nextIconIsAutoPage) {
+                            nextIconIsAutoPage = false
+                            val icon = ReaderAutoPageHook.autoPageIcon(ReaderAutoPageHook.isAutoPageRunning()) ?: return
+                            param.args?.set(0, icon)
+                            return
                         }
-                        if (!replace) return
+                        // 搜索图标替换（仅 inlineSearchIconEnabled 模式，替换主题键图标）
+                        if (!settingsProvider().inlineSearchIconEnabled) return
+                        if (!canRunFullTextSearch() || !readerBottomMenuVisible) return
+                        if (!nextIconIsDarkLightToggle) return
+                        nextIconIsDarkLightToggle = false
                         val searchIcon = searchImageVector() ?: return
-                        // 替换 imageVector 参数（位置 0）为搜索图标
                         param.args?.set(0, searchIcon)
                     }
                 })
             }
-            // hook clickable-oSLSa3U$default：将深浅色按钮的点击回调替换为打开搜索
+            // hook clickable-oSLSa3U$default：将主题切换按钮的点击回调替换为打开搜索（仅 inlineSearchIconEnabled 模式）
+            // 非 inlineSearchIconEnabled 模式下不替换返回键点击，返回键留给自动阅读使用。
             runCatching {
                 val clickableClass = classLoader.loadClass("androidx.compose.foundation.ClickableKt")
                 clickableClass.declaredMethods.filter {
@@ -745,11 +790,9 @@ class ReaderHook(
                             extractNavGraphScopeFromLambda(onClick)?.let { navGraphScope ->
                                 currentReaderNavGraphScopeRef = WeakReference(navGraphScope)
                             }
-                            val replace = if (settingsProvider().inlineSearchIconEnabled) {
+                            // 只在 inlineSearchIconEnabled 模式下替换主题键点击为搜索
+                            val replace = settingsProvider().inlineSearchIconEnabled &&
                                 isReaderBottomBarDarkLightToggleClick(onClick)
-                            } else {
-                                isReaderBottomBarBackClick(onClick)
-                            }
                             if (!replace) return
                             param.args[5] = nativeFunction0 { openBottomSearchPage() }
                         }
@@ -792,172 +835,80 @@ class ReaderHook(
             cls.declaredFields.any { it.type.name == NAV_GRAPH_SCOPE_CLASS }
         }.getOrDefault(false)
 
-    private fun hookReaderTypeSettingHighlightRow() {
+    // 在阅微原生高亮界面（底栏搜索右侧那个"高亮"按钮打开的 ReaderHighlightScreen）的
+    // 高亮列表 LazyColumn 最前面注入一个"补全计划"入口 item，显示在"预设规则"分组标题上方。
+    // 关键：高亮界面用 LazyColumn 渲染，其 content lambda 被 R8 内联导致 Xposed 无法直接 hook。
+    // 因此改为 hook HighlightPageContent 主方法标记渲染区间，借用宿主自身调用 item$default 的
+    // 时机（见 ReaMicroSettingsHook.hookLazyListItem）在第一个 item 之前插入入口，位于列表最上方。
+    private fun hookReaderHighlightScreenEntry() {
         runCatching {
-            val typeSettingClass = classLoader.loadClass(READER_TYPE_SETTING_CLASS)
+            val screenClass = classLoader.loadClass(READER_HIGHLIGHT_SCREEN_CLASS)
             val composerClass = classLoader.loadClass(COMPOSER_CLASS)
-            var scopeHookCount = 0
-            typeSettingClass.declaredMethods
-                .filter { isReaderTypeSettingScopeMethod(it, composerClass) }
-                .forEach { method ->
-                    method.isAccessible = true
-                    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            val depth = readerTypeSettingDepth.get()
-                            if (depth == 0) {
-                                readerTypeSettingInjected.set(false)
-                                readerTypeSettingRowCount.set(0)
-                                readerTypeSettingRowDepth.set(0)
-                                readerTypeSettingRowTopLevelStack.get().clear()
-                                pendingReaderTypeSettingFontTitle.remove()
-                            }
-                            readerTypeSettingDepth.set(depth + 1)
-                        }
-
-                        override fun afterHookedMethod(param: MethodHookParam) {
-                            readerTypeSettingDepth.set((readerTypeSettingDepth.get() - 1).coerceAtLeast(0))
-                        }
-                    })
-                    scopeHookCount++
+            // HighlightPageContent(List, String, Modifier, Function1, Function1, Function0, Composer, int, int)：
+            // 阅微原生高亮页正文（普通 Column）。每次渲染在 before 重置"入口已注入"标志。
+            val pageContentMethod = screenClass.declaredMethods.firstOrNull { method ->
+                method.name == "HighlightPageContent" &&
+                    method.parameterTypes.firstOrNull()?.name == "java.util.List" &&
+                    method.parameterTypes.any { it == composerClass }
+            } ?: error("HighlightPageContent main method not found")
+            pageContentMethod.isAccessible = true
+            XposedBridge.hookMethod(pageContentMethod, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    highlightScreenEntryInjected.set(false)
                 }
-            val textClass = classLoader.loadClass(MATERIAL3_TEXT_CLASS)
-            val methods = textClass.declaredMethods.filter { method ->
-                method.name.startsWith("Text") &&
-                    method.parameterTypes.size == 22 &&
-                    method.parameterTypes.firstOrNull() == String::class.java
-            }
-            methods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (renderingHighlightQuickRow.get() == true) return
-                        val text = param.args?.getOrNull(0) as? String ?: return
-                        if (text !in READER_TYPE_SETTING_TITLE_TEXTS) return
-                        if (readerTypeSettingDepth.get() <= 0 && !isInReaderTypeSettingCompose()) return
-                        val args = param.args?.copyOf() ?: return
-                        pendingReaderTypeSettingFontTitle.set(PendingReaderTypeSettingTitle(method, args))
-                        if (text == "\u5b57\u4f53" && !readerTypeSettingInjected.get()) {
-                            val composer = args.getOrNull(18) ?: return
-                            readerTypeSettingInjected.set(true)
-                            renderingHighlightQuickRow.set(true)
-                            try {
-                                renderReaderHighlightQuickSection(composer)
-                            } finally {
-                                renderingHighlightQuickRow.set(false)
-                            }
-                        }
+            })
+            // SectionTitleLikeMore(String title, Modifier, Composer, int, int)：分组标题（"预设规则"/"自定义"）。
+            // 在第一个标题前注入"补全计划"入口卡片，点击后通过宿主 NavHost 导航到完整聚合页
+            // （复用宿主页面框架与返回），不再就地替换或跳过原生内容。
+            val sectionTitleMethod = screenClass.declaredMethods.firstOrNull { method ->
+                method.name == "SectionTitleLikeMore" &&
+                    method.parameterTypes.firstOrNull() == String::class.java &&
+                    method.parameterTypes.any { it == composerClass }
+            } ?: error("SectionTitleLikeMore method not found")
+            sectionTitleMethod.isAccessible = true
+            val composerIndex = sectionTitleMethod.parameterTypes.indexOfFirst { it == composerClass }
+            XposedBridge.hookMethod(sectionTitleMethod, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val composer = param.args?.getOrNull(composerIndex) ?: return
+                    // 只在第一个标题前注入入口卡片，标题继续正常渲染。
+                    if (highlightScreenEntryInjected.get() == true) return
+                    highlightScreenEntryInjected.set(true)
+                    val bookKey = ReaderHighlightBookContext.bookKey
+                    val bookTitle = ReaderHighlightBookContext.bookTitle
+                    ReaMicroSettingsHook.renderReaderHighlightScreenEntryCard(
+                        bookKey = bookKey,
+                        bookTitle = bookTitle,
+                        composer = composer,
+                    ) {
+                        XposedBridge.log("$LOG_PREFIX highlight entry card clicked")
+                        openReaderCompletionPlanPage()
                     }
-                })
-            }
-            composeMethod(ROW_KT_CLASS, ROW_METHOD, 7).let { rowMethod ->
-                XposedBridge.hookMethod(rowMethod, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (renderingHighlightQuickRow.get() == true) return
-                        if (readerTypeSettingDepth.get() <= 0) return
-                        val depth = readerTypeSettingRowDepth.get()
-                        readerTypeSettingRowTopLevelStack.get().addLast(depth == 0)
-                        readerTypeSettingRowDepth.set(depth + 1)
-                    }
-
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (renderingHighlightQuickRow.get() == true) return
-                        if (readerTypeSettingDepth.get() <= 0) return
-                        val depth = (readerTypeSettingRowDepth.get() - 1).coerceAtLeast(0)
-                        readerTypeSettingRowDepth.set(depth)
-                        val isTopLevel = readerTypeSettingRowTopLevelStack.get().removeLastOrNull() == true
-                        if (!isTopLevel || readerTypeSettingInjected.get()) return
-                        val rowIndex = readerTypeSettingRowCount.get()
-                        readerTypeSettingRowCount.set(rowIndex + 1)
-                        if (rowIndex != READER_TYPE_SETTING_INSERT_AFTER_ROW_INDEX) return
-                        val composer = param.args?.getOrNull(4) ?: return
-                        readerTypeSettingInjected.set(true)
-                        renderingHighlightQuickRow.set(true)
-                        try {
-                            renderReaderHighlightQuickSection(composer)
-                        } finally {
-                            renderingHighlightQuickRow.set(false)
-                        }
-                    }
-                })
-            }
-            XposedBridge.log(
-                "$LOG_PREFIX reader highlight type-setting row hook installed: " +
-                    "scope=$scopeHookCount text=${methods.size}",
-            )
+                }
+            })
+            XposedBridge.log("$LOG_PREFIX reader highlight screen entry hook installed")
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX reader highlight type-setting row hook failed: ${it.stackTraceToString()}")
+            XposedBridge.log("$LOG_PREFIX reader highlight screen entry hook failed: ${it.stackTraceToString()}")
         }
     }
 
-    private fun isReaderTypeSettingScopeMethod(method: Method, composerClass: Class<*>): Boolean {
-        val parameterTypes = method.parameterTypes
-        return method.name == "TypeSetting" &&
-            parameterTypes.size == 4 &&
-            parameterTypes.getOrNull(2) == composerClass &&
-            parameterTypes.getOrNull(3) == Int::class.javaPrimitiveType
-    }
-
-    private fun isInReaderTypeSettingCompose(): Boolean =
-        Thread.currentThread().stackTrace.any { frame ->
-            frame.className == READER_TYPE_SETTING_CLASS && frame.methodName.contains("TypeSetting")
-        }
-
-    private fun renderReaderHighlightQuickSection(composer: Any) {
-        val pendingTitle = pendingReaderTypeSettingFontTitle.get() ?: return
-        val highlightTitleArgs = pendingTitle.args.copyOf()
-        highlightTitleArgs[0] = "\u9ad8\u4eae"
-        val composerIndex = pendingTitle.method.parameterTypes.indexOfFirst { it.name == COMPOSER_CLASS }
-        if (composerIndex >= 0 && composerIndex < highlightTitleArgs.size) {
-            highlightTitleArgs[composerIndex] = composer
-        }
-        highlightTitleArgs[1] = sectionTitleModifier(
-            top = NATIVE_TYPE_GROUP_TOP_PADDING,
-            bottom = NATIVE_SECTION_TITLE_BOTTOM_PADDING,
+    // 从阅微原生高亮页点击"补全计划"：通过宿主 NavHost 导航到完整聚合页（复用宿主页面框架与返回）。
+    // navGraphScope 优先用阅读页底栏捕获到的实例，拿不到时由 ReaMicroSettingsHook 用全局单例兜底。
+    private fun openReaderCompletionPlanPage() {
+        val activity = activityProvider()
+        val bookKey = ReaderHighlightBookContext.bookKey
+        val bookTitle = ReaderHighlightBookContext.bookTitle
+        val navGraphScope = currentReaderNavGraphScopeRef?.get()
+        val opened = ReaMicroSettingsHook.openReaderCompletionPlanFromReader(
+            bookKey = bookKey,
+            bookTitle = bookTitle,
+            navGraphScope = navGraphScope,
         )
-        pendingTitle.method.invoke(null, *highlightTitleArgs)
-        val content = functionProxy("ReaderHighlightTypeSettingRowContent", KOTLIN_FUNCTION3_CLASS) { args ->
-            val rowScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
-            val innerComposer = args.getOrNull(1) ?: return@functionProxy targetUnit()
-            renderReaderHighlightTypeSettingButton(
-                rowScope = rowScope,
-                title = "\u5168\u5c40\u9ad8\u4eae\u89c4\u5219",
-                onClick = { openReaderHighlightRuleSheet(globalRules = true) },
-                composer = innerComposer,
-            )
-            renderReaderHighlightTypeSettingButton(
-                rowScope = rowScope,
-                title = "\u5355\u4e66\u9ad8\u4eae\u89c4\u5219",
-                onClick = { openReaderHighlightRuleSheet(globalRules = false) },
-                composer = innerComposer,
-            )
-            targetUnit()
+        if (!opened) {
+            XposedBridge.log("$LOG_PREFIX open completion plan page failed (navGraphScope unavailable)")
+            activity?.runOnUiThread {
+                Toast.makeText(activity, "\u672a\u80fd\u6253\u5f00\u8865\u5168\u8ba1\u5212", Toast.LENGTH_SHORT).show()
+            }
         }
-        composeMethod(ROW_KT_CLASS, ROW_METHOD, 7).invoke(
-            null,
-            fillMaxWidth(sectionTitleModifier(top = 0, bottom = 0)),
-            arrangementSpacedBy(20),
-            alignmentTop(),
-            content,
-            composer,
-            0,
-            0,
-        )
-    }
-
-    private fun renderReaderHighlightTypeSettingButton(
-        rowScope: Any,
-        title: String,
-        onClick: () -> Unit,
-        composer: Any,
-    ) {
-        composeMethod(READER_TYPE_SETTING_CLASS, TYPE_SETTING_FAMILY_METHOD, 5).invoke(
-            null,
-            rowScope,
-            title,
-            nativeFunction0(onClick),
-            composer,
-            0,
-        )
     }
 
     private fun openReaderHighlightRuleSheet(globalRules: Boolean) {
@@ -1005,8 +956,10 @@ class ReaderHook(
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        val request = pendingReaderHighlightSheet ?: return
+                        val request = pendingReaderHighlightSheet
                         val status = param.args?.getOrNull(0)
+                        XposedBridge.log("$LOG_PREFIX family epub content pending=${request != null} status=$status match=${isReaderSheetStatus(status, "EpubFamily")}")
+                        if (request == null) return
                         if (!isReaderSheetStatus(status, "EpubFamily")) return
                         val receiver = param.args?.getOrNull(1) ?: return
                         val composer = param.args?.getOrNull(4) ?: return
@@ -1264,12 +1217,23 @@ class ReaderHook(
     private fun openBottomSearchPage() {
         val activity = activityProvider() ?: return
         if (!canShowReaderSearchEntry()) {
+            XposedBridge.log(
+                "$LOG_PREFIX search blocked entry: moduleEnabled=${canRunFullTextSearch()} " +
+                    "epubRoot=${currentEpubRoot() != null} page=${currentReaderPage() != null} " +
+                    "epubStrong=${currentEpubStrong != null} epubWeak=${currentEpubRef?.get() != null} " +
+                    "pageStrong=${currentPageStrong != null} pageWeak=${currentPageRef?.get() != null}",
+            )
             removeSearchMenuButton()
             Toast.makeText(activity, "\u6682\u65e0\u6cd5\u641c\u7d22\u5f53\u524d\u4e66\u7c4d", Toast.LENGTH_SHORT).show()
             return
         }
         val context = bottomSearchContext(bottomSearchReceiverRef?.get(), bottomSearchBookRef?.get())
         if (context == null) {
+            XposedBridge.log(
+                "$LOG_PREFIX search blocked context: receiver=${bottomSearchReceiverRef?.get() != null} " +
+                    "book=${bottomSearchBookRef?.get() != null} lastCatalog=${lastCatalogContext != null} " +
+                    "lastCatalogBook=${lastCatalogContext?.book != null}",
+            )
             Toast.makeText(activity, "\u6682\u65e0\u6cd5\u641c\u7d22\u5f53\u524d\u4e66\u7c4d", Toast.LENGTH_SHORT).show()
             return
         }
@@ -2987,10 +2951,12 @@ class ReaderHook(
                                     previousDirectory != nextDirectory
                                 ) {
                                     currentPageRef = null
+                                    currentPageStrong = null
                                     resetFullTextSearchState("epub changed", removeOverlays = true)
                                 }
                             }
                             currentEpubRef = WeakReference(param.thisObject)
+                            currentEpubStrong = param.thisObject
                             currentHighlightBookIdentity()?.let { (bookKey, bookTitle) ->
                                 updateReaderHighlightBookContext(
                                     bookKey = bookKey,
@@ -3019,6 +2985,7 @@ class ReaderHook(
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             val page = param.args?.getOrNull(1)
                             currentPageRef = WeakReference(page)
+                            currentPageStrong = page
                             renderingEpubPage.set(page)
                             currentHighlightBookIdentity()?.let { (bookKey, bookTitle) ->
                                 updateReaderHighlightBookContext(bookKey, bookTitle, "page rendered")
@@ -6177,7 +6144,7 @@ class ReaderHook(
     }
 
     private fun currentEpubRoot(): File? =
-        currentEpubRef?.get()
+        (currentEpubStrong ?: currentEpubRef?.get())
             ?.let(::epubDirectory)
             ?.takeIf { it.isNotBlank() }
             ?.let { File(it) }
@@ -7547,17 +7514,14 @@ class ReaderHook(
         val bookTitle: String,
     )
 
-    private data class PendingReaderTypeSettingTitle(
-        val method: Method,
-        val args: Array<Any?>,
-    )
-
     private companion object {
         const val READER_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.reader.ReaderViewModel"
         const val READER_UI_INTENT_CLASS = "app.zhendong.reamicro.ui.reader.ReaderUiIntent"
         const val NAV_GRAPH_SCOPE_CLASS = "app.zhendong.reamicro.NavGraphScope"
         const val READER_CATALOG_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderCatalogKt"
         const val READER_TYPE_SETTING_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderTypeSettingKt"
+        const val READER_HIGHLIGHT_SCREEN_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderHighlightScreenKt"
+        const val LAZY_LIST_SCOPE_CLASS = "androidx.compose.foundation.lazy.LazyListScope"
         const val READER_FAMILY_EPUB_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderFamilyEpubKt"
         const val READER_FAMILY_USER_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderFamilyUserKt"
         const val READER_FAMILY_BUILD_IN_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderFamilyBuildInKt"

@@ -11909,13 +11909,49 @@ img{max-width:100%;max-height:100%;height:auto;}
         }.apply { isAccessible = true }.invoke(null, file)
 
     private fun enqueueNativeImport(workerManager: Any, platformFile: Any): Any? {
-        val enqueueImport = workerManager.javaClass.methods.firstOrNull {
-            it.name == WORKER_ENQUEUE_IMPORT_METHOD && it.parameterTypes.size == 1
-        } ?: workerManager.javaClass.declaredMethods.first {
-            it.name == WORKER_ENQUEUE_IMPORT_METHOD && it.parameterTypes.size == 1
+        // 阅微 2.3.0 起 WorkerManager.enqueueImport 由 1 参 (PlatformFile) 变为
+        // 2 参 (PlatformFile, boolean) 或 3 参 (PlatformFile, String, boolean)。
+        // 兼容多种签名，避免旧版 .first{ size==1 } 找不到匹配抛 NoSuchElementException 导致导入无反应。
+        val candidates = (workerManager.javaClass.methods.asSequence() +
+            workerManager.javaClass.declaredMethods.asSequence())
+            .filter { it.name == WORKER_ENQUEUE_IMPORT_METHOD }
+            .distinct()
+            .toList()
+
+        // 优先旧版 1 参
+        candidates.firstOrNull { it.parameterTypes.size == 1 }?.let {
+            it.isAccessible = true
+            return it.invoke(workerManager, platformFile)
         }
-        enqueueImport.isAccessible = true
-        return enqueueImport.invoke(workerManager, platformFile)
+        // 2 参 (PlatformFile, boolean)：boolean 传 false
+        candidates.firstOrNull {
+            it.parameterTypes.size == 2 &&
+                (it.parameterTypes[1] == java.lang.Boolean.TYPE || it.parameterTypes[1] == java.lang.Boolean::class.java)
+        }?.let {
+            it.isAccessible = true
+            return it.invoke(workerManager, platformFile, false)
+        }
+        // 3 参 (PlatformFile, String, boolean)：书名传 null，boolean 传 false
+        candidates.firstOrNull {
+            it.parameterTypes.size == 3 &&
+                it.parameterTypes[1] == String::class.java &&
+                (it.parameterTypes[2] == java.lang.Boolean.TYPE || it.parameterTypes[2] == java.lang.Boolean::class.java)
+        }?.let {
+            it.isAccessible = true
+            return it.invoke(workerManager, platformFile, null, false)
+        }
+        // 兜底：取参数最少的一个 enqueueImport，非首参用默认值填充
+        val fallback = candidates.minByOrNull { it.parameterTypes.size }
+            ?: error("WorkerManager.$WORKER_ENQUEUE_IMPORT_METHOD not found")
+        fallback.isAccessible = true
+        val args = fallback.parameterTypes.mapIndexed { index, type ->
+            when {
+                index == 0 -> platformFile
+                type == java.lang.Boolean.TYPE || type == java.lang.Boolean::class.java -> false
+                else -> null
+            }
+        }.toTypedArray()
+        return fallback.invoke(workerManager, *args)
     }
 
     private fun rememberPendingWebDavImport(platformFile: Any, localFile: File, sourceUrl: String, sourceSize: Long?) {

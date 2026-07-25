@@ -215,10 +215,49 @@ class ReaderFontCompletionHook(
             bookEmbeddedFonts = (callMethod(config, "getBookEmbeddedFonts") as? Number)?.toInt() ?: 0,
             embeddedFonts = callMethod(config, "getEmbeddedFonts") as? Boolean ?: true,
             buildInFonts = callMethod(config, "getBuildInFonts") as? Boolean ?: true,
+            // 阅微 2.3.0 新增字段，读取原值以便透传
+            paragraphSpacing = (callMethod(config, "getParagraphSpacing") as? Number)?.toInt() ?: 0,
+            letterSpacing = (callMethod(config, "getLetterSpacing") as? Number)?.toInt() ?: 0,
+            boldFont = callMethod(config, "getBoldFont") as? Boolean ?: false,
         )
 
     private fun newReaderEpubConfig(value: ResolvedTypeSetting): Any {
         val configClass = cls(READER_EPUB_CONFIG_CLASS)
+        // 阅微 2.3.0 起 ReaderEpubConfig 为 11 参：
+        // (family, textSize, lineHeight, paragraphSpacing, letterSpacing, padding,
+        //  boldFont, bookEmbeddedFonts, embeddedFonts, globalEmbeddedFonts, buildInFonts)
+        runCatching {
+            configClass
+                .getDeclaredConstructor(
+                    String::class.java,
+                    Float::class.javaPrimitiveType,
+                    Float::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                    Boolean::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                    Boolean::class.javaPrimitiveType,
+                    Boolean::class.javaPrimitiveType,
+                    Boolean::class.javaPrimitiveType,
+                )
+                .apply { isAccessible = true }
+                .newInstance(
+                    value.family,
+                    value.textSize,
+                    value.lineHeight,
+                    value.paragraphSpacing,
+                    value.letterSpacing,
+                    value.padding,
+                    value.boldFont,
+                    value.bookEmbeddedFonts,
+                    value.embeddedFonts,
+                    value.globalEmbeddedFonts,
+                    value.buildInFonts,
+                )
+        }.getOrNull()?.let { return it }
+
+        // 旧版 8 参兼容
         runCatching {
             configClass
                 .getDeclaredConstructor(
@@ -244,6 +283,7 @@ class ReaderFontCompletionHook(
                 )
         }.getOrNull()?.let { return it }
 
+        // 最旧版 6 参兼容
         return configClass
             .getDeclaredConstructor(
                 String::class.java,
@@ -484,6 +524,10 @@ class ReaderFontCompletionHook(
         val bookEmbeddedFonts: Int,
         val embeddedFonts: Boolean,
         val buildInFonts: Boolean,
+        // 阅微 2.3.0 ReaderEpubConfig 新增字段，透传保留原值
+        val paragraphSpacing: Int = 0,
+        val letterSpacing: Int = 0,
+        val boldFont: Boolean = false,
     )
 
     private companion object {

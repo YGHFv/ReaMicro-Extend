@@ -107,19 +107,35 @@ class ReaMicroSettingsHook(
     private val settingsBuildDepth = ThreadLocal.withInitial { 0 }
     private val itemCount = ThreadLocal.withInitial { 0 }
     private val injectingModuleItem = ThreadLocal.withInitial { false }
+    // 高亮界面（ReaderHighlightScreen）LazyColumn 渲染期间的深度与去重标志。
+    // 借用宿主自身调用 LazyListScope.item$default 的时机注入"补全计划"入口。
+    private val highlightScreenBuildDepth = ThreadLocal.withInitial { 0 }
+    private val highlightEntryInjected = ThreadLocal.withInitial { false }
     private val settingsEntryTitleOverride = ThreadLocal.withInitial<String?> { null }
     private val navigatingModuleRoute = ThreadLocal.withInitial { false }
     private val poppingInjectedRoute = ThreadLocal.withInitial { false }
     private val methodCache = mutableMapOf<String, Method>()
+    // ReaderHook 在进入高亮界面前设置的入口点击回调（打开三段式高亮规则 sheet）。
+    @Volatile private var highlightScreenEntryOnClick: (() -> Unit)? = null
     private var lazyItemDefaultMethod: Method? = null
     @Volatile private var currentSettingsNavGraphScope: Any? = null
     @Volatile private var currentSettingsNavController: Any? = null
+    // 全 app 唯一的 NavGraphScope（setup() 里 new 一次，reader/设置共用）。
+    // 阅读页没有设置页的 NavGraphScope 捕获时机，用它作为导航兜底 scope。
+    @Volatile private var lastKnownNavGraphScope: Any? = null
     @Volatile private var injectedRouteStack: List<InjectedRoute> = emptyList()
     @Volatile private var injectedRouteUiState: Any? = null
     @Volatile private var fontLibraryVersionUiState: Any? = null
     @Volatile private var onlineSourceVersionUiState: Any? = null
     @Volatile private var aiApiVersionUiState: Any? = null
     @Volatile private var readerHighlightVersionUiState: Any? = null
+    // 阅读页高亮规则 sheet 内的子页面导航状态：0=规则列表，1=高亮样式列表。
+    // 借用 mutableState 让 sheet 的 content lambda 读取后可随点击重组，实现 sheet 内翻页而非弹窗。
+    @Volatile private var readerHighlightSheetSubPageUiState: Any? = null
+    // 阅微原生高亮页（ReaderHighlightScreen）内的"补全计划"页面导航状态：
+    // 0=原生高亮页，1=补全计划规则页，2=补全计划-高亮样式页。
+    // 点击"补全计划"时置 1，令 HighlightPageContent 改渲染我们的补全计划内容（同一整页跳转，不用弹窗）。
+    @Volatile private var readerHighlightScreenPlanUiState: Any? = null
     @Volatile private var profileBackgroundVersionUiState: Any? = null
     @Volatile private var pendingDeleteFontUiState: Any? = null
     @Volatile private var lastFontImportToken: String = ""
@@ -185,6 +201,8 @@ class ReaMicroSettingsHook(
             val navGraphScopeClass = cls(NAV_GRAPH_SCOPE_CLASS)
             XposedBridge.hookAllMethods(navGraphScopeClass, "navigate", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
+                    // 缓存 NavGraphScope 单例，供阅读页高亮页导航兜底使用。
+                    param.thisObject?.let { lastKnownNavGraphScope = it }
                     val route = param.args?.getOrNull(0) ?: return
                     if (route.javaClass.name == ROUTE_ABOUT_CLASS && navigatingModuleRoute.get() != true) {
                         injectedRouteStack = emptyList()
@@ -314,8 +332,19 @@ class ReaMicroSettingsHook(
             method.isAccessible = true
             lazyItemDefaultMethod = method
             XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (injectingModuleItem.get() == true) return
+                    // 高亮界面：在宿主的第一个 item 注册之前插入"补全计划"入口，使其位于列表最上方。
+                    if ((highlightScreenBuildDepth.get() ?: 0) > 0 && highlightEntryInjected.get() != true) {
+                        highlightEntryInjected.set(true)
+                        insertHighlightScreenEntryItem(param.args[0] ?: return)
+                    }
+                }
+
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    if ((settingsBuildDepth.get() ?: 0) <= 0 || injectingModuleItem.get() == true) return
+                    if (injectingModuleItem.get() == true) return
+                    if ((highlightScreenBuildDepth.get() ?: 0) > 0) return
+                    if ((settingsBuildDepth.get() ?: 0) <= 0) return
                     val count = (itemCount.get() ?: 0) + 1
                     itemCount.set(count)
                     if (count == INSERT_AFTER_SETTINGS_ITEM_COUNT) {
@@ -366,6 +395,44 @@ class ReaMicroSettingsHook(
         injectingModuleItem.set(false)
     }
 
+    // 借用宿主 item$default 调用时机，在高亮界面 LazyColumn 最前面插入"补全计划"入口。
+    // onClick 由 ReaderHook 通过 highlightScreenEntryOnClick 提供。
+    private fun insertHighlightScreenEntryItem(lazyListScope: Any) {
+        val onClick = highlightScreenEntryOnClick ?: run {
+            XposedBridge.log("$LOG_PREFIX highlight entry item skip: onClick null")
+            return
+        }
+        val bookKey = ReaderHighlightBookContext.bookKey
+        val bookTitle = ReaderHighlightBookContext.bookTitle
+        XposedBridge.log("$LOG_PREFIX highlight entry item inserting bookKey=$bookKey scope=${lazyListScope.javaClass.name}")
+        injectingModuleItem.set(true)
+        runCatching {
+            addLazyItem(lazyListScope, "reader_highlight_screen_entry_${bookKey.hashCode()}".hashCode()) { composer ->
+                renderReaderHighlightScreenEntryCard(
+                    bookKey = bookKey,
+                    bookTitle = bookTitle,
+                    composer = composer,
+                    onClick = onClick,
+                )
+            }
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX failed to insert highlight screen entry item: ${it.stackTraceToString()}")
+        }
+        injectingModuleItem.set(false)
+    }
+
+    // 由 ReaderHook 在 HighlightPageContent 主方法 before/after 调用，标记高亮界面渲染区间。
+    private fun beginHighlightScreenBuild(onClick: () -> Unit) {
+        highlightScreenEntryOnClick = onClick
+        highlightScreenBuildDepth.set((highlightScreenBuildDepth.get() ?: 0) + 1)
+        highlightEntryInjected.set(false)
+    }
+
+    private fun endHighlightScreenBuild() {
+        val depth = ((highlightScreenBuildDepth.get() ?: 0) - 1).coerceAtLeast(0)
+        highlightScreenBuildDepth.set(depth)
+    }
+
     private fun renderSettingsEntry(
         title: String,
         callbackName: String,
@@ -413,7 +480,7 @@ class ReaMicroSettingsHook(
     }
 
     private fun openInjectedRouteViaHostNavigation(route: InjectedRoute, navGraphScopeOverride: Any? = null): Boolean {
-        val navGraphScope = navGraphScopeOverride ?: currentSettingsNavGraphScope ?: return false
+        val navGraphScope = navGraphScopeOverride ?: currentSettingsNavGraphScope ?: lastKnownNavGraphScope ?: return false
         val previousStack = injectedRouteStack
         return runCatching {
             val aboutRoute = staticObject(ROUTE_ABOUT_CLASS, "INSTANCE")
@@ -552,6 +619,7 @@ class ReaMicroSettingsHook(
                 InjectedRoute.ReaderHighlightSettings -> renderReaderHighlightSettingsContent(innerPaddings, innerComposer)
                 InjectedRoute.ReaderHighlightConfigSettings -> renderReaderHighlightConfigSettingsContent(innerPaddings, innerComposer)
                 InjectedRoute.ReaderHighlightTextSettings -> renderReaderHighlightTextSettingsContent(innerPaddings, innerComposer)
+                is InjectedRoute.ReaderCompletionPlan -> renderReaderCompletionPlanContent(currentRoute, innerPaddings, innerComposer)
                 is InjectedRoute.ReaderBookHighlightRules -> renderReaderBookHighlightRulesContent(currentRoute, innerPaddings, innerComposer)
                 is InjectedRoute.ReaderBookOnlyHighlightRules -> renderReaderBookOnlyHighlightRulesContent(currentRoute, innerPaddings, innerComposer)
                 is InjectedRoute.ReaderBookGlobalHighlightRules -> renderReaderBookGlobalHighlightRulesContent(currentRoute, innerPaddings, innerComposer)
@@ -1278,20 +1346,95 @@ class ReaMicroSettingsHook(
         renderHostLazyColumn(innerPaddings, listContent, composer)
     }
 
-    private fun renderReaderBookHighlightRulesContent(route: InjectedRoute.ReaderBookHighlightRules, innerPaddings: Any, composer: Any) {
-        val listContent = functionProxy("ReaderBookHighlightRulesList", FUNCTION1_CLASS) { args ->
+    // 从阅读页原生高亮界面点击"补全计划"进入的完整聚合页。三段式：
+    //   段1 高亮样式入口（点进去是完整页面，非弹窗）
+    //   段2 全局规则卡（添加全局规则 + 跟随全局开关 + 各全局规则）
+    //   段3 单书规则卡（仅本书规则，平铺，含添加本书规则）
+    // 全部复用宿主 ActionCard/Switch 组件与宿主 LazyColumn，样式与设置页一致。
+    private fun renderReaderCompletionPlanContent(
+        route: InjectedRoute.ReaderCompletionPlan,
+        innerPaddings: Any,
+        composer: Any,
+    ) {
+        val listContent = functionProxy("ReaderCompletionPlanList", FUNCTION1_CLASS) { args ->
             val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
             readerHighlightVersionValue()
+            fontLibraryVersionValue()
             val highlight = settings.highlightSettings()
-            val rows = buildList {
-                val globalRules = highlight.globalRules()
-                val followsGlobal = highlight.bookFollowsGlobalRules(route.bookKey)
-                val enabledGlobalRuleIds = highlight.effectiveGlobalRuleIdsForBook(route.bookKey)
-                val enabledGlobalCount = globalRules.count { it.id in enabledGlobalRuleIds }
+            // 段1：高亮样式入口
+            val styleRows = listOf(
+                ActionRow(
+                    key = "reader_plan_style_entry_${route.bookKey.hashCode()}",
+                    title = "\u9ad8\u4eae\u6837\u5f0f",
+                    subtitle = "${highlight.styles.size} \u4e2a\u6837\u5f0f",
+                    singleLineSubtitle = true,
+                    onClick = { openNestedInjectedRoute(InjectedRoute.ReaderHighlightConfigSettings) },
+                ),
+            )
+            // 段2：全局规则（添加全局规则 + 跟随全局 + 各全局规则）
+            val followsGlobal = highlight.bookFollowsGlobalRules(route.bookKey)
+            val enabledGlobalIds = highlight.effectiveGlobalRuleIdsForBook(route.bookKey)
+            val globalRows = buildList {
                 add(
                     ActionRow(
-                        key = "reader_book_highlight_rule_add_${route.bookKey.hashCode()}",
-                        title = "\u6dfb\u52a0\u914d\u7f6e",
+                        key = "reader_plan_global_add_${route.bookKey.hashCode()}",
+                        title = "\u6dfb\u52a0\u5168\u5c40\u89c4\u5219",
+                        subtitle = "\u65b0\u589e\u4e00\u6761\u56fa\u5b9a\u6587\u672c\u6216\u6b63\u5219\u9ad8\u4eae\u89c4\u5219",
+                        singleLineSubtitle = true,
+                        onClick = { openReaderHighlightRuleDialog(newReaderHighlightRule()) },
+                    ),
+                )
+                add(
+                    ActionRow(
+                        key = "reader_plan_global_follow_${route.bookKey.hashCode()}",
+                        title = "\u8ddf\u968f\u5168\u5c40",
+                        subtitle = if (followsGlobal) "\u4fee\u6539\u4e0b\u65b9\u5f00\u5173\u65f6\u540c\u6b65\u4fee\u6539\u5168\u5c40\u89c4\u5219" else "\u4fee\u6539\u4e0b\u65b9\u5f00\u5173\u65f6\u4ec5\u5f71\u54cd\u672c\u4e66",
+                        trailingContent = { itemComposer ->
+                            renderHostActionSwitch(
+                                key = "reader_plan_global_follow_switch_${route.bookKey.hashCode()}",
+                                checked = followsGlobal,
+                                composer = itemComposer,
+                            ) { enabled ->
+                                settings.setReaderHighlightBookFollowsGlobalRules(route.bookKey, enabled)
+                                bumpReaderHighlightVersion()
+                            }
+                        },
+                        singleLineSubtitle = true,
+                    ),
+                )
+                highlight.globalRules().forEach { rule ->
+                    add(
+                        ActionRow(
+                            key = "reader_plan_global_rule_${route.bookKey.hashCode()}_${rule.id}",
+                            title = rule.name,
+                            subtitle = "${highlightRuleSummary(rule)} / ${highlightRuleStyleSummary(highlight, rule)}",
+                            trailingContent = { itemComposer ->
+                                renderHostActionSwitch(
+                                    key = "reader_plan_global_rule_switch_${route.bookKey.hashCode()}_${rule.id}",
+                                    checked = rule.id in enabledGlobalIds,
+                                    composer = itemComposer,
+                                ) { enabled ->
+                                    if (followsGlobal) {
+                                        settings.setReaderHighlightRuleEnabled(rule.id, enabled)
+                                    } else {
+                                        settings.setReaderHighlightBookGlobalRuleEnabled(route.bookKey, rule.id, enabled)
+                                    }
+                                    bumpReaderHighlightVersion()
+                                }
+                            },
+                            singleLineSubtitle = true,
+                            onClick = { openReaderHighlightRuleDialog(rule) },
+                        ),
+                    )
+                }
+            }
+            // 段3：单书规则（仅本书，平铺）
+            val bookRules = highlight.bookRules(route.bookKey)
+            val bookRows = buildList {
+                add(
+                    ActionRow(
+                        key = "reader_plan_book_add_${route.bookKey.hashCode()}",
+                        title = "\u6dfb\u52a0\u672c\u4e66\u89c4\u5219",
                         subtitle = "\u65b0\u589e\u672c\u4e66\u56fa\u5b9a\u6587\u672c\u6216\u6b63\u5219\u9ad8\u4eae\u89c4\u5219",
                         singleLineSubtitle = true,
                         onClick = {
@@ -1301,19 +1444,67 @@ class ReaMicroSettingsHook(
                         },
                     ),
                 )
+                bookRules.forEach { rule ->
+                    add(
+                        ActionRow(
+                            key = "reader_plan_book_rule_${rule.id}",
+                            title = rule.name,
+                            subtitle = "${highlightRuleSummary(rule)} / ${highlightRuleStyleSummary(highlight, rule)}",
+                            trailingContent = { itemComposer ->
+                                renderHostActionSwitch(
+                                    key = "reader_plan_book_rule_switch_${rule.id}",
+                                    checked = rule.enabled,
+                                    composer = itemComposer,
+                                ) { enabled ->
+                                    settings.setReaderHighlightRuleEnabled(rule.id, enabled)
+                                    bumpReaderHighlightVersion()
+                                }
+                            },
+                            singleLineSubtitle = true,
+                            onClick = { openReaderHighlightRuleDialog(rule) },
+                        ),
+                    )
+                }
+                if (bookRules.isEmpty()) {
+                    add(
+                        ActionRow(
+                            key = "reader_plan_book_empty_${route.bookKey.hashCode()}",
+                            title = "\u6682\u65e0\u5355\u4e66\u89c4\u5219",
+                            subtitle = "\u9009\u4e2d\u672c\u4e66\u6587\u672c\u540e\u53ef\u6dfb\u52a0\u9ad8\u4eae\u89c4\u5219",
+                            singleLineSubtitle = true,
+                        ),
+                    )
+                }
+            }
+            addLazyItem(lazyListScope, "reader_plan_style_${route.bookKey}".hashCode()) { itemComposer ->
+                renderHostActionCard(styleRows, itemComposer)
+            }
+            addLazyItem(lazyListScope, "reader_plan_global_${route.bookKey}".hashCode()) { itemComposer ->
+                renderHostActionCard(globalRows, itemComposer)
+            }
+            addLazyItem(lazyListScope, "reader_plan_book_${route.bookKey}".hashCode()) { itemComposer ->
+                renderHostActionCard(bookRows, itemComposer)
+            }
+            targetUnit()
+        }
+        renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    private fun renderReaderBookHighlightRulesContent(route: InjectedRoute.ReaderBookHighlightRules, innerPaddings: Any, composer: Any) {
+        val listContent = functionProxy("ReaderBookHighlightRulesList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            readerHighlightVersionValue()
+            val highlight = settings.highlightSettings()
+            val rows = buildList {
                 add(
                     ActionRow(
-                        key = "reader_book_global_rules_${route.bookKey.hashCode()}",
-                        title = "\u5168\u5c40\u89c4\u5219",
-                        subtitle = if (followsGlobal) {
-                            "\u8ddf\u968f\u5168\u5c40"
-                        } else {
-                            "\u5df2\u542f\u7528 $enabledGlobalCount/${globalRules.size} \u6761\u5168\u5c40\u89c4\u5219"
-                        },
+                        key = "reader_book_highlight_rule_add_${route.bookKey.hashCode()}",
+                        title = "\u6dfb\u52a0\u914d\u7f6e",
+                        subtitle = "\u65b0\u589e\u672c\u4e66\u56fa\u5b9a\u6587\u672c\u6216\u6b63\u5219\u9ad8\u4eae\u89c4\u5219",
                         singleLineSubtitle = true,
                         onClick = {
-                            openNestedInjectedRoute(
-                                InjectedRoute.ReaderBookGlobalHighlightRules(route.bookKey, route.bookTitle),
+                            openReaderHighlightRuleDialog(
+                                newReaderHighlightRule(route.bookKey, route.bookTitle),
                             )
                         },
                     ),
@@ -1455,6 +1646,89 @@ class ReaMicroSettingsHook(
         renderHostLazyColumn(innerPaddings, listContent, composer)
     }
 
+    // 在阅微原生高亮界面顶部注入的容器：读取"补全计划"整页状态（快照读，随点击重组）。
+    // plan==0 时渲染"补全计划"入口卡片；plan>0 时渲染占满全屏的补全计划整页覆盖在原生内容之上。
+    // 因为读取状态发生在本注入 composable 的重启作用域内，点击改变状态会让本作用域重组切换分支。
+    private fun renderReaderHighlightScreenContainer(
+        bookKey: String,
+        bookTitle: String,
+        composer: Any,
+        onEntryClick: () -> Unit,
+    ) {
+        readerHighlightVersionValue()
+        val plan = readerHighlightScreenPlanValue()
+        if (plan > 0) {
+            renderReaderHighlightScreenPlanPage(bookKey, bookTitle, composer)
+        } else {
+            renderReaderHighlightScreenEntryCard(bookKey, bookTitle, composer, onEntryClick)
+        }
+    }
+
+    // 在阅微原生高亮界面顶部注入的"补全计划"入口卡片，样式沿用设置里的 ActionRow 行样式。
+    private fun renderReaderHighlightScreenEntryCard(
+        bookKey: String,
+        bookTitle: String,
+        composer: Any,
+        onClick: () -> Unit,
+    ) {
+        readerHighlightVersionValue()
+        val highlight = settings.highlightSettings()
+        val enabled = highlight.rules.count { it.enabled }
+        val rows = listOf(
+            ActionRow(
+                key = "reader_highlight_screen_entry_${bookKey.hashCode()}",
+                title = "\u8865\u5168\u8ba1\u5212",
+                subtitle = "$enabled / ${highlight.rules.size} \u6761\u9ad8\u4eae\u89c4\u5219 \u00b7 ${highlight.styles.size} \u4e2a\u6837\u5f0f",
+                singleLineSubtitle = true,
+                onClick = onClick,
+            ),
+        )
+        // 用带底部内边距的宿主 Column 包裹卡片，与下方"预设规则"标题拉开间距。
+        val content = functionProxy("ReaderHighlightScreenEntryCard", FUNCTION3_CLASS) { args ->
+            val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
+            renderHostActionCard(rows, innerComposer)
+            targetUnit()
+        }
+        val bottomPaddedModifier = method(PADDING_KT_CLASS, PADDING_ABSOLUTE_DEFAULT_METHOD, 7).invoke(
+            null,
+            modifierInstance(),
+            0f,
+            0f,
+            0f,
+            udp(12),
+            7,
+            null,
+        )
+        method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
+            null,
+            bottomPaddedModifier,
+            arrangementTop(),
+            alignmentStart(),
+            content,
+            composer,
+            0,
+            0,
+        )
+    }
+
+    // 通过 LazyListScope.item 在高亮界面 LazyColumn 最前面插入"补全计划"入口。
+    // 相比在 SectionTitle 前直接渲染，此方式才能真正成为独立的列表项显示在最上方。
+    private fun addReaderHighlightScreenEntryLazyItem(
+        lazyListScope: Any,
+        bookKey: String,
+        bookTitle: String,
+        onClick: () -> Unit,
+    ) {
+        addLazyItem(lazyListScope, "reader_highlight_screen_entry_${bookKey.hashCode()}".hashCode()) { itemComposer ->
+            renderReaderHighlightScreenEntryCard(
+                bookKey = bookKey,
+                bookTitle = bookTitle,
+                composer = itemComposer,
+                onClick = onClick,
+            )
+        }
+    }
+
     private fun renderReaderHighlightRulesSheetFromReader(
         globalRules: Boolean,
         bookKey: String,
@@ -1462,12 +1736,29 @@ class ReaMicroSettingsHook(
         composer: Any,
         onClose: () -> Unit,
     ) {
-        val title = if (globalRules) "\u5168\u5c40\u9ad8\u4eae\u89c4\u5219" else "\u5355\u4e66\u9ad8\u4eae\u89c4\u5219"
+        // 关闭 sheet 时把子页面状态复位到规则列表，避免下次打开仍停留在样式子页。
+        val closeSheet: () -> Unit = {
+            setReaderHighlightSheetSubPage(0)
+            onClose()
+        }
         val content = functionProxy("ReaderHighlightRulesSheetContent", FUNCTION3_CLASS) { args ->
             val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
-            renderReaderSheetBackHandler(innerComposer, onClose)
-            renderReaderSheetTopBar(title, innerComposer, onClose)
-            renderReaderHighlightRulesSheetList(globalRules, bookKey, bookTitle, innerComposer)
+            // 读取子页面状态：0=规则列表，1=高亮样式列表。读值使其可随点击重组翻页。
+            val subPage = readerHighlightSheetSubPageValue()
+            // 子页面标题与返回行为随状态切换：样式页返回到规则页，规则页返回关闭 sheet。
+            val onBack: () -> Unit = if (subPage == 1) {
+                { setReaderHighlightSheetSubPage(0) }
+            } else {
+                closeSheet
+            }
+            val title = if (subPage == 1) "\u9ad8\u4eae\u6837\u5f0f" else "\u9ad8\u4eae\u89c4\u5219"
+            renderReaderSheetBackHandler(innerComposer, onBack)
+            renderReaderSheetTopBar(title, innerComposer, onBack)
+            if (subPage == 1) {
+                renderReaderHighlightSheetStyleList(innerComposer)
+            } else {
+                renderReaderHighlightRulesSheetList(globalRules, bookKey, bookTitle, innerComposer)
+            }
             targetUnit()
         }
         method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
@@ -1480,6 +1771,135 @@ class ReaMicroSettingsHook(
             0,
             0,
         )
+    }
+
+    // sheet 内的"高亮样式"子页面：与设置里的高亮样式页一致（添加配置 + 各样式行），点击样式打开编辑弹窗。
+    private fun renderReaderHighlightSheetStyleList(composer: Any) {
+        val listContent = functionProxy("ReaderHighlightSheetStyleList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            readerHighlightVersionValue()
+            fontLibraryVersionValue()
+            val highlight = settings.highlightSettings()
+            val rows = buildList {
+                add(
+                    ActionRow(
+                        key = "reader_sheet_style_add",
+                        title = "\u6dfb\u52a0\u914d\u7f6e",
+                        subtitle = "\u65b0\u589e\u4e00\u7ec4\u9ad8\u4eae\u6837\u5f0f",
+                        singleLineSubtitle = true,
+                        onClick = { openReaderHighlightStyleDialog(newReaderHighlightStyle()) },
+                        onLongClick = ::openReaderHighlightStyleImportPicker,
+                    ),
+                )
+                highlight.styles.forEach { style ->
+                    add(
+                        ActionRow(
+                            key = "reader_sheet_style_${style.id}",
+                            title = style.name,
+                            subtitle = highlightStyleSummary(style),
+                            trailing = readerHighlightStyleDefaultTrailing(highlight, style),
+                            singleLineSubtitle = true,
+                            onClick = { openReaderHighlightStyleDialog(style) },
+                            onLongClick = { exportReaderHighlightStyle(style) },
+                        ),
+                    )
+                }
+            }
+            addLazyItem(lazyListScope, "reader_sheet_style_list".hashCode()) { itemComposer ->
+                renderHostActionCard(rows, itemComposer)
+            }
+            targetUnit()
+        }
+        method(LAZY_DSL_KT_CLASS, LAZY_COLUMN_METHOD, 13).invoke(
+            null,
+            readerHighlightSheetListModifier(),
+            null,
+            null,
+            false,
+            spacedBy(12),
+            null,
+            null,
+            false,
+            null,
+            listContent,
+            composer,
+            0,
+            494,
+        )
+    }
+
+    // "补全计划"整页：直接替换阅微原生高亮页（HighlightPageContent）Column 里的正文内容。
+    // 由 ReaderHook 在原生第一个分组标题处调用，并把原生标题/预设行/自定义行全部跳过，
+    // 使本内容占据原生正文位置（保留原生顶部"高亮"标题栏），实现同一整页内的真实跳转，而非弹窗。
+    // plan==1：三段式卡片（样式入口 + 全局/预设 + 单书）；plan==2：高亮样式列表。样式全部复用设置卡片。
+    private fun renderReaderHighlightScreenPlanPage(bookKey: String, bookTitle: String, composer: Any) {
+        val plan = readerHighlightScreenPlanValue()
+        val onBack: () -> Unit = when (plan) {
+            2 -> { { setReaderHighlightScreenPlan(1) } }
+            else -> { { setReaderHighlightScreenPlan(0) } }
+        }
+        renderReaderSheetBackHandler(composer, onBack)
+        readerHighlightVersionValue()
+        // 用一个 Column 承载多张设置卡片，卡片之间留出与设置页一致的间距（spacedBy 12dp）。
+        val content = functionProxy("ReaderHighlightPlanContent", FUNCTION3_CLASS) { args ->
+            val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
+            if (plan == 2) {
+                renderHostActionCard(readerHighlightPlanStyleRows(), innerComposer)
+            } else {
+                renderHostActionCard(readerHighlightSheetStyleRows(), innerComposer)
+                renderHostActionCard(readerHighlightSheetGlobalRows(bookKey), innerComposer)
+                renderHostActionCard(readerHighlightSheetBookRows(bookKey, bookTitle), innerComposer)
+            }
+            targetUnit()
+        }
+        method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
+            null,
+            readerHighlightPlanColumnModifier(),
+            spacedBy(12),
+            alignmentStart(),
+            content,
+            composer,
+            0,
+            0,
+        )
+    }
+
+    // 补全计划正文 Column 的 modifier：横向留白与设置页一致（16dp）。
+    private fun readerHighlightPlanColumnModifier(): Any {
+        val filled = method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, 4)
+            .invoke(null, modifierInstance(), 0f, 1, null)
+        return method(PADDING_KT_CLASS, PADDING_HORIZONTAL_DEFAULT_METHOD, 5)
+            .invoke(null, filled, udp(16), udp(8), 2, null)
+    }
+
+    // 补全计划-高亮样式子页的行：添加配置 + 各样式行，与设置里的高亮样式页一致。
+    private fun readerHighlightPlanStyleRows(): List<ActionRow> {
+        val highlight = settings.highlightSettings()
+        return buildList {
+            add(
+                ActionRow(
+                    key = "reader_plan_style_add",
+                    title = "\u6dfb\u52a0\u914d\u7f6e",
+                    subtitle = "\u65b0\u589e\u4e00\u7ec4\u9ad8\u4eae\u6837\u5f0f",
+                    singleLineSubtitle = true,
+                    onClick = { openReaderHighlightStyleDialog(newReaderHighlightStyle()) },
+                    onLongClick = ::openReaderHighlightStyleImportPicker,
+                ),
+            )
+            highlight.styles.forEach { style ->
+                add(
+                    ActionRow(
+                        key = "reader_plan_style_${style.id}",
+                        title = style.name,
+                        subtitle = highlightStyleSummary(style),
+                        trailing = readerHighlightStyleDefaultTrailing(highlight, style),
+                        singleLineSubtitle = true,
+                        onClick = { openReaderHighlightStyleDialog(style) },
+                        onLongClick = { exportReaderHighlightStyle(style) },
+                    ),
+                )
+            }
+        }
     }
 
     private fun renderReaderSheetBackHandler(composer: Any, onClose: () -> Unit) {
@@ -1518,9 +1938,20 @@ class ReaMicroSettingsHook(
         val listContent = functionProxy("ReaderHighlightRulesSheetList", FUNCTION1_CLASS) { args ->
             val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
             readerHighlightVersionValue()
-            val rows = readerHighlightRulesSheetRows(globalRules, bookKey, bookTitle)
-            addLazyItem(lazyListScope, "reader_highlight_sheet_${globalRules}_${bookKey}".hashCode()) { itemComposer ->
-                renderHostActionCard(rows, itemComposer)
+            // 样式行置顶：高亮样式入口作为该规则入口内部的第一张卡。
+            val styleRows = readerHighlightSheetStyleRows()
+            addLazyItem(lazyListScope, "reader_highlight_sheet_style_${bookKey}".hashCode()) { itemComposer ->
+                renderHostActionCard(styleRows, itemComposer)
+            }
+            // 全局（预设）高亮规则。
+            val globalRuleRows = readerHighlightSheetGlobalRows(bookKey)
+            addLazyItem(lazyListScope, "reader_highlight_sheet_global_${bookKey}".hashCode()) { itemComposer ->
+                renderHostActionCard(globalRuleRows, itemComposer)
+            }
+            // 单书规则：仅显示本书的，直接平铺，不再按书名折叠。
+            val bookRuleRows = readerHighlightSheetBookRows(bookKey, bookTitle)
+            addLazyItem(lazyListScope, "reader_highlight_sheet_book_${bookKey}".hashCode()) { itemComposer ->
+                renderHostActionCard(bookRuleRows, itemComposer)
             }
             targetUnit()
         }
@@ -1542,78 +1973,112 @@ class ReaMicroSettingsHook(
         )
     }
 
-    private fun readerHighlightRulesSheetRows(
-        globalRules: Boolean,
-        bookKey: String,
-        bookTitle: String,
-    ): List<ActionRow> {
+    // 样式入口行（置顶）：点击在 sheet 内翻到"高亮样式"子页面（不弹窗），与设置页体验一致。
+    private fun readerHighlightSheetStyleRows(): List<ActionRow> {
         val highlight = settings.highlightSettings()
-        return if (globalRules) {
-            val rules = highlight.globalRules()
-            val followsGlobal = highlight.bookFollowsGlobalRules(bookKey)
-            val enabledIds = highlight.effectiveGlobalRuleIdsForBook(bookKey)
-            buildList {
+        return listOf(
+            ActionRow(
+                key = "reader_sheet_style_entry",
+                title = "\u9ad8\u4eae\u6837\u5f0f",
+                subtitle = "${highlight.styles.size} \u4e2a\u6837\u5f0f",
+                trailing = "\u7ba1\u7406",
+                singleLineSubtitle = true,
+                onClick = { setReaderHighlightSheetSubPage(1) },
+            ),
+        )
+    }
+
+    // 全局（预设）高亮规则行：跟随全局开关 + 各规则开关。
+    private fun readerHighlightSheetGlobalRows(bookKey: String): List<ActionRow> {
+        val highlight = settings.highlightSettings()
+        val rules = highlight.globalRules()
+        val followsGlobal = highlight.bookFollowsGlobalRules(bookKey)
+        val enabledIds = highlight.effectiveGlobalRuleIdsForBook(bookKey)
+        return buildList {
+            add(
+                ActionRow(
+                    key = "reader_sheet_global_add_${bookKey.hashCode()}",
+                    title = "\u6dfb\u52a0\u5168\u5c40\u89c4\u5219",
+                    subtitle = "\u65b0\u589e\u4e00\u6761\u56fa\u5b9a\u6587\u672c\u6216\u6b63\u5219\u5168\u5c40\u9ad8\u4eae\u89c4\u5219",
+                    singleLineSubtitle = true,
+                    onClick = { openReaderHighlightRuleDialog(newReaderHighlightRule()) },
+                ),
+            )
+            add(
+                ActionRow(
+                    key = "reader_sheet_follow_${bookKey.hashCode()}",
+                    title = "\u8ddf\u968f\u5168\u5c40",
+                    subtitle = if (followsGlobal) {
+                        "\u4fee\u6539\u4e0b\u65b9\u5f00\u5173\u65f6\u540c\u6b65\u4fee\u6539\u5168\u5c40\u89c4\u5219"
+                    } else {
+                        "\u4fee\u6539\u4e0b\u65b9\u5f00\u5173\u65f6\u4ec5\u5f71\u54cd\u672c\u4e66"
+                    },
+                    trailingContent = { itemComposer ->
+                        renderHostActionSwitch(
+                            key = "reader_sheet_follow_switch_${bookKey.hashCode()}",
+                            checked = followsGlobal,
+                            composer = itemComposer,
+                        ) { enabled ->
+                            settings.setReaderHighlightBookFollowsGlobalRules(bookKey, enabled)
+                            bumpReaderHighlightVersion()
+                        }
+                    },
+                    singleLineSubtitle = true,
+                ),
+            )
+            if (rules.isEmpty()) {
                 add(
                     ActionRow(
-                        key = "reader_sheet_follow_${bookKey.hashCode()}",
-                        title = "\u8ddf\u968f\u5168\u5c40",
-                        subtitle = if (followsGlobal) {
-                            "\u4fee\u6539\u4e0b\u65b9\u5f00\u5173\u65f6\u540c\u6b65\u4fee\u6539\u5168\u5c40\u89c4\u5219"
-                        } else {
-                            "\u4fee\u6539\u4e0b\u65b9\u5f00\u5173\u65f6\u4ec5\u5f71\u54cd\u672c\u4e66"
-                        },
+                        key = "reader_sheet_global_empty_${bookKey.hashCode()}",
+                        title = "\u6682\u65e0\u5168\u5c40\u89c4\u5219",
+                        subtitle = "\u53ef\u5728\u9ad8\u4eae\u7ba1\u7406\u4e2d\u6dfb\u52a0",
+                        singleLineSubtitle = true,
+                    ),
+                )
+            }
+            rules.forEach { rule ->
+                add(
+                    ActionRow(
+                        key = "reader_sheet_global_${bookKey.hashCode()}_${rule.id}",
+                        title = rule.name,
+                        subtitle = "${highlightRuleSummary(rule)} / ${highlightRuleStyleSummary(highlight, rule)}",
                         trailingContent = { itemComposer ->
                             renderHostActionSwitch(
-                                key = "reader_sheet_follow_switch_${bookKey.hashCode()}",
-                                checked = followsGlobal,
+                                key = "reader_sheet_global_switch_${bookKey.hashCode()}_${rule.id}",
+                                checked = rule.id in enabledIds,
                                 composer = itemComposer,
                             ) { enabled ->
-                                settings.setReaderHighlightBookFollowsGlobalRules(bookKey, enabled)
+                                if (followsGlobal) {
+                                    settings.setReaderHighlightRuleEnabled(rule.id, enabled)
+                                } else {
+                                    settings.setReaderHighlightBookGlobalRuleEnabled(bookKey, rule.id, enabled)
+                                }
                                 bumpReaderHighlightVersion()
                             }
                         },
                         singleLineSubtitle = true,
                     ),
                 )
-                if (rules.isEmpty()) {
-                    add(
-                        ActionRow(
-                            key = "reader_sheet_global_empty_${bookKey.hashCode()}",
-                            title = "\u6682\u65e0\u5168\u5c40\u89c4\u5219",
-                            subtitle = "\u53ef\u5728\u9ad8\u4eae\u7ba1\u7406\u4e2d\u6dfb\u52a0",
-                            singleLineSubtitle = true,
-                        ),
-                    )
-                }
-                rules.forEach { rule ->
-                    add(
-                        ActionRow(
-                            key = "reader_sheet_global_${bookKey.hashCode()}_${rule.id}",
-                            title = rule.name,
-                            subtitle = "${highlightRuleSummary(rule)} / ${highlightRuleStyleSummary(highlight, rule)}",
-                            trailingContent = { itemComposer ->
-                                renderHostActionSwitch(
-                                    key = "reader_sheet_global_switch_${bookKey.hashCode()}_${rule.id}",
-                                    checked = rule.id in enabledIds,
-                                    composer = itemComposer,
-                                ) { enabled ->
-                                    if (followsGlobal) {
-                                        settings.setReaderHighlightRuleEnabled(rule.id, enabled)
-                                    } else {
-                                        settings.setReaderHighlightBookGlobalRuleEnabled(bookKey, rule.id, enabled)
-                                    }
-                                    bumpReaderHighlightVersion()
-                                }
-                            },
-                            singleLineSubtitle = true,
-                        ),
-                    )
-                }
             }
-        } else {
-            val rules = highlight.rules.filter { it.bookKey.isNotBlank() && it.appliesToBook(bookKey, bookTitle) }
+        }
+    }
+
+    // 单书规则行：仅本书，平铺显示，第一行为"添加本书规则"。
+    private fun readerHighlightSheetBookRows(bookKey: String, bookTitle: String): List<ActionRow> {
+        val highlight = settings.highlightSettings()
+        val rules = highlight.rules.filter { it.bookKey.isNotBlank() && it.appliesToBook(bookKey, bookTitle) }
+        return buildList {
+            add(
+                ActionRow(
+                    key = "reader_sheet_book_add_${bookKey.hashCode()}",
+                    title = "\u6dfb\u52a0\u672c\u4e66\u89c4\u5219",
+                    subtitle = "\u65b0\u589e\u672c\u4e66\u56fa\u5b9a\u6587\u672c\u6216\u6b63\u5219\u9ad8\u4eae\u89c4\u5219",
+                    singleLineSubtitle = true,
+                    onClick = { openReaderHighlightRuleDialog(newReaderHighlightRule(bookKey, bookTitle)) },
+                ),
+            )
             if (rules.isEmpty()) {
-                listOf(
+                add(
                     ActionRow(
                         key = "reader_sheet_book_empty_${bookKey.hashCode()}",
                         title = "\u6682\u65e0\u5355\u4e66\u89c4\u5219",
@@ -1621,8 +2086,9 @@ class ReaMicroSettingsHook(
                         singleLineSubtitle = true,
                     ),
                 )
-            } else {
-                rules.map { rule ->
+            }
+            rules.forEach { rule ->
+                add(
                     ActionRow(
                         key = "reader_sheet_book_${bookKey.hashCode()}_${rule.id}",
                         title = rule.name,
@@ -1638,8 +2104,9 @@ class ReaMicroSettingsHook(
                             }
                         },
                         singleLineSubtitle = true,
-                    )
-                }
+                        onClick = { openReaderHighlightRuleDialog(rule) },
+                    ),
+                )
             }
         }
     }
@@ -7953,7 +8420,6 @@ class ReaMicroSettingsHook(
         readerHighlightVersionUiState?.let { return it }
         return mutableState(0).also { readerHighlightVersionUiState = it }
     }
-
     private fun readerHighlightVersionValue(): Int =
         (readerHighlightVersionState().method0("getValue") as? Number)?.toInt() ?: 0
 
@@ -7965,11 +8431,42 @@ class ReaMicroSettingsHook(
             ?.invoke(state, value + 1)
     }
 
+    // sheet 子页面导航状态：0=规则列表，1=高亮样式列表。
+    private fun readerHighlightSheetSubPageState(): Any {
+        readerHighlightSheetSubPageUiState?.let { return it }
+        return mutableState(0).also { readerHighlightSheetSubPageUiState = it }
+    }
+
+    private fun readerHighlightSheetSubPageValue(): Int =
+        (readerHighlightSheetSubPageState().method0("getValue") as? Number)?.toInt() ?: 0
+
+    private fun setReaderHighlightSheetSubPage(page: Int) {
+        val state = readerHighlightSheetSubPageState()
+        state.javaClass.methods
+            .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+            ?.invoke(state, page)
+    }
+
+    // "补全计划"整页导航状态：0=原生高亮页，1=规则页，2=高亮样式页。
+    private fun readerHighlightScreenPlanState(): Any {
+        readerHighlightScreenPlanUiState?.let { return it }
+        return mutableState(0).also { readerHighlightScreenPlanUiState = it }
+    }
+
+    private fun readerHighlightScreenPlanValue(): Int =
+        (readerHighlightScreenPlanState().method0("getValue") as? Number)?.toInt() ?: 0
+
+    private fun setReaderHighlightScreenPlan(page: Int) {
+        val state = readerHighlightScreenPlanState()
+        state.javaClass.methods
+            .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+            ?.invoke(state, page)
+    }
+
     private fun profileBackgroundVersionState(): Any {
         profileBackgroundVersionUiState?.let { return it }
         return mutableState(0).also { profileBackgroundVersionUiState = it }
     }
-
     private fun profileBackgroundVersionValue(): Int =
         (profileBackgroundVersionState().method0("getValue") as? Number)?.toInt() ?: 0
 
@@ -8384,6 +8881,8 @@ class ReaMicroSettingsHook(
         object ReaderHighlightSettings : InjectedRoute(READER_HIGHLIGHT_SETTINGS_TITLE)
         object ReaderHighlightConfigSettings : InjectedRoute("\u9ad8\u4eae\u6837\u5f0f")
         object ReaderHighlightTextSettings : InjectedRoute("\u9ad8\u4eae\u89c4\u5219")
+        // 从阅读页原生高亮界面点击"补全计划"进入的完整聚合页（复用宿主 NavHost 页面框架）。
+        data class ReaderCompletionPlan(val bookKey: String, val bookTitle: String) : InjectedRoute("\u8865\u5168\u8ba1\u5212")
         data class ReaderBookHighlightRules(val bookKey: String, val bookTitle: String) : InjectedRoute(bookTitle)
         data class ReaderBookOnlyHighlightRules(val bookKey: String, val bookTitle: String) : InjectedRoute("\u5355\u4e66\u9ad8\u4eae\u89c4\u5219")
         data class ReaderBookGlobalHighlightRules(val bookKey: String, val bookTitle: String) : InjectedRoute("\u8ddf\u968f\u5168\u5c40")
@@ -8527,6 +9026,17 @@ class ReaMicroSettingsHook(
     companion object {
         @Volatile private var activeInstance: ReaMicroSettingsHook? = null
 
+        // 从阅读页原生高亮界面点击"补全计划"进入完整聚合页（复用宿主 NavHost 页面框架，遵循宿主返回）。
+        fun openReaderCompletionPlanFromReader(
+            bookKey: String,
+            bookTitle: String,
+            navGraphScope: Any?,
+        ): Boolean =
+            activeInstance?.openInjectedRouteViaHostNavigation(
+                InjectedRoute.ReaderCompletionPlan(bookKey, bookTitle),
+                navGraphScope,
+            ) ?: false
+
         fun openReaderBookGlobalHighlightRulesFromReader(
             bookKey: String,
             bookTitle: String,
@@ -8547,6 +9057,72 @@ class ReaMicroSettingsHook(
                 navGraphScope,
             ) ?: false
 
+        fun renderReaderHighlightScreenEntryCard(
+            bookKey: String,
+            bookTitle: String,
+            composer: Any,
+            onClick: () -> Unit,
+        ): Boolean =
+            activeInstance?.runCatching {
+                renderReaderHighlightScreenEntryCard(
+                    bookKey = bookKey,
+                    bookTitle = bookTitle,
+                    composer = composer,
+                    onClick = onClick,
+                )
+                true
+            }?.onFailure {
+                XposedBridge.log("$LOG_PREFIX reader highlight screen entry card render failed: ${it.stackTraceToString()}")
+            }?.getOrDefault(false) ?: false
+
+        // 高亮界面顶部注入容器：plan==0 显示入口卡片，plan>0 显示补全计划整页（同一高亮页内跳转）。
+        fun renderReaderHighlightScreenContainer(
+            bookKey: String,
+            bookTitle: String,
+            composer: Any,
+            onEntryClick: () -> Unit,
+        ): Boolean =
+            activeInstance?.runCatching {
+                renderReaderHighlightScreenContainer(
+                    bookKey = bookKey,
+                    bookTitle = bookTitle,
+                    composer = composer,
+                    onEntryClick = onEntryClick,
+                )
+                true
+            }?.onFailure {
+                XposedBridge.log("$LOG_PREFIX reader highlight screen container render failed: ${it.stackTraceToString()}")
+            }?.getOrDefault(false) ?: false
+
+        // 在阅微原生高亮界面的 LazyColumn 上，向列表最前面插入一个"补全计划"入口 item。
+        fun addReaderHighlightScreenEntryLazyItem(
+            lazyListScope: Any,
+            bookKey: String,
+            bookTitle: String,
+            onClick: () -> Unit,
+        ): Boolean =
+            activeInstance?.runCatching {
+                addReaderHighlightScreenEntryLazyItem(
+                    lazyListScope = lazyListScope,
+                    bookKey = bookKey,
+                    bookTitle = bookTitle,
+                    onClick = onClick,
+                )
+                true
+            }?.onFailure {
+                XposedBridge.log("$LOG_PREFIX reader highlight screen entry lazy item failed: ${it.stackTraceToString()}")
+            }?.getOrDefault(false) ?: false
+
+        // 进入高亮界面 LazyColumn 渲染前调用，标记区间并提供入口点击回调。
+        fun beginHighlightScreenBuild(onClick: () -> Unit) {
+            activeInstance?.beginHighlightScreenBuild(onClick)
+        }
+
+        // 高亮界面 LazyColumn 渲染结束后调用，结束区间。
+        fun endHighlightScreenBuild() {
+            activeInstance?.endHighlightScreenBuild()
+        }
+
         fun renderReaderHighlightRulesSheetFromReader(
             globalRules: Boolean,
             bookKey: String,
@@ -8565,6 +9141,28 @@ class ReaMicroSettingsHook(
                 true
             }?.onFailure {
                 XposedBridge.log("$LOG_PREFIX reader highlight rules sheet render failed: ${it.stackTraceToString()}")
+            }?.getOrDefault(false) ?: false
+
+        // 当前是否处于"补全计划"整页（1=规则页，2=样式页）。0 表示原生高亮页。
+        fun readerHighlightScreenPlanValue(): Int =
+            activeInstance?.runCatching { readerHighlightScreenPlanValue() }?.getOrDefault(0) ?: 0
+
+        // 设置"补全计划"整页导航状态。点击入口置 1；返回置 0 回到原生高亮页。
+        fun setReaderHighlightScreenPlan(page: Int) {
+            activeInstance?.setReaderHighlightScreenPlan(page)
+        }
+
+        // 在阅微原生高亮页（HighlightPageContent）位置渲染"补全计划"整页内容，替换原生内容。
+        fun renderReaderHighlightScreenPlanPage(
+            bookKey: String,
+            bookTitle: String,
+            composer: Any,
+        ): Boolean =
+            activeInstance?.runCatching {
+                renderReaderHighlightScreenPlanPage(bookKey, bookTitle, composer)
+                true
+            }?.onFailure {
+                XposedBridge.log("$LOG_PREFIX reader highlight plan page render failed: ${it.stackTraceToString()}")
             }?.getOrDefault(false) ?: false
 
         const val LOG_PREFIX = "ReaMicro LSP"
