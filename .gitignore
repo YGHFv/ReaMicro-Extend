@@ -20,6 +20,23 @@ signing/
 tools/
 decompiled/
 dex_tmp/
+base_decompiled/
+classes.dex
+
+# Local analysis and diagnostic leftovers
+__pycache__/
+*.py[cod]
+*.log
+/build_output.txt
+/jadx_log.txt
+/repro_*.txt
+/reamicro_log_*.txt
+/scratchpad_*.txt
+/*outline*.txt
+/hl_*.json
+/hl_*.smali
+/bottombar_*.smali
+/mt_query.py
 
 # Local verification leftovers
 logcat.txt
@@ -37,4 +54,3 @@ external-sources/
 source-files/*
 !source-files/
 !source-files/fanqie.rmsource
-.kotlin/

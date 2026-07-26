@@ -27,6 +27,8 @@ data class OnlineSourceEntry(
     val ruleContent: String,
     val respondTime: Int,
     val origin: String,
+    val configuredRequestsPerSecond: Int? = null,
+    val dailyChapterLimit: Int? = null,
 ) {
     val hasLoginConfig: Boolean
         get() = loginUrl.isNotBlank() || loginUi.isNotBlank() || loginCheckJs.isNotBlank()
@@ -49,14 +51,19 @@ object OnlineConcurrentRateLimiter {
 
     fun updateConcurrentRate(key: String, concurrentRate: String) {
         records.compute(key) { _, record ->
-            parseConcurrentRate(concurrentRate, record?.time ?: System.currentTimeMillis(), record?.frequency ?: 0)
-                ?: record
+            val parsed = parseConcurrentRate(concurrentRate, System.currentTimeMillis(), 0)
+                ?: return@compute null
+            if (record?.accessLimit == parsed.accessLimit && record.interval == parsed.interval) record else parsed
         }
     }
 
     fun waitTurn(source: OnlineSourceEntry): OnlineConcurrentRecord? {
-        val concurrentRate = source.concurrentRate
-        if (concurrentRate.isBlank() || concurrentRate == "0") return null
+        val concurrentRate = OnlineSourceDownloadPolicyStore.effectiveConcurrentRate(source)
+        if (concurrentRate.isBlank() || concurrentRate == "0") {
+            records.remove(source.id)
+            return null
+        }
+        updateConcurrentRate(source.id, concurrentRate)
         while (true) {
             val waitTime = waitTime(source.id, concurrentRate)
             if (waitTime <= 0L) return records[source.id]
@@ -123,8 +130,11 @@ object OnlineSourceStore {
             ?.filter { it.isFile && it.extension.lowercase() in sourceExtensions }
             ?.mapNotNull { file ->
                 runCatching {
-                    parseSingleSource(file.readBytes(), file.nameWithoutExtension, file.name)
-                        .copy(fileName = file.name)
+                    OnlineSourceDownloadPolicyStore.attach(
+                        context,
+                        parseSingleSource(file.readBytes(), file.nameWithoutExtension, file.name)
+                            .copy(fileName = file.name),
+                    )
                 }.getOrNull()
             }
             ?.distinctBy { it.id }
@@ -147,7 +157,7 @@ object OnlineSourceStore {
         val dir = sourceDir(context).apply { mkdirs() }
         val target = File(dir, "${safeFileName(parsed.id)}.rmonline")
         FileOutputStream(target).use { it.write(bytes) }
-        return parsed.copy(fileName = target.name)
+        return OnlineSourceDownloadPolicyStore.attach(context, parsed.copy(fileName = target.name))
     }
 
     fun remove(context: Context?, sourceId: String): Boolean {
@@ -186,10 +196,10 @@ object OnlineSourceStore {
             .ifBlank { "在线源" }
         val sourceUrl = firstString(json, "bookSourceUrl", "sourceUrl", "url", "id")
         val loginUrl = firstString(json, "loginUrl", "loginURL", "login", "loginPage")
-        val loginUi = firstString(json, "loginUi", "loginUI")
+        val loginUi = rawJsonString(json, "loginUi").ifBlank { rawJsonString(json, "loginUI") }
         val loginCheckJs = firstString(json, "loginCheckJs", "loginCheckJS")
         val concurrentRate = firstString(json, "concurrentRate", "rateLimit", "requestRate")
-        val header = firstString(json, "header", "headers")
+        val header = rawJsonString(json, "header").ifBlank { rawJsonString(json, "headers") }
         val searchUrl = firstString(json, "searchUrl", "searchURL", "search")
         val ruleSearch = rawJsonString(json, "ruleSearch")
         val ruleBookInfo = rawJsonString(json, "ruleBookInfo")

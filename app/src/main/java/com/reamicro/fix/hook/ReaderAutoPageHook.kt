@@ -112,8 +112,12 @@ class ReaderAutoPageHook(
                     // 直接置 1（不累加），避免 LazyColumn content lambda 延迟执行导致 depth 一直累加
                     readerSettingsBuildDepth.set(1)
                     autoPageItemInjected.set(false)
-                    readerSettingsComposer.set(param.args.getOrNull(composerIndex))
-                    log("ReaderMoreSettingScreen before depth=${readerSettingsBuildDepth.get()}")
+                    val autoPageVisible = canRunAutoPage()
+                    readerSettingsComposer.set(param.args.getOrNull(composerIndex).takeIf { autoPageVisible })
+                    log(
+                        "ReaderMoreSettingScreen before depth=${readerSettingsBuildDepth.get()} " +
+                            "autoPageVisible=$autoPageVisible",
+                    )
                 }
                 override fun afterHookedMethod(param: MethodHookParam) {
                     log("ReaderMoreSettingScreen after depth=${readerSettingsBuildDepth.get()} injected=${autoPageItemInjected.get()}")

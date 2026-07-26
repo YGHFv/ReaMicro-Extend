@@ -14,11 +14,57 @@ data class OnlineSourceAuthResult(
 object OnlineSourceAuth {
     private const val KEY_USER_PREFIX = "online_login_user_"
     private const val KEY_PASSWORD_PREFIX = "online_login_password_"
+    private const val KEY_INFO_PREFIX = "online_login_info_"
     private const val KEY_COOKIE_PREFIX = "online_login_cookie_"
     private const val KEY_COOKIE_TIME_PREFIX = "online_login_cookie_time_"
 
     fun supportsCredentialLogin(source: OnlineSourceEntry): Boolean =
-        loginEndpoint(source) != null
+        loginEndpoint(source) != null || loginFields(source).isNotEmpty()
+
+    fun loginFields(source: OnlineSourceEntry): List<OnlineSourceLoginField> =
+        OnlineSourceLoginConfig.credentialFields(source.loginUi)
+
+    fun browserLoginUrl(source: OnlineSourceEntry): String =
+        source.webLoginUrl.ifBlank { OnlineSourceLoginConfig.browserUrl(source.loginUrl) }
+
+    fun loginInfo(context: Context?, source: OnlineSourceEntry): Map<String, String> {
+        val preferences = prefs(context) ?: return emptyMap()
+        val values = OnlineSourceLoginConfig.decode(
+            preferences.getString(KEY_INFO_PREFIX + source.id, "").orEmpty(),
+        ).toMutableMap()
+        val username = preferences.getString(KEY_USER_PREFIX + source.id, "").orEmpty()
+        val password = preferences.getString(KEY_PASSWORD_PREFIX + source.id, "").orEmpty()
+        loginFields(source).forEach { field ->
+            if (values[field.name].isNullOrBlank()) {
+                legacyLoginValue(field.name, username, password)?.let { values[field.name] = it }
+            }
+        }
+        return values
+    }
+
+    fun saveLoginInfo(
+        context: Context?,
+        source: OnlineSourceEntry,
+        values: Map<String, String>,
+    ): OnlineSourceAuthResult {
+        val appContext = context?.applicationContext
+            ?: return OnlineSourceAuthResult(false, "缺少 Context")
+        val fields = loginFields(source)
+        if (fields.isEmpty()) return OnlineSourceAuthResult(false, "该源没有可保存的登录字段")
+        val normalized = fields.associate { field ->
+            field.name to values[field.name].orEmpty().trim().ifBlank { field.defaultValue.trim() }
+        }
+        val missing = fields.filter { normalized[it.name].isNullOrBlank() }.map { it.name }
+        if (missing.isNotEmpty()) {
+            return OnlineSourceAuthResult(false, "请输入${missing.joinToString("、")}")
+        }
+        val merged = loginInfo(appContext, source).toMutableMap().apply { putAll(normalized) }
+        prefs(appContext)?.edit()
+            ?.putString(KEY_INFO_PREFIX + source.id, OnlineSourceLoginConfig.encode(merged))
+            ?.apply()
+        val label = fields.joinToString("、") { it.name }
+        return OnlineSourceAuthResult(true, "已保存$label")
+    }
 
     fun requestHeaders(context: Context?, source: OnlineSourceEntry): Map<String, String> {
         if (!source.enabledCookieJar) return emptyMap()
@@ -28,14 +74,47 @@ object OnlineSourceAuth {
 
     fun hasSavedLogin(context: Context?, source: OnlineSourceEntry): Boolean {
         val prefs = prefs(context) ?: return false
+        val fields = loginFields(source)
+        if (fields.isNotEmpty()) {
+            val info = loginInfo(context, source)
+            if (fields.all { info[it.name].orEmpty().isNotBlank() }) return true
+        }
         val cookie = prefs.getString(KEY_COOKIE_PREFIX + source.id, "").orEmpty()
         val username = prefs.getString(KEY_USER_PREFIX + source.id, "").orEmpty()
         val password = prefs.getString(KEY_PASSWORD_PREFIX + source.id, "").orEmpty()
         return cookie.isNotBlank() || (username.isNotBlank() && password.isNotBlank())
     }
 
+    fun savedCredentials(context: Context?, source: OnlineSourceEntry): Pair<String, String> {
+        val preferences = prefs(context) ?: return "" to ""
+        return preferences.getString(KEY_USER_PREFIX + source.id, "").orEmpty() to
+            preferences.getString(KEY_PASSWORD_PREFIX + source.id, "").orEmpty()
+    }
+
+    fun clearSourceData(context: Context?, sourceId: String) {
+        prefs(context)?.edit()
+            ?.remove(KEY_USER_PREFIX + sourceId)
+            ?.remove(KEY_PASSWORD_PREFIX + sourceId)
+            ?.remove(KEY_INFO_PREFIX + sourceId)
+            ?.remove(KEY_COOKIE_PREFIX + sourceId)
+            ?.remove(KEY_COOKIE_TIME_PREFIX + sourceId)
+            ?.apply()
+    }
+
     fun loginWithSavedCredentials(context: Context?, source: OnlineSourceEntry): OnlineSourceAuthResult {
         val prefs = prefs(context) ?: return OnlineSourceAuthResult(false, "缺少设置存储")
+        if (loginEndpoint(source) == null) {
+            val fields = loginFields(source)
+            if (fields.isNotEmpty()) {
+                val info = loginInfo(context, source)
+                val missing = fields.filter { info[it.name].orEmpty().isBlank() }
+                return if (missing.isEmpty()) {
+                    OnlineSourceAuthResult(true, "已读取保存的登录信息")
+                } else {
+                    OnlineSourceAuthResult(false, "未保存${missing.joinToString("、") { it.name }}")
+                }
+            }
+        }
         val username = prefs.getString(KEY_USER_PREFIX + source.id, "").orEmpty()
         val password = prefs.getString(KEY_PASSWORD_PREFIX + source.id, "").orEmpty()
         if (username.isBlank() || password.isBlank()) {
@@ -187,6 +266,17 @@ object OnlineSourceAuth {
                     if (index <= 0) null else line.take(index).trim() to line.substring(index + 1).trim()
                 }
                 .toMap()
+        }
+    }
+
+    private fun legacyLoginValue(name: String, username: String, password: String): String? {
+        val normalized = name.trim().lowercase()
+        return when {
+            normalized in setOf("账号", "帐号", "用户名", "用户", "邮箱", "手机号", "username", "user", "email") ->
+                username.takeIf { it.isNotBlank() }
+            normalized in setOf("密码", "password", "pass", "passwd") ->
+                password.takeIf { it.isNotBlank() }
+            else -> null
         }
     }
 }

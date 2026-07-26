@@ -53,6 +53,7 @@ import com.reamicro.fix.settings.XposedModuleSettings
 import com.reamicro.fix.tts.ReadAloudIntents
 import com.reamicro.fix.tts.TtsSourceEntry
 import com.reamicro.fix.tts.TtsSourceStore
+import com.reamicro.fix.webdav.decodeOnlineHtmlEntities
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
@@ -6794,12 +6795,7 @@ class ReaderHook(
                 .replace(Regex("<title\\b[\\s\\S]*?</title>", RegexOption.IGNORE_CASE), " ")
 
     private fun String.decodeBasicHtmlEntities(): String =
-        replace("&nbsp;", " ")
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&apos;", "'")
+        decodeOnlineHtmlEntities()
 
     private fun relativePath(root: File, file: File): String {
         val rootPath = (root.canonicalFileSafe() ?: root).absolutePath.trimEnd(File.separatorChar)

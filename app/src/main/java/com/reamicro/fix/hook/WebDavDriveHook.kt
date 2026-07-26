@@ -51,8 +51,12 @@ import android.webkit.JavascriptInterface
 import com.reamicro.fix.R
 import com.reamicro.fix.association.model.AssociationPlatforms
 import com.reamicro.fix.online.OnlineConcurrentRateLimiter
+import com.reamicro.fix.online.OnlineSourceDailyLimitException
+import com.reamicro.fix.online.OnlineSourceDownloadPolicyStore
 import com.reamicro.fix.online.OnlineSourceAuth
 import com.reamicro.fix.online.OnlineSourceEntry
+import com.reamicro.fix.online.OnlineSourceLoginConfig
+import com.reamicro.fix.online.OnlineSourceScriptCompat
 import com.reamicro.fix.online.OnlineSourceStore
 import com.reamicro.fix.notification.cancelOnlineCompletionNotificationIfDone
 import com.reamicro.fix.notification.onlineCompletionDownloadBigText
@@ -65,6 +69,7 @@ import com.reamicro.fix.webdav.CleartextScope
 import com.reamicro.fix.webdav.CloudDownloadCancelledException
 import com.reamicro.fix.webdav.CloudBookRowExtendedDisplayContext
 import com.reamicro.fix.webdav.CancellableWebDavDownload
+import com.reamicro.fix.webdav.decodeOnlineHtmlEntities
 import com.reamicro.fix.webdav.HomeSearchRenderContext
 import com.reamicro.fix.webdav.HomeSearchSection
 import com.reamicro.fix.webdav.ImportLocalLibraryRowContext
@@ -73,6 +78,7 @@ import com.reamicro.fix.webdav.NativeCloudDownload
 import com.reamicro.fix.webdav.OnlineCompletionDownloadCancelledException
 import com.reamicro.fix.webdav.OnlineCompletionDownloadTask
 import com.reamicro.fix.webdav.OnlineDownloadedChapter
+import com.reamicro.fix.webdav.OnlineChapterContentValidator
 import com.reamicro.fix.webdav.OnlineChapterUpdatePlanner
 import com.reamicro.fix.webdav.OnlineChapterHeadingMarkup
 import com.reamicro.fix.webdav.RemoteOnlineChapter
@@ -5199,14 +5205,20 @@ class WebDavDriveHook(
                 author = result.author.ifBlank {
                     rule?.optString("author", "").orEmpty()
                         .takeIf { it.isNotBlank() }
-                        ?.let { onlineRuleValue(node, it, detail.url).cleanOnlineText() }
+                        ?.let { onlineRuleValue(node, it, detail.url, source = source).cleanOnlineText() }
                         .orEmpty()
                         .ifBlank { onlineFirstJsonString(node, listOf("author", "bookAuthor", "authorName", "writer")) }
                 },
                 coverUrl = result.coverUrl.ifBlank {
                     rule?.optString("coverUrl", "").orEmpty()
                         .takeIf { it.isNotBlank() }
-                        ?.let { normalizeOnlineCoverUrl(source, detail.url, onlineRuleValue(node, it, detail.url)) }
+                        ?.let {
+                            normalizeOnlineCoverUrl(
+                                source,
+                                detail.url,
+                                onlineRuleValue(node, it, detail.url, source = source),
+                            )
+                        }
                         .orEmpty()
                         .ifBlank {
                             normalizeOnlineCoverUrl(
@@ -5263,10 +5275,26 @@ class WebDavDriveHook(
         val charset = options.optString("charset", "UTF-8").ifBlank { "UTF-8" }
         val method = options.optString("method", "GET").ifBlank { "GET" }.uppercase()
         val bodyTemplate = options.optString("body", "").orEmpty()
-        val resolvedUrl = applyOnlineTemplate(urlPart, null, sourceBaseUrl(source), query, encodeQuery = true, encodeCharset = charset)
+        val resolvedUrl = applyOnlineTemplate(
+            urlPart,
+            null,
+            sourceBaseUrl(source),
+            query,
+            encodeQuery = true,
+            encodeCharset = charset,
+            source = source,
+        )
         val url = resolveOnlineUrl(sourceBaseUrl(source), resolvedUrl)
         val body = if (bodyTemplate.isNotBlank()) {
-            applyOnlineTemplate(bodyTemplate, null, sourceBaseUrl(source), query, encodeQuery = true, encodeCharset = charset)
+            applyOnlineTemplate(
+                bodyTemplate,
+                null,
+                sourceBaseUrl(source),
+                query,
+                encodeQuery = true,
+                encodeCharset = charset,
+                source = source,
+            )
         } else null
         val headers = runCatching { options.optJSONObject("headers") }.getOrNull()?.let { h ->
             h.keys().asSequence().associateWith { h.optString(it, "") }
@@ -5302,11 +5330,26 @@ class WebDavDriveHook(
             return buildOnlineSearchUrlFromJs(source, raw, query)
         }
         val urlPart = raw.substringBefore(",{").substringBefore(", {").trim()
-        val resolved = applyOnlineTemplate(urlPart, null, sourceBaseUrl(source), query, encodeQuery = true)
+        val resolved = applyOnlineTemplate(
+            urlPart,
+            null,
+            sourceBaseUrl(source),
+            query,
+            encodeQuery = true,
+            source = source,
+        )
         return resolveOnlineUrl(sourceBaseUrl(source), resolved)
     }
 
     private fun buildOnlineSearchUrlFromJs(source: OnlineSourceEntry, raw: String, query: String): String {
+        val context = currentApplicationContext() ?: currentContext()
+        OnlineSourceScriptCompat.resolveSearchUrl(
+            sourceUrl = sourceBaseUrl(source),
+            rawScript = raw,
+            rawQuery = query,
+            page = 1,
+            loginInfo = OnlineSourceAuth.loginInfo(context, source),
+        )?.takeIf { it.isNotBlank() }?.let { return it }
         val templates = Regex("""return\s+`([^`]+)`""").findAll(raw).map { it.groupValues[1] }.toList()
         val selected = when {
             templates.isEmpty() -> return ""
@@ -5315,7 +5358,14 @@ class WebDavDriveHook(
         }
         return resolveOnlineUrl(
             sourceBaseUrl(source),
-            applyOnlineTemplate(selected, null, sourceBaseUrl(source), query, encodeQuery = true),
+            applyOnlineTemplate(
+                selected,
+                null,
+                sourceBaseUrl(source),
+                query,
+                encodeQuery = true,
+                source = source,
+            ),
         )
     }
 
@@ -5463,12 +5513,12 @@ class WebDavDriveHook(
         val nodes = onlineJsonRuleValues(root, rule.optString("bookList", ""))
         if (nodes.isEmpty()) return emptyList()
         return nodes.mapNotNull { node ->
-            val name = onlineRuleValue(node, rule.optString("name", ""), baseUrl).cleanOnlineText()
+            val name = onlineRuleValue(node, rule.optString("name", ""), baseUrl, source = source).cleanOnlineText()
             if (name.isBlank() || name.length > 120) return@mapNotNull null
-            val author = onlineRuleValue(node, rule.optString("author", ""), baseUrl).cleanOnlineText()
-            val detail = onlineRuleValue(node, rule.optString("bookUrl", ""), baseUrl)
-            val cover = onlineRuleValue(node, rule.optString("coverUrl", ""), baseUrl)
-            val intro = onlineRuleValue(node, rule.optString("intro", ""), baseUrl).cleanOnlineText()
+            val author = onlineRuleValue(node, rule.optString("author", ""), baseUrl, source = source).cleanOnlineText()
+            val detail = onlineRuleValue(node, rule.optString("bookUrl", ""), baseUrl, source = source)
+            val cover = onlineRuleValue(node, rule.optString("coverUrl", ""), baseUrl, source = source)
+            val intro = onlineRuleValue(node, rule.optString("intro", ""), baseUrl, source = source).cleanOnlineText()
             val meta = onlineResultMetadata(source, node, rule, baseUrl)
             OnlineBookSearchResult(
                 sourceName = source.name,
@@ -5564,16 +5614,16 @@ class WebDavDriveHook(
     ): OnlineResultMetadata {
         val kind = rule?.optString("kind", "").orEmpty()
             .takeIf { it.isNotBlank() }
-            ?.let { onlineRuleValue(node, it, baseUrl) }
+            ?.let { onlineRuleValue(node, it, baseUrl, source = source) }
             .orEmpty()
         val wordCount = rule?.optString("wordCount", "").orEmpty()
             .takeIf { it.isNotBlank() }
-            ?.let { onlineRuleValue(node, it, baseUrl) }
+            ?.let { onlineRuleValue(node, it, baseUrl, source = source) }
             .orEmpty()
             .ifBlank { onlineFirstJsonString(node, ONLINE_WORD_COUNT_FIELDS) }
         val updateTime = rule?.optString("updateTime", "").orEmpty()
             .takeIf { it.isNotBlank() }
-            ?.let { onlineRuleValue(node, it, baseUrl) }
+            ?.let { onlineRuleValue(node, it, baseUrl, source = source) }
             .orEmpty()
             .ifBlank { onlineFirstJsonString(node, ONLINE_UPDATE_TIME_FIELDS) }
         val chapterCount = onlineFirstJsonInt(node, ONLINE_CHAPTER_COUNT_FIELDS)
@@ -5790,19 +5840,25 @@ class WebDavDriveHook(
         }
     }
 
-    private fun onlineRuleValue(node: Any?, rawRule: String, baseUrl: String, query: String? = null): String {
+    private fun onlineRuleValue(
+        node: Any?,
+        rawRule: String,
+        baseUrl: String,
+        query: String? = null,
+        source: OnlineSourceEntry? = null,
+    ): String {
         var rule = rawRule.trim()
         if (rule.isBlank() || node == null || node == JSONObject.NULL) return ""
         if (rule.startsWith("<js>", ignoreCase = true)) return ""
         if (rule.startsWith("@js:", ignoreCase = true)) {
             if (rule.contains("replaceCover", ignoreCase = true)) {
-                return replaceFanqieCover(onlineRuleValue(node, "thumb_url", baseUrl))
+                return replaceFanqieCover(onlineRuleValue(node, "thumb_url", baseUrl, source = source))
             }
             return ""
         }
         rule = rule.substringBefore("\n<js>", rule).substringBefore("\n@js:", rule).trim()
         if (rule.contains("{{") && rule.contains("}}")) {
-            return applyOnlineTemplate(rule, node, baseUrl, query)
+            return applyOnlineTemplate(rule, node, baseUrl, query, source = source)
         }
         val parts = rule.split("##", limit = 3)
         val selector = parts.firstOrNull().orEmpty().trim()
@@ -5827,7 +5883,12 @@ class WebDavDriveHook(
         page: Int = 1,
         encodeQuery: Boolean = false,
         encodeCharset: String = "UTF-8",
+        source: OnlineSourceEntry? = null,
     ): String {
+        val loginInfo = source?.let {
+            OnlineSourceAuth.loginInfo(currentApplicationContext() ?: currentContext(), it)
+        }.orEmpty()
+        val sourceUrl = source?.sourceUrl.orEmpty().ifBlank { baseUrl }
         var text = raw
             .replace("{{(page-1)*10}}", ((page - 1) * 10).toString())
             .replace("{{(page - 1) * 10}}", ((page - 1) * 10).toString())
@@ -5840,7 +5901,9 @@ class WebDavDriveHook(
         }
         return Regex("""\{\{([^{}]+)\}\}""").replace(text) { match ->
             val expr = match.groupValues[1].trim()
+            val sourceExpression = OnlineSourceLoginConfig.expressionValue(expr, sourceUrl, loginInfo)
             when {
+                sourceExpression != null -> sourceExpression
                 Regex("""^baseUrl\s*\+\s*['"]([^'"]*)['"]$""").matchEntire(expr) != null ->
                     baseUrl.trimEnd('/') + Regex("""^baseUrl\s*\+\s*['"]([^'"]*)['"]$""")
                         .matchEntire(expr)
@@ -6061,12 +6124,7 @@ class WebDavDriveHook(
         replace(Regex("(?is)<script[\\s\\S]*?</script>"), " ")
             .replace(Regex("(?is)<style[\\s\\S]*?</style>"), " ")
             .replace(Regex("(?is)<[^>]+>"), " ")
-            .replace("&nbsp;", " ")
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
+            .decodeOnlineHtmlEntities()
             .replace(Regex("\\s+"), " ")
             .trim()
 
@@ -6907,11 +6965,15 @@ class WebDavDriveHook(
             return
         }
         val appContext = context.applicationContext ?: context
-        val source = info.source ?: OnlineSourceStore.list(appContext).firstOrNull { source ->
+        val source = (info.source ?: OnlineSourceStore.list(appContext).firstOrNull { source ->
             source.id == info.sourceId
-        }
+        })?.let { OnlineSourceDownloadPolicyStore.attach(appContext, it) }
         if (source == null) {
             showToast("在线补全源不可用：${info.sourceName}")
+            return
+        }
+        if (OnlineSourceDownloadPolicyStore.remainingToday(appContext, source) == 0) {
+            showToast(OnlineSourceDownloadPolicyStore.limitReachedMessage(source))
             return
         }
         val title = book.callString("getTitle").ifBlank { "未命名图书" }
@@ -6997,14 +7059,18 @@ class WebDavDriveHook(
         tocSnapshot: OnlineTocSnapshot,
         failures: List<OnlineFailedChapter>,
         chapterHrefs: List<String>,
+        maxChapterAttempts: Int? = null,
         onProgress: (Int, String) -> Unit,
     ): OnlineFailedRetryResult {
-        if (failures.isEmpty()) return OnlineFailedRetryResult(0, 0, false)
+        if (failures.isEmpty()) return OnlineFailedRetryResult(0, 0, false, 0)
         val remoteChapters = tocSnapshot.chapters
-        val candidates = failures.filter { it.index in remoteChapters.indices }.distinctBy { it.index }
+        val candidates = failures
+            .filter { it.index in remoteChapters.indices }
+            .distinctBy { it.index }
+            .let { values -> maxChapterAttempts?.let { values.take(it.coerceAtLeast(0)) } ?: values }
         if (candidates.isEmpty()) {
             writeOnlineCompletionFailedChapters(bookDir, target, failures)
-            return OnlineFailedRetryResult(0, failures.size, false)
+            return OnlineFailedRetryResult(0, failures.size, false, 0)
         }
         logWebDav(
             "online completion retry logged failures start title=${target.result.name} " +
@@ -7014,15 +7080,30 @@ class WebDavDriveHook(
         val initialAttempts = failures.associate { it.index to it.attempts }
         val roundAttemptsByIndex = mutableMapOf<Int, Int>()
         val failed = candidates.mapTo(linkedSetOf()) { it.index }
+        val nonRetryable = linkedSetOf<Int>()
         val failureMessages = candidates.associate { it.index to it.message }.toMutableMap()
+        var dailyLimitMessage: String? = null
         var successCount = 0
 
         fun attemptLoggedChapter(index: Int, immediateRetry: Boolean): Boolean {
             val chapter = remoteChapters[index]
+            dailyLimitMessage?.let { message ->
+                nonRetryable.add(index)
+                failureMessages[index] = message
+                remaining[index] = onlineCompletionFailedChapter(
+                    target = target,
+                    chapter = chapter,
+                    index = index,
+                    attempts = initialAttempts[index] ?: 0,
+                    message = message,
+                    href = chapterHrefs.getOrNull(index).orEmpty(),
+                )
+                return false
+            }
             val maxAttemptsThisRound = if (immediateRetry) 2 else 1
             var roundAttempts = 0
             while ((roundAttemptsByIndex[index] ?: 0) < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT &&
-                roundAttempts < maxAttemptsThisRound
+                roundAttempts < maxAttemptsThisRound && index !in nonRetryable
             ) {
                 roundAttemptsByIndex[index] = (roundAttemptsByIndex[index] ?: 0) + 1
                 roundAttempts++
@@ -7048,6 +7129,10 @@ class WebDavDriveHook(
                     return true
                 }.onFailure { error ->
                     val message = error.message.orEmpty().ifBlank { error.javaClass.name }
+                    if (error is OnlineSourceDailyLimitException) {
+                        dailyLimitMessage = message
+                        nonRetryable.add(index)
+                    }
                     failureMessages[index] = message
                     remaining[index] = onlineCompletionFailedChapter(
                         target = target,
@@ -7074,9 +7159,11 @@ class WebDavDriveHook(
             attemptLoggedChapter(failure.index, immediateRetry = true)
         }
         var retryRound = 0
-        while (failed.any { (roundAttemptsByIndex[it] ?: 0) < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }) {
+        while (failed.any { it !in nonRetryable && (roundAttemptsByIndex[it] ?: 0) < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }) {
             retryRound++
-            val retryCandidates = failed.filter { (roundAttemptsByIndex[it] ?: 0) < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }
+            val retryCandidates = failed.filter {
+                it !in nonRetryable && (roundAttemptsByIndex[it] ?: 0) < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT
+            }
             val waitMs = onlineCompletionRetryDelayMs(retryRound)
             onProgress(23, "等待重试失败章节 ${retryCandidates.size} 章${onlineCompletionFailureSuffix(failed.size)}")
             sleepOnlineCompletionRetryDelay(null, waitMs)
@@ -7093,6 +7180,7 @@ class WebDavDriveHook(
             retried = successCount,
             failed = unresolved.size,
             changed = successCount > 0 || unresolved.size != failures.size,
+            attempted = candidates.size,
         )
     }
 
@@ -7114,6 +7202,7 @@ class WebDavDriveHook(
             onProgress(progress.coerceAtMost(12), message)
         }
         val remoteChapters = tocSnapshot.chapters
+        val chapterAllowance = OnlineSourceDownloadPolicyStore.remainingToday(currentContext(), target.source)
         val (chapterHrefs, newRemoteIndices) = onlineChapterUpdatePlan(bookDir, remoteChapters)
         val originalFailures = readOnlineCompletionFailedChapters(bookDir)
         val loggedFailures = remapOnlineCompletionFailures(
@@ -7121,15 +7210,24 @@ class WebDavDriveHook(
             remoteChapters = remoteChapters,
             chapterHrefs = chapterHrefs,
         )
-        if (loggedFailures != originalFailures) {
-            writeOnlineCompletionFailedChapters(bookDir, target, loggedFailures)
+        val detectedFailures = detectInvalidOnlineCompletionChapters(
+            bookDir = bookDir,
+            target = target,
+            remoteChapters = remoteChapters,
+            chapterHrefs = chapterHrefs,
+            ignoredIndices = loggedFailures.mapTo(hashSetOf()) { it.index },
+        )
+        val retryFailures = (loggedFailures + detectedFailures).sortedBy { it.index }
+        if (retryFailures != originalFailures) {
+            writeOnlineCompletionFailedChapters(bookDir, target, retryFailures)
         }
         val retryResult = retryOnlineCompletionLoggedFailures(
             bookDir = bookDir,
             target = target,
             tocSnapshot = tocSnapshot,
-            failures = loggedFailures,
+            failures = retryFailures,
             chapterHrefs = chapterHrefs,
+            maxChapterAttempts = chapterAllowance,
             onProgress = onProgress,
         )
         if (newRemoteIndices.isEmpty()) {
@@ -7168,17 +7266,39 @@ class WebDavDriveHook(
                 "remote=${remoteChapters.size} new=${newRemoteIndices.size} " +
                 "retried=${retryResult.retried} previousFailed=${retryResult.failed}",
         )
+        val newChapterAllowance = chapterAllowance
+            ?.minus(retryResult.attempted)
+            ?.coerceAtLeast(0)
+        val allowedNewChapterCount = newChapterAllowance
+            ?.coerceAtMost(newRemoteIndices.size)
+            ?: newRemoteIndices.size
+        val quotaPendingMessage = OnlineSourceDownloadPolicyStore.limitReachedMessage(target.source)
         val downloaded = MutableList<OnlineDownloadedChapter?>(newRemoteIndices.size) { null }
         val attempts = IntArray(newRemoteIndices.size)
         val failed = linkedSetOf<Int>()
+        val nonRetryable = linkedSetOf<Int>()
         val failureMessages = mutableMapOf<Int, String>()
+        var dailyLimitMessage: String? = null
+        for (offset in allowedNewChapterCount until newRemoteIndices.size) {
+            failed.add(offset)
+            nonRetryable.add(offset)
+            failureMessages[offset] = quotaPendingMessage
+        }
 
         fun attemptChapter(offset: Int, immediateRetry: Boolean): Boolean {
             val remoteIndex = newRemoteIndices[offset]
             val chapter = remoteChapters[remoteIndex]
+            dailyLimitMessage?.let { message ->
+                failed.add(offset)
+                nonRetryable.add(offset)
+                failureMessages[offset] = message
+                return false
+            }
             val maxAttemptsThisRound = if (immediateRetry) 2 else 1
             var roundAttempts = 0
-            while (attempts[offset] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT && roundAttempts < maxAttemptsThisRound) {
+            while (attempts[offset] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT &&
+                roundAttempts < maxAttemptsThisRound && offset !in nonRetryable
+            ) {
                 attempts[offset]++
                 roundAttempts++
                 val attempt = attempts[offset]
@@ -7196,7 +7316,12 @@ class WebDavDriveHook(
                     return true
                 }.onFailure { error ->
                     failed.add(offset)
-                    failureMessages[offset] = error.message.orEmpty().ifBlank { error.javaClass.name }
+                    val message = error.message.orEmpty().ifBlank { error.javaClass.name }
+                    failureMessages[offset] = message
+                    if (error is OnlineSourceDailyLimitException) {
+                        dailyLimitMessage = message
+                        nonRetryable.add(offset)
+                    }
                     logWebDav(
                         "online completion update chapter failed ${offset + 1}/${newRemoteIndices.size} " +
                             "remote=${remoteIndex + 1}/${remoteChapters.size} " +
@@ -7217,9 +7342,9 @@ class WebDavDriveHook(
             }
         }
         var retryRound = 0
-        while (failed.any { attempts[it] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }) {
+        while (failed.any { it !in nonRetryable && attempts[it] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }) {
             retryRound++
-            val retryCandidates = failed.filter { attempts[it] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }
+            val retryCandidates = failed.filter { it !in nonRetryable && attempts[it] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }
             val waitMs = onlineCompletionRetryDelayMs(retryRound)
             onProgress(84, "等待重试新增章节 ${retryCandidates.size} 章${onlineCompletionFailureSuffix(failed.size)}")
             logWebDav(
@@ -7238,14 +7363,11 @@ class WebDavDriveHook(
             }
         }
         val successCount = downloaded.count { it != null }
-        if (successCount <= 0) {
-            error("新增章节全部下载失败，已停止更新：${target.result.name}")
-        }
         val newDownloadedChapters = newRemoteIndices.mapIndexed { offset, remoteIndex ->
             val chapter = remoteChapters[remoteIndex]
             remoteIndex to (downloaded[offset] ?: OnlineDownloadedChapter(
                 title = chapter.title.ifBlank { "第 ${remoteIndex + 1} 章" },
-                content = "本章下载失败，已按在线源重试 ${attempts[offset]} 次。\n\n${failureMessages[offset].orEmpty()}",
+                content = onlineCompletionFailurePlaceholder(attempts[offset], failureMessages[offset].orEmpty()),
                 volumeTitle = chapter.volumeTitle,
                 level = chapter.level,
                 sourceUrl = chapter.url,
@@ -7362,6 +7484,40 @@ class WebDavDriveHook(
         val rootPrefix = root.path.trimEnd(File.separatorChar) + File.separator
         if (!file.path.startsWith(rootPrefix)) error("EPUB chapter path escapes book dir")
         return file
+    }
+
+    private fun detectInvalidOnlineCompletionChapters(
+        bookDir: File,
+        target: OnlineDownloadTarget,
+        remoteChapters: List<OnlineChapter>,
+        chapterHrefs: List<String>,
+        ignoredIndices: Set<Int>,
+    ): List<OnlineFailedChapter> {
+        val failures = chapterHrefs.mapIndexedNotNull { index, href ->
+            if (index !in remoteChapters.indices || index in ignoredIndices) return@mapIndexedNotNull null
+            val chapterFile = onlineCompletionChapterFile(bookDir, href)
+            if (!chapterFile.isFile) return@mapIndexedNotNull null
+            val reason = runCatching {
+                OnlineChapterContentValidator.storedXhtmlFailureReason(chapterFile.readText(Charsets.UTF_8))
+            }.getOrElse { error ->
+                "读取历史章节失败：${error.message.orEmpty().ifBlank { error.javaClass.name }}"
+            } ?: return@mapIndexedNotNull null
+            onlineCompletionFailedChapter(
+                target = target,
+                chapter = remoteChapters[index],
+                index = index,
+                attempts = 0,
+                message = "检测到历史无效章节：$reason",
+                href = href,
+            )
+        }
+        if (failures.isNotEmpty()) {
+            logWebDav(
+                "online completion invalid stored chapters detected title=${target.result.name} " +
+                    "count=${failures.size} indices=${failures.take(20).joinToString { (it.index + 1).toString() }}",
+            )
+        }
+        return failures
     }
 
     private fun remapOnlineCompletionFailures(
@@ -7535,6 +7691,11 @@ class WebDavDriveHook(
             return
         }
         val appContext = context.applicationContext ?: context
+        target.source = OnlineSourceDownloadPolicyStore.attach(appContext, target.source)
+        if (OnlineSourceDownloadPolicyStore.remainingToday(appContext, target.source) == 0) {
+            showToast(OnlineSourceDownloadPolicyStore.limitReachedMessage(target.source))
+            return
+        }
         ensureOnlineCompletionCancelReceiver(appContext)
         val key = "${target.source.id}|${target.result.detailUrl}|${target.result.name}"
         if (onlineCompletionRunningDownloads.containsKey(key)) {
@@ -7877,15 +8038,26 @@ class WebDavDriveHook(
         throwIfOnlineCompletionDownloadCancelled(task)
         val detail = tocSnapshot.detail
         val chapters = tocSnapshot.chapters
+        val chapterAllowance = OnlineSourceDownloadPolicyStore.remainingToday(currentContext(), target.source)
+        val allowedChapterCount = chapterAllowance?.coerceAtMost(chapters.size) ?: chapters.size
+        val quotaPendingMessage = OnlineSourceDownloadPolicyStore.limitReachedMessage(target.source)
         logWebDav(
             "online completion chapters=${chapters.size} " +
-                "first=${chapters.firstOrNull()?.title.orEmpty()} firstUrl=${chapters.firstOrNull()?.url.orEmpty()}",
+                "allowed=$allowedChapterCount first=${chapters.firstOrNull()?.title.orEmpty()} " +
+                "firstUrl=${chapters.firstOrNull()?.url.orEmpty()}",
         )
         onProgress(5, "开始下载章节 0/${chapters.size}")
         val downloaded = MutableList<OnlineDownloadedChapter?>(chapters.size) { null }
         val attempts = IntArray(chapters.size)
         val failed = linkedSetOf<Int>()
+        val nonRetryable = linkedSetOf<Int>()
         val failureMessages = mutableMapOf<Int, String>()
+        var dailyLimitMessage: String? = null
+        for (index in allowedChapterCount until chapters.size) {
+            failed.add(index)
+            nonRetryable.add(index)
+            failureMessages[index] = quotaPendingMessage
+        }
         val cover = target.result.coverUrl.takeIf { it.isNotBlank() }?.let { coverUrl ->
             runCatching {
                 throwIfOnlineCompletionDownloadCancelled(task)
@@ -7939,9 +8111,17 @@ class WebDavDriveHook(
         fun attemptChapter(index: Int, immediateRetry: Boolean): Boolean {
             throwIfOnlineCompletionDownloadCancelled(task)
             val chapter = chapters[index]
+            dailyLimitMessage?.let { message ->
+                failed.add(index)
+                nonRetryable.add(index)
+                failureMessages[index] = message
+                return false
+            }
             val maxAttemptsThisRound = if (immediateRetry) 2 else 1
             var roundAttempts = 0
-            while (attempts[index] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT && roundAttempts < maxAttemptsThisRound) {
+            while (attempts[index] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT &&
+                roundAttempts < maxAttemptsThisRound && index !in nonRetryable
+            ) {
                 throwIfOnlineCompletionDownloadCancelled(task)
                 attempts[index]++
                 roundAttempts++
@@ -7964,7 +8144,12 @@ class WebDavDriveHook(
                     return true
                 }.onFailure { error ->
                     failed.add(index)
-                    failureMessages[index] = error.message.orEmpty().ifBlank { error.javaClass.name }
+                    val message = error.message.orEmpty().ifBlank { error.javaClass.name }
+                    failureMessages[index] = message
+                    if (error is OnlineSourceDailyLimitException) {
+                        dailyLimitMessage = message
+                        nonRetryable.add(index)
+                    }
                     logWebDav(
                         "online completion chapter failed ${index + 1}/${chapters.size} " +
                             "attempt=$attempt/${ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT} " +
@@ -7987,9 +8172,9 @@ class WebDavDriveHook(
             maybeImportFirstBatch(progress, index + 1)
         }
         var retryRound = 0
-        while (failed.any { attempts[it] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }) {
+        while (failed.any { it !in nonRetryable && attempts[it] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }) {
             retryRound++
-            val retryCandidates = failed.filter { attempts[it] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }
+            val retryCandidates = failed.filter { it !in nonRetryable && attempts[it] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }
             val waitMs = onlineCompletionRetryDelayMs(retryRound)
             onProgress(84, "等待重试失败章节 ${retryCandidates.size} 章${onlineCompletionFailureSuffix(failed.size)}")
             logWebDav(
@@ -8010,9 +8195,6 @@ class WebDavDriveHook(
             }
         }
         val successCount = downloadedCount()
-        if (successCount <= 0) {
-            error("所有章节下载失败，已停止导入：${target.result.name}")
-        }
         if (failed.isNotEmpty()) {
             onProgress(88, "仍有 ${failed.size} 章失败，继续生成 EPUB")
             logWebDav(
@@ -8037,7 +8219,7 @@ class WebDavDriveHook(
         val finalChapters = chapters.mapIndexed { index, chapter ->
             downloaded[index] ?: OnlineDownloadedChapter(
                 title = chapter.title.ifBlank { "第 ${index + 1} 章" },
-                content = "本章下载失败，已按在线源重试 ${attempts[index]} 次。\n\n${failureMessages[index].orEmpty()}",
+                content = onlineCompletionFailurePlaceholder(attempts[index], failureMessages[index].orEmpty()),
                 volumeTitle = chapter.volumeTitle,
                 level = chapter.level,
                 sourceUrl = chapter.url,
@@ -8110,14 +8292,20 @@ class WebDavDriveHook(
             author = current.author.ifBlank {
                 bookInfoRule?.optString("author", "").orEmpty()
                     .takeIf { it.isNotBlank() }
-                    ?.let { onlineRuleValue(node, it, detailUrl).cleanOnlineText() }
+                    ?.let { onlineRuleValue(node, it, detailUrl, source = target.source).cleanOnlineText() }
                     .orEmpty()
                     .ifBlank { onlineFirstJsonString(node, listOf("author", "bookAuthor", "authorName", "writer")) }
             },
             coverUrl = current.coverUrl.ifBlank {
                 bookInfoRule?.optString("coverUrl", "").orEmpty()
                     .takeIf { it.isNotBlank() }
-                    ?.let { normalizeOnlineCoverUrl(target.source, detailUrl, onlineRuleValue(node, it, detailUrl)) }
+                    ?.let {
+                        normalizeOnlineCoverUrl(
+                            target.source,
+                            detailUrl,
+                            onlineRuleValue(node, it, detailUrl, source = target.source),
+                        )
+                    }
                     .orEmpty()
                     .ifBlank {
                         normalizeOnlineCoverUrl(
@@ -8130,7 +8318,7 @@ class WebDavDriveHook(
             intro = current.intro.ifBlank {
                 bookInfoRule?.optString("intro", "").orEmpty()
                     .takeIf { it.isNotBlank() }
-                    ?.let { onlineRuleValue(node, it, detailUrl).cleanOnlineText() }
+                    ?.let { onlineRuleValue(node, it, detailUrl, source = target.source).cleanOnlineText() }
                     .orEmpty()
                     .ifBlank { onlineFirstJsonString(node, listOf("intro", "abstract", "description", "bookDesc")) }
             },
@@ -8154,26 +8342,27 @@ class WebDavDriveHook(
         detailBody: String,
         chapter: OnlineChapter,
         index: Int,
-    ): OnlineDownloadedChapter {
-        val body = if (chapter.url == detailUrl) {
-            detailBody
-        } else {
-            OnlineConcurrentRateLimiter.withLimitBlocking(target.source) {
-                requestOnlineSearch(target.source, chapter.url)
-            }.body
+    ): OnlineDownloadedChapter =
+        OnlineSourceDownloadPolicyStore.withChapterDownload(currentContext(), target.source) {
+            val body = if (chapter.url == detailUrl) {
+                detailBody
+            } else {
+                OnlineConcurrentRateLimiter.withLimitBlocking(target.source) {
+                    requestOnlineSearch(target.source, chapter.url)
+                }.body
+            }
+            val content = extractOnlineChapterContent(target.source, chapter.url, body)
+            OnlineChapterContentValidator.downloadedFailureReason(content)?.let { reason ->
+                error("章节正文无效：$reason body=${body.length}")
+            }
+            OnlineDownloadedChapter(
+                title = chapter.title.ifBlank { "第 ${index + 1} 章" },
+                content = content,
+                volumeTitle = chapter.volumeTitle,
+                level = chapter.level,
+                sourceUrl = chapter.url,
+            )
         }
-        val content = extractOnlineChapterContent(target.source, chapter.url, body)
-        if (content.isBlank()) {
-            error("章节正文为空 body=${body.length}")
-        }
-        return OnlineDownloadedChapter(
-            title = chapter.title.ifBlank { "第 ${index + 1} 章" },
-            content = content,
-            volumeTitle = chapter.volumeTitle,
-            level = chapter.level,
-            sourceUrl = chapter.url,
-        )
-    }
 
     private fun buildOnlineTocUrl(
         source: OnlineSourceEntry,
@@ -8188,7 +8377,7 @@ class WebDavDriveHook(
             .takeIf { it.isNotBlank() }
             ?.let { onlineJsonRuleValues(root, it).firstOrNull() }
             ?: root
-        return resolveOnlineUrl(detailUrl, onlineRuleValue(node, tocRule, detailUrl))
+        return resolveOnlineUrl(detailUrl, onlineRuleValue(node, tocRule, detailUrl, source = source))
     }
 
     private fun parseOnlineToc(
@@ -8247,11 +8436,11 @@ class WebDavDriveHook(
         val isVolumeRule = rule.optString("isVolume", "")
         var currentVolumeTitle = ""
         return nodes.mapIndexedNotNull { index, node ->
-            val rawTitle = onlineRuleValue(node, titleRule, baseUrl).cleanOnlineText()
-            val ruleRawUrl = onlineRuleValue(node, urlRule, baseUrl)
+            val rawTitle = onlineRuleValue(node, titleRule, baseUrl, source = source).cleanOnlineText()
+            val ruleRawUrl = onlineRuleValue(node, urlRule, baseUrl, source = source)
             val fallbackRawUrl = if (ruleRawUrl.isBlank()) fallbackOnlineChapterRawUrl(node) else ""
             val rawUrl = ruleRawUrl.ifBlank { fallbackRawUrl }
-            if (isOnlineTocVolumeNode(node, isVolumeRule, rawTitle, rawUrl.isNotBlank(), baseUrl)) {
+            if (isOnlineTocVolumeNode(source, node, isVolumeRule, rawTitle, rawUrl.isNotBlank(), baseUrl)) {
                 currentVolumeTitle = rawTitle
                 return@mapIndexedNotNull null
             }
@@ -8274,6 +8463,7 @@ class WebDavDriveHook(
     }
 
     private fun isOnlineTocVolumeNode(
+        source: OnlineSourceEntry,
         node: Any?,
         isVolumeRule: String,
         title: String,
@@ -8282,7 +8472,7 @@ class WebDavDriveHook(
     ): Boolean {
         val explicitVolume = isVolumeRule.trim()
             .takeIf { it.isNotBlank() }
-            ?.let { onlineRuleValue(node, it, baseUrl).trim().lowercase(Locale.ROOT) }
+            ?.let { onlineRuleValue(node, it, baseUrl, source = source).trim().lowercase(Locale.ROOT) }
             ?.let { value ->
                 when (value) {
                     "true", "1", "yes", "volume", "vol", "part", "group", "section" -> true
@@ -8367,6 +8557,11 @@ class WebDavDriveHook(
         val contentRule = runCatching { JSONObject(source.ruleContent).optString("content", "") }.getOrNull().orEmpty()
         return extractOnlineBacktickTemplates(contentRule)
             .firstOrNull { it.contains("\${itemId}") }
+            ?: OnlineSourceScriptCompat.resolveContentRequestTemplate(
+                sourceUrl = sourceBaseUrl(source),
+                rawScript = contentRule,
+                loginInfo = OnlineSourceAuth.loginInfo(currentApplicationContext() ?: currentContext(), source),
+            )
     }
 
     private fun extractOnlineBacktickTemplates(rule: String): List<String> {
@@ -8415,7 +8610,7 @@ class WebDavDriveHook(
                 val jsonContentRule = rule?.optString("content", "").orEmpty()
                 val rawContent = when {
                     jsonContentRule.isNotBlank() && !jsonContentRule.startsWith("<js>", ignoreCase = true) ->
-                        onlineRuleValue(root, jsonContentRule, baseUrl)
+                        onlineRuleValue(root, jsonContentRule, baseUrl, source = source)
                     else -> ""
                 }.ifBlank {
                     onlineJsonString(root, "$.data.content")
@@ -8481,12 +8676,7 @@ class WebDavDriveHook(
             .replace(Regex("(?i)</p\\s*>"), "\n")
             .replace(Regex("(?i)</div\\s*>"), "\n")
             .replace(Regex("(?is)<[^>]+>"), " ")
-            .replace("&nbsp;", " ")
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
+            .decodeOnlineHtmlEntities()
             .replace(Regex("[ \\t\\r\\f]+"), " ")
             .lineSequence()
             .map { it.trim() }
@@ -8619,6 +8809,13 @@ class WebDavDriveHook(
             level = chapter.level,
             sourceUrl = chapter.url,
         )
+
+    private fun onlineCompletionFailurePlaceholder(attempts: Int, message: String): String =
+        if (message.contains("今日已达到章节下载限额")) {
+            "本章尚未下载，当前在线源今日额度已用完。\n\n请明日点击更新继续补全。"
+        } else {
+            "本章下载失败，已按在线源重试 $attempts 次。\n\n$message"
+        }
 
     private fun writeOnlineCompletionChapterToImportedBookIfReady(
         task: OnlineCompletionDownloadTask,
@@ -9553,6 +9750,9 @@ class WebDavDriveHook(
             ONLINE_COMPLETION_INLINE_STYLE_REGEX,
             "<link rel=\"stylesheet\" type=\"text/css\" href=\"../Styles/default.css\"/>",
         )
+        result = ONLINE_COMPLETION_ESCAPED_ENTITY_REGEX.replace(result) { match ->
+            match.value.decodeOnlineHtmlEntities().xmlEscape()
+        }
         if (!result.contains("../Styles/default.css")) {
             result = result.replaceFirst(
                 "</head>",
@@ -12148,7 +12348,7 @@ img{max-width:100%;max-height:100%;height:auto;}
     )
 
     private data class OnlineDownloadTarget(
-        val source: OnlineSourceEntry,
+        var source: OnlineSourceEntry,
         val query: String,
         var result: OnlineBookSearchResult,
     )
@@ -12180,6 +12380,7 @@ img{max-width:100%;max-height:100%;height:auto;}
         val retried: Int,
         val failed: Int,
         val changed: Boolean,
+        val attempted: Int,
     )
 
     private data class OnlineCompletionImportResult(
@@ -13068,6 +13269,10 @@ img{max-width:100%;max-height:100%;height:auto;}
         val ONLINE_DIVIDER_LINE_REGEX = Regex("""^[=_~*·•…⋯・◆◇■□●○※＊\-‐‑‒–—―]{2,}$""")
         val ONLINE_COMPLETION_INLINE_STYLE_REGEX =
             Regex("""<style\s+type=["']text/css["']>[\s\S]*?</style>""", RegexOption.IGNORE_CASE)
+        val ONLINE_COMPLETION_ESCAPED_ENTITY_REGEX = Regex(
+            """&amp;(?:amp;)*(?:#(?:[xX][0-9A-Fa-f]+|\d+)|amp|lt|gt|quot|apos|nbsp|ldquo|rdquo|lsquo|rsquo|laquo|raquo|hellip|mdash|ndash|middot|bull|colon|semi|comma|period|excl|quest);""",
+            RegexOption.IGNORE_CASE,
+        )
         val ONLINE_COMPLETION_CHAPTER_HEADING_HTML_REGEX =
             Regex("""<h1([^>]*)>([\s\S]*?)</h1>""", RegexOption.IGNORE_CASE)
         const val ONLINE_CHAPTER_TITLE_SCAN_LINES = 8
