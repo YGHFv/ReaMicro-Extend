@@ -6,6 +6,17 @@ import org.junit.Test
 
 class OnlineSourceLoginConfigTest {
     @Test
+    fun `builds api key header from saved login field`() {
+        assertEquals(
+            mapOf("X-API-Key" to "fq_test_key"),
+            OnlineSourceAuth.credentialHeaders(
+                rawHeader = "<js>JSON.stringify({'X-API-Key': apiKey})</js>",
+                loginInfo = mapOf("密钥" to " fq_test_key "),
+            ),
+        )
+    }
+
+    @Test
     fun loginUiKeepsSingleSecretAndIgnoresUnrelatedStyleFields() {
         val fields = OnlineSourceLoginConfig.credentialFields(
             """

@@ -76,7 +76,18 @@ import com.reamicro.fix.webdav.CleartextScope
 import com.reamicro.fix.webdav.CloudDownloadCancelledException
 import com.reamicro.fix.webdav.CloudBookRowExtendedDisplayContext
 import com.reamicro.fix.webdav.CancellableWebDavDownload
+import com.reamicro.fix.webdav.applyOnlineChapterListRuleCompat
+import com.reamicro.fix.webdav.cleanOnlineChapterContentValue
+import com.reamicro.fix.webdav.cleanOnlineChapterTitleValue
 import com.reamicro.fix.webdav.decodeOnlineHtmlEntities
+import com.reamicro.fix.webdav.evaluateOnlineChapterUrlRule
+import com.reamicro.fix.webdav.evaluateQqReaderCoverRule
+import com.reamicro.fix.webdav.formatOnlineWordCountValue
+import com.reamicro.fix.webdav.inferOnlineStatusFromLastChapterTitle
+import com.reamicro.fix.webdav.isOnlineChapterCountSelector
+import com.reamicro.fix.webdav.onlineSearchRelevanceScore
+import com.reamicro.fix.webdav.onlineHttpErrorDetail
+import com.reamicro.fix.webdav.resolveOnlineChapterListRuleCompat
 import com.reamicro.fix.webdav.HomeSearchRenderContext
 import com.reamicro.fix.webdav.HomeSearchSection
 import com.reamicro.fix.webdav.ImportLocalLibraryRowContext
@@ -243,6 +254,7 @@ class WebDavDriveHook(
     private val localLibraryHomeSearchSeq = AtomicLong(0L)
     private val onlineCompletionHomeSearchSeq = AtomicLong(0L)
     private val onlineCompletionSearchTargets = ConcurrentHashMap<String, OnlineDownloadTarget>()
+    private val onlineCompletionSearchRowViews = ConcurrentHashMap<String, WeakReference<View>>()
     private val onlineCompletionRunningDownloads = ConcurrentHashMap<String, OnlineCompletionDownloadTask>()
     private val onlineCompletionRunningDownloadsByNotificationId = ConcurrentHashMap<Int, OnlineCompletionDownloadTask>()
     private val onlineCompletionRunningUpdates = ConcurrentHashMap<String, Boolean>()
@@ -1194,7 +1206,8 @@ class WebDavDriveHook(
         }
         val update = functionProxy("OnlineCompletionSearchRowUpdate", FUNCTION1_CLASS) { args ->
             (args?.getOrNull(0) as? View)?.let { view ->
-                applyOnlineCompletionSearchRowColors(view, textColors)
+                val latestTarget = onlineCompletionSearchTargets[cloudPathOf(book)] ?: target
+                applyOnlineCompletionSearchRow(view, latestTarget, textColors)
             }
             targetUnit()
         }
@@ -1271,19 +1284,53 @@ class WebDavDriveHook(
         }
         texts.addView(metaView)
         row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val path = cloudPathOf(book)
+        onlineCompletionSearchRowViews[path] = WeakReference(row)
+        // 详情请求可能在 AndroidView 真正创建前已经完成。登记 View 后再读取一次最新结果，
+        // 避免工厂闭包携带的旧结果覆盖已补全的章节数、字数等信息。
+        onlineCompletionSearchTargets[path]
+            ?.takeIf { it != target }
+            ?.let { latestTarget -> applyOnlineCompletionSearchRow(row, latestTarget, colors = null) }
         return row
     }
 
-    private fun applyOnlineCompletionSearchRowColors(row: View, colors: IntArray) {
+    private fun applyOnlineCompletionSearchRow(row: View, target: OnlineDownloadTarget, colors: IntArray?) {
+        val cover = (row as? ViewGroup)?.getChildAt(0) as? ImageView
+        if (cover != null) loadOnlineCompletionSearchCover(cover, target.source, target.result.coverUrl)
         val textContainer = (row as? ViewGroup)?.getChildAt(1) as? ViewGroup ?: return
-        (textContainer.getChildAt(0) as? TextView)?.setTextColor(colors[0])
-        (textContainer.getChildAt(1) as? TextView)?.setTextColor(colors[1])
-        (textContainer.getChildAt(2) as? TextView)?.setTextColor(colors[2])
+        (textContainer.getChildAt(0) as? TextView)?.apply {
+            text = target.result.name.ifBlank { "未命名" }
+            colors?.getOrNull(0)?.let { setTextColor(it) }
+        }
+        (textContainer.getChildAt(1) as? TextView)?.apply {
+            text = target.result.author.ifBlank { "未知作者" }
+            colors?.getOrNull(1)?.let { setTextColor(it) }
+        }
+        (textContainer.getChildAt(2) as? TextView)?.apply {
+            text = onlineCompletionSearchMetaLine(target.result)
+            colors?.getOrNull(2)?.let { setTextColor(it) }
+        }
+    }
+
+    private fun updateOnlineCompletionSearchTarget(path: String, target: OnlineDownloadTarget) {
+        onlineCompletionSearchTargets[path] = target
+        val rowRef = onlineCompletionSearchRowViews[path] ?: return
+        Handler(Looper.getMainLooper()).post {
+            val row = rowRef.get()
+            if (row == null) {
+                onlineCompletionSearchRowViews.remove(path, rowRef)
+                return@post
+            }
+            val latestTarget = onlineCompletionSearchTargets[path] ?: return@post
+            applyOnlineCompletionSearchRow(row, latestTarget, colors = null)
+        }
     }
 
     private fun loadOnlineCompletionSearchCover(imageView: ImageView, source: OnlineSourceEntry, coverUrl: String) {
         val url = normalizeOnlineCoverUrl(source, sourceBaseUrl(source), coverUrl).trim()
         if (url.isBlank()) return
+        if (imageView.tag == url) return
+        imageView.tag = url
         Thread({
             runCatching {
                 decodeOnlineDataImage(url)?.let { return@runCatching it }
@@ -1310,7 +1357,7 @@ class WebDavDriveHook(
             }.onSuccess { bitmap ->
                 if (bitmap != null) {
                     Handler(Looper.getMainLooper()).post {
-                        imageView.setImageBitmap(bitmap)
+                        if (imageView.tag == url) imageView.setImageBitmap(bitmap)
                     }
                 }
             }.onFailure {
@@ -5035,6 +5082,7 @@ class WebDavDriveHook(
         val sources = enabledOnlineCompletionSources(context)
         logWebDav("online completion search query=$needle sources=${sources.size}")
         onlineCompletionSearchTargets.clear()
+        onlineCompletionSearchRowViews.clear()
         val selectedSources = sources.take(HOME_SEARCH_RESULT_LIMIT)
         return searchOnlineCompletionSourcesConcurrent(selectedSources, needle)
     }
@@ -5105,9 +5153,11 @@ class WebDavDriveHook(
         val needle = query.trim()
         if (needle.isBlank()) {
             onlineCompletionSearchTargets.clear()
+            onlineCompletionSearchRowViews.clear()
             return emptyList()
         }
         onlineCompletionSearchTargets.clear()
+        onlineCompletionSearchRowViews.clear()
         return enabledOnlineCompletionSources(context)
             .take(HOME_SEARCH_RESULT_LIMIT)
             .map { source -> OnlineSearchGroup(source, needle, emptyList(), "搜索中") }
@@ -5156,6 +5206,13 @@ class WebDavDriveHook(
             }
             val parsedResults = parseOnlineSearchResults(source, query, response)
                 .distinctBy { "${it.name}|${it.author}|${it.detailUrl}" }
+                .withIndex()
+                .sortedWith(
+                    compareByDescending<IndexedValue<OnlineBookSearchResult>> { indexed ->
+                        onlineSearchRelevanceScore(query, indexed.value.name, indexed.value.author)
+                    }.thenBy { it.index },
+                )
+                .map { it.value }
                 .take(ONLINE_COMPLETION_RESULT_LIMIT)
             if (parsedResults.isNotEmpty()) {
                 onParsedResults?.invoke(OnlineSearchGroup(source, query, parsedResults, ""))
@@ -5435,8 +5492,10 @@ class WebDavDriveHook(
                         )
                         if (login.success) return execute(authRetried = true)
                     }
-                    val authHint = if (code == 401 || code == 403) "：未登录或会员权限不足" else ""
-                    error("HTTP $code$authHint")
+                    val reason = onlineHttpErrorDetail(body).ifBlank {
+                        if (code == 401 || code == 403) "未登录或会员权限不足" else ""
+                    }
+                    error("HTTP $code${reason.takeIf { it.isNotBlank() }?.let { "：$it" }.orEmpty()}")
                 } finally {
                     connection.disconnect()
                 }
@@ -5632,7 +5691,10 @@ class WebDavDriveHook(
             .takeIf { it.isNotBlank() }
             ?.let { onlineRuleValue(node, it, baseUrl, source = source) }
             .orEmpty()
-        val wordCount = rule?.optString("wordCount", "").orEmpty()
+        val wordCountRule = rule?.optString("wordCount", "").orEmpty()
+            .takeUnless(::isOnlineChapterCountSelector)
+            .orEmpty()
+        val wordCount = wordCountRule
             .takeIf { it.isNotBlank() }
             ?.let { onlineRuleValue(node, it, baseUrl, source = source) }
             .orEmpty()
@@ -5645,7 +5707,11 @@ class WebDavDriveHook(
         val chapterCount = onlineFirstJsonInt(node, ONLINE_CHAPTER_COUNT_FIELDS)
             .takeIf { it > 0 }
             ?: chapterCountFallback.coerceAtLeast(0)
-        val status = onlineCompletionStatusText(kind, node)
+        val statusHint = rule?.optString("lastChapter", "").orEmpty()
+            .takeIf { it.isNotBlank() }
+            ?.let { onlineRuleValue(node, it, baseUrl, source = source) }
+            .orEmpty()
+        val status = onlineCompletionStatusText(kind, node, statusHint)
         val platformName = if (source.isWanFengLiSource()) {
             onlineCompletionPlatformName(node, kind)
         } else {
@@ -5710,7 +5776,7 @@ class WebDavDriveHook(
             result.wordCount.ifBlank { null },
             result.chapterCount.takeIf { it > 0 }?.let { "${it}章" },
             tail.ifBlank { null },
-        ).joinToString(" / ").ifBlank { result.sourceName.ifBlank { ONLINE_COMPLETION_TITLE } }
+        ).joinToString(" / ").ifBlank { "详情加载中" }
     }
 
     private fun onlineCompletionPlatformName(node: Any?, kind: String): String {
@@ -5751,9 +5817,10 @@ class WebDavDriveHook(
         return contains("晚风里") || normalized.contains("wanfengli") || normalized.contains("whispertale")
     }
 
-    private fun onlineCompletionStatusText(kind: String, node: Any?): String {
+    private fun onlineCompletionStatusText(kind: String, node: Any?, statusHint: String = ""): String {
         val text = kind.cleanOnlineText()
         statusTextFromHumanText(text)?.let { return it }
+        statusTextFromHumanText(statusHint.cleanOnlineText())?.let { return it }
         onlineFirstJsonString(node, ONLINE_STATUS_TEXT_FIELDS)
             .takeIf { it.isNotBlank() }
             ?.let { statusTextFromHumanText(it) }
@@ -5777,6 +5844,17 @@ class WebDavDriveHook(
                 return if (value in setOf("true", "1", "yes")) "完结" else "连载"
             }
         }
+        inferOnlineStatusFromLastChapterTitle(statusHint)
+            .ifBlank {
+                inferOnlineStatusFromLastChapterTitle(
+                    onlineFirstJsonString(
+                        node,
+                        listOf("last_chapter_title", "lastChapterTitle", "latest_chapter_title", "latestChapterTitle"),
+                    ),
+                )
+            }
+            .takeIf { it.isNotBlank() }
+            ?.let { return it }
         val statusSource = text.ifBlank {
             sequenceOf(
                 "status",
@@ -5813,21 +5891,7 @@ class WebDavDriveHook(
 
     private fun formatOnlineWordCount(raw: String): String {
         val text = raw.cleanOnlineText()
-        if (text.isBlank()) return ""
-        if (text.contains("字")) return text
-        val number = text.replace(",", "").trim().toLongOrNull() ?: return text
-        if (number <= 0L) return ""
-        return if (number >= 10_000L) {
-            val value = number / 10_000.0
-            val formatted = if (number % 10_000L == 0L) {
-                (number / 10_000L).toString()
-            } else {
-                String.format(Locale.ROOT, "%.1f", value).trimEnd('0').trimEnd('.')
-            }
-            "${formatted}万字"
-        } else {
-            "${number}字"
-        }
+        return formatOnlineWordCountValue(text)
     }
 
     private fun formatOnlineUpdateTime(raw: String): String {
@@ -5871,6 +5935,12 @@ class WebDavDriveHook(
                 return replaceFanqieCover(onlineRuleValue(node, "thumb_url", baseUrl, source = source))
             }
             return ""
+        }
+        val inlineJsIndex = rule.indexOf("\n@js:", ignoreCase = true)
+        if (inlineJsIndex >= 0) {
+            val selectorRule = rule.substring(0, inlineJsIndex).trim()
+            val selectedValue = onlineRuleValue(node, selectorRule, baseUrl, query, source)
+            evaluateQqReaderCoverRule(rule, selectedValue)?.let { return it }
         }
         rule = rule.substringBefore("\n<js>", rule).substringBefore("\n@js:", rule).trim()
         if (rule.contains("{{") && rule.contains("}}")) {
@@ -6585,7 +6655,7 @@ class WebDavDriveHook(
         val path = "$ONLINE_COMPLETION_SOURCE_PREFIX${group.source.id}?q=$encodedQuery"
         val best = group.results.firstOrNull()
         if (best != null) {
-            onlineCompletionSearchTargets[path] = OnlineDownloadTarget(group.source, group.query, best)
+            updateOnlineCompletionSearchTarget(path, OnlineDownloadTarget(group.source, group.query, best))
         }
         val status = when {
             group.error.isNotBlank() -> group.error
@@ -6665,7 +6735,7 @@ class WebDavDriveHook(
     ): Any {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val path = "$ONLINE_COMPLETION_BOOK_PREFIX${source.id}/$index?q=$encodedQuery"
-        onlineCompletionSearchTargets[path] = OnlineDownloadTarget(source, query, result)
+        updateOnlineCompletionSearchTarget(path, OnlineDownloadTarget(source, query, result))
         return newOnlineCompletionCloudBook(
             path = path,
             name = result.name,
@@ -8460,6 +8530,7 @@ class WebDavDriveHook(
         chapterIndex: Int,
         chapterContent: String,
     ) {
+        if (!ONLINE_PARAGRAPH_COMMENTS_RUNTIME_ENABLED) return
         if (!source.paragraphCommentsEnabled || !source.supportsParagraphComments) return
         runCatching {
             val context = currentApplicationContext() ?: currentContext() ?: return
@@ -8568,7 +8639,7 @@ class WebDavDriveHook(
         val anchors = Regex("""(?is)<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>""")
             .findAll(html)
             .mapNotNull { match ->
-                val title = match.groupValues[2].cleanOnlineText()
+                val title = cleanOnlineChapterTitleValue(match.groupValues[2].cleanOnlineText())
                 if (title.isBlank() || title.length > 80) return@mapNotNull null
                 val href = resolveOnlineUrl(baseUrl, match.groupValues[1])
                 if (href.isBlank()) return@mapNotNull null
@@ -8584,7 +8655,7 @@ class WebDavDriveHook(
         return Regex("""(?is)<option\b[^>]*\bvalue\s*=\s*["']([^"']+)["'][^>]*>(.*?)</option>""")
             .findAll(html)
             .mapNotNull { match ->
-                val title = match.groupValues[2].cleanOnlineText()
+                val title = cleanOnlineChapterTitleValue(match.groupValues[2].cleanOnlineText())
                 val href = resolveOnlineUrl(baseUrl, match.groupValues[1])
                 if (title.isBlank() || href.isBlank()) null else OnlineChapter(title, href)
             }
@@ -8599,9 +8670,13 @@ class WebDavDriveHook(
         root: Any,
     ): List<OnlineChapter> {
         val rule = runCatching { JSONObject(source.ruleToc) }.getOrNull() ?: return emptyList()
-        val nodes = onlineJsonRuleValues(root, rule.optString("chapterList", ""))
+        val chapterListRule = rule.optString("chapterList", "")
+        val compat = resolveOnlineChapterListRuleCompat(chapterListRule)
+        val rawNodes = onlineJsonRuleValues(root, compat?.jsonPath ?: chapterListRule)
+        val nodes = compat?.let { applyOnlineChapterListRuleCompat(rawNodes, it) } ?: rawNodes
         logWebDav(
-            "online completion toc nodes=${nodes.size} rule=${rule.optString("chapterList", "").take(120)}",
+            "online completion toc nodes=${nodes.size} rule=${chapterListRule.take(120)} " +
+                "compat=${compat?.jsonPath.orEmpty()}",
         )
         if (nodes.isEmpty()) return emptyList()
         val titleRule = rule.optString("chapterName", "")
@@ -8609,7 +8684,9 @@ class WebDavDriveHook(
         val isVolumeRule = rule.optString("isVolume", "")
         var currentVolumeTitle = ""
         return nodes.mapIndexedNotNull { index, node ->
-            val rawTitle = onlineRuleValue(node, titleRule, baseUrl, source = source).cleanOnlineText()
+            val rawTitle = cleanOnlineChapterTitleValue(
+                onlineRuleValue(node, titleRule, baseUrl, source = source).cleanOnlineText(),
+            )
             val ruleRawUrl = onlineRuleValue(node, urlRule, baseUrl, source = source)
             val fallbackRawUrl = if (ruleRawUrl.isBlank()) fallbackOnlineChapterRawUrl(node) else ""
             val rawUrl = ruleRawUrl.ifBlank { fallbackRawUrl }
@@ -8705,6 +8782,7 @@ class WebDavDriveHook(
             return value
         }
         if (urlRule.contains("<js>", ignoreCase = true) || urlRule.contains("@js:", ignoreCase = true)) {
+            evaluateOnlineChapterUrlRule(urlRule, value, baseUrl)?.let { return it }
             evaluateOnlineChapterUrlJs(urlRule, value)?.let { return it }
         }
         if (value.isNotBlank()) {
@@ -8843,6 +8921,7 @@ class WebDavDriveHook(
     private fun normalizeOnlineChapterText(raw: String): String {
         if (raw.isBlank()) return ""
         return raw
+            .let(::cleanOnlineChapterContentValue)
             .replace(Regex("(?is)<script[\\s\\S]*?</script>"), " ")
             .replace(Regex("(?is)<style[\\s\\S]*?</style>"), " ")
             .replace(Regex("(?i)<br\\s*/?>"), "\n")
@@ -13093,6 +13172,8 @@ img{max-width:100%;max-height:100%;height:auto;}
     private companion object {
         const val LOG_TAG = "ReaMicroWebDAV"
         const val LOG_PREFIX = "ReaMicro LSP"
+        // 暂停段评网络请求与缓存写入，保留实现供后续继续修复。
+        const val ONLINE_PARAGRAPH_COMMENTS_RUNTIME_ENABLED = false
         // 关闭常规运行日志向 LSPosed 面板输出，避免刷屏；错误日志不受影响。
         const val VERBOSE_WEBDAV_LOG = false
         const val BACKUP_TYPE_CLASS = "app.zhendong.reamicro.constants.BackupType"
@@ -13472,6 +13553,8 @@ img{max-width:100%;max-height:100%;height:auto;}
         val ONLINE_WORD_COUNT_FIELDS = listOf(
             "wordCount",
             "word_count",
+            "wordText",
+            "word_text",
             "word_number",
             "wordNum",
             "word_num",

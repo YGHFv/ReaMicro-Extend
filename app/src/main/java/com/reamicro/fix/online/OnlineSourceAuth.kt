@@ -67,9 +67,27 @@ object OnlineSourceAuth {
     }
 
     fun requestHeaders(context: Context?, source: OnlineSourceEntry): Map<String, String> {
-        if (!source.enabledCookieJar) return emptyMap()
-        val cookie = prefs(context)?.getString(KEY_COOKIE_PREFIX + source.id, "").orEmpty()
-        return if (cookie.isBlank()) emptyMap() else mapOf("Cookie" to cookie)
+        val headers = linkedMapOf<String, String>()
+        if (source.enabledCookieJar) {
+            val cookie = prefs(context)?.getString(KEY_COOKIE_PREFIX + source.id, "").orEmpty()
+            if (cookie.isNotBlank()) headers["Cookie"] = cookie
+        }
+        // 一些 JSON 书源把 API 密钥写在 header 的内联 JS 中；原先只保存了密钥，
+        // 但普通 HTTP 请求没有执行这段 JS，导致详情接口持续 401，章节数无法补全。
+        headers.putAll(credentialHeaders(source.header, loginInfo(context, source)))
+        return headers
+    }
+
+    internal fun credentialHeaders(rawHeader: String, loginInfo: Map<String, String>): Map<String, String> {
+        if (!rawHeader.contains("X-API-Key", ignoreCase = true)) return emptyMap()
+        val apiKey = sequenceOf(
+            loginInfo["密钥"],
+            loginInfo["apiKey"],
+            loginInfo["api_key"],
+            loginInfo["apikey"],
+            loginInfo["qq_api_key"],
+        ).map { it.orEmpty().trim() }.firstOrNull { it.isNotBlank() }.orEmpty()
+        return if (apiKey.isBlank()) emptyMap() else mapOf("X-API-Key" to apiKey)
     }
 
     fun hasSavedLogin(context: Context?, source: OnlineSourceEntry): Boolean {

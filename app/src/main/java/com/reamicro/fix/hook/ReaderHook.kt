@@ -274,12 +274,6 @@ class ReaderHook(
                     resetFullTextSearchState("ReaderViewModel cleared", removeOverlays = true)
                 }
             })
-            XposedBridge.hookAllMethods(cls, "getVirtualPage", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val page = param.result ?: return
-                    scheduleOnDemandVisiblePageRefresh(param.thisObject, page)
-                }
-            })
             val readerUiIntentClass = classLoader.loadClass(READER_UI_INTENT_CLASS)
             XposedHelpers.findAndHookMethod(
                 cls,
@@ -307,6 +301,9 @@ class ReaderHook(
                     val pageSignature = epubPageSignature(page)
                     currentVisiblePageSignature = pageSignature
                     currentVisiblePageNumber = epubPageNumber(page)
+                    // getVirtualPage 会批量预布局相邻甚至远端章节，不能据此判断真正可见页。
+                    // 仅使用 Statistics 上报的当前页触发逐章下载和分页刷新，避免异步纠正跳到其他章节。
+                    scheduleOnDemandVisiblePageRefresh(param.thisObject, page)
                     val statisticsKey = pageSignature
                         ?: "spine=${callNoArg(page, "getSpineIndex") ?: -1}|number=${currentVisiblePageNumber ?: -1}"
                     if (statisticsKey == lastHandledReaderStatisticsKey) return
@@ -337,8 +334,7 @@ class ReaderHook(
 
     private fun prefetchOnlineOnDemandChapters(page: Any) {
         val bookDir = currentEpubRoot() ?: return
-        val currentIndex = (callNoArg(page, "getSpineIndex") as? Number)?.toInt() ?: return
-        if (currentIndex < 0) return
+        val currentIndex = onDemandPageLocation(bookDir, page)?.metadataIndex ?: return
         val spineKey = "${bookDir.absolutePath}|$currentIndex"
         if (spineKey == lastOnDemandPrefetchSpineKey) return
         lastOnDemandPrefetchSpineKey = spineKey
@@ -556,71 +552,30 @@ class ReaderHook(
         targetCfi: Any?,
         intent: Any,
         replayLabel: String,
-        attempt: Int = 0,
     ) {
-        val mutex = runCatching {
-            XposedHelpers.getObjectField(viewModel, "virtualPageLoadMutex")
-        }.getOrNull()
-        val owner = request
-        val locked = mutex == null || runCatching {
-            XposedHelpers.callMethod(mutex, "tryLock", owner) as? Boolean ?: false
-        }.getOrDefault(false)
-        if (!locked) {
-            if (attempt < ON_DEMAND_CACHE_LOCK_RETRIES) {
-                Handler(Looper.getMainLooper()).postDelayed(
-                    {
-                        replayOnDemandJumpWhenSpineCacheReady(
-                            viewModel = viewModel,
-                            request = request,
-                            targetCfi = targetCfi,
-                            intent = intent,
-                            replayLabel = replayLabel,
-                            attempt = attempt + 1,
-                        )
-                    },
-                    ON_DEMAND_CACHE_LOCK_RETRY_MS,
-                )
-            } else {
-                XposedBridge.log(
-                    "$LOG_PREFIX on-demand spine invalidation lock timeout " +
-                        "index=${request.chapterIndex} href=${request.chapter.href}",
-                )
-                Toast.makeText(activityProvider(), "章节已下载，请重新点击目录", Toast.LENGTH_SHORT).show()
-            }
-            return
-        }
-        try {
-            invalidateOnDemandSpine(viewModel, request, request.chapterIndex)
-        } finally {
-            if (mutex != null) {
-                runCatching { XposedHelpers.callMethod(mutex, "unlock", owner) }
-                    .onFailure { error ->
-                        XposedBridge.log("$LOG_PREFIX on-demand cache unlock failed: ${error.stackTraceToString()}")
-                    }
-            }
-        }
         Thread({
-            runCatching {
-                targetCfi?.let { cfi ->
-                    val refreshMethod = viewModel.javaClass.methods.firstOrNull {
-                        it.name == "findVirtualPageForCfi" && it.parameterTypes.size == 2
-                    }?.apply { isAccessible = true }
-                    if (refreshMethod != null) {
-                        invokeSuspendBlocking(refreshMethod, viewModel, cfi)
-                        XposedBridge.log(
-                            "$LOG_PREFIX on-demand virtual page refreshed " +
-                                "index=${request.chapterIndex + 1} href=${request.chapter.href}",
-                        )
-                        onDemandRefreshPending.remove(
-                            onDemandRefreshKey(request.bookDir, request.chapter.href),
-                        )
-                    }
-                }
-            }.onFailure { error ->
-                XposedBridge.log(
-                    "$LOG_PREFIX on-demand virtual page refresh failed: ${error.stackTraceToString()}",
+            val rebuiltPage = targetCfi?.let { cfi ->
+                val targetSpineIndex = (callNoArg(cfi, "getSpineIndex") as? Number)?.toInt()
+                    ?: OnlineOnDemandPrefetchPlanner.hostSpineIndexFromCfi(cfi.toString())
+                    ?: request.chapterIndex
+                rebuildOnDemandVirtualWindow(
+                    viewModel = viewModel,
+                    request = request,
+                    anchorCfi = cfi,
+                    anchorSpineIndex = targetSpineIndex,
                 )
             }
+            if (targetCfi != null && rebuiltPage == null) {
+                activityProvider()?.runOnUiThread {
+                    Toast.makeText(activityProvider(), "章节已下载，但分页刷新失败，请重试", Toast.LENGTH_SHORT).show()
+                }
+                return@Thread
+            }
+            onDemandRefreshPending.remove(onDemandRefreshKey(request.bookDir, request.chapter.href))
+            XposedBridge.log(
+                "$LOG_PREFIX on-demand virtual window rebuilt " +
+                    "index=${request.chapterIndex + 1} page=${rebuiltPage ?: -1} href=${request.chapter.href}",
+            )
             activityProvider()?.runOnUiThread {
                 runCatching {
                     replayingOnDemandJump.set(true)
@@ -645,100 +600,236 @@ class ReaderHook(
 
     private fun scheduleOnDemandVisiblePageRefresh(viewModel: Any, page: Any) {
         val bookDir = currentEpubRoot() ?: return
-        val spineIndex = (callNoArg(page, "getSpineIndex") as? Number)?.toInt() ?: return
-        if (spineIndex < 0) return
         val metadata = runCatching {
             com.reamicro.fix.webdav.OnlineOnDemandMetadataStore.read(bookDir)
         }.getOrNull() ?: return
-        val chapter = metadata.chapter(spineIndex) ?: return
+        val location = onDemandPageLocation(bookDir, page, metadata) ?: return
+        val chapter = metadata.chapter(location.metadataIndex) ?: return
         val refreshKey = onDemandRefreshKey(bookDir, chapter.href)
-        if (refreshKey !in onDemandRefreshPending || !onDemandRefreshInFlight.add(refreshKey)) return
-        val request = OnlineOnDemandBridge.readyRequest(bookDir, chapter.href)
         val targetCfi = callNoArg(page, "getStart")
-        if (request == null || targetCfi == null) {
+        if (targetCfi == null || !onDemandRefreshInFlight.add(refreshKey)) return
+
+        val pendingRequest = OnlineOnDemandBridge.pendingRequest(bookDir, chapter.href)
+        if (pendingRequest != null) {
+            val accepted = OnlineOnDemandBridge.request(pendingRequest) { result ->
+                if (result.isSuccess) {
+                    onDemandRefreshPending += refreshKey
+                    XposedBridge.log(
+                        "$LOG_PREFIX on-demand visible chapter downloaded " +
+                            "index=${result.request.chapterIndex + 1} href=${result.request.chapter.href}",
+                    )
+                    refreshOnDemandVisiblePageWhenSpineCacheReady(
+                        viewModel = viewModel,
+                        request = result.request,
+                        fallbackPage = page,
+                        refreshKey = refreshKey,
+                    )
+                } else {
+                    onDemandRefreshInFlight.remove(refreshKey)
+                    XposedBridge.log(
+                        "$LOG_PREFIX on-demand visible chapter failed: ${result.error?.stackTraceToString()}",
+                    )
+                }
+            }
+            if (!accepted) onDemandRefreshInFlight.remove(refreshKey)
+            if (accepted) {
+                XposedBridge.log(
+                    "$LOG_PREFIX on-demand visible chapter requested " +
+                        "index=${location.metadataIndex + 1} spine=${location.hostSpineIndex} href=${chapter.href}",
+                )
+            }
+            return
+        }
+
+        val readyRequest = OnlineOnDemandBridge.readyRequest(bookDir, chapter.href)
+        if (readyRequest == null || refreshKey !in onDemandRefreshPending) {
             onDemandRefreshInFlight.remove(refreshKey)
             return
         }
-        Handler(Looper.getMainLooper()).post {
-            refreshOnDemandVisiblePageWhenSpineCacheReady(
-                viewModel = viewModel,
-                request = request,
-                targetCfi = targetCfi,
-                refreshKey = refreshKey,
-            )
-        }
+        refreshOnDemandVisiblePageWhenSpineCacheReady(
+            viewModel = viewModel,
+            request = readyRequest,
+            fallbackPage = page,
+            refreshKey = refreshKey,
+        )
     }
 
     private fun refreshOnDemandVisiblePageWhenSpineCacheReady(
         viewModel: Any,
         request: OnlineOnDemandChapterRequest,
-        targetCfi: Any,
+        fallbackPage: Any,
         refreshKey: String,
-        attempt: Int = 0,
     ) {
-        val mutex = runCatching {
-            XposedHelpers.getObjectField(viewModel, "virtualPageLoadMutex")
-        }.getOrNull()
-        val owner = request
-        val locked = mutex == null || runCatching {
-            XposedHelpers.callMethod(mutex, "tryLock", owner) as? Boolean ?: false
-        }.getOrDefault(false)
-        if (!locked) {
-            if (attempt < ON_DEMAND_CACHE_LOCK_RETRIES) {
-                Handler(Looper.getMainLooper()).postDelayed(
-                    {
-                        refreshOnDemandVisiblePageWhenSpineCacheReady(
-                            viewModel = viewModel,
-                            request = request,
-                            targetCfi = targetCfi,
-                            refreshKey = refreshKey,
-                            attempt = attempt + 1,
-                        )
-                    },
-                    ON_DEMAND_CACHE_LOCK_RETRY_MS,
-                )
-            } else {
-                onDemandRefreshInFlight.remove(refreshKey)
-                XposedBridge.log(
-                    "$LOG_PREFIX on-demand visible-page refresh lock timeout " +
-                        "index=${request.chapterIndex} href=${request.chapter.href}",
-                )
-            }
-            return
-        }
-        try {
-            invalidateOnDemandSpine(viewModel, request, request.chapterIndex)
-        } finally {
-            if (mutex != null) {
-                runCatching { XposedHelpers.callMethod(mutex, "unlock", owner) }
-                    .onFailure { error ->
-                        XposedBridge.log(
-                            "$LOG_PREFIX on-demand visible-page cache unlock failed: " +
-                                error.stackTraceToString(),
-                        )
-                    }
-            }
-        }
         Thread({
-            runCatching {
-                val refreshMethod = viewModel.javaClass.methods.firstOrNull {
-                    it.name == "findVirtualPageForCfi" && it.parameterTypes.size == 2
-                }?.apply { isAccessible = true }
-                    ?: error("宿主缺少 findVirtualPageForCfi")
-                invokeSuspendBlocking(refreshMethod, viewModel, targetCfi)
-                onDemandRefreshPending.remove(refreshKey)
+            // getVirtualPage 也会为相邻页预布局；优先用 Statistics 记录的真实可见页做锚点，
+            // 避免下载完成后把阅读位置强行纠正到尚未翻入的占位章节。
+            val anchorPage = currentReaderPage() ?: fallbackPage
+            val anchorCfi = callNoArg(anchorPage, "getStart")
+            val anchorLocation = onDemandPageLocation(request.bookDir, anchorPage)
+            val anchorChapterNumber = anchorLocation?.metadataIndex?.plus(1) ?: -1
+            if (anchorLocation?.metadataIndex != request.chapterIndex) {
                 XposedBridge.log(
-                    "$LOG_PREFIX on-demand visible page refreshed " +
-                        "index=${request.chapterIndex + 1} href=${request.chapter.href}",
+                    "$LOG_PREFIX on-demand visible page refresh stale " +
+                        "index=${request.chapterIndex + 1} anchor=$anchorChapterNumber href=${request.chapter.href}",
                 )
-            }.onFailure { error ->
+                onDemandRefreshInFlight.remove(refreshKey)
+                return@Thread
+            }
+            val anchorSpineIndex = anchorLocation.hostSpineIndex
+            val page = if (anchorCfi != null) rebuildOnDemandVirtualWindow(
+                viewModel = viewModel,
+                request = request,
+                anchorCfi = anchorCfi,
+                anchorSpineIndex = anchorSpineIndex,
+            ) else null
+            if (page != null) {
+                emitOnDemandPagerCorrection(viewModel, page)
+                if (isOnDemandSpineLoaded(viewModel, anchorSpineIndex)) {
+                    onDemandRefreshPending.remove(refreshKey)
+                    XposedBridge.log(
+                        "$LOG_PREFIX on-demand visible page refreshed " +
+                            "index=${request.chapterIndex + 1} anchor=$anchorChapterNumber " +
+                            "page=$page href=${request.chapter.href}",
+                    )
+                } else {
+                    XposedBridge.log(
+                        "$LOG_PREFIX on-demand visible page refresh deferred " +
+                            "index=${request.chapterIndex + 1} anchor=$anchorChapterNumber " +
+                            "href=${request.chapter.href}",
+                    )
+                }
+            } else {
                 XposedBridge.log(
-                    "$LOG_PREFIX on-demand visible page refresh failed: ${error.stackTraceToString()}",
+                    "$LOG_PREFIX on-demand visible page refresh failed " +
+                        "index=${request.chapterIndex + 1} href=${request.chapter.href}",
                 )
             }
             onDemandRefreshInFlight.remove(refreshKey)
         }, "ReaMicroOnDemandVisibleRefresh").start()
     }
+
+    private fun onDemandPageLocation(
+        bookDir: File,
+        page: Any,
+        knownMetadata: com.reamicro.fix.webdav.OnlineOnDemandMetadata? = null,
+    ): OnDemandPageLocation? {
+        val metadata = knownMetadata ?: runCatching {
+            com.reamicro.fix.webdav.OnlineOnDemandMetadataStore.read(bookDir)
+        }.getOrNull() ?: return null
+        val normalizedHrefs = metadata.chapters.map { normalizeOnDemandHref(it.href) }
+        val directIndex = readAloudPageHrefCandidates(page)
+            .asSequence()
+            .map(::normalizeOnDemandHref)
+            .map(normalizedHrefs::indexOf)
+            .firstOrNull { it >= 0 }
+        val cfi = callString(page, "getAnchor")
+            .ifBlank { callNoArg(page, "getStart")?.toString().orEmpty() }
+        val metadataIndex = directIndex
+            ?: OnlineOnDemandPrefetchPlanner.chapterIndexFromCfi(cfi, metadata.chapters.size)
+            ?: return null
+        val hostSpineIndex = (callNoArg(page, "getSpineIndex") as? Number)?.toInt()
+            ?: OnlineOnDemandPrefetchPlanner.hostSpineIndexFromCfi(cfi)
+            ?: return null
+        val chapter = metadata.chapter(metadataIndex) ?: return null
+        return OnDemandPageLocation(metadataIndex, hostSpineIndex, chapter.href)
+    }
+
+    private fun normalizeOnDemandHref(value: String): String =
+        value.trim()
+            .substringBefore('#')
+            .replace('\\', '/')
+            .removePrefix("OEBPS/")
+            .removePrefix("./")
+
+    private fun rebuildOnDemandVirtualWindow(
+        viewModel: Any,
+        request: OnlineOnDemandChapterRequest,
+        anchorCfi: Any,
+        anchorSpineIndex: Int,
+    ): Int? {
+        val epub = currentEpubStrong ?: currentEpubRef?.get() ?: return null
+        val mutex = runCatching {
+            XposedHelpers.getObjectField(viewModel, "virtualPageLoadMutex")
+        }.getOrNull()
+        val owner = request
+        var locked = mutex == null
+        for (attempt in 0..ON_DEMAND_CACHE_LOCK_RETRIES) {
+            if (!locked) {
+                locked = runCatching {
+                    XposedHelpers.callMethod(mutex, "tryLock", owner) as? Boolean ?: false
+                }.getOrDefault(false)
+            }
+            if (locked) break
+            if (attempt < ON_DEMAND_CACHE_LOCK_RETRIES) Thread.sleep(ON_DEMAND_CACHE_LOCK_RETRY_MS)
+        }
+        if (!locked) {
+            XposedBridge.log(
+                "$LOG_PREFIX on-demand virtual window lock timeout " +
+                    "target=${request.chapterIndex + 1} href=${request.chapter.href}",
+            )
+            return null
+        }
+        return try {
+            val recenterMethod = findOnDemandRecenterMethod(viewModel, epub, anchorCfi)
+                ?: error("宿主缺少 recenterVirtualWindow")
+            (invokeSuspendBlocking(
+                recenterMethod,
+                viewModel,
+                anchorSpineIndex,
+                epub,
+                anchorCfi,
+                false,
+            ) as? Number)?.toInt()
+        } catch (error: Throwable) {
+            XposedBridge.log(
+                "$LOG_PREFIX on-demand virtual window rebuild failed: ${error.stackTraceToString()}",
+            )
+            null
+        } finally {
+            if (mutex != null) {
+                runCatching { XposedHelpers.callMethod(mutex, "unlock", owner) }
+                    .onFailure { error ->
+                        XposedBridge.log("$LOG_PREFIX on-demand virtual window unlock failed: ${error.stackTraceToString()}")
+                    }
+            }
+        }
+    }
+
+    private fun emitOnDemandPagerCorrection(viewModel: Any, virtualPage: Int) {
+        runCatching {
+            val correction = XposedHelpers.getObjectField(viewModel, "_pagerCorrection")
+            XposedHelpers.callMethod(correction, "tryEmit", Integer.valueOf(virtualPage))
+        }.onFailure { error ->
+            XposedBridge.log("$LOG_PREFIX on-demand pager correction failed: ${error.stackTraceToString()}")
+        }
+    }
+
+    private fun findOnDemandRecenterMethod(viewModel: Any, epub: Any, anchorCfi: Any): Method? {
+        val candidates = mutableListOf<Method>()
+        var type: Class<*>? = viewModel.javaClass
+        while (type != null) {
+            candidates += runCatching { type.declaredMethods.asList() }.getOrDefault(emptyList())
+            type = type.superclass
+        }
+        fun Method.matchesSignature(): Boolean {
+            val parameters = parameterTypes
+            return parameters.size == 5 &&
+                parameters[0] == Int::class.javaPrimitiveType &&
+                parameters[1].isAssignableFrom(epub.javaClass) &&
+                parameters[2].isAssignableFrom(anchorCfi.javaClass) &&
+                parameters[3] == Boolean::class.javaPrimitiveType &&
+                parameters[4].name == KOTLIN_CONTINUATION_CLASS
+        }
+        return candidates.firstOrNull { it.name == "recenterVirtualWindow" && it.matchesSignature() }
+            ?.apply { isAccessible = true }
+            ?: candidates.firstOrNull(Method::matchesSignature)?.apply { isAccessible = true }
+    }
+
+    private fun isOnDemandSpineLoaded(viewModel: Any, spineIndex: Int): Boolean =
+        runCatching {
+            val loadedSpines = XposedHelpers.getObjectField(viewModel, "loadedSpines") as? Set<*>
+            loadedSpines?.any { (it as? Number)?.toInt() == spineIndex } == true
+        }.getOrDefault(false)
 
     private fun invalidateOnDemandPrefetchedSpineWhenCacheReady(
         viewModel: Any,
@@ -8418,6 +8509,12 @@ class ReaderHook(
     private data class CfiBase(
         val spineIndex: Int,
         val itemRefIndex: Int,
+    )
+
+    private data class OnDemandPageLocation(
+        val metadataIndex: Int,
+        val hostSpineIndex: Int,
+        val href: String,
     )
 
     private data class BlockState(

@@ -111,6 +111,7 @@ class ReaderDialogueHighlightHook(
 
     private fun applyOnlineParagraphComments(contentDom: Any?) {
         runCatching {
+            if (!ONLINE_PARAGRAPH_COMMENTS_RUNTIME_ENABLED) return
             contentDom ?: return
             val activity = activityProvider() ?: return logOnlineParagraphCommentDebug("skip:no-activity")
             val context = activity.applicationContext
@@ -1817,6 +1818,8 @@ class ReaderDialogueHighlightHook(
 
     private companion object {
         const val LOG_PREFIX = "ReaMicro LSP"
+        // 暂停段评运行时功能，保留缓存、解析和注入代码供后续继续修复。
+        const val ONLINE_PARAGRAPH_COMMENTS_RUNTIME_ENABLED = false
         const val DEFAULT_DIALOGUE_COLOR = "#FF9800"
         const val SPAN_STYLE_CLASS = ReaMicroHostCompat.ReaderHighlight.SPAN_STYLE_CLASS
         const val ANNOTATED_STRING_CLASS = ReaMicroHostCompat.ReaderHighlight.ANNOTATED_STRING_CLASS
