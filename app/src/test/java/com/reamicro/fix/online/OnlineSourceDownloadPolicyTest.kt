@@ -39,6 +39,27 @@ class OnlineSourceDownloadPolicyTest {
     }
 
     @Test
+    fun downloadModeAndParagraphCommentsDefaultToDisabled() {
+        val policy = OnlineSourceDownloadPolicyStore.parse("", "")
+
+        assertEquals(false, policy.preferOnDemandLoading)
+        assertEquals(false, policy.paragraphCommentsEnabled)
+    }
+
+    @Test
+    fun paragraphCommentCapabilityIsDetectedFromSourceScripts() {
+        assertEquals(false, source().supportsParagraphComments)
+        assertEquals(
+            true,
+            source().copy(loginUi = """[{"name":"段评开关","type":"button"}]""").supportsParagraphComments,
+        )
+        assertEquals(
+            true,
+            source().copy(jsLib = "function load(){ return 'idea_counts'; }").supportsParagraphComments,
+        )
+    }
+
+    @Test
     fun invalidValuesAreRejected() {
         assertThrows(IllegalStateException::class.java) {
             OnlineSourceDownloadPolicyStore.parse("abc", "")

@@ -8,6 +8,8 @@ import java.util.concurrent.ConcurrentHashMap
 internal data class OnlineSourceDownloadPolicy(
     val requestsPerSecond: Int? = null,
     val dailyChapterLimit: Int? = null,
+    val preferOnDemandLoading: Boolean = false,
+    val paragraphCommentsEnabled: Boolean = false,
 )
 
 internal class OnlineSourceDailyLimitException(message: String) : IllegalStateException(message)
@@ -17,6 +19,8 @@ internal object OnlineSourceDownloadPolicyStore {
     private const val KEY_DAILY_LIMIT_PREFIX = "online_download_daily_limit_"
     private const val KEY_DAILY_DATE_PREFIX = "online_download_daily_date_"
     private const val KEY_DAILY_USED_PREFIX = "online_download_daily_used_"
+    private const val KEY_ON_DEMAND_PREFIX = "online_download_on_demand_"
+    private const val KEY_PARAGRAPH_COMMENTS_PREFIX = "online_paragraph_comments_"
     private const val MAX_REQUESTS_PER_SECOND = 10_000
     private const val MAX_DAILY_CHAPTER_LIMIT = 10_000_000
     private val quotaLocks = ConcurrentHashMap<String, Any>()
@@ -40,6 +44,8 @@ internal object OnlineSourceDownloadPolicyStore {
         return source.copy(
             configuredRequestsPerSecond = policy.requestsPerSecond,
             dailyChapterLimit = policy.dailyChapterLimit,
+            preferOnDemandLoading = policy.preferOnDemandLoading,
+            paragraphCommentsEnabled = policy.paragraphCommentsEnabled,
         )
     }
 
@@ -48,6 +54,8 @@ internal object OnlineSourceDownloadPolicyStore {
         return OnlineSourceDownloadPolicy(
             requestsPerSecond = preferences.getInt(KEY_RATE_PREFIX + sourceId, 0).takeIf { it > 0 },
             dailyChapterLimit = preferences.getInt(KEY_DAILY_LIMIT_PREFIX + sourceId, 0).takeIf { it > 0 },
+            preferOnDemandLoading = preferences.getBoolean(KEY_ON_DEMAND_PREFIX + sourceId, false),
+            paragraphCommentsEnabled = preferences.getBoolean(KEY_PARAGRAPH_COMMENTS_PREFIX + sourceId, false),
         )
     }
 
@@ -56,14 +64,21 @@ internal object OnlineSourceDownloadPolicyStore {
         sourceId: String,
         requestsPerSecond: String,
         dailyChapterLimit: String,
+        preferOnDemandLoading: Boolean = false,
+        paragraphCommentsEnabled: Boolean = false,
     ): OnlineSourceDownloadPolicy {
         val appContext = context?.applicationContext ?: error("缺少 Context")
-        val policy = parse(requestsPerSecond, dailyChapterLimit)
+        val policy = parse(requestsPerSecond, dailyChapterLimit).copy(
+            preferOnDemandLoading = preferOnDemandLoading,
+            paragraphCommentsEnabled = paragraphCommentsEnabled,
+        )
         prefs(appContext)?.edit()?.apply {
             policy.requestsPerSecond?.let { putInt(KEY_RATE_PREFIX + sourceId, it) }
                 ?: remove(KEY_RATE_PREFIX + sourceId)
             policy.dailyChapterLimit?.let { putInt(KEY_DAILY_LIMIT_PREFIX + sourceId, it) }
                 ?: remove(KEY_DAILY_LIMIT_PREFIX + sourceId)
+            putBoolean(KEY_ON_DEMAND_PREFIX + sourceId, policy.preferOnDemandLoading)
+            putBoolean(KEY_PARAGRAPH_COMMENTS_PREFIX + sourceId, policy.paragraphCommentsEnabled)
         }?.apply()
         return policy
     }
@@ -74,6 +89,8 @@ internal object OnlineSourceDownloadPolicyStore {
             ?.remove(KEY_DAILY_LIMIT_PREFIX + sourceId)
             ?.remove(KEY_DAILY_DATE_PREFIX + sourceId)
             ?.remove(KEY_DAILY_USED_PREFIX + sourceId)
+            ?.remove(KEY_ON_DEMAND_PREFIX + sourceId)
+            ?.remove(KEY_PARAGRAPH_COMMENTS_PREFIX + sourceId)
             ?.apply()
         quotaLocks.remove(sourceId)
     }

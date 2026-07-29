@@ -10,6 +10,20 @@ import java.lang.ref.WeakReference
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 
+internal fun readerEpubConfig230TrailingArguments(
+    globalEmbeddedFonts: Boolean,
+    bookEmbeddedFonts: Int,
+    embeddedFonts: Boolean,
+    buildInFonts: Boolean,
+    boldFont: Boolean,
+): Array<Any> = arrayOf(
+    globalEmbeddedFonts,
+    bookEmbeddedFonts,
+    embeddedFonts,
+    buildInFonts,
+    boldFont,
+)
+
 class ReaderFontCompletionHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
@@ -225,7 +239,7 @@ class ReaderFontCompletionHook(
         val configClass = cls(READER_EPUB_CONFIG_CLASS)
         // 阅微 2.3.0 起 ReaderEpubConfig 为 11 参：
         // (family, textSize, lineHeight, paragraphSpacing, letterSpacing, padding,
-        //  boldFont, bookEmbeddedFonts, embeddedFonts, globalEmbeddedFonts, buildInFonts)
+        //  globalEmbeddedFonts, bookEmbeddedFonts, embeddedFonts, buildInFonts, boldFont)
         runCatching {
             configClass
                 .getDeclaredConstructor(
@@ -249,11 +263,13 @@ class ReaderFontCompletionHook(
                     value.paragraphSpacing,
                     value.letterSpacing,
                     value.padding,
-                    value.boldFont,
-                    value.bookEmbeddedFonts,
-                    value.embeddedFonts,
-                    value.globalEmbeddedFonts,
-                    value.buildInFonts,
+                    *readerEpubConfig230TrailingArguments(
+                        globalEmbeddedFonts = value.globalEmbeddedFonts,
+                        bookEmbeddedFonts = value.bookEmbeddedFonts,
+                        embeddedFonts = value.embeddedFonts,
+                        buildInFonts = value.buildInFonts,
+                        boldFont = value.boldFont,
+                    ),
                 )
         }.getOrNull()?.let { return it }
 

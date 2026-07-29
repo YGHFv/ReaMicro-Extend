@@ -1,0 +1,448 @@
+参考这个项目https://github.com/refgd/legado和书源‪C:\Users\YGHF\Downloads\番茄小说(1).json适配段评和插图，为了更好的显示，是否可以尝试加入一个逐章加载的模式（保留原来的下载导入机制，可选下载导入或者逐章加载），点击搜索结果仅下载前三章并加入书架，后面阅读的时候自动往后缓存，点击目录切换章节时实时请求下载并显示
+
+可以做，而且不必破坏现有“整本下载→导入”链路。比较稳妥的方向是新增“按需阅读”模式：首次只落地前三章和完整目录，阅读/跳章时按需拉取并写入同一缓存层，再由后台预取后续章节。
+我先把当前导入链、阅微宿主的书架/目录/阅读 Hook、番茄书源规则，以及 Legado 的章节缓存实现对齐，再决定最小侵入的落点。段评和插图也会一起评估：重点是内容标记格式、图片缓存路径、段落与评论 ID 的稳定映射。
+
+如果需要分析阅微请使用mt的mcp服务
+
+先通过已启用的 MT 服务确认当前阅微 APK 和宿主版本，再以真实类签名校准“搜索结果→入架→目录→阅读器切章”的 Hook 点；同时把番茄书源里的段评、插图协议拆出来。确认宿主能力后再动代码，避免基于旧反编译材料误改。MT 已正常连通，并确认当前宿主是 阅微 2.3.0 beta（versionCode 2202）​。有个关键发现：新宿主自身已经出现 ensureVirtualPageMapped、ensureVirtualPageWindow、jumpProgress 和“正在加载章节”等虚拟分页/延迟加载能力。这比从零改造本地 EPUB 阅读器安全得多，我正在判断能否直接接入宿主这套虚拟页机制。我先把宿主 2.3.0 beta 的“虚拟页”能力定性：它究竟只是本地 EPUB 的分页窗口，还是已经预留了远程章节映射。然后结合当前项目的在线书源/EPUB 生成链，确定能否复用；若不能，就采用“稀疏 EPUB + 章节替换”的兼容实现，不直接侵入阅读器底层
+
+继续执行。先完成两项关键确认：一是宿主虚拟页是否支持动态补章，二是现有 `.rmsource`/EPUB 管线能否安全增量更新。确认后我会直接落实现有“整本导入 / 逐章加载”双模式，而不是停留在方案说明。
+## 只读技术报告
+
+已继续核对，全程未修改、编译或写入仓库文件。
+
+### 1. 当前链路与直接修改点
+
+核心实现高度集中在：
+
+`E:\MTool\Work\reamicro\app\src\main\java\com\reamicro\fix\hook\WebDavDriveHook.kt`
+
+- 搜索 Hook：`hookHomeWebDavSearch()`（2403）、`searchOnlineCompletionSourcesProgressively()`（5026）、`searchOnlineCompletionSource()`（5128）、`parseOnlineSearchResults()`（5462）。
+- 搜索结果点击：`hookHomeSearchTapCancellation()`（2610）→`handleOnlineCompletionSearchTap()`（7657）→`startOnlineCompletionDownload()`。
+- 书源规则执行：`onlineRuleValue()`、`applyOnlineTemplate()`、`onlineJsonRuleValues()`；请求由`requestOnlineSearch()`完成。模型在  
+  `E:\MTool\Work\reamicro\app\src\main\java\com\reamicro\fix\online\OnlineSourceStore.kt`：
+  ```kotlin
+  OnlineSourceEntry(
+      searchUrl, ruleSearch, ruleBookInfo, ruleToc, ruleContent, ...
+  )
+  ```
+  当前只是 Legado 规则及有限 JS 兼容，不是完整 JS 引擎。
+- 完整目录：`loadOnlineCompletionToc()`→`buildOnlineTocUrl()`→`parseOnlineToc()`/`parseOnlineJsonToc()`。
+- 正文：`downloadOnlineChapter()`→`extractOnlineChapterContent()`。
+- EPUB：`writeOnlineCompletionEpub()`、`chapterXhtml()`、`onlineTocNcx()`、`onlineContentOpf()`。
+- 导入阅微：`importOnlineCompletionBookLocked()`调用宿主`EpubFileManager.import`和六参`BookshelfRepository.importBook`；另有`hookWebDavImportBookSource()`覆盖来源信息。
+- 增量更新：`updateOnlineCompletionBookIncrementally()`、`writeOnlineCompletionChapterToBookDir()`、`refreshOnlineCompletionCatalogTables()`。
+- 覆盖导入保护位于  
+  `E:\MTool\Work\reamicro\app\src\main\java\com\reamicro\fix\hook\ReaderImportOverwriteHook.kt`。
+
+### 2. 当前并非“首次三章”
+
+`downloadOnlineCompletionBook()`仍遍历全部章节。仅当章节数大于200时，在前100章处理后生成一次“完整目录、其余占位”的 EPUB 并提前导入，随后继续下载整本：
+
+```kotlin
+val partialChapters = chapters.mapIndexed { index, chapter ->
+    downloaded[index] ?: onlineCompletionPendingChapter(chapter, index)
+}
+```
+
+因此现状是“前100章提前可见+后台整本”，不是按需模式。保留旧能力时，应增加下载策略`FULL`/`ON_DEMAND`；不要直接把常量100改成3。
+
+### 3. 数据模型缺口
+
+现有运行时模型：
+
+`E:\MTool\Work\reamicro\app\src\main\java\com\reamicro\fix\webdav\WebDavDownloadTasks.kt`
+
+```kotlin
+OnlineDownloadedChapter(title, content, volumeTitle, level, sourceUrl)
+downloadedChapters: ConcurrentHashMap<Int, OnlineDownloadedChapter>
+```
+
+持久关联目前依赖：
+
+- OPF：`reamicro-online-source-id/name/detail-url`
+- 宿主Book：`backupType/backupId/backupCode`
+- `OEBPS/reamicro-online-chapters.json`：章节ID、URL、标题、卷、href
+- 失败日志：失败状态
+
+章节索引没有`PENDING/DOWNLOADING/READY/FAILED`、时间、图片、段评字段；`AssociatedFileMetadata`仅用于普通文件关联，不适合本需求。
+
+### 4. 最小实现分层
+
+1. **OnlineCatalogRepository**：复用目录解析，首次保存完整目录及固定href。
+2. **OnlineChapterRepository**：单章去重下载、限速、状态持久化；从现有`downloadOnlineChapter()`抽出。
+3. **OnlineEpubPatcher**：首次为所有章节生成固定占位XHTML，后续仅原子替换目标文件；复用现有临时文件+`renameTo`逻辑。
+4. **OnlineReaderPrefetchHook**：放在独立类，避免继续膨胀`WebDavDriveHook`。  
+   `ReaderHook.kt`已有可用入口：
+   - `ReaderViewModel.intent`中的`ReaderUiIntent.Statistics`可取得可见`page.chapterIndex`，用于向后预取N章；
+   - `EpubContainer`可取得实际渲染页；
+   - `ReaderCatalog`已捕获Book及完整catalog。
+   
+   当前没有目录跳章下载逻辑，应在`ReaderViewModel.intent`统一观察目录/MarkJump/BookmarkJump等跳转Intent，在跳转前下载目标章；具体目录Intent类名需用现有反射日志在对应阅微版本确认。
+5. **OnlineMetadataRepository**：扩展章节索引JSON，记录状态、ETag/hash、资源清单和段评引用。
+
+### 5. 番茄段评与插图
+
+当前`normalizeOnlineChapterText()`删除全部HTML标签，`chapterXhtml()`又把每行`xmlEscape()`后包装为`<p>`，因此正文中的`<img>`必然丢失；代码中也没有段评模型或解析链。
+
+应将正文结果改为结构化块，例如`Paragraph(text, commentCount, commentId)`、`Image(url, localHref, mime)`；图片经现有`downloadOnlineBytes()`下载到`OEBPS/Images/`，写入manifest并输出真实`<img>`。段评宜先保存为自定义JSON/data属性或脚注；阅微原生段评UI没有现成接入点，不能仅靠正文字符串适配。
+
+### 6. 稀疏EPUB、缓存与CFI结论
+
+**结构上可行，但当前不能热更新后立即保证可见。**
+
+首次 EPUB 已能为完整目录生成全部manifest、spine和固定路径：
+
+```text
+Text/chapter_0001.xhtml
+Text/chapter_0002.xhtml
+...
+```
+
+若后续只替换对应XHTML，不插入、删除、重排spine：
+
+- 其他章节CFI的spine索引及路径保持稳定；
+- 被替换章节内部DOM路径改变，该章已有书签、标注及当前阅读CFI可能失效；
+- `ReaderHook`明确长期持有`currentEpubStrong/currentPageStrong`，且宿主`Epub.read`会形成解析、分页对象；仓库没有正文文件替换后的publication/DOM/分页缓存失效接口。因此正在打开的占位章可能继续显示缓存内容。
+
+安全策略是：在进入未下载章**之前**完成下载；若目标章已被加载，则提示关闭重进或主动重建ReaderViewModel/Epub对象。不要在读到占位页后静默替换并依赖自动刷新。完整spine首次固定后，通常无需刷新目录DAO；仅远端新增章节时才继续调用现有`refreshOnlineCompletionCatalogTables()`。## 只读技术报告
+
+已继续核对，全程未修改、编译或写入仓库文件。
+
+### 1. 当前链路与直接修改点
+
+核心实现高度集中在：
+
+`E:\MTool\Work\reamicro\app\src\main\java\com\reamicro\fix\hook\WebDavDriveHook.kt`
+
+- 搜索 Hook：`hookHomeWebDavSearch()`（2403）、`searchOnlineCompletionSourcesProgressively()`（5026）、`searchOnlineCompletionSource()`（5128）、`parseOnlineSearchResults()`（5462）。
+- 搜索结果点击：`hookHomeSearchTapCancellation()`（2610）→`handleOnlineCompletionSearchTap()`（7657）→`startOnlineCompletionDownload()`。
+- 书源规则执行：`onlineRuleValue()`、`applyOnlineTemplate()`、`onlineJsonRuleValues()`；请求由`requestOnlineSearch()`完成。模型在  
+  `E:\MTool\Work\reamicro\app\src\main\java\com\reamicro\fix\online\OnlineSourceStore.kt`：
+  ```kotlin
+  OnlineSourceEntry(
+      searchUrl, ruleSearch, ruleBookInfo, ruleToc, ruleContent, ...
+  )
+  ```
+  当前只是 Legado 规则及有限 JS 兼容，不是完整 JS 引擎。
+- 完整目录：`loadOnlineCompletionToc()`→`buildOnlineTocUrl()`→`parseOnlineToc()`/`parseOnlineJsonToc()`。
+- 正文：`downloadOnlineChapter()`→`extractOnlineChapterContent()`。
+- EPUB：`writeOnlineCompletionEpub()`、`chapterXhtml()`、`onlineTocNcx()`、`onlineContentOpf()`。
+- 导入阅微：`importOnlineCompletionBookLocked()`调用宿主`EpubFileManager.import`和六参`BookshelfRepository.importBook`；另有`hookWebDavImportBookSource()`覆盖来源信息。
+- 增量更新：`updateOnlineCompletionBookIncrementally()`、`writeOnlineCompletionChapterToBookDir()`、`refreshOnlineCompletionCatalogTables()`。
+- 覆盖导入保护位于  
+  `E:\MTool\Work\reamicro\app\src\main\java\com\reamicro\fix\hook\ReaderImportOverwriteHook.kt`。
+
+### 2. 当前并非“首次三章”
+
+`downloadOnlineCompletionBook()`仍遍历全部章节。仅当章节数大于200时，在前100章处理后生成一次“完整目录、其余占位”的 EPUB 并提前导入，随后继续下载整本：
+
+```kotlin
+val partialChapters = chapters.mapIndexed { index, chapter ->
+    downloaded[index] ?: onlineCompletionPendingChapter(chapter, index)
+}
+```
+
+因此现状是“前100章提前可见+后台整本”，不是按需模式。保留旧能力时，应增加下载策略`FULL`/`ON_DEMAND`；不要直接把常量100改成3。
+
+### 3. 数据模型缺口
+
+现有运行时模型：
+
+`E:\MTool\Work\reamicro\app\src\main\java\com\reamicro\fix\webdav\WebDavDownloadTasks.kt`
+
+```kotlin
+OnlineDownloadedChapter(title, content, volumeTitle, level, sourceUrl)
+downloadedChapters: ConcurrentHashMap<Int, OnlineDownloadedChapter>
+```
+
+持久关联目前依赖：
+
+- OPF：`reamicro-online-source-id/name/detail-url`
+- 宿主Book：`backupType/backupId/backupCode`
+- `OEBPS/reamicro-online-chapters.json`：章节ID、URL、标题、卷、href
+- 失败日志：失败状态
+
+章节索引没有`PENDING/DOWNLOADING/READY/FAILED`、时间、图片、段评字段；`AssociatedFileMetadata`仅用于普通文件关联，不适合本需求。
+
+### 4. 最小实现分层
+
+1. **OnlineCatalogRepository**：复用目录解析，首次保存完整目录及固定href。
+2. **OnlineChapterRepository**：单章去重下载、限速、状态持久化；从现有`downloadOnlineChapter()`抽出。
+3. **OnlineEpubPatcher**：首次为所有章节生成固定占位XHTML，后续仅原子替换目标文件；复用现有临时文件+`renameTo`逻辑。
+4. **OnlineReaderPrefetchHook**：放在独立类，避免继续膨胀`WebDavDriveHook`。  
+   `ReaderHook.kt`已有可用入口：
+   - `ReaderViewModel.intent`中的`ReaderUiIntent.Statistics`可取得可见`page.chapterIndex`，用于向后预取N章；
+   - `EpubContainer`可取得实际渲染页；
+   - `ReaderCatalog`已捕获Book及完整catalog。
+   
+   当前没有目录跳章下载逻辑，应在`ReaderViewModel.intent`统一观察目录/MarkJump/BookmarkJump等跳转Intent，在跳转前下载目标章；具体目录Intent类名需用现有反射日志在对应阅微版本确认。
+5. **OnlineMetadataRepository**：扩展章节索引JSON，记录状态、ETag/hash、资源清单和段评引用。
+
+### 5. 番茄段评与插图
+
+当前`normalizeOnlineChapterText()`删除全部HTML标签，`chapterXhtml()`又把每行`xmlEscape()`后包装为`<p>`，因此正文中的`<img>`必然丢失；代码中也没有段评模型或解析链。
+
+应将正文结果改为结构化块，例如`Paragraph(text, commentCount, commentId)`、`Image(url, localHref, mime)`；图片经现有`downloadOnlineBytes()`下载到`OEBPS/Images/`，写入manifest并输出真实`<img>`。段评宜先保存为自定义JSON/data属性或脚注；阅微原生段评UI没有现成接入点，不能仅靠正文字符串适配。
+
+### 6. 稀疏EPUB、缓存与CFI结论
+
+**结构上可行，但当前不能热更新后立即保证可见。**
+
+首次 EPUB 已能为完整目录生成全部manifest、spine和固定路径：
+
+```text
+Text/chapter_0001.xhtml
+Text/chapter_0002.xhtml
+...
+```
+
+若后续只替换对应XHTML，不插入、删除、重排spine：
+
+- 其他章节CFI的spine索引及路径保持稳定；
+- 被替换章节内部DOM路径改变，该章已有书签、标注及当前阅读CFI可能失效；
+- `ReaderHook`明确长期持有`currentEpubStrong/currentPageStrong`，且宿主`Epub.read`会形成解析、分页对象；仓库没有正文文件替换后的publication/DOM/分页缓存失效接口。因此正在打开的占位章可能继续显示缓存内容。
+
+安全策略是：在进入未下载章**之前**完成下载；若目标章已被加载，则提示关闭重进或主动重建ReaderViewModel/Epub对象。不要在读到占位页后静默替换并依赖自动刷新。完整spine首次固定后，通常无需刷新目录DAO；仅远端新增章节时才继续调用现有`refreshOnlineCompletionCatalogTables()`。
+已确认目录跳转的真实入口是 `ReaderUiIntent.JumpChapter`，并且宿主的虚拟页方法确实存在。下一步读取方法体与数据字段，区分“章节远程加载”与“超长本地书分页窗口”；这是能否无刷新热补章的决定点。
+结论已经清楚：宿主所谓“虚拟页”只是对**本地 EPUB spine 的分段解析和分页内存窗口**，不具备远程章节提供器能力；“正在加载章节”也是跨未分页 spine 跳转时的 UI，不会主动联网。因此实现方向确定为：首次生成**固定完整 spine + 前三章正文 + 其余占位**，在 `JumpChapter` 发生前补齐目标章，并在阅读统计回调中预取后续章；补齐后必须让宿主重新解析目标 spine，不能假设文件替换会自动热刷新。
+我会仅做静态研究，敏感值只描述用途和传递关系，不输出原文。先解析规则文件，再对照 ReaMicro 现有模型给出最小结构建议。
+我会仅做静态研究，敏感值只描述用途和传递关系，不输出原文。先解析规则文件，再对照 ReaMicro 现有模型给出最小结构建议。
+## 研究结论
+
+全程只读，未修改文件；以下省略密钥、Cookie、Token、签名值及完整敏感查询参数。主要依据：规则入口 `C:/Users/YGHF/Downloads/番茄小说(1).json:31`、`jsLib` `C:/Users/YGHF/Downloads/番茄小说(1).json:15`。
+
+### 1）章节请求输入、输出
+
+**目录输入/输出**
+
+1. 目录接口按 `bookId` 返回 `chapterListWithVolume`。
+2. 每章提取 `title、itemId、firstPassTime`。
+3. `chapterUrl` 不是真实网络地址，而是把 `itemId` Base64 包装为  
+   `data:;base64,<编码后的 itemId>,{"type":"novel"}`；同时将 `book.type` 设为文本类型。见 `番茄小说(1).json:57`。
+4. 正文脚本收到前级 `result` 后执行 `hexDecodeToString(result)` 得到章节 `id`。因此移植时应直接保留结构化 `itemId`，不要复刻 Base64→data URI→hex 解码的兼容绕行。
+
+**正文请求**
+
+输入：`bookId、itemId、contentType、API key`。`contentType` 默认为 `full`，可切换为 `full_v2`。
+
+输出解析链：
+
+```text
+HTTP JSON
+→ root.data
+→ 若存在 data.data，再进入该层
+→ content 字段
+→ 图片处理
+→ 可选段评处理
+→ ChapterDocument
+```
+
+正文接口本身未设置特殊 Header/Cookie。规则中没有正文 AES/RSA 解密；“解密”仅有章节输入的 hex 解码。正文清洗仅包括：段落匹配时去 HTML、去 `\r`，段评完成后将三行以上空行压成两行。没有通用广告过滤或正文替换规则。
+
+### 2）插图来源与最终正文
+
+插图原始来源是正文接口使用 `api_type=full_v2` 返回的 `content`，其中已经包含 `<img ...>` 行；`full` 明确是不含插图的快速模式。
+
+关键缺陷：`ruleContent` 调用了 `injectFqImages(result,id)`，但整个 JSON 的 `jsLib` **没有该函数定义**，且仅此一处引用。异常被空 `catch` 吞掉，因此它
+## 研究结论
+
+已完成静态分析，**未修改任何文件**。敏感主机、密钥和完整查询串均已省略。规则入口见 `C:/Users/YGHF/Downloads/番茄小说(1).json:31`，`jsLib` 位于同文件 `:15`。
+
+### 1）章节请求输入、输出
+
+1. 目录接口返回 `itemId`；`ruleToc.chapterUrl` 将其包装为 `data:;base64,...`，并附加书籍类型元数据；同时按 `novel/comic/audio` 设置 `book.type`，见 JSON `:57-61`。
+2. 进入 `ruleContent` 后，运行时 `result` 被 `java.hexDecodeToString(result)` 还原为章节 `itemId`。
+3. 从 `book.bookUrl` 提取 `bookId`，读取：
+   - `source.key`：代理服务基址；
+   - `source.getLoginInfoMap()['密钥']`：鉴权值；
+   - `java.get('fq_content_type')`：`full` 或 `full_v2`。
+4. 请求逻辑可抽象为：
+
+```text
+ContentRequest(bookId, itemId, apiType, credential)
+  -> proxy api=content
+  -> JSON.data[.data].content
+  -> String
+```
+
+5. **没有客户端正文解密算法**：文件中无 AES/decrypt 逻辑。所谓“解密”仅有章节标识的 hex 解码；正文由代理接口直接返回明文 `content`。
+6. 正文清洗也很轻：段评流程去 `\r`、按换行分段、匹配时剥离 HTML，并最终把三行以上空行压成两行；没有通用广告过滤或正文正则清洗。
+
+### 2）插图来源与最终正文
+
+插图原始来源是 `api_type=full_v2` 返回的 `content`，其中图片已经表现为 `<img ...>`。若当前模式为 `full`，`getComments` 会额外请求一次 `full_v2`，但只用于段落对齐，不会用它替换正文。
+
+关键缺陷：`ruleContent` 调用了 `injectFqImages(result,id)`，但整个 `jsLib` **没有该函数定义**，且异常被空 `catch` 吞掉。因此：
+
+- `full`：不会由 `injectFqImages` 补图；
+- `full_v2`：最终插图就是代理正文原有的 `<img ...>`；
+- 文件内没有可追踪的独立图片 JSON→HTML 转换链。
+
+评论窗口另有 `imagePairs/imageHtml`，其数据来自评论对象的 `image_data`、`expand_image_url`、`image_url`，输出：
+
+```html
+<div class="imgs">
+  <span class="pic-wrap"><img class="pic comment-img" ...></span>
+</div>
+```
+
+这属于评论图片，不是小说正文插图。
+
+### 3）段评锚点、计数、列表与标记
+
+- 计数接口：代理 `api=idea_counts`。
+- 返回核心：`data[.data].idea_data`。
+- `idea_data` 的键 `x` 就是 `para_index`，即段评锚点，不是另外生成的 UUID。
+- 普通锚点：`x` 对应 `full_v2` 去标题后的第 `x` 个文本段。
+- 图片锚点：约定 `x >= 20000`，对应第 `x-20000` 个纯图片行。
+
+随后以“剥离 HTML 后文本完全相等”在当前正文中找行，并防止同一行重复绑定。命中后缓存：
+
+```text
+fq-{bookId}-{itemId}-{paraIndex}-text -> 段落文本
+```
+
+计数取 `idea_count || count`，最终在段落末尾追加可点击 SVG：
+
+```html
+<img src="data:image/svg+xml;base64,...,{style,click}">
+```
+
+`click` 调用 `showCmt(bookId,itemId,paraIndex)`。注意：纯图片行剥离标签后为空，当前代码又要求目标文本非空，因此 **图片段评锚点实际上无法命中**。
+
+评论列表使用代理 `api=idea_comments`，关键输入为 `bookId/itemId/paraIndex/offset/count/sort`；输出读取 `comments`、`count`、`offset/next_offset`、`has_more`。回复使用 `api=idea_comment_replies`，按 `comment_id + cursor` 分页。评论最终渲染为 `.card`，包含头像、用户、富文本、评论图片、时间、点赞及回复列表。
+
+### 4）所需运行能力
+
+最小必需能力：
+
+- HTTP GET、JSON 解析、URL 编码；
+- 安全保存并注入 API key；
+- `source.key`、登录字段、源级 `get/put`；
+- `java.ajax`、hex/Base64、日志；
+- 内存缓存；
+- HTML/WebView 展示及 JS 点击桥；
+- data-URI/SVG 图片渲染。
+
+章节链本身**不需要 Cookie 或自定义 Header**，且规则声明 `enabledCookieJar=false`。`jsLib` 中虽有 OkHttp、gzip、MD5、X-Gorgon、Cookie、`source.getLoginHeader()`，但它们服务于书架等其他路径，不是本章正文/段评链的必要依赖。
+
+### 5）ReaMicro 最小结构化模型
+
+建议避免把交互信息继续塞进正文 HTML：
+
+```text
+ChapterRequest(sourceId, bookId, itemId, contentType)
+ChapterContent(chapterId, blocks)
+ContentBlock.Text(text, paraIndex?)
+ContentBlock.Image(url, paraIndex?)
+ParagraphCommentSummary(paraIndex, blockIndex, count)
+CommentPage(items, nextOffset, hasMore, total)
+Comment(id, user, text, images, createdAt, likes, replyCount)
+ReplyPage(items, nextCursor, hasMore)
+CredentialRef(sourceId)   // 与内容模型隔离
+```
+
+ReaMicro 当前 `OnlineSourceEntry` 只保存原始 `ruleContent`，见 `app/src/main/java/com/reamicro/fix/online/OnlineSourceStore.kt:12-31`；导入逻辑也未保存 `jsLib`，见 `OnlineSourceStore.kt:194-231`。现有兼容层仅能抽取正文 URL 模板，且默认 `contentType=full`、`bookId` 为空，见 `OnlineSourceScriptCompat.kt:36-61`，尚不足以实现上述图片与段评链。## 研究结论
+
+已完成静态分析，**未修改任何文件**。敏感主机、密钥和完整查询串均已省略。规则入口见 `C:/Users/YGHF/Downloads/番茄小说(1).json:31`，`jsLib` 位于同文件 `:15`。
+
+### 1）章节请求输入、输出
+
+1. 目录接口返回 `itemId`；`ruleToc.chapterUrl` 将其包装为 `data:;base64,...`，并附加书籍类型元数据；同时按 `novel/comic/audio` 设置 `book.type`，见 JSON `:57-61`。
+2. 进入 `ruleContent` 后，运行时 `result` 被 `java.hexDecodeToString(result)` 还原为章节 `itemId`。
+3. 从 `book.bookUrl` 提取 `bookId`，读取：
+   - `source.key`：代理服务基址；
+   - `source.getLoginInfoMap()['密钥']`：鉴权值；
+   - `java.get('fq_content_type')`：`full` 或 `full_v2`。
+4. 请求逻辑可抽象为：
+
+```text
+ContentRequest(bookId, itemId, apiType, credential)
+  -> proxy api=content
+  -> JSON.data[.data].content
+  -> String
+```
+
+5. **没有客户端正文解密算法**：文件中无 AES/decrypt 逻辑。所谓“解密”仅有章节标识的 hex 解码；正文由代理接口直接返回明文 `content`。
+6. 正文清洗也很轻：段评流程去 `\r`、按换行分段、匹配时剥离 HTML，并最终把三行以上空行压成两行；没有通用广告过滤或正文正则清洗。
+
+### 2）插图来源与最终正文
+
+插图原始来源是 `api_type=full_v2` 返回的 `content`，其中图片已经表现为 `<img ...>`。若当前模式为 `full`，`getComments` 会额外请求一次 `full_v2`，但只用于段落对齐，不会用它替换正文。
+
+关键缺陷：`ruleContent` 调用了 `injectFqImages(result,id)`，但整个 `jsLib` **没有该函数定义**，且异常被空 `catch` 吞掉。因此：
+
+- `full`：不会由 `injectFqImages` 补图；
+- `full_v2`：最终插图就是代理正文原有的 `<img ...>`；
+- 文件内没有可追踪的独立图片 JSON→HTML 转换链。
+
+评论窗口另有 `imagePairs/imageHtml`，其数据来自评论对象的 `image_data`、`expand_image_url`、`image_url`，输出：
+
+```html
+<div class="imgs">
+  <span class="pic-wrap"><img class="pic comment-img" ...></span>
+</div>
+```
+
+这属于评论图片，不是小说正文插图。
+
+### 3）段评锚点、计数、列表与标记
+
+- 计数接口：代理 `api=idea_counts`。
+- 返回核心：`data[.data].idea_data`。
+- `idea_data` 的键 `x` 就是 `para_index`，即段评锚点，不是另外生成的 UUID。
+- 普通锚点：`x` 对应 `full_v2` 去标题后的第 `x` 个文本段。
+- 图片锚点：约定 `x >= 20000`，对应第 `x-20000` 个纯图片行。
+
+随后以“剥离 HTML 后文本完全相等”在当前正文中找行，并防止同一行重复绑定。命中后缓存：
+
+```text
+fq-{bookId}-{itemId}-{paraIndex}-text -> 段落文本
+```
+
+计数取 `idea_count || count`，最终在段落末尾追加可点击 SVG：
+
+```html
+<img src="data:image/svg+xml;base64,...,{style,click}">
+```
+
+`click` 调用 `showCmt(bookId,itemId,paraIndex)`。注意：纯图片行剥离标签后为空，当前代码又要求目标文本非空，因此 **图片段评锚点实际上无法命中**。
+
+评论列表使用代理 `api=idea_comments`，关键输入为 `bookId/itemId/paraIndex/offset/count/sort`；输出读取 `comments`、`count`、`offset/next_offset`、`has_more`。回复使用 `api=idea_comment_replies`，按 `comment_id + cursor` 分页。评论最终渲染为 `.card`，包含头像、用户、富文本、评论图片、时间、点赞及回复列表。
+
+### 4）所需运行能力
+
+最小必需能力：
+
+- HTTP GET、JSON 解析、URL 编码；
+- 安全保存并注入 API key；
+- `source.key`、登录字段、源级 `get/put`；
+- `java.ajax`、hex/Base64、日志；
+- 内存缓存；
+- HTML/WebView 展示及 JS 点击桥；
+- data-URI/SVG 图片渲染。
+
+章节链本身**不需要 Cookie 或自定义 Header**，且规则声明 `enabledCookieJar=false`。`jsLib` 中虽有 OkHttp、gzip、MD5、X-Gorgon、Cookie、`source.getLoginHeader()`，但它们服务于书架等其他路径，不是本章正文/段评链的必要依赖。
+
+### 5）ReaMicro 最小结构化模型
+
+建议避免把交互信息继续塞进正文 HTML：
+
+```text
+ChapterRequest(sourceId, bookId, itemId, contentType)
+ChapterContent(chapterId, blocks)
+ContentBlock.Text(text, paraIndex?)
+ContentBlock.Image(url, paraIndex?)
+ParagraphCommentSummary(paraIndex, blockIndex, count)
+CommentPage(items, nextOffset, hasMore, total)
+Comment(id, user, text, images, createdAt, likes, replyCount)
+ReplyPage(items, nextCursor, hasMore)
+CredentialRef(sourceId)   // 与内容模型隔离
+```
+
+ReaMicro 当前 `OnlineSourceEntry` 只保存原始 `ruleContent`，见 `app/src/main/java/com/reamicro/fix/online/OnlineSourceStore.kt:12-31`；导入逻辑也未保存 `jsLib`，见 `OnlineSourceStore.kt:194-231`。现有兼容层仅能抽取正文 URL 模板，且默认 `contentType=full`、`bookId` 为空，见 `OnlineSourceScriptCompat.kt:36-61`，尚不足以实现上述图片与段评链。
+书源协议也已拆清：番茄正文插图来自 `full_v2` 返回的 `<img>`，段评用 `para_index` 对齐正文段落；但当前书源中的 `injectFqImages` 没有定义，且 ReaMicro 现有正文管线会剥离全部 HTML，所以现在插图必然丢失。实现会先把“按章加载”主链闭合，再把正文从纯字符串升级为可保留安全图片标签的结构；段评 UI 单独接，不把可执行脚本塞进 EPUB。
+我会把按需加载拆成一个独立协调层，避免继续把 `WebDavDriveHook` 和 `ReaderHook` 直接耦死：下载侧注册“按书籍+章节索引补章”的执行器，阅读侧只拦截 `JumpChapter`、暂停原跳转、后台补章后重放原 Intent；统计回调只触发后续预取，不阻塞阅读。这样原整本下载流程完全保留。现在处理最关键的“实时显示”问题：按需补章必须发生在宿主执行 `JumpChapter` 之前，并清掉该章已解析的占位分页缓存，再重放同一个跳章 Intent。我先确认宿主有没有按 spine 移除分页的私有方法；有就精确失效目标章，没有再退化为安全重载。
+继续。刚才连接中断前已经确认：宿主没有公开的单章缓存失效方法，但内部缓存字段是可精确清理的（`loadedSpines`、`spinePagesCache`、`virtualToReal`、`realToVirtual`、`virtualPages`）。我会采用“拦截跳章→补章→清目标 spine 映射→重放 Intent”的方式，并为搜索结果点击加入“逐章加载 / 整本下载”选择。

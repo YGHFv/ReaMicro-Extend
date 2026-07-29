@@ -27,8 +27,11 @@ data class OnlineSourceEntry(
     val ruleContent: String,
     val respondTime: Int,
     val origin: String,
+    val jsLib: String = "",
     val configuredRequestsPerSecond: Int? = null,
     val dailyChapterLimit: Int? = null,
+    val preferOnDemandLoading: Boolean = false,
+    val paragraphCommentsEnabled: Boolean = false,
 ) {
     val hasLoginConfig: Boolean
         get() = loginUrl.isNotBlank() || loginUi.isNotBlank() || loginCheckJs.isNotBlank()
@@ -37,6 +40,14 @@ data class OnlineSourceEntry(
         get() = loginUrl.takeIf {
             it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true)
         }.orEmpty()
+
+    val supportsParagraphComments: Boolean
+        get() = listOf(loginUi, loginUrl, ruleContent, jsLib).any { text ->
+            text.contains("段评", ignoreCase = true) ||
+                text.contains("idea_counts", ignoreCase = true) ||
+                text.contains("idea_comments", ignoreCase = true) ||
+                text.contains("toggleParacomment", ignoreCase = true)
+        }
 }
 
 data class OnlineConcurrentRecord(
@@ -48,6 +59,7 @@ data class OnlineConcurrentRecord(
 
 object OnlineConcurrentRateLimiter {
     private val records = java.util.concurrent.ConcurrentHashMap<String, OnlineConcurrentRecord>()
+    private val cooldownUntilMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     fun updateConcurrentRate(key: String, concurrentRate: String) {
         records.compute(key) { _, record ->
@@ -65,16 +77,35 @@ object OnlineConcurrentRateLimiter {
         }
         updateConcurrentRate(source.id, concurrentRate)
         while (true) {
+            val cooldownWait = (cooldownUntilMs[source.id] ?: 0L) - System.currentTimeMillis()
+            if (cooldownWait > 0L) {
+                Thread.sleep(cooldownWait)
+                continue
+            }
             val waitTime = waitTime(source.id, concurrentRate)
             if (waitTime <= 0L) return records[source.id]
             Thread.sleep(waitTime)
         }
     }
 
+    fun recordRateLimited(source: OnlineSourceEntry, retryAfterMs: Long = DEFAULT_RATE_LIMIT_COOLDOWN_MS) {
+        val until = System.currentTimeMillis() + retryAfterMs.coerceIn(MIN_RATE_LIMIT_COOLDOWN_MS, MAX_RATE_LIMIT_COOLDOWN_MS)
+        cooldownUntilMs.merge(source.id, until) { previous, next -> maxOf(previous, next) }
+    }
+
     inline fun <T> withLimitBlocking(source: OnlineSourceEntry, block: () -> T): T {
         waitTurn(source)
-        return block()
+        return try {
+            block()
+        } catch (error: Throwable) {
+            if (error.message.orEmpty().contains("HTTP 429")) recordRateLimited(source)
+            throw error
+        }
     }
+
+    private const val MIN_RATE_LIMIT_COOLDOWN_MS = 3_000L
+    private const val DEFAULT_RATE_LIMIT_COOLDOWN_MS = 10_000L
+    private const val MAX_RATE_LIMIT_COOLDOWN_MS = 60_000L
 
     private fun waitTime(key: String, concurrentRate: String): Long {
         var isNewRecord = false
@@ -205,6 +236,7 @@ object OnlineSourceStore {
         val ruleBookInfo = rawJsonString(json, "ruleBookInfo")
         val ruleToc = rawJsonString(json, "ruleToc")
         val ruleContent = rawJsonString(json, "ruleContent")
+        val jsLib = rawJsonString(json, "jsLib")
         val respondTime = firstString(json, "respondTime", "timeout")
             .toIntOrNull()
             ?.takeIf { it > 0 }
@@ -228,6 +260,7 @@ object OnlineSourceStore {
             ruleContent = ruleContent,
             respondTime = respondTime,
             origin = "",
+            jsLib = jsLib,
         )
     }
 

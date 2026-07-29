@@ -11,8 +11,17 @@ import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.NinePatchDrawable
 import com.reamicro.fix.compat.ReaMicroHostCompat
+import com.reamicro.fix.online.FanqieParagraphCommentApi
+import com.reamicro.fix.online.OnlineParagraphCommentCacheStore
+import com.reamicro.fix.online.OnlineParagraphCommentInjectionPlan
+import com.reamicro.fix.online.OnlineParagraphCommentInjectionPlanner
+import com.reamicro.fix.online.OnlineParagraphCommentRuntimePayload
+import com.reamicro.fix.online.OnlineParagraphCommentRuntimePayloadCodec
+import com.reamicro.fix.online.OnlineReaderContextBridge
+import com.reamicro.fix.online.OnlineSourceDownloadPolicyStore
 import com.reamicro.fix.reader.DialogueHighlightRangeFinder
 import com.reamicro.fix.settings.ReaderHighlightRule
+import com.reamicro.fix.webdav.OnlineOnDemandMetadataStore
 import com.reamicro.fix.settings.ReaderHighlightBookContext
 import com.reamicro.fix.settings.ReaderHighlightRuleType
 import com.reamicro.fix.settings.ReaderHighlightStyle
@@ -31,6 +40,7 @@ class ReaderDialogueHighlightHook(
     private val hostCompat = ReaMicroHostCompat(classLoader)
     private val fontFamilyCache = HashMap<String, Any>()
     private val failedFontFamilyLogKeys = HashSet<String>()
+    private val onlineParagraphCommentDebugKeys = HashSet<String>()
     private val ninePatchDrawableCache = HashMap<String, CachedImage>()
     private val reedenBoxStyleCache = object : LinkedHashMap<String, ReedenBoxStyle>(32, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ReedenBoxStyle>?): Boolean =
@@ -75,6 +85,7 @@ class ReaderDialogueHighlightHook(
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         applyDialogueHighlight(param.thisObject)
+                        applyOnlineParagraphComments(param.thisObject)
                     }
                 })
             }
@@ -95,6 +106,318 @@ class ReaderDialogueHighlightHook(
             logApplied(text, highlightMarkerRanges(nextContent).size)
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX dialogue highlight apply failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun applyOnlineParagraphComments(contentDom: Any?) {
+        runCatching {
+            contentDom ?: return
+            val activity = activityProvider() ?: return logOnlineParagraphCommentDebug("skip:no-activity")
+            val context = activity.applicationContext
+            val reader = OnlineReaderContextBridge.snapshot()
+                ?: return logOnlineParagraphCommentDebug("skip:no-reader-context")
+            val metadata = OnlineOnDemandMetadataStore.read(reader.bookDir)
+                ?: return logOnlineParagraphCommentDebug("skip:no-metadata:${reader.bookDir.absolutePath}")
+            val sourceId = metadata.sourceId.trim()
+            if (sourceId.isBlank()) return logOnlineParagraphCommentDebug("skip:blank-source")
+            if (!OnlineSourceDownloadPolicyStore.load(context, sourceId).paragraphCommentsEnabled) {
+                return logOnlineParagraphCommentDebug("skip:disabled:$sourceId")
+            }
+
+            val locationSpine = contentDomSpineIndex(contentDom)
+            val spineIndex = locationSpine
+                ?: reader.spineIndex.takeIf { it >= 0 }
+                ?: return logOnlineParagraphCommentDebug("skip:no-spine")
+            val chapter = metadata.chapter(spineIndex)
+                ?: return logOnlineParagraphCommentDebug("skip:no-chapter:$spineIndex")
+            val bookId = FanqieParagraphCommentApi.bookId(metadata.detailUrl)
+            val itemId = FanqieParagraphCommentApi.itemId(chapter.url)
+            if (bookId.isBlank() || itemId.isBlank()) {
+                return logOnlineParagraphCommentDebug("skip:identifiers:$spineIndex:${bookId.isNotBlank()}:${itemId.isNotBlank()}")
+            }
+            val cache = OnlineParagraphCommentCacheStore.read(
+                rootDir = context.filesDir,
+                sourceId = sourceId,
+                bookId = bookId,
+                itemId = itemId,
+            ) ?: return logOnlineParagraphCommentDebug("skip:no-cache:$spineIndex:$bookId:$itemId")
+            if (
+                cache.sourceId != sourceId ||
+                cache.bookId != bookId ||
+                cache.itemId != itemId ||
+                cache.comments.isEmpty()
+            ) {
+                return logOnlineParagraphCommentDebug(
+                    "skip:cache-mismatch:$spineIndex:${cache.comments.size}:" +
+                        "${cache.sourceId == sourceId}:${cache.bookId == bookId}:${cache.itemId == itemId}",
+                )
+            }
+
+            val originalContent = callNoArg(contentDom, "getContent")
+                ?: return logOnlineParagraphCommentDebug("skip:no-content:$spineIndex")
+            val originalText = callNoArg(originalContent, "getText")?.toString().orEmpty()
+            val originalPlaceholderMap = callNoArg(contentDom, "getPlaceholderMap") as? Map<*, *>
+                ?: return logOnlineParagraphCommentDebug("skip:no-placeholder-map:$spineIndex")
+            val originalPlaceholders = callNoArg(contentDom, "getPlaceholders") as? Map<*, *>
+                ?: return logOnlineParagraphCommentDebug("skip:no-placeholders:$spineIndex")
+            val existingIds = onlineCommentRuntimeIds(originalContent, originalPlaceholderMap)
+            val plan = OnlineParagraphCommentInjectionPlanner.plan(
+                text = originalText,
+                comments = cache.comments,
+                existingIds = existingIds,
+            ) ?: return logOnlineParagraphCommentDebug(
+                "skip:no-plan:$spineIndex:text=${originalText.length}:comments=${cache.comments.size}:existing=${existingIds.size}",
+            )
+            val update = buildOnlineParagraphCommentUpdate(
+                contentDom = contentDom,
+                originalContent = originalContent,
+                originalPlaceholderMap = originalPlaceholderMap,
+                originalPlaceholders = originalPlaceholders,
+                plan = plan,
+            ) ?: return
+            replaceOnlineParagraphCommentFields(contentDom, update)
+            XposedBridge.log(
+                "$LOG_PREFIX online paragraph comments injected spine=$spineIndex count=${plan.insertions.size}",
+            )
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX online paragraph comment injection failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun contentDomSpineIndex(contentDom: Any): Int? =
+        (callNoArg(callNoArg(callNoArg(contentDom, "getLocation"), "getItemref"), "getIndex") as? Number)
+            ?.toInt()
+            ?.let(OnlineReaderContextBridge::chapterIndexFromItemRef)
+
+    private fun onlineCommentRuntimeIds(content: Any, placeholderMap: Map<*, *>): Set<String> {
+        val result = placeholderMap.keys
+            .mapNotNull { it?.toString() }
+            .filterTo(linkedSetOf()) { it.startsWith(OnlineParagraphCommentInjectionPlanner.RUNTIME_ID_PREFIX) }
+        val length = (callNoArg(content, "getLength") as? Number)?.toInt()
+            ?: callNoArg(content, "getText")?.toString()?.length
+            ?: 0
+        val annotations = content.javaClass.methods.firstOrNull {
+            it.name == "getStringAnnotations" && it.parameterTypes.size == 2
+        }?.invoke(content, 0, length) as? List<*> ?: emptyList<Any>()
+        annotations.filterNotNull().forEach { range ->
+            val tag = callNoArg(range, "getTag")?.toString().orEmpty()
+            val item = callNoArg(range, "getItem")?.toString().orEmpty()
+            if (
+                tag == INLINE_CONTENT_ANNOTATION_TAG &&
+                item.startsWith(OnlineParagraphCommentInjectionPlanner.RUNTIME_ID_PREFIX)
+            ) {
+                result += item
+            }
+        }
+        return result
+    }
+
+    private fun buildOnlineParagraphCommentUpdate(
+        contentDom: Any,
+        originalContent: Any,
+        originalPlaceholderMap: Map<*, *>,
+        originalPlaceholders: Map<*, *>,
+        plan: OnlineParagraphCommentInjectionPlan,
+    ): OnlineParagraphCommentUpdate? = runCatching {
+        val annotations = allAnnotatedRanges(originalContent).map { range ->
+            shiftedAnnotatedRange(range, plan)
+                ?: error("无法迁移 AnnotatedString range")
+        }.toMutableList()
+        val placeholderMap = HashMap<Any, Any>(originalPlaceholderMap.size + plan.insertions.size)
+        originalPlaceholderMap.forEach { (key, value) ->
+            if (key != null && value != null) placeholderMap[key] = value
+        }
+        val placeholders = HashMap<Any, Any>(originalPlaceholders.size + plan.insertions.size)
+        originalPlaceholders.forEach { (key, value) ->
+            if (key == null || value == null) return@forEach
+            placeholders[key] = shiftedAnnotatedRange(value, plan)
+                ?: error("无法迁移已有 Placeholder range")
+        }
+        val fontSize = onlineCommentFontSize(contentDom)
+        val composePlaceholder = createOnlineCommentComposePlaceholder(fontSize)
+            ?: error("无法创建 Compose Placeholder")
+        plan.insertions.forEach { insertion ->
+            val offset = plan.insertedOffset(insertion)
+            val end = offset + 1
+            val encodedComment = encodeOnlineCommentAnnotation(insertion.stableId, insertion.comment)
+                ?: error("无法创建 CommentAnnotation")
+            annotations += createTaggedAnnotatedRange(
+                encodedComment,
+                offset,
+                end,
+                COMMENT_ANNOTATION_TAG,
+            ) ?: error("无法创建评论 annotation range")
+            annotations += createTaggedAnnotatedRange(
+                insertion.stableId,
+                offset,
+                end,
+                INLINE_CONTENT_ANNOTATION_TAG,
+            ) ?: error("无法创建 inline annotation range")
+            placeholderMap[insertion.stableId] = createOnlineCommentImagePlaceholder(
+                runtimeId = insertion.stableId,
+                fontSize = fontSize,
+            ) ?: error("无法创建 ImagePlaceholder")
+            placeholders[insertion.stableId] = createTaggedAnnotatedRange(
+                composePlaceholder,
+                offset,
+                end,
+                INLINE_CONTENT_ANNOTATION_TAG,
+            ) ?: error("无法创建 Placeholder range")
+        }
+        val annotatedString = cls(ANNOTATED_STRING_CLASS).declaredConstructors
+            .firstOrNull { constructor ->
+                constructor.parameterTypes.contentEquals(arrayOf(List::class.java, String::class.java))
+            }
+            ?.apply { isAccessible = true }
+            ?.newInstance(annotations, plan.text)
+            ?: error("无法创建 AnnotatedString")
+        OnlineParagraphCommentUpdate(annotatedString, placeholderMap, placeholders)
+    }.onFailure {
+        XposedBridge.log("$LOG_PREFIX online paragraph comment build failed: ${it.stackTraceToString()}")
+    }.getOrNull()
+
+    private fun allAnnotatedRanges(content: Any): List<Any> {
+        val method = content.javaClass.methods.firstOrNull {
+            it.name == "getAnnotations\$ui_text" && it.parameterTypes.isEmpty()
+        } ?: content.javaClass.declaredMethods.firstOrNull {
+            it.name == "getAnnotations\$ui_text" && it.parameterTypes.isEmpty()
+        } ?: error("宿主 AnnotatedString 缺少统一 annotations getter")
+        method.isAccessible = true
+        val ranges = method.invoke(content) as? List<*>
+            ?: error("宿主 AnnotatedString annotations 类型异常")
+        return ranges.map { it ?: error("宿主 AnnotatedString annotations 含 null range") }
+    }
+
+    private fun shiftedAnnotatedRange(range: Any, plan: OnlineParagraphCommentInjectionPlan): Any? {
+        val item = callNoArg(range, "getItem") ?: return null
+        val start = (callNoArg(range, "getStart") as? Number)?.toInt() ?: return null
+        val end = (callNoArg(range, "getEnd") as? Number)?.toInt() ?: return null
+        val tag = callNoArg(range, "getTag")?.toString().orEmpty()
+        return createTaggedAnnotatedRange(
+            item = item,
+            start = plan.shiftedOffset(start, includeInsertionAtOffset = true),
+            endExclusive = plan.shiftedOffset(end, includeInsertionAtOffset = true),
+            tag = tag,
+        )
+    }
+
+    private fun createTaggedAnnotatedRange(item: Any, start: Int, endExclusive: Int, tag: String): Any? =
+        runCatching {
+            val annotationItem = if (item is String) {
+                cls(STRING_ANNOTATION_CLASS).getDeclaredMethod("box-impl", String::class.java)
+                    .apply { isAccessible = true }
+                    .invoke(null, item)
+            } else {
+                item
+            }
+            cls(ANNOTATED_RANGE_CLASS).getDeclaredConstructor(
+                Any::class.java,
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                String::class.java,
+            ).apply { isAccessible = true }
+                .newInstance(annotationItem, start, endExclusive, tag)
+        }.getOrNull()
+
+    private fun encodeOnlineCommentAnnotation(
+        runtimeId: String,
+        comment: com.reamicro.fix.online.OnlineParagraphCommentCount,
+    ): String? = runCatching {
+        val payload = OnlineParagraphCommentRuntimePayloadCodec.encode(
+            OnlineParagraphCommentRuntimePayload(
+                sourceId = comment.sourceId,
+                bookId = comment.bookId,
+                itemId = comment.itemId,
+                paraIndex = comment.paraIndex,
+                paragraphText = comment.paragraphText,
+                paragraphHash = comment.paragraphHash,
+                runtimeId = runtimeId,
+            ),
+        )
+        val annotationClass = cls(COMMENT_ANNOTATION_CLASS)
+        val annotation = annotationClass.getDeclaredConstructor(
+            String::class.java,
+            String::class.java,
+            String::class.java,
+            String::class.java,
+            String::class.java,
+            String::class.java,
+        ).apply { isAccessible = true }
+            .newInstance(
+                comment.paragraphText,
+                "",
+                payload,
+                "",
+                ONLINE_COMMENT_ANNOTATION_PREFIX,
+                runtimeId,
+            )
+        val companion = staticObject(COMMENT_ANNOTATION_CLASS, "Companion")
+        instanceMethod(companion, "encode", 1)?.invoke(companion, annotation)?.toString()
+    }.getOrNull()
+
+    private fun onlineCommentFontSize(contentDom: Any): Float {
+        val style = callNoArg(contentDom, "getStyle")
+        val fontSize = callNoArg(callNoArg(style, "getFontSize"), "getNumber") as? Number
+        return fontSize?.toFloat()?.takeIf { it.isFinite() && it > 0f } ?: 1f
+    }
+
+    private fun createOnlineCommentComposePlaceholder(fontSize: Float): Any? = runCatching {
+        val window = staticObject(UI_EPUB_WINDOW_CLASS, "INSTANCE")
+        val spMethod = instanceMethod(window, "sp-kPz2Gy4", 1) ?: error("sp method missing")
+        val textUnit = (spMethod.invoke(window, fontSize) as Number).toLong()
+        val companion = staticObject(PLACEHOLDER_VERTICAL_ALIGN_CLASS, "Companion")
+        val align = (instanceMethod(companion, "getTextCenter-J6kI3mc", 0)
+            ?.invoke(companion) as Number).toInt()
+        cls(COMPOSE_PLACEHOLDER_CLASS).declaredConstructors
+            .first { it.parameterTypes.size == 4 }
+            .apply { isAccessible = true }
+            .newInstance(textUnit, textUnit, align, null)
+    }.getOrNull()
+
+    private fun createOnlineCommentImagePlaceholder(runtimeId: String, fontSize: Float): Any? =
+        runCatching {
+            cls(IMAGE_PLACEHOLDER_CLASS).getDeclaredConstructor(
+                String::class.java,
+                String::class.java,
+                String::class.java,
+                Float::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType,
+                String::class.java,
+                String::class.java,
+            ).apply { isAccessible = true }
+                .newInstance(
+                    runtimeId,
+                    COMMENT_ANNOTATION_TAG,
+                    COMMENT_ANNOTATION_TAG,
+                    fontSize,
+                    fontSize,
+                    0f,
+                    0f,
+                    "",
+                    "",
+                )
+        }.getOrNull()
+
+    private fun replaceOnlineParagraphCommentFields(contentDom: Any, update: OnlineParagraphCommentUpdate) {
+        synchronized(contentDom) {
+            val contentField = field(contentDom.javaClass.name, "content")
+            val placeholderMapField = field(contentDom.javaClass.name, "placeholderMap")
+            val placeholdersField = field(contentDom.javaClass.name, "placeholders")
+            val originalContent = contentField.get(contentDom)
+            val originalPlaceholderMap = placeholderMapField.get(contentDom)
+            val originalPlaceholders = placeholdersField.get(contentDom)
+            runCatching {
+                placeholderMapField.set(contentDom, update.placeholderMap)
+                placeholdersField.set(contentDom, update.placeholders)
+                contentField.set(contentDom, update.content)
+            }.onFailure { error ->
+                runCatching { contentField.set(contentDom, originalContent) }
+                runCatching { placeholderMapField.set(contentDom, originalPlaceholderMap) }
+                runCatching { placeholdersField.set(contentDom, originalPlaceholders) }
+                throw error
+            }
         }
     }
 
@@ -506,73 +829,49 @@ class ReaderDialogueHighlightHook(
         highlightRanges: List<IntRange> = emptyList(),
     ): Any? =
         runCatching {
-            val builderClass = cls(ANNOTATED_STRING_BUILDER_CLASS)
-            val builder = builderClass.getDeclaredConstructor(String::class.java)
-                .apply { isAccessible = true }
-                .newInstance(callNoArg(original, "getText")?.toString().orEmpty())
-            val addStringAnnotation = builderClass.methods.first {
-                it.name == "addStringAnnotation" && it.parameterTypes.size == 4
-            }
-            val addStyleMethods = builderClass.methods.filter {
-                it.name == "addStyle" && it.parameterTypes.size == 3
-            }
-            val toAnnotatedString = builderClass.methods.first {
-                it.name == "toAnnotatedString" && it.parameterTypes.isEmpty()
-            }
-            val length = (callNoArg(original, "length") as? Int)
-                ?: callNoArg(original, "getLength") as? Int
-                ?: callNoArg(original, "getText")?.toString()?.length
-                ?: 0
-            val originalStringAnnotations = original.javaClass.methods.firstOrNull {
-                it.name == "getStringAnnotations" && it.parameterTypes.size == 2
-            }?.invoke(original, 0, length) as? List<*> ?: emptyList<Any>()
-            originalStringAnnotations.filterNotNull().forEach { range ->
-                val tag = callNoArg(range, "getTag")?.toString().orEmpty()
-                if (tag == NINE_PATCH_ANNOTATION_TAG || tag == HIGHLIGHT_ANNOTATION_TAG) return@forEach
-                addStringAnnotation.invoke(
-                    builder,
-                    tag,
-                    callNoArg(range, "getItem")?.toString().orEmpty(),
-                    callNoArg(range, "getStart") as? Int ?: return@forEach,
-                    callNoArg(range, "getEnd") as? Int ?: return@forEach,
-                )
-            }
+            val spanStyleClass = cls(SPAN_STYLE_CLASS)
+            val ranges = allAnnotatedRanges(original)
+                .filter { range ->
+                    val item = callNoArg(range, "getItem")
+                        ?: error("AnnotatedString range 缺少 item")
+                    val tag = callNoArg(range, "getTag")?.toString().orEmpty()
+                    !spanStyleClass.isInstance(item) &&
+                        tag != NINE_PATCH_ANNOTATION_TAG &&
+                        tag != HIGHLIGHT_ANNOTATION_TAG
+                }
+                .toMutableList()
+            ranges.addAll(spanStyles)
             annotations.forEach { annotation ->
-                addStringAnnotation.invoke(
-                    builder,
-                    NINE_PATCH_ANNOTATION_TAG,
-                    listOf(annotation.path, annotation.slice, annotation.css).joinToString(NINE_PATCH_ANNOTATION_SEPARATOR),
-                    annotation.start,
-                    annotation.end,
-                )
+                ranges += createTaggedAnnotatedRange(
+                    item = listOf(annotation.path, annotation.slice, annotation.css)
+                        .joinToString(NINE_PATCH_ANNOTATION_SEPARATOR),
+                    start = annotation.start,
+                    endExclusive = annotation.end,
+                    tag = NINE_PATCH_ANNOTATION_TAG,
+                ) ?: error("无法创建九宫格 annotation range")
             }
             val token = highlightMarkerToken()
             highlightRanges.forEach { range ->
-                addStringAnnotation.invoke(
-                    builder,
-                    HIGHLIGHT_ANNOTATION_TAG,
-                    token,
-                    range.first,
-                    range.last,
-                )
+                ranges += createTaggedAnnotatedRange(
+                    item = token,
+                    start = range.first,
+                    endExclusive = range.last,
+                    tag = HIGHLIGHT_ANNOTATION_TAG,
+                ) ?: error("无法创建高亮 annotation range")
             }
-            (callNoArg(original, "getParagraphStyles") as? List<*>)
-                ?.filterNotNull()
-                ?.forEach { range -> addAnnotatedStyle(builder, addStyleMethods, range) }
-            spanStyles.forEach { range -> addAnnotatedStyle(builder, addStyleMethods, range) }
-            toAnnotatedString.invoke(builder)
+            cls(ANNOTATED_STRING_CLASS).declaredConstructors
+                .firstOrNull { constructor ->
+                    constructor.parameterTypes.contentEquals(arrayOf(List::class.java, String::class.java))
+                }
+                ?.apply { isAccessible = true }
+                ?.newInstance(
+                    ranges,
+                    callNoArg(original, "getText")?.toString().orEmpty(),
+                )
+                ?: error("无法重建 AnnotatedString")
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX nine-patch annotation failed: ${it.stackTraceToString()}")
         }.getOrNull()
-
-    private fun addAnnotatedStyle(builder: Any, addStyleMethods: List<Method>, range: Any) {
-        val item = callNoArg(range, "getItem") ?: return
-        val start = callNoArg(range, "getStart") as? Int ?: return
-        val end = callNoArg(range, "getEnd") as? Int ?: return
-        addStyleMethods.firstOrNull { method ->
-            method.parameterTypes[0].isAssignableFrom(item.javaClass)
-        }?.invoke(builder, item, start, end)
-    }
 
     private fun hookJustifyTextNinePatchDraw() {
         if (ninePatchDrawHookInstalled) return
@@ -1457,6 +1756,13 @@ class ReaderDialogueHighlightHook(
         XposedBridge.log("$LOG_PREFIX dialogue highlight font failed: $selection ${error.javaClass.simpleName}: ${error.message}")
     }
 
+    private fun logOnlineParagraphCommentDebug(message: String) {
+        synchronized(onlineParagraphCommentDebugKeys) {
+            if (!onlineParagraphCommentDebugKeys.add(message)) return
+        }
+        XposedBridge.log("$LOG_PREFIX online paragraph comments $message")
+    }
+
     private fun logApplied(text: String, count: Int) {
         val key = "${text.length}|$count|${text.take(24)}"
         if (key == lastAppliedLogKey) return
@@ -1513,8 +1819,14 @@ class ReaderDialogueHighlightHook(
         const val LOG_PREFIX = "ReaMicro LSP"
         const val DEFAULT_DIALOGUE_COLOR = "#FF9800"
         const val SPAN_STYLE_CLASS = ReaMicroHostCompat.ReaderHighlight.SPAN_STYLE_CLASS
-        const val ANNOTATED_STRING_BUILDER_CLASS = ReaMicroHostCompat.ReaderHighlight.ANNOTATED_STRING_BUILDER_CLASS
+        const val ANNOTATED_STRING_CLASS = ReaMicroHostCompat.ReaderHighlight.ANNOTATED_STRING_CLASS
         const val ANNOTATED_RANGE_CLASS = ReaMicroHostCompat.ReaderHighlight.ANNOTATED_RANGE_CLASS
+        const val STRING_ANNOTATION_CLASS = "androidx.compose.ui.text.StringAnnotation"
+        const val COMMENT_ANNOTATION_CLASS = "org.epub.ui.CommentAnnotation"
+        const val IMAGE_PLACEHOLDER_CLASS = "org.epub.html.ImagePlaceholder"
+        const val COMPOSE_PLACEHOLDER_CLASS = "androidx.compose.ui.text.Placeholder"
+        const val PLACEHOLDER_VERTICAL_ALIGN_CLASS = "androidx.compose.ui.text.PlaceholderVerticalAlign"
+        const val UI_EPUB_WINDOW_CLASS = "org.epub.UIEpubWindow"
         const val ANNOTATED_STRING_EXT_CLASS = ReaMicroHostCompat.ReaderHighlight.ANNOTATED_STRING_EXT_CLASS
         const val DRAW_MODIFIER_KT_CLASS = ReaMicroHostCompat.ReaderHighlight.DRAW_MODIFIER_KT_CLASS
         const val ANDROID_CANVAS_KT_CLASS = ReaMicroHostCompat.ReaderHighlight.ANDROID_CANVAS_KT_CLASS
@@ -1550,6 +1862,9 @@ class ReaderDialogueHighlightHook(
         const val MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS = 7
         const val HIGHLIGHT_ANNOTATION_TAG = "reamicro.highlight.span"
         const val NINE_PATCH_ANNOTATION_TAG = "reamicro.highlight.ninepatch"
+        const val COMMENT_ANNOTATION_TAG = "#comment"
+        const val INLINE_CONTENT_ANNOTATION_TAG = "androidx.compose.foundation.text.inlineContent"
+        const val ONLINE_COMMENT_ANNOTATION_PREFIX = "reamicro-online-comment"
         const val NINE_PATCH_ANNOTATION_SEPARATOR = "\u001F"
         const val MARKUP_TEXT = "#text"
         val UNPROTECTED_INLINE_TAGS = emptySet<String>()
@@ -1564,6 +1879,12 @@ class ReaderDialogueHighlightHook(
             '\'' to '\'',
         )
     }
+
+    private data class OnlineParagraphCommentUpdate(
+        val content: Any,
+        val placeholderMap: HashMap<Any, Any>,
+        val placeholders: HashMap<Any, Any>,
+    )
 
     private data class CssStyle(
         val color: String = "",

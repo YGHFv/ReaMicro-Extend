@@ -43,6 +43,7 @@ import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.CheckBox
 import android.widget.FrameLayout
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -6067,6 +6068,10 @@ class ReaMicroSettingsHook(
             val used = OnlineSourceDownloadPolicyStore.usedToday(activityProvider()?.applicationContext, source.id)
             tags += "今日 $used/$limit 章"
         }
+        tags += if (source.preferOnDemandLoading) "逐章加载" else "整本下载"
+        if (source.supportsParagraphComments) {
+            tags += if (source.paragraphCommentsEnabled) "段评已开" else "段评已关"
+        }
         return tags.joinToString(" · ")
     }
 
@@ -6230,22 +6235,42 @@ class ReaMicroSettingsHook(
             }
             return
         }
+        openOnlineSourceDownloadConfigDialog(source)
+    }
+
+    private fun openOnlineSourceDownloadConfigDialog(source: OnlineSourceEntry) {
         val activity = activityProvider() ?: return
         activity.runOnUiThread {
-            val message = source.concurrentRate
-                .takeIf { it.isNotBlank() && it != "0" }
-                ?.let { "该源无需登录。源内置频控：$it" }
-                ?: "该源无需登录，也没有额外登录配置。"
-            val dialog = AlertDialog.Builder(activity)
-                .setTitle(source.name)
-                .setMessage(message)
-                .setPositiveButton("关闭", null)
-                .setNeutralButton("删除", null)
-                .create()
-            dialog.setOnShowListener {
-                configureOnlineSourceDeleteButton(activity, source, dialog) { dialog.dismiss() }
+            runCatching {
+                val container = LinearLayout(activity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(48, 24, 48, 0)
+                }
+                val inputs = addOnlineSourceDownloadPolicyInputs(activity, source, container)
+                val dialog = AlertDialog.Builder(activity)
+                    .setTitle("${source.name} 配置")
+                    .setMessage("下载方式和段评设置按书源独立保存。")
+                    .setView(container)
+                    .setPositiveButton("保存", null)
+                    .setNegativeButton("取消", null)
+                    .setNeutralButton("删除", null)
+                    .create()
+                dialog.setOnShowListener {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        if (!saveOnlineSourceDownloadPolicy(activity, source, inputs)) {
+                            return@setOnClickListener
+                        }
+                        bumpOnlineSourceVersion()
+                        showToast("已保存在线源配置：${source.name}")
+                        dialog.dismiss()
+                    }
+                    configureOnlineSourceDeleteButton(activity, source, dialog) { dialog.dismiss() }
+                }
+                dialog.show()
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX online source config dialog failed: ${it.stackTraceToString()}")
+                showToast("无法打开在线源配置")
             }
-            dialog.show()
         }
     }
 
@@ -6896,11 +6921,18 @@ class ReaMicroSettingsHook(
         }
     }
 
+    private data class OnlineSourcePolicyInputs(
+        val requestsPerSecond: EditText,
+        val dailyChapterLimit: EditText,
+        val preferOnDemandLoading: CheckBox,
+        val paragraphCommentsEnabled: CheckBox?,
+    )
+
     private fun addOnlineSourceDownloadPolicyInputs(
         activity: Activity,
         source: OnlineSourceEntry,
         container: LinearLayout,
-    ): Pair<EditText, EditText> {
+    ): OnlineSourcePolicyInputs {
         container.addView(TextView(activity).apply {
             text = "下载配置（可选）"
             setTextColor(Color.rgb(96, 96, 96))
@@ -6918,21 +6950,44 @@ class ReaMicroSettingsHook(
             setSingleLine(true)
             setText(source.dailyChapterLimit?.toString().orEmpty())
         }
+        val preferOnDemandLoading = CheckBox(activity).apply {
+            text = "逐章加载（首次下载前 3 章）"
+            isChecked = source.preferOnDemandLoading
+            setPadding(0, 18, 0, 0)
+        }
+        val paragraphCommentsEnabled = if (source.supportsParagraphComments) {
+            CheckBox(activity).apply {
+                text = "启用段评（下载时获取段评数据）"
+                isChecked = source.paragraphCommentsEnabled
+                setPadding(0, 4, 0, 0)
+            }
+        } else {
+            null
+        }
         container.addView(requestsPerSecondInput)
         container.addView(dailyChapterLimitInput)
-        return requestsPerSecondInput to dailyChapterLimitInput
+        container.addView(preferOnDemandLoading)
+        paragraphCommentsEnabled?.let(container::addView)
+        return OnlineSourcePolicyInputs(
+            requestsPerSecond = requestsPerSecondInput,
+            dailyChapterLimit = dailyChapterLimitInput,
+            preferOnDemandLoading = preferOnDemandLoading,
+            paragraphCommentsEnabled = paragraphCommentsEnabled,
+        )
     }
 
     private fun saveOnlineSourceDownloadPolicy(
         activity: Activity,
         source: OnlineSourceEntry,
-        inputs: Pair<EditText, EditText>,
+        inputs: OnlineSourcePolicyInputs,
     ): Boolean = runCatching {
         OnlineSourceDownloadPolicyStore.save(
             context = activity.applicationContext,
             sourceId = source.id,
-            requestsPerSecond = inputs.first.text?.toString().orEmpty(),
-            dailyChapterLimit = inputs.second.text?.toString().orEmpty(),
+            requestsPerSecond = inputs.requestsPerSecond.text?.toString().orEmpty(),
+            dailyChapterLimit = inputs.dailyChapterLimit.text?.toString().orEmpty(),
+            preferOnDemandLoading = inputs.preferOnDemandLoading.isChecked,
+            paragraphCommentsEnabled = inputs.paragraphCommentsEnabled?.isChecked ?: false,
         )
     }.onFailure { error ->
         Toast.makeText(activity, error.message ?: "下载配置不正确", Toast.LENGTH_SHORT).show()

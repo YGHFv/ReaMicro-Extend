@@ -37,6 +37,9 @@ __pycache__/
 /hl_*.smali
 /bottombar_*.smali
 /mt_query.py
+/.gradle-user-home/
+/.workbuddy/
+/outputs/
 
 # Local verification leftovers
 logcat.txt
