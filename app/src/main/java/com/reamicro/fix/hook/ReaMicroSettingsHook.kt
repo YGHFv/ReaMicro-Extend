@@ -6662,6 +6662,10 @@ class ReaMicroSettingsHook(
             return
         }
         val loginFields = OnlineSourceAuth.loginFields(source)
+        if (OnlineSourceAuth.usesAccountPasswordLogin(source)) {
+            openOnlineSourceCredentialDialog(activity, source, enableFlow, onResult)
+            return
+        }
         if (loginFields.isNotEmpty()) {
             openOnlineSourceLoginInfoDialog(activity, source, enableFlow, onResult)
             return

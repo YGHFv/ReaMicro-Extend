@@ -75,4 +75,51 @@ class OnlineSourceLoginConfigTest {
             OnlineSourceLoginConfig.expressionValue("source.key", "http://example.com/", values),
         )
     }
+
+    @Test
+    fun accountPasswordEndpointTakesPriorityOverGenericLoginFields() {
+        val source = onlineSourceForLoginTest(
+            loginUi = """[{"name":"用户名","type":"text"},{"name":"密码","type":"password"}]""",
+            loginUrl = """function login(){java.post(BASE+'/reader-auth/login','{}',{});}""",
+        )
+
+        assertTrue(OnlineSourceAuth.usesAccountPasswordLogin(source))
+        assertEquals(listOf("用户名", "密码"), OnlineSourceAuth.loginFields(source).map { it.name })
+    }
+
+    @Test
+    fun recoversCredentialsSavedByGenericFieldRegression() {
+        val fields = OnlineSourceLoginConfig.credentialFields(
+            """[{"name":"用户名","type":"text"},{"name":"密码","type":"password"}]""",
+        )
+
+        assertEquals(
+            "alice" to "secret",
+            OnlineSourceAuth.accountPasswordFromLoginInfo(
+                mapOf("用户名" to " alice ", "密码" to "secret"),
+                fields,
+            ),
+        )
+    }
+
+    private fun onlineSourceForLoginTest(loginUi: String, loginUrl: String): OnlineSourceEntry =
+        OnlineSourceEntry(
+            id = "login-test",
+            name = "登录测试",
+            fileName = "login-test.json",
+            sourceUrl = "https://example.com",
+            loginUrl = loginUrl,
+            loginUi = loginUi,
+            loginCheckJs = "",
+            concurrentRate = "",
+            header = "",
+            enabledCookieJar = true,
+            searchUrl = "",
+            ruleSearch = "",
+            ruleBookInfo = "",
+            ruleToc = "",
+            ruleContent = "",
+            respondTime = 60_000,
+            origin = "",
+        )
 }

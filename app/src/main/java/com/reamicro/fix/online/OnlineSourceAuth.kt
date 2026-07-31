@@ -21,6 +21,10 @@ object OnlineSourceAuth {
     fun supportsCredentialLogin(source: OnlineSourceEntry): Boolean =
         loginEndpoint(source) != null || loginFields(source).isNotEmpty()
 
+    /** 存在真实登录端点时必须执行账号密码请求，不能退化成仅保存 loginUi 字段。 */
+    fun usesAccountPasswordLogin(source: OnlineSourceEntry): Boolean =
+        loginEndpoint(source) != null
+
     fun loginFields(source: OnlineSourceEntry): List<OnlineSourceLoginField> =
         OnlineSourceLoginConfig.credentialFields(source.loginUi)
 
@@ -93,7 +97,7 @@ object OnlineSourceAuth {
     fun hasSavedLogin(context: Context?, source: OnlineSourceEntry): Boolean {
         val prefs = prefs(context) ?: return false
         val fields = loginFields(source)
-        if (fields.isNotEmpty()) {
+        if (!usesAccountPasswordLogin(source) && fields.isNotEmpty()) {
             val info = loginInfo(context, source)
             if (fields.all { info[it.name].orEmpty().isNotBlank() }) return true
         }
@@ -105,8 +109,11 @@ object OnlineSourceAuth {
 
     fun savedCredentials(context: Context?, source: OnlineSourceEntry): Pair<String, String> {
         val preferences = prefs(context) ?: return "" to ""
-        return preferences.getString(KEY_USER_PREFIX + source.id, "").orEmpty() to
-            preferences.getString(KEY_PASSWORD_PREFIX + source.id, "").orEmpty()
+        val username = preferences.getString(KEY_USER_PREFIX + source.id, "").orEmpty()
+        val password = preferences.getString(KEY_PASSWORD_PREFIX + source.id, "").orEmpty()
+        if (username.isNotBlank() || password.isNotBlank()) return username to password
+        // 1.3.8 曾把账号密码源误分流到通用字段保存；从该位置回读，避免用户重新输入。
+        return accountPasswordFromLoginInfo(loginInfo(context, source), loginFields(source))
     }
 
     fun clearSourceData(context: Context?, sourceId: String) {
@@ -133,8 +140,9 @@ object OnlineSourceAuth {
                 }
             }
         }
-        val username = prefs.getString(KEY_USER_PREFIX + source.id, "").orEmpty()
-        val password = prefs.getString(KEY_PASSWORD_PREFIX + source.id, "").orEmpty()
+        val saved = savedCredentials(context, source)
+        val username = saved.first
+        val password = saved.second
         if (username.isBlank() || password.isBlank()) {
             return OnlineSourceAuthResult(false, "未保存登录账号")
         }
@@ -296,5 +304,25 @@ object OnlineSourceAuth {
                 password.takeIf { it.isNotBlank() }
             else -> null
         }
+    }
+
+    internal fun accountPasswordFromLoginInfo(
+        values: Map<String, String>,
+        fields: List<OnlineSourceLoginField>,
+    ): Pair<String, String> {
+        val username = fields.asSequence()
+            .filterNot(OnlineSourceLoginField::isSecret)
+            .mapNotNull { field ->
+                val value = values[field.name].orEmpty().trim()
+                value.takeIf { value.isNotBlank() && legacyLoginValue(field.name, value, "") != null }
+            }
+            .firstOrNull()
+            .orEmpty()
+        val password = fields.asSequence()
+            .filter(OnlineSourceLoginField::isSecret)
+            .map { field -> values[field.name].orEmpty() }
+            .firstOrNull { it.isNotBlank() }
+            .orEmpty()
+        return username to password
     }
 }
