@@ -58,4 +58,39 @@ class OnlineJsonPathCompatTest {
 
         assertEquals(listOf(1, 2, 3), items.map { (it as JSONObject).getInt("id") })
     }
+
+    @Test
+    fun `and operator merges aladdin object and data array`() {
+        val root = JSONObject(
+            """{"aladdin":{"bid":1},"data":[{"bid":2},{"bid":3}]}""",
+        )
+
+        val items = OnlineJsonPathCompat.values(root, "$..aladdin&&$.data")
+
+        assertEquals(listOf(1, 2, 3), items.flatMap { value ->
+            when (value) {
+                is JSONArray -> (0 until value.length()).map { value.getJSONObject(it).getInt("bid") }
+                else -> listOf((value as JSONObject).getInt("bid"))
+            }
+        })
+    }
+
+    @Test
+    fun `shuqi volume list path returns chapter objects`() {
+        val root = JSONObject(
+            """{"data":{"chapterList":[{"volumeList":[{"chapterId":"1"},{"chapterId":"2"}]}]}}""",
+        )
+
+        val values = OnlineJsonPathCompat.values(root, "$.data.chapterList[0].volumeList")
+
+        assertEquals(
+            listOf("1", "2"),
+            values.flatMap { value ->
+                when (value) {
+                    is JSONArray -> (0 until value.length()).map { value.getJSONObject(it).getString("chapterId") }
+                    else -> listOf((value as JSONObject).getString("chapterId"))
+                }
+            },
+        )
+    }
 }

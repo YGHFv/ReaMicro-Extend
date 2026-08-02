@@ -87,6 +87,7 @@ import com.reamicro.fix.webdav.inferOnlineStatusFromLastChapterTitle
 import com.reamicro.fix.webdav.isOnlineChapterCountSelector
 import com.reamicro.fix.webdav.onlineSearchRelevanceScore
 import com.reamicro.fix.webdav.onlineHttpErrorDetail
+import com.reamicro.fix.webdav.parseOnlineUrlRequestCompat
 import com.reamicro.fix.webdav.resolveOnlineChapterListRuleCompat
 import com.reamicro.fix.webdav.HomeSearchRenderContext
 import com.reamicro.fix.webdav.HomeSearchSection
@@ -2820,8 +2821,12 @@ class WebDavDriveHook(
     private fun hookWebDavImportBookSource() {
         runCatching {
             val repositoryClass = cls(BOOKSHELF_REPOSITORY_CLASS)
+            // 2.2.0 importBook 6 参、2.3.0 起 7 参（新增进度回调）。按方法名 + 末参 Continuation 匹配，
+            // 兼容新旧签名；hook 内只改 args[3]=url、args[4]=size，两下标在新版仍不变。
             repositoryClass.declaredMethods.filter {
-                it.name == BOOKSHELF_IMPORT_BOOK_METHOD && it.parameterTypes.size == 6
+                it.name == BOOKSHELF_IMPORT_BOOK_METHOD &&
+                    it.parameterTypes.size >= 6 &&
+                    it.parameterTypes.last().name == KOTLIN_CONTINUATION_CLASS
             }.forEach { method ->
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
@@ -5442,8 +5447,10 @@ class WebDavDriveHook(
         )
     }
 
-    private fun requestOnlineSearch(source: OnlineSourceEntry, requestUrl: String): OnlineHttpResponse =
-        requestOnlineSearch(source, OnlineSearchRequest(url = requestUrl))
+    private fun requestOnlineSearch(source: OnlineSourceEntry, requestUrl: String): OnlineHttpResponse {
+        val request = parseOnlineUrlRequestCompat(requestUrl)
+        return requestOnlineSearch(source, OnlineSearchRequest(url = request.url, headers = request.headers))
+    }
 
     private fun requestOnlineSearch(source: OnlineSourceEntry, request: OnlineSearchRequest): OnlineHttpResponse {
         val requestUrl = request.url
@@ -5936,6 +5943,12 @@ class WebDavDriveHook(
             }
             return ""
         }
+        val inlineTagIndex = rule.indexOf("<js>", ignoreCase = true)
+        if (inlineTagIndex > 0) {
+            val selectorRule = rule.substring(0, inlineTagIndex).trim()
+            val selectedValue = onlineRuleValue(node, selectorRule, baseUrl, query, source)
+            OnlineSourceScriptCompat.resolveInlineResultUrl(rule, selectedValue)?.let { return it }
+        }
         val inlineJsIndex = rule.indexOf("\n@js:", ignoreCase = true)
         if (inlineJsIndex >= 0) {
             val selectorRule = rule.substring(0, inlineJsIndex).trim()
@@ -6022,8 +6035,10 @@ class WebDavDriveHook(
 
     private fun onlineJsonRuleValues(node: Any?, rule: String): List<Any?> {
         if (node == null || rule.isBlank()) return emptyList()
+        val selectorRule = rule.substringBefore("<js>", rule).substringBefore("@js:", rule).trim()
+        if (selectorRule.isBlank()) return emptyList()
         onlineJsonCandidateRoots(node).forEach { candidate ->
-            val values = onlineJsonValues(candidate, rule).flatMap(::onlineJsonRuleItems)
+            val values = onlineJsonValues(candidate, selectorRule).flatMap(::onlineJsonRuleItems)
             if (values.isNotEmpty()) return values
         }
         return emptyList()
@@ -8616,6 +8631,11 @@ class WebDavDriveHook(
         val rule = runCatching { JSONObject(source.ruleBookInfo) }.getOrNull() ?: return ""
         val tocRule = rule.optString("tocUrl", "").trim()
         if (tocRule.isBlank()) return ""
+        OnlineSourceScriptCompat.resolveShuqiTocUrl(
+            rawRule = tocRule,
+            detailUrl = detailUrl,
+            nowSeconds = System.currentTimeMillis() / 1000L,
+        )?.let { return it }
         val root = parseOnlineJsonRoot(detailBody) ?: return resolveOnlineUrl(detailUrl, tocRule)
         val node = rule.optString("init", "").trim()
             .takeIf { it.isNotBlank() }
@@ -8673,15 +8693,18 @@ class WebDavDriveHook(
         val chapterListRule = rule.optString("chapterList", "")
         val compat = resolveOnlineChapterListRuleCompat(chapterListRule)
         val rawNodes = onlineJsonRuleValues(root, compat?.jsonPath ?: chapterListRule)
-        val nodes = compat?.let { applyOnlineChapterListRuleCompat(rawNodes, it) } ?: rawNodes
+        val selectedNodes = rawNodes.ifEmpty { shuqiChapterListNodes(root, chapterListRule) }
+        val nodes = compat?.let { applyOnlineChapterListRuleCompat(selectedNodes, it) } ?: selectedNodes
         logWebDav(
             "online completion toc nodes=${nodes.size} rule=${chapterListRule.take(120)} " +
-                "compat=${compat?.jsonPath.orEmpty()}",
+                "compat=${compat?.jsonPath.orEmpty()} root=${root.javaClass.simpleName} " +
+                "raw=${rawNodes.size} selector=${chapterListRule.substringBefore("<js>").trim()}",
         )
         if (nodes.isEmpty()) return emptyList()
         val titleRule = rule.optString("chapterName", "")
         val urlRule = rule.optString("chapterUrl", "")
         val isVolumeRule = rule.optString("isVolume", "")
+        val loginInfo = OnlineSourceAuth.loginInfo(currentApplicationContext() ?: currentContext(), source)
         var currentVolumeTitle = ""
         return nodes.mapIndexedNotNull { index, node ->
             val rawTitle = cleanOnlineChapterTitleValue(
@@ -8701,7 +8724,7 @@ class WebDavDriveHook(
                         "ruleRaw=${ruleRawUrl.take(80)} fallbackRaw=${fallbackRawUrl.take(80)}",
                 )
             }
-            val url = buildOnlineChapterUrl(source, baseUrl, urlRule, rawUrl)
+            val url = buildOnlineChapterUrl(source, baseUrl, urlRule, rawUrl, loginInfo)
             val volumeTitle = onlineChapterVolumeTitle(node).ifBlank { currentVolumeTitle }
             if (url.isBlank()) null else OnlineChapter(
                 title = title,
@@ -8764,23 +8787,46 @@ class WebDavDriveHook(
             .orEmpty()
 
     private fun fallbackOnlineChapterRawUrl(node: Any?): String =
-        listOf("$.itemId", "$.item_id", "$.chapter_id", "$.id", "$.url", "$.href", "itemId", "chapter_id", "id")
+        listOf(
+            "$.itemId", "$.item_id", "$.chapterId", "$.chapter_id", "$.id", "$.url", "$.href",
+            "itemId", "item_id", "chapterId", "chapter_id", "id",
+        )
             .asSequence()
             .map { onlineJsonString(node, it) }
             .firstOrNull { it.isNotBlank() }
             .orEmpty()
+
+    /** 书旗目录固定为 data.chapterList[0].volumeList，大数组场景直接读取。 */
+    private fun shuqiChapterListNodes(root: Any, chapterListRule: String): List<Any?> {
+        if (!chapterListRule.substringBefore("<js>").trim()
+                .equals("$.data.chapterList[0].volumeList", ignoreCase = true)
+        ) return emptyList()
+        val data = (root as? JSONObject)?.optJSONObject("data") ?: return emptyList()
+        val volumes = data.optJSONArray("chapterList") ?: return emptyList()
+        val chapters = volumes.optJSONObject(0)?.optJSONArray("volumeList") ?: return emptyList()
+        return (0 until chapters.length()).mapNotNull { index ->
+            chapters.opt(index)?.takeIf { it != JSONObject.NULL }
+        }
+    }
 
     private fun buildOnlineChapterUrl(
         source: OnlineSourceEntry,
         baseUrl: String,
         urlRule: String,
         rawUrl: String,
+        loginInfo: Map<String, String>,
     ): String {
         val value = rawUrl.trim()
         if (value.isBlank()) return ""
         if (value.startsWith("http://", ignoreCase = true) || value.startsWith("https://", ignoreCase = true)) {
             return value
         }
+        OnlineSourceScriptCompat.resolveShuqiChapterUrl(
+            baseUrl = baseUrl,
+            rawScript = urlRule,
+            chapterId = value,
+            loginInfo = loginInfo,
+        )?.let { return it }
         if (urlRule.contains("<js>", ignoreCase = true) || urlRule.contains("@js:", ignoreCase = true)) {
             evaluateOnlineChapterUrlRule(urlRule, value, baseUrl)?.let { return it }
             evaluateOnlineChapterUrlJs(urlRule, value)?.let { return it }
@@ -9525,17 +9571,18 @@ class WebDavDriveHook(
                     "title=${callStringPath(opf, "metadata", "title", "value")} " +
                     "uuid=${callStringPath(opf, "metadata", "uuid", "value")}",
             )
-            val importMethod = (bookshelf.javaClass.methods.asSequence() + bookshelf.javaClass.declaredMethods.asSequence())
-                .first { it.name == "importBook" && it.parameterTypes.size == 6 }
-                .apply { isAccessible = true }
+            val importMethod = findImportBookMethod(bookshelf)
             val result = invokeSuspendBlocking(
                 importMethod,
                 bookshelf,
-                platformFile,
-                bookDir,
-                opf,
-                sourceUrl,
-                java.lang.Long.valueOf(file.length()),
+                *importBookArgs(
+                    importMethod,
+                    platformFile,
+                    bookDir,
+                    opf,
+                    sourceUrl,
+                    java.lang.Long.valueOf(file.length()),
+                ),
             )
             val importedBook = syncOnlineCompletionImportedBookMetadata(
                 bookshelf = bookshelf,
@@ -9670,15 +9717,23 @@ class WebDavDriveHook(
         val manager = runCatching {
             managerClass.getDeclaredField("INSTANCE").apply { isAccessible = true }.get(null)
         }.getOrNull() ?: error("阅微 EpubFileManager INSTANCE 未找到")
+        // 2.2.0：import(Path, Path):Pair；2.3.0 起 import(Path, Path, Function1):Pair（新增进度回调）。
+        // 按方法名 + 前两参 okio.Path + 返回 Pair 匹配，取参数最少者，兼容新旧签名。
         val importMethod = (managerClass.methods.asSequence() + managerClass.declaredMethods.asSequence())
-            .firstOrNull { candidate ->
-                candidate.parameterTypes.size == 2 &&
-                    candidate.parameterTypes.all { it.name == OKIO_PATH_CLASS } &&
-                    candidate.returnType.name == KOTLIN_PAIR_CLASS
+            .filter { candidate ->
+                candidate.name == EPUB_IMPORT_METHOD &&
+                    candidate.returnType.name == KOTLIN_PAIR_CLASS &&
+                    candidate.parameterTypes.size >= 2 &&
+                    candidate.parameterTypes[0].name == OKIO_PATH_CLASS &&
+                    candidate.parameterTypes[1].name == OKIO_PATH_CLASS
             }
+            .minByOrNull { it.parameterTypes.size }
             ?.apply { isAccessible = true }
             ?: error("阅微 EpubFileManager.import 方法未找到")
-        val pair = importMethod.invoke(manager, unzipDir, booksDir)
+        // 2.3.0 的进度回调参数可空（宿主内部对其做了空判断），多余参数一律补 null。
+        val importArgs = arrayListOf<Any?>(unzipDir, booksDir)
+        while (importArgs.size < importMethod.parameterTypes.size) importArgs.add(null)
+        val pair = importMethod.invoke(manager, *importArgs.toTypedArray())
             ?: error("阅微 EpubFileManager.import 返回空")
         val first = pair.javaClass.methods.first { it.name == "getFirst" && it.parameterTypes.isEmpty() }
             .apply { isAccessible = true }
@@ -12527,20 +12582,51 @@ img{max-width:100%;max-height:100%;height:auto;}
         rememberWorkerManager(workerManager)
         val bookshelf = currentBookshelfRepository()
             ?: error("BookshelfRepository not available for WebDAV import")
-        val importMethod = (bookshelf.javaClass.methods.asSequence() + bookshelf.javaClass.declaredMethods.asSequence())
-            .first {
-                it.name == "importBook" && it.parameterTypes.size == 6
-            }
-            .apply { isAccessible = true }
+        val importMethod = findImportBookMethod(bookshelf)
         return invokeSuspendBlocking(
             importMethod,
             bookshelf,
-            platformFile,
-            null,
-            null,
-            sourceUrl.ifBlank { null },
-            sourceSize?.takeIf { it > 0L }?.let { java.lang.Long.valueOf(it) },
+            *importBookArgs(
+                importMethod,
+                platformFile,
+                null,
+                null,
+                sourceUrl.ifBlank { null },
+                sourceSize?.takeIf { it > 0L }?.let { java.lang.Long.valueOf(it) },
+            ),
         )
+    }
+
+    /**
+     * 定位宿主 BookshelfRepository 的 epub 版 importBook 方法，兼容新旧签名。
+     * 2.2.0：importBook(PlatformFile, Path, Opf, String, Long, Continuation) 共 6 参。
+     * 2.3.0：新增进度回调 importBook(PlatformFile, Path, Opf, String, Long, Function1<Int,Unit>, Continuation) 共 7 参。
+     * 方法名精确匹配（importTxtBook / importBook$default / importBook$lambda 名称均不同），
+     * 要求末参为 Continuation，取参数最少者，避免旧写法 size==6 在 2.3.0 匹配失败。
+     */
+    private fun findImportBookMethod(bookshelf: Any): Method =
+        (bookshelf.javaClass.methods.asSequence() + bookshelf.javaClass.declaredMethods.asSequence())
+            .filter {
+                it.name == BOOKSHELF_IMPORT_BOOK_METHOD &&
+                    it.parameterTypes.size >= 6 &&
+                    it.parameterTypes.last().name == KOTLIN_CONTINUATION_CLASS
+            }
+            .minByOrNull { it.parameterTypes.size }
+            ?.apply { isAccessible = true }
+            ?: error("阅微 importBook 方法未找到")
+
+    /**
+     * 按 importBook 实际参数个数组织调用实参（不含末尾 Continuation，由 invokeSuspendBlocking 追加）。
+     * 顺序固定为 PlatformFile, Path, Opf, String(url), Long(size)[, Function1 进度回调]。
+     * 2.3.0 起在 size 与 Continuation 之间新增进度回调，用无副作用的 Function1 代理补齐。
+     */
+    private fun importBookArgs(method: Method, file: Any?, bookDir: Any?, opf: Any?, url: Any?, size: Any?): Array<Any?> {
+        val realParamCount = (method.parameterTypes.size - 1).coerceAtLeast(0)
+        val args = arrayListOf(file, bookDir, opf, url, size)
+        while (args.size < realParamCount) {
+            args.add(functionProxy("ImportProgress", FUNCTION1_CLASS) { targetUnit() })
+        }
+        return args.toTypedArray()
     }
 
     private fun invokeSuspendBlocking(method: Method, target: Any?, vararg args: Any?): Any? {
@@ -13244,6 +13330,7 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val BOOKSHELF_UPDATE_BOOK_METHOD = "updateBook"
         const val OPF_CLASS = "org.epub.structure.opf.Opf"
         const val EPUB_FILE_MANAGER_CLASS = "app.zhendong.reamicro.arch.EpubFileManager"
+        const val EPUB_IMPORT_METHOD = "import"
         const val OKIO_PATH_CLASS = "okio.Path"
         const val WORKER_MANAGER_CLASS = "app.zhendong.reamicro.arch.WorkerManager"
         const val WORK_TRACKER_CLASS = "app.zhendong.reamicro.arch.WorkTracker"

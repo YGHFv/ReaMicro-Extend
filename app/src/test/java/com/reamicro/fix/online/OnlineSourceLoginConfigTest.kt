@@ -43,6 +43,36 @@ class OnlineSourceLoginConfigTest {
     }
 
     @Test
+    fun scriptReferencedEndpointFieldIsKeptAlongsideApiKey() {
+        val fields = OnlineSourceLoginConfig.credentialFields(
+            raw = """
+                [
+                  {"name":"正文接口","type":"text"},
+                  {"name":"API Key","type":"password"},
+                  {"name":"主题颜色","type":"text"}
+                ]
+            """.trimIndent(),
+            referencedScripts = """
+                var api = shuqiValue(info, '正文接口');
+                var key = shuqiValue(info, 'API Key');
+                source.putLoginInfo(JSON.stringify({'正文接口': api, 'API Key': key}));
+            """.trimIndent(),
+        )
+
+        assertEquals(listOf("正文接口", "API Key"), fields.map { it.name })
+    }
+
+    @Test
+    fun fieldsOnlyWrittenToLoginInfoAreNotTreatedAsCredentials() {
+        val fields = OnlineSourceLoginConfig.credentialFields(
+            raw = """[{"name":"密钥","type":"password"},{"name":"主题颜色","type":"text"}]""",
+            referencedScripts = "source.putLoginInfo(JSON.stringify({'密钥': key, '主题颜色': color}));",
+        )
+
+        assertEquals(listOf("密钥"), fields.map { it.name })
+    }
+
+    @Test
     fun loginScriptExposesRegistrationUrl() {
         val script = """
             function openLoginPage() {

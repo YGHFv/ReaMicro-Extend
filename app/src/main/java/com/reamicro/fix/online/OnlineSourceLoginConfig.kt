@@ -54,17 +54,29 @@ object OnlineSourceLoginConfig {
         }.distinctBy { it.name }
     }
 
-    fun credentialFields(raw: String): List<OnlineSourceLoginField> {
+    fun credentialFields(raw: String, referencedScripts: String = ""): List<OnlineSourceLoginField> {
         val inputs = parseFields(raw).filter { it.type in inputTypes }
         if (inputs.isEmpty()) return emptyList()
         val credentials = inputs.filter { field ->
-            field.isSecret || credentialNamePattern.containsMatchIn(field.name)
+            field.isSecret ||
+                credentialNamePattern.containsMatchIn(field.name) ||
+                scriptReferencesLoginField(referencedScripts, field.name)
         }
         return when {
             credentials.isNotEmpty() -> credentials
             inputs.size == 1 -> inputs
             else -> emptyList()
         }
+    }
+
+    private fun scriptReferencesLoginField(script: String, fieldName: String): Boolean {
+        if (script.isBlank() || fieldName.isBlank()) return false
+        val escapedName = Regex.escape(fieldName)
+        return listOf(
+            Regex("""(?i)getLoginInfoMap\s*\(\s*\)\s*\.get\s*\(\s*['\"]$escapedName['\"]\s*\)"""),
+            Regex("""(?i)getLoginInfoMap\s*\(\s*\)\s*\[\s*['\"]$escapedName['\"]\s*]"""),
+            Regex("""(?i)\bshuqiValue\s*\(\s*[^,]+,\s*['\"]$escapedName['\"]\s*\)"""),
+        ).any { it.containsMatchIn(script) }
     }
 
     fun browserUrl(raw: String): String {

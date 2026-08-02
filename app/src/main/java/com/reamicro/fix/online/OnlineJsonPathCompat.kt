@@ -13,6 +13,12 @@ internal object OnlineJsonPathCompat {
     fun values(node: Any?, rawRule: String): List<Any?> {
         val rule = rawRule.trim()
         if (node == null || rule.isBlank()) return emptyList()
+        if (rule.contains("&&")) {
+            return rule.split("&&")
+                .asSequence()
+                .flatMap { part -> values(node, part.trim()).asSequence() }
+                .toList()
+        }
         return rule.split("||")
             .asSequence()
             .map { valuesSingle(node, it.trim()) }

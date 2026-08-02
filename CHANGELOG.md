@@ -1,5 +1,18 @@
 # 更新记录
 
+## 2.3.0 beta 适配 - 2026-08-03
+
+### 导入功能（覆盖导入 / 云盘下载 / 本地书库 / 在线补全）
+- 修复升级到阅微 **2.3.0 beta（versionCode 2202）** 后模块导入相关功能全部失效的问题。根因：宿主给导入链路新增了进度回调参数，模块里所有按“固定参数个数”定位宿主方法的写法全部失配 → `NoSuchElementException` / 找不到方法，导致导入无反应或报错。
+  - `BookshelfRepository.importBook` 由 6 参增至 **7 参**（在 `size` 与 `Continuation` 间新增 `Function1<Int,Unit>` 进度回调）。
+  - `EpubFileManager.import` 由 `(Path, Path)` 2 参增至 **`(Path, Path, Function1<Int,Unit>)` 3 参**。
+- 修复点：
+  - `ReaderImportOverwriteHook` 覆盖导入预检的 `EpubFileManager.import` 定位：由 `size==2 && 全 okio.Path` 改为按方法名 `import` + 前两参 `okio.Path` + 返回 `Pair` 匹配，取参数最少者，兼容 2.2.0/2.3.0。
+  - `WebDavDriveHook` 新增 `findImportBookMethod`/`importBookArgs` 兜底：按方法名 + 末参 `Continuation` 定位 `importBook`，并按实际参数个数用无副作用的 `Function1` 代理补齐进度回调（旧版不补）。
+  - 在线补全导入 `importOnlineCompletionBookLocked`、`importOnlineCompletionEpubDirectory` 改用上述兼容逻辑（`EpubFileManager.import` 进度参可空，补 `null`）。
+  - WebDAV/本地书库来源覆盖 hook `hookWebDavImportBookSource`：`importBook` 定位由 `size==6` 改为 `size>=6 && 末参 Continuation`，恢复导入后书籍来源 URL / 大小的写入（`args[3]/args[4]` 下标在新版不变）。
+  - 兜底修正未被调用的 `importWebDavDownloadedBook` 同类写法，避免后续复用踩坑。
+
 ## 1.3.2 - 2026-07-15
 
 ### 首页云盘/书库

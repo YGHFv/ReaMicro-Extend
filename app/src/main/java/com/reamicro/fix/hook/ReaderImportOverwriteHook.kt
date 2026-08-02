@@ -197,12 +197,18 @@ class ReaderImportOverwriteHook(
     private fun hookEpubFileManagerImport() {
         runCatching {
             val managerClass = XposedHelpers.findClass(EPUB_FILE_MANAGER_CLASS, classLoader)
+            // 2.2.0：import(Path, Path):Pair 两参；2.3.0 起新增进度回调 import(Path, Path, Function1):Pair 三参。
+            // 旧写法要求 size==2 且全部为 okio.Path，2.3.0 因多出 Function1 而匹配失败 → 预检 hook 不安装。
+            // 改为按方法名 + 前两参为 okio.Path + 返回 Pair 匹配，取参数最少者，兼容新旧签名（hook 只读 args[0]/args[1]）。
             val importMethod = (managerClass.methods.asSequence() + managerClass.declaredMethods.asSequence())
-                .firstOrNull { candidate ->
-                    candidate.parameterTypes.size == 2 &&
-                        candidate.parameterTypes.all { it.name == OKIO_PATH_CLASS } &&
-                        candidate.returnType.name == KOTLIN_PAIR_CLASS
+                .filter { candidate ->
+                    candidate.name == EPUB_IMPORT_METHOD &&
+                        candidate.returnType.name == KOTLIN_PAIR_CLASS &&
+                        candidate.parameterTypes.size >= 2 &&
+                        candidate.parameterTypes[0].name == OKIO_PATH_CLASS &&
+                        candidate.parameterTypes[1].name == OKIO_PATH_CLASS
                 }
+                .minByOrNull { it.parameterTypes.size }
                 ?.apply { isAccessible = true }
                 ?: return@runCatching
             XposedBridge.hookMethod(importMethod, object : XC_MethodHook(XCallback.PRIORITY_HIGHEST) {
@@ -1046,6 +1052,7 @@ class ReaderImportOverwriteHook(
         const val BOOKSHELF_IMPORT_BOOK_METHOD = "importBook"
         const val WORKER_MANAGER_CLASS = "app.zhendong.reamicro.arch.WorkerManager"
         const val EPUB_FILE_MANAGER_CLASS = "app.zhendong.reamicro.arch.EpubFileManager"
+        const val EPUB_IMPORT_METHOD = "import"
         const val OPF_CLASS = "org.epub.structure.opf.Opf"
         const val OKIO_PATH_CLASS = "okio.Path"
         const val KOTLIN_PAIR_CLASS = "kotlin.Pair"

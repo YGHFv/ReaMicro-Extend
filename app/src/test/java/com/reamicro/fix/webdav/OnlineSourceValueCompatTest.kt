@@ -7,6 +7,22 @@ import org.junit.Test
 
 class OnlineSourceValueCompatTest {
     @Test
+    fun parsesLegadoHeadersFromChapterUrl() {
+        val request = parseOnlineUrlRequestCompat(
+            "https://content.example/chapter/1?mode=auto,{\"headers\":{\"Accept\":\"application/json\",\"X-API-Key\":\"secret\"}}",
+        )
+
+        assertEquals("https://content.example/chapter/1?mode=auto", request.url)
+        assertEquals(mapOf("Accept" to "application/json", "X-API-Key" to "secret"), request.headers)
+    }
+
+    @Test
+    fun malformedLegadoOptionsDoNotChangeUrl() {
+        val raw = "https://example.com/chapter/1,{not-json}"
+        assertEquals(raw, parseOnlineUrlRequestCompat(raw).url)
+    }
+
+    @Test
     fun `builds qq reader cover from book id`() {
         val rule = "$.book_id\n@js:\nresult='https://wfqqreader-1252317822.image.myqcloud.com/cover/'"
         assertEquals(

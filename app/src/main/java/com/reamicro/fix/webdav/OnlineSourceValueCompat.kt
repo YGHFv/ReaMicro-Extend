@@ -10,6 +10,22 @@ internal data class OnlineChapterListRuleCompat(
     val descending: Boolean = false,
 )
 
+internal data class OnlineUrlRequestCompat(
+    val url: String,
+    val headers: Map<String, String> = emptyMap(),
+)
+
+/** 拆分 Legado URL 末尾的 JSON 请求选项；无法完整解析时保留原 URL。 */
+internal fun parseOnlineUrlRequestCompat(raw: String): OnlineUrlRequestCompat {
+    val index = raw.indexOf(",{")
+    if (index <= 0) return OnlineUrlRequestCompat(raw)
+    val options = runCatching { JSONObject(raw.substring(index + 1)) }.getOrNull()
+        ?: return OnlineUrlRequestCompat(raw)
+    val headersJson = options.optJSONObject("headers") ?: return OnlineUrlRequestCompat(raw.substring(0, index))
+    val headers = headersJson.keys().asSequence().associateWith { name -> headersJson.optString(name, "") }
+    return OnlineUrlRequestCompat(raw.substring(0, index), headers)
+}
+
 /**
  * 兼容 QQ 阅读书源中由 book_id 和内联 JS 拼接出来的腾讯云封面地址。
  */

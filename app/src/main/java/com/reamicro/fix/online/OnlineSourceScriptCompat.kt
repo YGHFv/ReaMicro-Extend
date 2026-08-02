@@ -2,8 +2,66 @@ package com.reamicro.fix.online
 
 import java.net.URL
 import java.net.URLEncoder
+import java.security.MessageDigest
 
 object OnlineSourceScriptCompat {
+    /** 兼容“JSON 字段 + 内联 JS”形式的详情页规则，仅解析 result 的字符串拼接。 */
+    fun resolveInlineResultUrl(rawRule: String, selectedValue: String): String? {
+        val scriptStart = rawRule.indexOf("<js>", ignoreCase = true)
+        if (scriptStart <= 0) return null
+        val scriptEnd = rawRule.indexOf("</js>", scriptStart, ignoreCase = true)
+            .takeIf { it >= 0 }
+            ?: rawRule.length
+        val script = rawRule.substring(scriptStart + 4, scriptEnd)
+        val candidates = Regex("""(['\"])(https?://[^'\"]*)\1\s*\+\s*result\s*\+\s*(['\"])([^'\"]*)\3""")
+            .findAll(script)
+            .map { match -> match.groupValues[2] + selectedValue.trim() + match.groupValues[4] }
+            .toList()
+        return candidates.lastOrNull()
+    }
+
+    /** 兼容书旗详情页中固定算法生成的目录签名地址。 */
+    fun resolveShuqiTocUrl(rawRule: String, detailUrl: String, nowSeconds: Long): String? {
+        if (!rawRule.contains("ocean.shuqireader.com/api/bcspub/qswebapi/book/chapterlist", ignoreCase = true) ||
+            !rawRule.contains("37e81a9d8f02596e1b895d07c171d5c9", ignoreCase = true)
+        ) return null
+        val bookId = Regex("(?i)/book/(\\d+)").find(detailUrl)?.groupValues?.getOrNull(1)
+            ?: Regex("(?i)[?&]bookId=(\\d+)").find(detailUrl)?.groupValues?.getOrNull(1)
+            ?: return null
+        val userId = "8000000"
+        val secret = "37e81a9d8f02596e1b895d07c171d5c9"
+        val sign = MessageDigest.getInstance("MD5")
+            .digest("$bookId$nowSeconds$userId$secret".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return "https://ocean.shuqireader.com/api/bcspub/qswebapi/book/chapterlist" +
+            "?_=&bookId=$bookId&user_id=$userId&sign=$sign&timestamp=$nowSeconds"
+    }
+
+    /**
+     * 兼容书旗小说书源通过 source.get(...) 读取正文接口和 API Key 的章节脚本。
+     * 该脚本依赖宿主源变量，模块不会执行任意 JS，因此只在检测到完整特征时启用。
+     */
+    fun resolveShuqiChapterUrl(
+        baseUrl: String,
+        rawScript: String,
+        chapterId: String,
+        loginInfo: Map<String, String>,
+    ): String? {
+        if (!rawScript.contains("shuqi_oe_api", ignoreCase = true) ||
+            !rawScript.contains("shuqi_oe_key", ignoreCase = true) ||
+            !rawScript.contains("/api/books/", ignoreCase = true)
+        ) return null
+        val apiBase = loginInfo["正文接口"].orEmpty().trim().trimEnd('/')
+        val apiKey = loginInfo["API Key"].orEmpty().trim()
+        val bookId = Regex("(?i)[?&]bookId=(\\d+)").find(baseUrl)?.groupValues?.getOrNull(1)
+            ?: Regex("(?i)/book(?:s)?/(\\d+)").find(baseUrl)?.groupValues?.getOrNull(1)
+            ?: Regex("(?i)bookId\\s*[=:]\\s*(\\d+)").find(baseUrl)?.groupValues?.getOrNull(1)
+        val chapter = chapterId.filter(Char::isDigit).ifBlank { chapterId.trim() }
+        if (apiBase.isBlank() || apiKey.isBlank() || bookId.isNullOrBlank() || chapter.isBlank()) return null
+        val headers = "{\"headers\":{\"Accept\":\"application/json\",\"X-API-Key\":\"${escapeJson(apiKey)}\"}}"
+        return "$apiBase/api/books/$bookId/chapters/$chapter?mode=auto,$headers"
+    }
+
     fun resolveSearchUrl(
         sourceUrl: String,
         rawScript: String,
@@ -195,6 +253,9 @@ object OnlineSourceScriptCompat {
 
     private fun encodeUrlComponent(value: String): String =
         URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+
+    private fun escapeJson(value: String): String =
+        value.replace("\\", "\\\\").replace("\"", "\\\"")
 
     private fun resolveUrl(sourceUrl: String, raw: String): String {
         val resolved = runCatching {

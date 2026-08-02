@@ -26,7 +26,10 @@ object OnlineSourceAuth {
         loginEndpoint(source) != null
 
     fun loginFields(source: OnlineSourceEntry): List<OnlineSourceLoginField> =
-        OnlineSourceLoginConfig.credentialFields(source.loginUi)
+        OnlineSourceLoginConfig.credentialFields(
+            source.loginUi,
+            listOf(source.loginUrl, source.loginCheckJs, source.header, source.jsLib).joinToString("\n"),
+        )
 
     fun browserLoginUrl(source: OnlineSourceEntry): String =
         source.webLoginUrl.ifBlank { OnlineSourceLoginConfig.browserUrl(source.loginUrl) }
