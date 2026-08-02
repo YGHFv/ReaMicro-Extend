@@ -313,9 +313,20 @@ class ProfileBackgroundHook(
 
     private fun findProfileScreenLambdaMethod(): Method? {
         val profileScreenClass = XposedHelpers.findClass(PROFILE_SCREEN_CLASS, classLoader)
+        // 背景/颜色/fillMaxSize 注入都 gate 在 inProfileLambda（内容渲染窗口）内。
+        // 2.2.0：整块内容在 ProfileScreen$lambda$0$1。
+        // 2.3.0 beta：ProfileScreen 改用 Scaffold，lambda$0$1 变成 topBar（几乎无背景调用），
+        //   真正的内容区是带 PaddingValues 的 content lambda（lambda$0$2，含 fillMaxSize/background/头像/卡片）。
+        // 旧代码固定 hook lambda$0$1 → 内容区渲染时开关为 false，所有注入失效 → 主页补全背景完全不生效。
+        // 改为按“ProfileScreen$lambda 前缀 + 参数含 PaddingValues”定位 content lambda，抗 lambda 编号变化；
+        // 找不到时回退旧的 lambda$0$1，兼容旧版本。
         return profileScreenClass.declaredMethods.firstOrNull { method ->
-            method.name == "ProfileScreen\$lambda\$0\$1"
-        }
+            method.name.startsWith("ProfileScreen\$lambda\$0\$") &&
+                method.parameterTypes.any { it.name == PADDING_VALUES_CLASS }
+        }?.apply { isAccessible = true }
+            ?: profileScreenClass.declaredMethods.firstOrNull { method ->
+                method.name == "ProfileScreen\$lambda\$0\$1"
+            }?.apply { isAccessible = true }
     }
 
     private fun findProfileScreenMethod(): Method? {
@@ -1519,6 +1530,7 @@ class ProfileBackgroundHook(
         const val PROFILE_BACKGROUND_HOUMO_SAMPLE_ROWS = 6
 
         const val PROFILE_SCREEN_CLASS = "app.zhendong.reamicro.ui.profile.ProfileScreenKt"
+        const val PADDING_VALUES_CLASS = "androidx.compose.foundation.layout.PaddingValues"
 
         const val THEME_KT_CLASS = "app.zhendong.reamicro.arch.theme.ThemeKt"
         const val THEME_GET_BACKGROUND_AUTO_METHOD = "getBackgroundAuto"

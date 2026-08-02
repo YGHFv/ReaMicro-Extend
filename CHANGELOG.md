@@ -13,6 +13,14 @@
   - WebDAV/本地书库来源覆盖 hook `hookWebDavImportBookSource`：`importBook` 定位由 `size==6` 改为 `size>=6 && 末参 Continuation`，恢复导入后书籍来源 URL / 大小的写入（`args[3]/args[4]` 下标在新版不变）。
   - 兜底修正未被调用的 `importWebDavDownloadedBook` 同类写法，避免后续复用踩坑。
 
+### 设置页顶栏标题（所有补全设置页）
+- 修复 2.3.0 beta 下模块所有设置子页顶部标题消失、并伴随 `AppTopBar/8 not found` 报错的问题。根因：宿主 `AppTopBarKt.AppTopBar` 由 8 参改为 **9 参**（参数重排 + 新增尾随内容槽 `Function3`），旧代码写死找 8 参并按固定顺序传值 → 找不到方法抛异常，顶栏标题渲染失败。
+- 改为按“方法名 + 首参 String + 末三参 `(Composer,int,int)`”定位 `AppTopBar`，并**按参数类型**映射（title→String 位、返回回调→`Function0` 位、图标/insets 按类型填、其余走 `$default` 掩码默认值），签名再变也不错位；`WebDavDriveHook` 账号页标题 hook 同步改为按名字匹配。
+
+### 主页补全（个人中心背景）
+- 修复 2.3.0 beta 下主页补全背景完全不生效的问题。根因：`ProfileScreen` 改用 `Scaffold` 重排，`ProfileScreen$lambda$0$1` 变成 topBar（几乎无背景调用），真正的内容区变成带 `PaddingValues` 的 content lambda（`lambda$0$2`，含 fillMaxSize/background/头像/卡片）；模块仍在 `lambda$0$1` 打开背景注入窗口 `inProfileLambda`，内容区渲染时开关为 false，颜色/背景/`fillMaxSize` 注入全部落空。
+- 改为按“`ProfileScreen$lambda` 前缀 + 参数含 `PaddingValues`”定位 content lambda 作为注入窗口，找不到时回退旧 `lambda$0$1`，兼容旧版本。
+
 ## 1.3.2 - 2026-07-15
 
 ### 首页云盘/书库

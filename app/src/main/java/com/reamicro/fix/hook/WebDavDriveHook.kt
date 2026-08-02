@@ -4183,7 +4183,13 @@ class WebDavDriveHook(
 
     private fun hookWebDavAccountTopBarTitle() {
         runCatching {
-            val method = method(APP_TOP_BAR_CLASS, APP_TOP_BAR_METHOD, 8)
+            // 2.3.0 beta 起 AppTopBar 参数重排并新增 Function3 尾随槽（8→9 参），旧的固定 8 参定位会失败。
+            // 按名字 + 首参 String 匹配、取参数最多者，兼容签名变化；hook 仅改 args[0]（title 仍是首个 String 参）。
+            val method = cls(APP_TOP_BAR_CLASS).declaredMethods
+                .filter { it.name == APP_TOP_BAR_METHOD && it.parameterTypes.firstOrNull() == String::class.java }
+                .maxByOrNull { it.parameterTypes.size }
+                ?.apply { isAccessible = true }
+                ?: error("$APP_TOP_BAR_CLASS.$APP_TOP_BAR_METHOD not found")
             XposedBridge.hookMethod(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val title = param.args?.getOrNull(0)?.toString().orEmpty()
