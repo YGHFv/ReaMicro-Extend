@@ -5,7 +5,6 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.util.Log
 import android.widget.Toast
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import de.robv.android.xposed.XC_MethodHook
@@ -795,7 +794,6 @@ class ReaderAutoPageHook(
 
     private fun log(message: String) {
         XposedBridge.log("$LOG_PREFIX $message")
-        Log.i(ANDROID_LOG_TAG, message)
     }
 
     private fun cls(className: String): Class<*> =
@@ -830,7 +828,6 @@ class ReaderAutoPageHook(
 
     companion object {
         const val LOG_PREFIX = "ReaMicro LSP"
-        const val ANDROID_LOG_TAG = "ReaMicroAutoPage"
 
         const val READER_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.reader.ReaderViewModel"
         // 阅微 2.3.0：阅读设置界面由 ReaderSettingsKt 重构为 ReaderMoreSettingScreenKt

@@ -11,6 +11,7 @@ internal data class OnlineDownloadedChapter(
     val volumeTitle: String = "",
     val level: Int = 0,
     val sourceUrl: String = "",
+    val transport: String = "single",
 )
 
 internal class CancellableWebDavDownload(

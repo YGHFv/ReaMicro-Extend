@@ -1,6 +1,10 @@
 package de.robv.android.xposed
 
 import android.util.Log
+import com.reamicro.fix.logging.ModuleLogLevel
+import com.reamicro.fix.logging.ModuleLogState
+import com.reamicro.fix.logging.legacyModuleLogLevel
+import com.reamicro.fix.logging.shouldEmitModuleLog
 import io.github.libxposed.api.XposedInterface
 import java.lang.reflect.Executable
 import java.util.concurrent.atomic.AtomicReference
@@ -11,16 +15,21 @@ object XposedBridge {
 
     fun attachFramework(framework: XposedInterface) {
         frameworkRef.set(framework)
-        framework.log(
+        log(
             Log.INFO,
-            LOG_TAG,
             "LibXposed framework attached: api=${framework.apiVersion}, " +
                 "framework=${framework.frameworkName} ${framework.frameworkVersion}(${framework.frameworkVersionCode})",
+            null,
         )
     }
 
     fun log(text: String) {
-        log(Log.INFO, text, null)
+        val priority = if (legacyModuleLogLevel(text) == ModuleLogLevel.ERROR) Log.ERROR else Log.INFO
+        log(priority, text, null)
+    }
+
+    fun logError(text: String, throwable: Throwable? = null) {
+        log(Log.ERROR, text, throwable)
     }
 
     fun log(throwable: Throwable) {
@@ -95,6 +104,12 @@ object XposedBridge {
     }
 
     private fun log(priority: Int, text: String, throwable: Throwable?) {
+        val level = when {
+            priority >= Log.ERROR -> ModuleLogLevel.ERROR
+            priority >= Log.WARN -> ModuleLogLevel.WARN
+            else -> ModuleLogLevel.INFO
+        }
+        if (!shouldEmitModuleLog(ModuleLogState.conciseLogEnabled, level)) return
         val framework = frameworkRef.get()
         if (framework != null) {
             if (throwable != null) {

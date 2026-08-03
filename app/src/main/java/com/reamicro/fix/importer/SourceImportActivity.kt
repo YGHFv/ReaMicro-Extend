@@ -6,8 +6,8 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.util.Base64
-import android.util.Log
 import android.widget.Toast
+import com.reamicro.fix.logging.ModuleAndroidLog
 
 /**
  * 接管 .json 文件的「打开方式」入口。
@@ -34,7 +34,7 @@ class SourceImportActivity : Activity() {
     private fun handleImportIntent(intent: Intent?) {
         val uri = resolveUri(intent)
         if (uri == null) {
-            toast("未找到要导入的文件")
+            // 桌面图标或部署验证可能无参数启动此透明入口；没有导入 Intent 时应静默结束。
             return
         }
         val bytes = runCatching {
@@ -42,7 +42,7 @@ class SourceImportActivity : Activity() {
         }.getOrNull()
         if (bytes == null || bytes.isEmpty()) {
             toast("文件读取失败或为空")
-            Log.w(LOG_TAG, "failed to read import uri=$uri")
+            ModuleAndroidLog.error(LOG_TAG, "failed to read import uri=$uri")
             return
         }
         val displayName = queryDisplayName(uri) ?: uri.lastPathSegment ?: "imported.json"
@@ -73,7 +73,7 @@ class SourceImportActivity : Activity() {
             }
         if (launch == null) {
             toast("未找到阅微，无法导入")
-            Log.w(LOG_TAG, "host launch intent not found")
+            ModuleAndroidLog.error(LOG_TAG, "host launch intent not found")
             return
         }
         launch.apply {
@@ -84,7 +84,7 @@ class SourceImportActivity : Activity() {
         runCatching { startActivity(launch) }
             .onFailure {
                 toast("无法启动阅微")
-                Log.w(LOG_TAG, "start host failed: ${it.message}")
+                ModuleAndroidLog.error(LOG_TAG, "start host failed: ${it.message}")
             }
     }
 

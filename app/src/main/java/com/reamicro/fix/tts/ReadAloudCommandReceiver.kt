@@ -4,19 +4,21 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
-import android.util.Log
+import com.reamicro.fix.logging.ModuleAndroidLog
+import com.reamicro.fix.logging.ModuleLogState
 
 class ReadAloudCommandReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        ModuleLogState.applyFromIntent(intent)
         val action = intent.action ?: return
         if (action == ReadAloudIntents.ACTION_SYNC_PROGRESS) {
             val sent = ReadAloudProgressStore.broadcast(context)
-            Log.i(LOG_TAG, "receiver sync progress sent=$sent")
+            ModuleAndroidLog.legacy(LOG_TAG, "receiver sync progress sent=$sent")
             return
         }
         if (action == ReadAloudIntents.ACTION_CLEAR_PROGRESS) {
             ReadAloudProgressStore.clear(context)
-            Log.i(LOG_TAG, "receiver cleared persisted progress")
+            ModuleAndroidLog.legacy(LOG_TAG, "receiver cleared persisted progress")
             return
         }
         if (action !in COMMAND_ACTIONS) return
@@ -29,9 +31,9 @@ class ReadAloudCommandReceiver : BroadcastReceiver() {
             } else {
                 context.startService(serviceIntent)
             }
-            Log.i(LOG_TAG, "receiver forward action=$action component=$component")
+            ModuleAndroidLog.legacy(LOG_TAG, "receiver forward action=$action component=$component")
         }.onFailure {
-            Log.i(LOG_TAG, "forward command failed action=$action", it)
+            ModuleAndroidLog.legacy(LOG_TAG, "forward command failed action=$action", it)
         }
     }
 

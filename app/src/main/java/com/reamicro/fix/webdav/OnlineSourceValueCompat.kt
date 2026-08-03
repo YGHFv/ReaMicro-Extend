@@ -2,6 +2,7 @@ package com.reamicro.fix.webdav
 
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.net.URL
 import org.json.JSONObject
 
 internal data class OnlineChapterListRuleCompat(
@@ -14,6 +15,19 @@ internal data class OnlineUrlRequestCompat(
     val url: String,
     val headers: Map<String, String> = emptyMap(),
 )
+
+/** 将书源规则生成的相对 URL 按当前请求地址解析，绝对 URL 保持不变。 */
+internal fun resolveOnlineUrlCompat(baseUrl: String, value: String): String {
+    val raw = value.trim()
+    if (raw.isBlank()) return ""
+    return runCatching {
+        when {
+            raw.startsWith("http://", ignoreCase = true) || raw.startsWith("https://", ignoreCase = true) -> raw
+            baseUrl.isBlank() -> raw
+            else -> URL(URL(baseUrl), raw).toString()
+        }
+    }.getOrDefault(raw)
+}
 
 /** 拆分 Legado URL 末尾的 JSON 请求选项；无法完整解析时保留原 URL。 */
 internal fun parseOnlineUrlRequestCompat(raw: String): OnlineUrlRequestCompat {
@@ -125,12 +139,25 @@ internal fun evaluateOnlineChapterUrlRule(rawRule: String, selectedValue: String
     if (!rawRule.contains("String(baseUrl", ignoreCase = true)) return null
     val bookId = Regex("""(?i)/books/(\d+)""").find(baseUrl)?.groupValues?.getOrNull(1) ?: return null
     val script = rawRule.substring(rawRule.indexOf("<js>", ignoreCase = true))
-    val assignment = Regex(
-        """(?is)\bresult\s*=\s*['"]([^'"]*)['"]\s*\+\s*bid\s*\+\s*['"]([^'"]*)['"]\s*\+\s*result\s*;?""",
+    val selected = selectedValue.trim()
+    val directAssignment = Regex(
+        """(?is)\bresult\s*=\s*['"]([^'"]*)['"]\s*\+\s*bid\s*\+\s*['"]([^'"]*)['"]\s*\+\s*result\s*(?:\+\s*['"]([^'"]*)['"])?\s*;?""",
+    ).find(script)
+    if (directAssignment != null) {
+        val prefix = unescapeOnlineJsString(directAssignment.groupValues[1])
+        val middle = unescapeOnlineJsString(directAssignment.groupValues[2])
+        val suffix = unescapeOnlineJsString(directAssignment.groupValues.getOrNull(3).orEmpty())
+        return prefix + bookId + middle + selected + suffix
+    }
+    val conditionalAssignment = Regex(
+        """(?is)\bresult\s*=\s*[^;]*?\?\s*['"]\s*['"]\s*:\s*\(\s*m\s*\?\s*['"]([^'"]*)['"]\s*\+\s*m\s*\[\s*1\s*]\s*\+\s*['"]([^'"]*)['"]\s*\+\s*([A-Za-z_$][\w$]*)\s*\+\s*['"]([^'"]*)['"]\s*:\s*['"]\s*['"]\s*\)""",
     ).find(script) ?: return null
-    val prefix = unescapeOnlineJsString(assignment.groupValues[1])
-    val middle = unescapeOnlineJsString(assignment.groupValues[2])
-    return prefix + bookId + middle + selectedValue.trim()
+    val idVariable = conditionalAssignment.groupValues[3]
+    if (!Regex("""(?is)\b${Regex.escape(idVariable)}\s*=\s*String\s*\(\s*result""").containsMatchIn(script)) return null
+    val prefix = unescapeOnlineJsString(conditionalAssignment.groupValues[1])
+    val middle = unescapeOnlineJsString(conditionalAssignment.groupValues[2])
+    val suffix = unescapeOnlineJsString(conditionalAssignment.groupValues[4])
+    return prefix + bookId + middle + selected + suffix
 }
 
 /** 仅使用强特征从末章标题推断完结，避免把普通章节或断更作品误标为完结。 */

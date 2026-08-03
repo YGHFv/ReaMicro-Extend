@@ -17,6 +17,41 @@ class OnlineSourceLoginConfigTest {
     }
 
     @Test
+    fun `builds api key header when login field is named X-Key`() {
+        // 番茄 api.yuezhi.me 源 loginUi 字段名为 "X-Key"，此前 credentialHeaders 只认 密钥/apiKey 等，
+        // 取不到值 → 请求缺 X-API-Key → 持续 401“未填写密钥”。
+        assertEquals(
+            mapOf("X-API-Key" to "sq_abc123"),
+            OnlineSourceAuth.credentialHeaders(
+                rawHeader = "@js:JSON.stringify({\"X-API-Key\": source.get(\"fq_x_key\")})",
+                loginInfo = mapOf("X-Key" to " sq_abc123 "),
+            ),
+        )
+    }
+
+    @Test
+    fun `resolves api key referenced by getLoginInfoMap in header`() {
+        assertEquals(
+            "token-42",
+            OnlineSourceAuth.resolveApiKey(
+                rawHeader = "@js:var k=source.getLoginInfoMap().get('授权令牌');JSON.stringify({'X-API-Key':k})",
+                loginInfo = mapOf("授权令牌" to "token-42", "主题色" to "红"),
+            ),
+        )
+    }
+
+    @Test
+    fun `falls back to the single saved credential value`() {
+        assertEquals(
+            "only-secret",
+            OnlineSourceAuth.resolveApiKey(
+                rawHeader = "X-API-Key: whatever",
+                loginInfo = mapOf("凭证" to "only-secret"),
+            ),
+        )
+    }
+
+    @Test
     fun loginUiKeepsSingleSecretAndIgnoresUnrelatedStyleFields() {
         val fields = OnlineSourceLoginConfig.credentialFields(
             """

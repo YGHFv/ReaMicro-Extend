@@ -89,6 +89,37 @@ class OnlineSourceValueCompatTest {
     }
 
     @Test
+    fun `builds fanqie chapter url from real source rule`() {
+        val rule = """
+            $.chapterId<js>var cid=String(result||''),m=String(baseUrl).match(/\/books\/(\d+)\/directory/);result=/^volume-/i.test(cid)?'':(m?'/v1/books/'+m[1]+'/chapters/'+cid+'?source=fanqie':'')</js>
+        """.trimIndent()
+        val baseUrl = "https://api.yuezhi.me/v1/books/7143038691944959011/directory?source=fanqie"
+        val evaluatedUrl = requireNotNull(
+            evaluateOnlineChapterUrlRule(
+                rule,
+                selectedValue = "7143038691944959012",
+                baseUrl = baseUrl,
+            ),
+        )
+
+        assertEquals(
+            "https://api.yuezhi.me/v1/books/7143038691944959011/chapters/7143038691944959012?source=fanqie",
+            resolveOnlineUrlCompat(baseUrl, evaluatedUrl),
+        )
+    }
+
+    @Test
+    fun `keeps absolute online url unchanged`() {
+        assertEquals(
+            "https://content.example/chapter/1",
+            resolveOnlineUrlCompat(
+                "https://api.example/books/1/directory",
+                "https://content.example/chapter/1",
+            ),
+        )
+    }
+
+    @Test
     fun `infers completion only from strong last chapter signals`() {
         assertEquals("完结", inferOnlineStatusFromLastChapterTitle("完结感言"))
         assertEquals("完结", inferOnlineStatusFromLastChapterTitle("新书《我被天使绑架了》"))

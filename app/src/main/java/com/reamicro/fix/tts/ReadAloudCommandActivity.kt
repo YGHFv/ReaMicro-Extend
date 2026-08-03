@@ -4,7 +4,8 @@ import android.app.Activity
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
+import com.reamicro.fix.logging.ModuleAndroidLog
+import com.reamicro.fix.logging.ModuleLogState
 
 class ReadAloudCommandActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -23,6 +24,7 @@ class ReadAloudCommandActivity : Activity() {
     }
 
     private fun forwardCommand(intent: Intent?) {
+        ModuleLogState.applyFromIntent(intent)
         val action = intent?.action ?: return
         if (action !in COMMAND_ACTIONS) return
         val serviceIntent = Intent(intent).apply {
@@ -34,9 +36,9 @@ class ReadAloudCommandActivity : Activity() {
             } else {
                 startService(serviceIntent)
             }
-            Log.i(LOG_TAG, "activity forward action=$action component=$component")
+            ModuleAndroidLog.legacy(LOG_TAG, "activity forward action=$action component=$component")
         }.onFailure {
-            Log.i(LOG_TAG, "activity forward failed action=$action", it)
+            ModuleAndroidLog.legacy(LOG_TAG, "activity forward failed action=$action", it)
         }
     }
 

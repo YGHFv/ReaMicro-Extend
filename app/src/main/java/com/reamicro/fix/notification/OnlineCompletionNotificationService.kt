@@ -10,16 +10,39 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
-import android.util.Log
+import android.os.Looper
+import android.os.PowerManager
 import com.reamicro.fix.R
+import com.reamicro.fix.logging.ModuleAndroidLog
+import com.reamicro.fix.logging.ModuleLogState
 
 class OnlineCompletionNotificationService : Service() {
     private var foregroundId: Int = 0
+    private val activeNotifications = linkedMapOf<Int, Notification>()
+    private val activeNotificationKeys = linkedMapOf<Int, String>()
+    private var wakeLock: PowerManager.WakeLock? = null
+    private val wakeLockHandler = Handler(Looper.getMainLooper())
+    private val wakeLockRenewal = object : Runnable {
+        override fun run() {
+            if (foregroundId == 0) return
+            acquireOrRenewWakeLock()
+            wakeLockHandler.postDelayed(this, WAKE_LOCK_RENEW_INTERVAL_MS)
+        }
+    }
+    private val hostHeartbeat = object : Runnable {
+        override fun run() {
+            if (foregroundId == 0) return
+            sendHostHeartbeat()
+            wakeLockHandler.postDelayed(this, HOST_HEARTBEAT_INTERVAL_MS)
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        ModuleLogState.applyFromIntent(intent)
         val id = intent?.getIntExtra(EXTRA_ID, 0)?.takeIf { it > 0 } ?: FALLBACK_NOTIFICATION_ID
         val title = intent?.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { ONLINE_COMPLETION_TITLE }
         val text = intent?.getStringExtra(EXTRA_TEXT).orEmpty()
@@ -27,39 +50,150 @@ class OnlineCompletionNotificationService : Service() {
         val cancellable = intent?.getBooleanExtra(EXTRA_CANCELLABLE, false) == true
         val progress = intent?.getIntExtra(EXTRA_PROGRESS, 0)?.coerceIn(0, 100) ?: 0
         val done = intent?.getBooleanExtra(EXTRA_DONE, false) == true
-        val notification = buildNotification(id, key, cancellable, title, text, progress, done)
         runCatching {
-            val manager = notificationManager()
-            if (foregroundId == 0) {
-                foregroundId = id
-                startForegroundCompat(id, notification)
-            } else if (hasNotificationPermission()) {
-                manager?.notify(id, notification)
+            if (intent?.action == ACTION_ONLINE_COMPLETION_CANCEL) {
+                removeActiveNotification(id, startId)
+                return START_NOT_STICKY
             }
             if (intent?.action != ACTION_ONLINE_COMPLETION_NOTIFICATION) {
-                Log.i(LOG_TAG, "module foreground service ignored unexpected action=${intent?.action}")
+                ModuleAndroidLog.legacy(LOG_TAG, "module foreground service ignored unexpected action=${intent?.action}")
                 stopForegroundNow(removeNotification = true)
                 stopSelf(startId)
                 return START_NOT_STICKY
             }
-            if (!hasNotificationPermission()) {
-                Log.i(LOG_TAG, "module notification permission denied")
-            }
-            Log.i(LOG_TAG, "module service notification posted id=$id progress=$progress done=$done title=$title")
-            if (done) {
+            val notification = buildNotification(id, key, cancellable, title, text, progress, done)
+            val manager = notificationManager()
+            if (!done) {
+                activeNotifications[id] = notification
+                activeNotificationKeys[id] = key
+                if (foregroundId == 0) {
+                    foregroundId = id
+                    startForegroundCompat(id, notification)
+                    startWakeLockRenewal()
+                } else if (hasNotificationPermission()) {
+                    manager?.notify(id, notification)
+                }
+            } else {
+                if (foregroundId == 0) {
+                    foregroundId = id
+                    startForegroundCompat(id, notification)
+                }
+                activeNotifications.remove(id)
+                activeNotificationKeys.remove(id)
                 if (hasNotificationPermission()) manager?.notify(id, notification)
                 if (id == foregroundId) {
-                    stopForegroundNow(removeNotification = false)
-                    foregroundId = 0
+                    val replacement = activeNotifications.entries.firstOrNull()
+                    if (replacement != null) {
+                        foregroundId = replacement.key
+                        startForegroundCompat(replacement.key, replacement.value)
+                    } else {
+                        stopForegroundNow(removeNotification = false)
+                        foregroundId = 0
+                        stopWakeLockRenewal()
+                    }
                 }
                 manager?.let { cancelOnlineCompletionNotificationIfDone(it, id, true) }
-                stopSelf(startId)
+                if (activeNotifications.isEmpty()) stopSelf(startId)
             }
+            if (!hasNotificationPermission()) {
+                ModuleAndroidLog.legacy(LOG_TAG, "module notification permission denied")
+            }
+            ModuleAndroidLog.legacy(
+                LOG_TAG,
+                "module service notification posted id=$id progress=$progress done=$done " +
+                    "active=${activeNotifications.size} title=$title",
+            )
         }.onFailure {
-            Log.i(LOG_TAG, "module foreground notification failed", it)
+            ModuleAndroidLog.legacy(LOG_TAG, "module foreground notification failed", it)
             stopSelf(startId)
         }
         return START_NOT_STICKY
+    }
+
+    override fun onDestroy() {
+        foregroundId = 0
+        activeNotifications.clear()
+        activeNotificationKeys.clear()
+        stopWakeLockRenewal()
+        super.onDestroy()
+    }
+
+    private fun removeActiveNotification(id: Int, startId: Int) {
+        activeNotifications.remove(id)
+        activeNotificationKeys.remove(id)
+        notificationManager()?.cancel(id)
+        if (id == foregroundId) {
+            val replacement = activeNotifications.entries.firstOrNull()
+            if (replacement != null) {
+                foregroundId = replacement.key
+                startForegroundCompat(replacement.key, replacement.value)
+            } else {
+                stopForegroundNow(removeNotification = true)
+                foregroundId = 0
+                stopWakeLockRenewal()
+            }
+        }
+        if (activeNotifications.isEmpty()) stopSelf(startId)
+        ModuleAndroidLog.legacy(
+            LOG_TAG,
+            "module service notification cancelled id=$id active=${activeNotifications.size}",
+        )
+    }
+
+    private fun startWakeLockRenewal() {
+        wakeLockHandler.removeCallbacks(wakeLockRenewal)
+        wakeLockHandler.removeCallbacks(hostHeartbeat)
+        acquireOrRenewWakeLock()
+        sendHostHeartbeat()
+        wakeLockHandler.postDelayed(wakeLockRenewal, WAKE_LOCK_RENEW_INTERVAL_MS)
+        wakeLockHandler.postDelayed(hostHeartbeat, HOST_HEARTBEAT_INTERVAL_MS)
+    }
+
+    private fun acquireOrRenewWakeLock() {
+        val lock = wakeLock ?: (
+            (getSystemService(POWER_SERVICE) as? PowerManager)
+                ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG)
+                ?.also {
+                    it.setReferenceCounted(false)
+                    wakeLock = it
+                }
+                ?: return
+            )
+        runCatching {
+            if (lock.isHeld) lock.release()
+            lock.acquire(WAKE_LOCK_TIMEOUT_MS)
+        }.onFailure {
+            ModuleAndroidLog.legacy(LOG_TAG, "module download wake lock acquire failed", it)
+        }
+    }
+
+    private fun sendHostHeartbeat() {
+        val key = activeNotificationKeys[foregroundId].orEmpty()
+        HOST_PACKAGES.forEach { packageName ->
+            runCatching {
+                val heartbeat = Intent(ACTION_ONLINE_COMPLETION_HEARTBEAT).apply {
+                    setPackage(packageName)
+                    addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+                    addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
+                    putExtra(EXTRA_ID, foregroundId)
+                    putExtra(EXTRA_KEY, key)
+                }
+                sendBroadcast(heartbeat)
+            }.onFailure {
+                ModuleAndroidLog.legacy(LOG_TAG, "module download heartbeat failed package=$packageName", it)
+            }
+        }
+    }
+
+    private fun stopWakeLockRenewal() {
+        wakeLockHandler.removeCallbacks(wakeLockRenewal)
+        wakeLockHandler.removeCallbacks(hostHeartbeat)
+        runCatching {
+            wakeLock?.takeIf { it.isHeld }?.release()
+        }.onFailure {
+            ModuleAndroidLog.legacy(LOG_TAG, "module download wake lock release failed", it)
+        }
+        wakeLock = null
     }
 
     private fun hasNotificationPermission(): Boolean =
@@ -153,6 +287,7 @@ class OnlineCompletionNotificationService : Service() {
         const val LOG_TAG = "ReaMicroNotify"
         const val ACTION_ONLINE_COMPLETION_NOTIFICATION = "com.reamicro.fix.ONLINE_COMPLETION_NOTIFICATION"
         const val ACTION_ONLINE_COMPLETION_CANCEL = "com.reamicro.fix.ONLINE_COMPLETION_CANCEL"
+        const val ACTION_ONLINE_COMPLETION_HEARTBEAT = "com.reamicro.fix.ONLINE_COMPLETION_HEARTBEAT"
         const val EXTRA_ID = "id"
         const val EXTRA_KEY = "key"
         const val EXTRA_CANCELLABLE = "cancellable"
@@ -163,5 +298,10 @@ class OnlineCompletionNotificationService : Service() {
         const val ONLINE_COMPLETION_TITLE = "\u5728\u7ebf\u8865\u5168"
         const val ONLINE_COMPLETION_NOTIFICATION_CHANNEL = "reamicro_online_completion_download"
         const val FALLBACK_NOTIFICATION_ID = 4300
+        const val WAKE_LOCK_TAG = "ReaMicro:OnlineCompletion"
+        const val WAKE_LOCK_TIMEOUT_MS = 15 * 60 * 1_000L
+        const val WAKE_LOCK_RENEW_INTERVAL_MS = 10 * 60 * 1_000L
+        const val HOST_HEARTBEAT_INTERVAL_MS = 15_000L
+        val HOST_PACKAGES = arrayOf("app.zhendong.reamicro", "app.zhendong.reamicro.fix")
     }
 }

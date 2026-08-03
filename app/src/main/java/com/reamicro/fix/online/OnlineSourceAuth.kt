@@ -86,15 +86,37 @@ object OnlineSourceAuth {
     }
 
     internal fun credentialHeaders(rawHeader: String, loginInfo: Map<String, String>): Map<String, String> {
+        if (loginInfo.isEmpty()) return emptyMap()
         if (!rawHeader.contains("X-API-Key", ignoreCase = true)) return emptyMap()
-        val apiKey = sequenceOf(
-            loginInfo["密钥"],
-            loginInfo["apiKey"],
-            loginInfo["api_key"],
-            loginInfo["apikey"],
-            loginInfo["qq_api_key"],
-        ).map { it.orEmpty().trim() }.firstOrNull { it.isNotBlank() }.orEmpty()
+        val apiKey = resolveApiKey(rawHeader, loginInfo)
         return if (apiKey.isBlank()) emptyMap() else mapOf("X-API-Key" to apiKey)
+    }
+
+    // 登录字段名各源不一（密钥 / apiKey / X-Key ...），这里按多重回退解析出真正的 API 密钥，
+    // 否则 loginUi 用 "X-Key" 之类字段名时取不到值 → 请求缺 X-API-Key → 接口持续 401。
+    private val API_KEY_ALIASES = listOf(
+        "密钥", "秘钥", "apiKey", "api_key", "apikey", "qq_api_key",
+        "key", "x-key", "x_key", "xkey", "token", "授权码", "令牌", "access_key",
+    )
+
+    internal fun resolveApiKey(rawHeader: String, loginInfo: Map<String, String>): String {
+        fun pickByName(name: String): String? =
+            loginInfo.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }
+                ?.value?.trim()?.takeIf { it.isNotBlank() }
+        // 1) header 内联 JS 明确 getLoginInfoMap().get("字段名") 引用的字段
+        OnlineSourceLoginConfig.referencedLoginFieldNames(rawHeader).forEach { name ->
+            pickByName(name)?.let { return it }
+        }
+        // 2) 常见密钥字段别名（含 X-Key）
+        API_KEY_ALIASES.forEach { alias -> pickByName(alias)?.let { return it } }
+        // 3) 字段名符合“密钥/key/token/apiKey”特征
+        loginInfo.entries
+            .firstOrNull { it.value.isNotBlank() && OnlineSourceLoginConfig.looksLikeCredentialName(it.key) }
+            ?.value?.trim()?.takeIf { it.isNotBlank() }
+            ?.let { return it }
+        // 4) 只有唯一一个非空登录字段时直接用它
+        loginInfo.values.map { it.trim() }.filter { it.isNotBlank() }.singleOrNull()?.let { return it }
+        return ""
     }
 
     fun hasSavedLogin(context: Context?, source: OnlineSourceEntry): Boolean {

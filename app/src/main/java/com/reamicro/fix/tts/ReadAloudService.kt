@@ -23,9 +23,10 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
-import android.util.Log
 import android.util.Base64
 import com.reamicro.fix.R
+import com.reamicro.fix.logging.ModuleAndroidLog
+import com.reamicro.fix.logging.ModuleLogState
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -75,8 +76,9 @@ class ReadAloudService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        ModuleLogState.applyFromIntent(intent)
         ensureForeground(status = "\u51c6\u5907\u542c\u4e66")
-        Log.i(LOG_TAG, "onStartCommand action=${intent?.action} startId=$startId")
+        ModuleAndroidLog.legacy(LOG_TAG, "onStartCommand action=${intent?.action} startId=$startId")
         when (intent?.action) {
             ReadAloudIntents.ACTION_PREPARE -> handlePrepare(intent)
             ReadAloudIntents.ACTION_APPEND -> handleAppend(intent)
@@ -136,7 +138,7 @@ class ReadAloudService : Service() {
         if (!lyriconEnabled) LyriconCaptionBridge.destroy()
         sendClearHighlight(clearSession = false)
         ensureForeground(status = if (initialParagraphs > 0) "\u5f00\u59cb\u542c\u4e66" else "\u6b63\u5728\u8f7d\u5165\u7ae0\u8282")
-        Log.i(
+        ModuleAndroidLog.legacy(
             LOG_TAG,
             "prepare session=$currentSessionId chunks=$totalChunks initial=$initialParagraphs " +
                 "autoPlay=$autoPlay lyricon=$lyriconEnabled source=${source?.name.orEmpty()} " +
@@ -150,7 +152,7 @@ class ReadAloudService : Service() {
     private fun handleAppend(intent: Intent) {
         val sessionId = intent.getStringExtra(ReadAloudIntents.EXTRA_SESSION_ID).orEmpty()
         if (sessionId.isBlank() || sessionId != currentSessionId) {
-            Log.i(LOG_TAG, "append ignored session=$sessionId current=$currentSessionId")
+            ModuleAndroidLog.legacy(LOG_TAG, "append ignored session=$sessionId current=$currentSessionId")
             return
         }
         val incomingTotalChunks = intent.getIntExtra(ReadAloudIntents.EXTRA_TOTAL_CHUNKS, totalChunks)
@@ -163,7 +165,7 @@ class ReadAloudService : Service() {
             if (added > 0) loadedChunks++
         }
         ensureForeground(status = "\u5df2\u8f7d\u5165 $loadedChunks/$totalChunks")
-        Log.i(
+        ModuleAndroidLog.legacy(
             LOG_TAG,
             "append session=$sessionId chunk=${intent.getIntExtra(ReadAloudIntents.EXTRA_CHUNK_INDEX, -1)} " +
                 "added=$added total=${paragraphs.size}",
@@ -176,7 +178,7 @@ class ReadAloudService : Service() {
     private fun handlePlay(intent: Intent) {
         val sessionId = intent.getStringExtra(ReadAloudIntents.EXTRA_SESSION_ID).orEmpty()
         if (sessionId.isNotBlank() && sessionId != currentSessionId) {
-            Log.i(LOG_TAG, "play ignored session=$sessionId current=$currentSessionId")
+            ModuleAndroidLog.legacy(LOG_TAG, "play ignored session=$sessionId current=$currentSessionId")
             return
         }
         playPreparedSession()
@@ -191,7 +193,7 @@ class ReadAloudService : Service() {
             requestAudioFocus()
         }
         acquireWakeLock()
-        Log.i(LOG_TAG, "play session=$currentSessionId loaded=$loadedChunks/$totalChunks paragraphs=${paragraphs.size}")
+        ModuleAndroidLog.legacy(LOG_TAG, "play session=$currentSessionId loaded=$loadedChunks/$totalChunks paragraphs=${paragraphs.size}")
         scheduleNetworkPrefetch(currentIndex + 1, playbackGeneration)
         startWorkerIfNeeded()
     }
@@ -250,7 +252,7 @@ class ReadAloudService : Service() {
                 break
             }
             acquireWakeLock()
-            Log.i(LOG_TAG, "speak index=$currentIndex title=${paragraph.title} chars=${paragraph.text.length}")
+            ModuleAndroidLog.legacy(LOG_TAG, "speak index=$currentIndex title=${paragraph.title} chars=${paragraph.text.length}")
             ensureForeground(status = paragraph.title.ifBlank { "\u6b63\u5728\u6717\u8bfb" })
             val networkSource = source
             if (networkSource != null) {
@@ -267,7 +269,7 @@ class ReadAloudService : Service() {
                 consecutiveFailures = 0
             } else if (!paused && !stopRequested && generation == playbackGeneration) {
                 consecutiveFailures++
-                Log.i(LOG_TAG, "speak failed index=$currentIndex failures=$consecutiveFailures")
+                ModuleAndroidLog.legacy(LOG_TAG, "speak failed index=$currentIndex failures=$consecutiveFailures")
                 if (consecutiveFailures >= MAX_SPEAK_FAILURES) {
                     playbackFailed = true
                     ensureForeground(
@@ -505,7 +507,7 @@ class ReadAloudService : Service() {
 
     private fun sendLyriconText(text: String, playing: Boolean) {
         if (!lyriconEnabled) return
-        Log.i(LOG_TAG, "lyricon send chars=${text.length} playing=$playing")
+        ModuleAndroidLog.legacy(LOG_TAG, "lyricon send chars=${text.length} playing=$playing")
         LyriconCaptionBridge.sendText(applicationContext, text, playing)
     }
 
@@ -593,14 +595,14 @@ class ReadAloudService : Service() {
             override fun onError(utteranceId: String?) {
                 utteranceFailed = true
                 setPlaybackElapsedActive(false)
-                Log.i(LOG_TAG, "system tts onError utterance=$utteranceId")
+                ModuleAndroidLog.legacy(LOG_TAG, "system tts onError utterance=$utteranceId")
                 latch.countDown()
             }
 
             override fun onError(utteranceId: String?, errorCode: Int) {
                 utteranceFailed = true
                 setPlaybackElapsedActive(false)
-                Log.i(LOG_TAG, "system tts onError utterance=$utteranceId code=$errorCode")
+                ModuleAndroidLog.legacy(LOG_TAG, "system tts onError utterance=$utteranceId code=$errorCode")
                 latch.countDown()
             }
 
@@ -618,7 +620,7 @@ class ReadAloudService : Service() {
                 put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
             })
         }
-        Log.i(LOG_TAG, "system tts speak result=$result chars=${text.length}")
+        ModuleAndroidLog.legacy(LOG_TAG, "system tts speak result=$result chars=${text.length}")
         if (result == TextToSpeech.ERROR) return false
         while (!stopRequested && !paused && generation == playbackGeneration) {
             if (latch.await(200, TimeUnit.MILLISECONDS)) return !utteranceFailed
@@ -635,7 +637,7 @@ class ReadAloudService : Service() {
         var initStatus = TextToSpeech.ERROR
         val created = TextToSpeech(applicationContext) { status ->
             initStatus = status
-            Log.i(LOG_TAG, "tts init callback status=$status")
+            ModuleAndroidLog.legacy(LOG_TAG, "tts init callback status=$status")
             readyLatch.countDown()
         }
         val callbackArrived = readyLatch.await(5, TimeUnit.SECONDS)
@@ -658,9 +660,9 @@ class ReadAloudService : Service() {
                 created.setLanguage(Locale.getDefault())
             }
             created.setSpeechRate(1.0f)
-            Log.i(LOG_TAG, "tts ready languageResult=$languageResult default=${Locale.getDefault()}")
+            ModuleAndroidLog.legacy(LOG_TAG, "tts ready languageResult=$languageResult default=${Locale.getDefault()}")
         } else {
-            Log.i(LOG_TAG, "tts init timeout or failed callback=$callbackArrived status=$initStatus")
+            ModuleAndroidLog.legacy(LOG_TAG, "tts init timeout or failed callback=$callbackArrived status=$initStatus")
             runCatching { created.shutdown() }
             tts = null
             ttsReady = false
@@ -754,7 +756,7 @@ class ReadAloudService : Service() {
         val latch: CountDownLatch
         synchronized(networkAudioLock) {
             networkAudioCache[index]?.let { cached ->
-                if (!prefetch) Log.i(LOG_TAG, "network tts cache hit index=$index bytes=${cached.size}")
+                if (!prefetch) ModuleAndroidLog.legacy(LOG_TAG, "network tts cache hit index=$index bytes=${cached.size}")
                 return cached
             }
             val existing = networkAudioInflight[index]
@@ -776,7 +778,7 @@ class ReadAloudService : Service() {
 
         val audio = runCatching { networkSource.fetchAudio(text) }
             .onFailure {
-                Log.i(LOG_TAG, if (prefetch) "network tts prefetch failed index=$index" else "network tts failed index=$index", it)
+                ModuleAndroidLog.legacy(LOG_TAG, if (prefetch) "network tts prefetch failed index=$index" else "network tts failed index=$index", it)
             }
             .getOrNull()
             ?.takeIf { it.isNotEmpty() }
@@ -785,7 +787,7 @@ class ReadAloudService : Service() {
             if (audio != null && generation == playbackGeneration && !stopRequested) {
                 networkAudioCache[index] = audio
                 trimNetworkAudioCacheLocked()
-                Log.i(LOG_TAG, if (prefetch) "network tts prefetched index=$index bytes=${audio.size}" else "network tts cached index=$index bytes=${audio.size}")
+                ModuleAndroidLog.legacy(LOG_TAG, if (prefetch) "network tts prefetched index=$index bytes=${audio.size}" else "network tts cached index=$index bytes=${audio.size}")
             }
             latch.countDown()
         }
@@ -1037,7 +1039,7 @@ class ReadAloudService : Service() {
                 else -> decodeCoverFile(File(raw))
             }
         }.onFailure {
-            Log.i(LOG_TAG, "cover decode failed", it)
+            ModuleAndroidLog.legacy(LOG_TAG, "cover decode failed", it)
         }.getOrNull()
 
     private fun coverLogValue(value: String): String =
@@ -1150,7 +1152,7 @@ class ReadAloudService : Service() {
             val acceptType = cleanString(contentType).ifBlank { "audio/*,*/*" }
             val request = NetworkTtsRequest.from(cleanString(url), cleanString(header), text)
             if (request.url.isBlank()) error("TTS URL is blank")
-            Log.i(LOG_TAG, "network tts request source=$sourceName method=${request.method} url=${safeUrlForLog(request.url)}")
+            ModuleAndroidLog.legacy(LOG_TAG, "network tts request source=$sourceName method=${request.method} url=${safeUrlForLog(request.url)}")
             return fetchAudio(request, sourceName, acceptType, 0)
         }
 
@@ -1188,12 +1190,12 @@ class ReadAloudService : Service() {
                 val responseType = connection.contentType.orEmpty()
                 val redirectUrl = redirectUrl(request.url, connection, code)
                 if (redirectUrl.isNotBlank()) {
-                    Log.i(LOG_TAG, "network tts redirect source=$sourceName code=$code url=${safeUrlForLog(redirectUrl)}")
+                    ModuleAndroidLog.legacy(LOG_TAG, "network tts redirect source=$sourceName code=$code url=${safeUrlForLog(redirectUrl)}")
                     return fetchAudio(request.redirectTo(redirectUrl, code), sourceName, acceptType, redirectCount + 1)
                 }
                 val stream = if (code in 200..299) connection.inputStream else connection.errorStream
                 val bytes = stream?.use { it.readBytes() } ?: ByteArray(0)
-                Log.i(LOG_TAG, "network tts response source=$sourceName code=$code type=$responseType bytes=${bytes.size}")
+                ModuleAndroidLog.legacy(LOG_TAG, "network tts response source=$sourceName code=$code type=$responseType bytes=${bytes.size}")
                 if (code !in 200..299) error("HTTP $code")
                 resolveAudioResponse(bytes, responseType, request.url)
             } finally {
@@ -1217,7 +1219,7 @@ class ReadAloudService : Service() {
             }?.trim().orEmpty()
             if (audioUrl.isBlank()) return bytes
             val resolved = URL(URL(requestUrl), audioUrl).toString()
-            Log.i(LOG_TAG, "network tts resolved audio url source=${cleanString(name).ifBlank { "TTS" }} url=${safeUrlForLog(resolved)}")
+            ModuleAndroidLog.legacy(LOG_TAG, "network tts resolved audio url source=${cleanString(name).ifBlank { "TTS" }} url=${safeUrlForLog(resolved)}")
             return downloadAudio(resolved)
         }
 
@@ -1241,12 +1243,12 @@ class ReadAloudService : Service() {
                 val responseType = connection.contentType.orEmpty()
                 val redirectUrl = redirectUrl(rawUrl, connection, code)
                 if (redirectUrl.isNotBlank()) {
-                    Log.i(LOG_TAG, "network tts audio redirect source=${cleanString(name).ifBlank { "TTS" }} code=$code url=${safeUrlForLog(redirectUrl)}")
+                    ModuleAndroidLog.legacy(LOG_TAG, "network tts audio redirect source=${cleanString(name).ifBlank { "TTS" }} code=$code url=${safeUrlForLog(redirectUrl)}")
                     return downloadAudio(redirectUrl, acceptType, redirectCount + 1)
                 }
                 val stream = if (code in 200..299) connection.inputStream else connection.errorStream
                 val bytes = stream?.use { it.readBytes() } ?: ByteArray(0)
-                Log.i(LOG_TAG, "network tts audio response source=${cleanString(name).ifBlank { "TTS" }} code=$code type=$responseType bytes=${bytes.size}")
+                ModuleAndroidLog.legacy(LOG_TAG, "network tts audio response source=${cleanString(name).ifBlank { "TTS" }} code=$code type=$responseType bytes=${bytes.size}")
                 if (code !in 200..299) error("audio HTTP $code")
                 bytes
             } finally {

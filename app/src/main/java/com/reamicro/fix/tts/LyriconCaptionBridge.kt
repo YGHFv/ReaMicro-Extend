@@ -2,7 +2,7 @@ package com.reamicro.fix.tts
 
 import android.content.Context
 import android.os.SystemClock
-import android.util.Log
+import com.reamicro.fix.logging.ModuleAndroidLog
 import io.github.proify.lyricon.provider.LyriconFactory
 import io.github.proify.lyricon.provider.LyriconProvider
 
@@ -28,7 +28,7 @@ object LyriconCaptionBridge {
             if (!sent) requestRegister(context)
             lastText = clean
         }.onFailure {
-            Log.i(LOG_TAG, "send Lyricon text failed", it)
+            ModuleAndroidLog.legacy(LOG_TAG, "send Lyricon text failed", it)
             requestRegister(context)
         }
     }
@@ -38,7 +38,7 @@ object LyriconCaptionBridge {
         runCatching {
             player.setPlaybackState(playing)
         }.onFailure {
-            Log.i(LOG_TAG, "sync Lyricon playback failed", it)
+            ModuleAndroidLog.legacy(LOG_TAG, "sync Lyricon playback failed", it)
             requestRegister(context)
         }
     }
@@ -50,7 +50,7 @@ object LyriconCaptionBridge {
             player.sendText(null)
             lastText = ""
         }.onFailure {
-            Log.i(LOG_TAG, "clear Lyricon text failed", it)
+            ModuleAndroidLog.legacy(LOG_TAG, "clear Lyricon text failed", it)
         }
     }
 
@@ -80,7 +80,7 @@ object LyriconCaptionBridge {
                     requestRegister(context)
                 }
             }.onFailure {
-                Log.i(LOG_TAG, "create Lyricon provider failed", it)
+                ModuleAndroidLog.legacy(LOG_TAG, "create Lyricon provider failed", it)
             }.getOrNull()
         }
     }
@@ -92,7 +92,7 @@ object LyriconCaptionBridge {
         runCatching {
             provider?.register()
         }.onFailure {
-            Log.i(LOG_TAG, "register Lyricon provider failed", it)
+            ModuleAndroidLog.legacy(LOG_TAG, "register Lyricon provider failed", it)
         }
     }
 

@@ -90,6 +90,12 @@ class ReaMicroHookEntry {
             settingsProvider = moduleSettings::snapshot,
         )
         profileBackgroundHook.install()
+        ReaderBackgroundHook(
+            classLoader = classLoader,
+            activityProvider = { currentActivityRef?.get() },
+            settings = moduleSettings,
+            settingsProvider = moduleSettings::snapshot,
+        ).install()
         val bookDetailsAssociationActionHook = BookDetailsAssociationActionHook(
             classLoader = classLoader,
             activityProvider = { currentActivityRef?.get() },

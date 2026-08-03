@@ -16,6 +16,17 @@ class OnlineSourceScriptCompatTest {
     }
 
     @Test
+    fun inlineBookUrlBuildsRelativeFanqieDetailUrl() {
+        assertEquals(
+            "/v1/books/7143038691944959011?source=fanqie",
+            OnlineSourceScriptCompat.resolveInlineResultUrl(
+                "$.bookId<js>result='/v1/books/'+result+'?source=fanqie'</js>",
+                "7143038691944959011",
+            ),
+        )
+    }
+
+    @Test
     fun unrelatedInlineScriptIsNotEvaluatedAsUrl() {
         assertEquals(
             null,

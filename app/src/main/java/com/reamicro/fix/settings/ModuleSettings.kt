@@ -11,6 +11,7 @@ object ModuleSettings {
     const val KEY_ASSOCIATION_UNLINK_ENABLED = "association_unlink_enabled"
     const val KEY_ASSOCIATION_COVER_FIX_ENABLED = "association_cover_fix_enabled"
     const val KEY_READER_ENABLED = "reader_enabled"
+    const val KEY_READER_BACKGROUND_ENABLED = "reader_background_enabled"
     const val KEY_READER_LONG_PRESS_ENABLED = "reader_long_press_enabled"
     const val KEY_READER_READ_ALOUD_ENABLED = "reader_read_aloud_enabled"
     const val KEY_READER_READ_ALOUD_IGNORE_AUDIO_FOCUS = "reader_read_aloud_ignore_audio_focus"
@@ -55,6 +56,10 @@ object ModuleSettings {
     const val KEY_PROFILE_BACKGROUND_TRANSPARENCY = "profile_background_transparency"
     const val KEY_PROFILE_BACKGROUND_CARD_BLUR = "profile_background_card_blur"
     const val KEY_PROFILE_BACKGROUND_CARD_TRANSPARENCY = "profile_background_card_transparency"
+    const val KEY_READER_BG_LIGHT_IMAGES = "reader_bg_light_images"
+    const val KEY_READER_BG_DARK_IMAGES = "reader_bg_dark_images"
+    const val KEY_READER_BG_LIGHT_CURRENT = "reader_bg_light_current"
+    const val KEY_READER_BG_DARK_CURRENT = "reader_bg_dark_current"
 
     private const val KEY_ASSOCIATION_SOURCE_PREFIX = "association_source_"
     private const val KEY_ONLINE_SOURCE_PREFIX = "online_source_"
@@ -66,6 +71,7 @@ object ModuleSettings {
     const val DEFAULT_ASSOCIATION_UNLINK_ENABLED = false
     const val DEFAULT_ASSOCIATION_COVER_FIX_ENABLED = false
     const val DEFAULT_READER_ENABLED = true
+    const val DEFAULT_READER_BACKGROUND_ENABLED = true
     const val DEFAULT_READER_LONG_PRESS_ENABLED = false
     const val DEFAULT_READER_READ_ALOUD_ENABLED = true
     const val DEFAULT_READER_READ_ALOUD_IGNORE_AUDIO_FOCUS = false
@@ -118,6 +124,7 @@ object ModuleSettings {
     const val DEFAULT_PROFILE_BACKGROUND_TRANSPARENCY = 0
     const val DEFAULT_PROFILE_BACKGROUND_CARD_BLUR = 50
     const val DEFAULT_PROFILE_BACKGROUND_CARD_TRANSPARENCY = 4
+    const val DEFAULT_READER_BG_CURRENT = ""
     val ROTATION_BASE_KEYS = setOf(
         KEY_ROTATION_AUTO_ENABLED,
         KEY_ROTATION_PORTRAIT_LOCK_ENABLED,
@@ -191,6 +198,7 @@ data class ModuleSettingsSnapshot(
     val associationUnlinkEnabled: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_UNLINK_ENABLED,
     val associationCoverFixEnabled: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_COVER_FIX_ENABLED,
     val readerEnabled: Boolean = ModuleSettings.DEFAULT_READER_ENABLED,
+    val readerBackgroundEnabled: Boolean = ModuleSettings.DEFAULT_READER_BACKGROUND_ENABLED,
     val readerLongPressEnabled: Boolean = ModuleSettings.DEFAULT_READER_LONG_PRESS_ENABLED,
     val readerReadAloudEnabled: Boolean = ModuleSettings.DEFAULT_READER_READ_ALOUD_ENABLED,
     val readerReadAloudIgnoreAudioFocus: Boolean = ModuleSettings.DEFAULT_READER_READ_ALOUD_IGNORE_AUDIO_FOCUS,
@@ -233,6 +241,10 @@ data class ModuleSettingsSnapshot(
     val profileBackgroundTransparency: Int = ModuleSettings.DEFAULT_PROFILE_BACKGROUND_TRANSPARENCY,
     val profileBackgroundCardBlur: Int = ModuleSettings.DEFAULT_PROFILE_BACKGROUND_CARD_BLUR,
     val profileBackgroundCardTransparency: Int = ModuleSettings.DEFAULT_PROFILE_BACKGROUND_CARD_TRANSPARENCY,
+    val readerBgLightImages: List<String> = emptyList(),
+    val readerBgDarkImages: List<String> = emptyList(),
+    val readerBgLightCurrent: String = ModuleSettings.DEFAULT_READER_BG_CURRENT,
+    val readerBgDarkCurrent: String = ModuleSettings.DEFAULT_READER_BG_CURRENT,
     val associationSearchSources: Map<String, Boolean> = ModuleSettings.defaultAssociationSearchSources(),
 ) {
     val canRunAssociation: Boolean
@@ -334,6 +346,18 @@ data class ModuleSettingsSnapshot(
 
     val canShowProfileBackground: Boolean
         get() = moduleEnabled && profileBackgroundEnabled && profileBackgroundUseImage && profileBackgroundImage.isNotBlank()
+
+    /** 阅读页背景扩展由独立子开关控制。 */
+    val canUseReaderBackground: Boolean
+        get() = moduleEnabled && readerBackgroundEnabled
+
+    /** 按深浅模式取对应组的图片池。 */
+    fun readerBgImages(dark: Boolean): List<String> =
+        if (dark) readerBgDarkImages else readerBgLightImages
+
+    /** 按深浅模式取当前选中背景路径（空=无背景/默认主题）。 */
+    fun readerBgCurrent(dark: Boolean): String =
+        if (dark) readerBgDarkCurrent else readerBgLightCurrent
 
     val enabledAssociationSearchSources: Set<BookSource>
         get() = emptySet()

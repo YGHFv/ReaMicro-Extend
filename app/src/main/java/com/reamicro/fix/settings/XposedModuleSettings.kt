@@ -2,6 +2,7 @@ package com.reamicro.fix.settings
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.reamicro.fix.logging.ModuleLogState
 import de.robv.android.xposed.XposedBridge
 import java.io.File
 import java.security.MessageDigest
@@ -38,6 +39,7 @@ class XposedModuleSettings(
         val now = System.currentTimeMillis()
         cachedSnapshot?.takeIf { now - cachedAtMs < CACHE_WINDOW_MS }?.let { return it }
         val snapshot = prefs()?.let(::readSnapshot) ?: ModuleSettingsSnapshot()
+        ModuleLogState.conciseLogEnabled = snapshot.conciseLogEnabled
         cachedSnapshot = snapshot
         cachedAtMs = now
         logSnapshot(snapshot)
@@ -92,6 +94,10 @@ class XposedModuleSettings(
         putBoolean(ModuleSettings.KEY_READER_READ_ALOUD_LYRICON_ENABLED, enabled)
     }
 
+    fun setReaderBackgroundEnabled(enabled: Boolean) {
+        putBoolean(ModuleSettings.KEY_READER_BACKGROUND_ENABLED, enabled)
+    }
+
     fun setReaderAutoPageEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_READER_AUTO_PAGE_ENABLED, enabled)
     }
@@ -126,6 +132,7 @@ class XposedModuleSettings(
     }
 
     fun setConciseLogEnabled(enabled: Boolean) {
+        ModuleLogState.conciseLogEnabled = enabled
         putBoolean(ModuleSettings.KEY_CONCISE_LOG_ENABLED, enabled)
     }
 
@@ -219,6 +226,18 @@ class XposedModuleSettings(
 
     fun setProfileBackgroundImageUrl(url: String) {
         putString(ModuleSettings.KEY_PROFILE_BACKGROUND_IMAGE_URL, url.trim())
+    }
+
+    /** 保存某深浅组的阅读背景图片池。 */
+    fun setReaderBgImages(dark: Boolean, images: List<String>) {
+        val key = if (dark) ModuleSettings.KEY_READER_BG_DARK_IMAGES else ModuleSettings.KEY_READER_BG_LIGHT_IMAGES
+        putString(key, writeStringList(images.distinct()))
+    }
+
+    /** 保存某深浅组当前选中的背景路径（空=无背景/默认主题）。 */
+    fun setReaderBgCurrent(dark: Boolean, path: String) {
+        val key = if (dark) ModuleSettings.KEY_READER_BG_DARK_CURRENT else ModuleSettings.KEY_READER_BG_LIGHT_CURRENT
+        putString(key, path.trim())
     }
 
     fun setProfileBackgroundCropPosition(position: String) {
@@ -647,6 +666,10 @@ class XposedModuleSettings(
             ModuleSettings.KEY_READER_READ_ALOUD_LYRICON_ENABLED,
             ModuleSettings.DEFAULT_READER_READ_ALOUD_LYRICON_ENABLED,
         )
+        val readerBackgroundEnabled = prefs.getBoolean(
+            ModuleSettings.KEY_READER_BACKGROUND_ENABLED,
+            ModuleSettings.DEFAULT_READER_BACKGROUND_ENABLED,
+        )
         val readerAutoPageEnabled = prefs.getBoolean(
             ModuleSettings.KEY_READER_AUTO_PAGE_ENABLED,
             ModuleSettings.DEFAULT_READER_AUTO_PAGE_ENABLED,
@@ -744,6 +767,7 @@ class XposedModuleSettings(
                     readerSelectionHighlightEnabled ||
                     ModuleSettings.DEFAULT_READER_ENABLED,
             ),
+            readerBackgroundEnabled = readerBackgroundEnabled,
             readerLongPressEnabled = readerLongPressEnabled,
             readerReadAloudEnabled = readerReadAloudEnabled,
             readerReadAloudIgnoreAudioFocus = readerReadAloudIgnoreAudioFocus,
@@ -860,9 +884,31 @@ class XposedModuleSettings(
                     ModuleSettings.DEFAULT_PROFILE_BACKGROUND_CARD_TRANSPARENCY,
                 ),
             ),
+            readerBgLightImages = readStringList(prefs, ModuleSettings.KEY_READER_BG_LIGHT_IMAGES),
+            readerBgDarkImages = readStringList(prefs, ModuleSettings.KEY_READER_BG_DARK_IMAGES),
+            readerBgLightCurrent = prefs.getString(
+                ModuleSettings.KEY_READER_BG_LIGHT_CURRENT,
+                ModuleSettings.DEFAULT_READER_BG_CURRENT,
+            ).orEmpty(),
+            readerBgDarkCurrent = prefs.getString(
+                ModuleSettings.KEY_READER_BG_DARK_CURRENT,
+                ModuleSettings.DEFAULT_READER_BG_CURRENT,
+            ).orEmpty(),
             associationSearchSources = readAssociationSearchSources(prefs),
         )
     }
+
+    private fun readStringList(prefs: SharedPreferences, key: String): List<String> =
+        runCatching {
+            val raw = prefs.getString(key, null)?.takeIf { it.isNotBlank() } ?: return emptyList()
+            val array = JSONArray(raw)
+            (0 until array.length()).mapNotNull { index ->
+                array.optString(index, "").takeIf { it.isNotBlank() }
+            }
+        }.getOrDefault(emptyList())
+
+    private fun writeStringList(list: List<String>): String =
+        JSONArray().apply { list.forEach { put(it) } }.toString()
 
     private fun readAssociationSearchSources(prefs: SharedPreferences): Map<String, Boolean> {
         val values = ModuleSettings.defaultAssociationSearchSources().toMutableMap()

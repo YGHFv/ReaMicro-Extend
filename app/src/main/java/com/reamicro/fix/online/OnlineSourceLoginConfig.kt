@@ -79,6 +79,19 @@ object OnlineSourceLoginConfig {
         ).any { it.containsMatchIn(script) }
     }
 
+    /** 名字看起来是否为凭证字段（密钥/key/token/apiKey 等），用于从登录信息里挑出 API 密钥。 */
+    fun looksLikeCredentialName(name: String): Boolean =
+        name.isNotBlank() && credentialNamePattern.containsMatchIn(name)
+
+    /** 提取 header/脚本里 `getLoginInfoMap().get("字段")` / `[...]` 显式引用的登录字段名。 */
+    fun referencedLoginFieldNames(script: String): List<String> {
+        if (script.isBlank()) return emptyList()
+        return (loginInfoGetPattern.findAll(script) + loginInfoIndexPattern.findAll(script))
+            .mapNotNull { it.groupValues.getOrNull(1)?.trim()?.takeIf(String::isNotBlank) }
+            .distinct()
+            .toList()
+    }
+
     fun browserUrl(raw: String): String {
         val text = raw.trim()
         if (text.startsWith("http://", ignoreCase = true) || text.startsWith("https://", ignoreCase = true)) {

@@ -32,6 +32,8 @@ data class OnlineSourceEntry(
     val dailyChapterLimit: Int? = null,
     val preferOnDemandLoading: Boolean = false,
     val paragraphCommentsEnabled: Boolean = false,
+    val chapterBatchEndpoint: String = "",
+    val chapterBatchSize: Int = 0,
 ) {
     val hasLoginConfig: Boolean
         get() = loginUrl.isNotBlank() || loginUi.isNotBlank() || loginCheckJs.isNotBlank()
@@ -237,6 +239,11 @@ object OnlineSourceStore {
         val ruleToc = rawJsonString(json, "ruleToc")
         val ruleContent = rawJsonString(json, "ruleContent")
         val jsLib = rawJsonString(json, "jsLib")
+        val chapterBatchEndpoint = firstString(json, "reamicroChapterBatchEndpoint")
+        val chapterBatchSize = firstString(json, "reamicroChapterBatchSize")
+            .toIntOrNull()
+            ?.takeIf { it in 1..30 }
+            ?: 0
         val respondTime = firstString(json, "respondTime", "timeout")
             .toIntOrNull()
             ?.takeIf { it > 0 }
@@ -261,6 +268,8 @@ object OnlineSourceStore {
             respondTime = respondTime,
             origin = "",
             jsLib = jsLib,
+            chapterBatchEndpoint = chapterBatchEndpoint,
+            chapterBatchSize = chapterBatchSize,
         )
     }
 

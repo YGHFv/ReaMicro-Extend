@@ -13,9 +13,14 @@ object OnlineSourceScriptCompat {
             .takeIf { it >= 0 }
             ?: rawRule.length
         val script = rawRule.substring(scriptStart + 4, scriptEnd)
-        val candidates = Regex("""(['\"])(https?://[^'\"]*)\1\s*\+\s*result\s*\+\s*(['\"])([^'\"]*)\3""")
+        val candidates = Regex("""(['\"])([^'\"]*)\1\s*\+\s*result\s*\+\s*(['\"])([^'\"]*)\3""")
             .findAll(script)
             .map { match -> match.groupValues[2] + selectedValue.trim() + match.groupValues[4] }
+            .filter { value ->
+                value.startsWith("http://", ignoreCase = true) ||
+                    value.startsWith("https://", ignoreCase = true) ||
+                    value.startsWith("/")
+            }
             .toList()
         return candidates.lastOrNull()
     }

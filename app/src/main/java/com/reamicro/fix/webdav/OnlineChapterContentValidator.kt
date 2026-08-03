@@ -20,6 +20,8 @@ internal object OnlineChapterContentValidator {
         if (xhtml.isBlank()) return "章节文件为空"
         val bodyHtml = XHTML_BODY_REGEX.find(xhtml)?.groupValues?.getOrNull(1)
             ?: XHTML_HEAD_REGEX.replace(xhtml, " ")
+        // 纯插图章节正文里可能没有文字，只有 <img>，不能据此判定为空。
+        val hasImage = XHTML_IMAGE_REGEX.containsMatchIn(bodyHtml)
         val paragraphs = XHTML_PARAGRAPH_REGEX.findAll(bodyHtml)
             .map { match -> match.groupValues[1] }
             .toList()
@@ -38,7 +40,8 @@ internal object OnlineChapterContentValidator {
             .map { line -> line.replace(INLINE_WHITESPACE_REGEX, " ").trim() }
             .filter { it.isNotBlank() }
             .joinToString("\n")
-        return downloadedFailureReason(bodyText)
+        val reason = downloadedFailureReason(bodyText)
+        return if (reason == "章节正文为空" && hasImage) null else reason
     }
 
     private fun placeholderFailureReason(text: String): String? {
@@ -141,6 +144,7 @@ internal object OnlineChapterContentValidator {
         """(?is)<(?:div|span)\b[^>]*class\s*=\s*["'][^"']*\bte-chapter-number\b[^"']*["'][^>]*>[\s\S]*?</(?:div|span)>""",
     )
     private val XHTML_HEADING_REGEX = Regex("""(?is)<h1\b[^>]*>[\s\S]*?</h1>""")
+    private val XHTML_IMAGE_REGEX = Regex("""(?is)<img\b""")
     private val XHTML_COMMENT_REGEX = Regex("""(?s)<!--.*?-->""")
     private val XHTML_LINE_BREAK_REGEX = Regex("""(?i)<br\s*/?>|</(?:p|div|section|article|li)\s*>""")
     private val XHTML_TAG_REGEX = Regex("""(?s)<[^>]+>""")

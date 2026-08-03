@@ -11,6 +11,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -43,12 +44,12 @@ import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.CheckBox
 import android.widget.FrameLayout
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import com.reamicro.fix.ai.AiApiConfig
@@ -984,6 +985,15 @@ class ReaMicroSettingsHook(
             )
             val rows = listOf(
                 ToggleRow(
+                    key = ModuleSettings.KEY_READER_BACKGROUND_ENABLED,
+                    title = "\u80cc\u666f\u6269\u5c55",
+                    checked = snapshot.readerBackgroundEnabled,
+                    onChanged = { checked, _ ->
+                        settings.setReaderBackgroundEnabled(checked)
+                        checked
+                    },
+                ),
+                ToggleRow(
                     key = ModuleSettings.KEY_READER_AUTO_PAGE_ENABLED,
                     title = "\u81ea\u52a8\u9605\u8bfb",
                     checked = snapshot.readerAutoPageEnabled,
@@ -1185,7 +1195,7 @@ class ReaMicroSettingsHook(
             val toggleRows = listOf(
                 ToggleRow(
                     key = ModuleSettings.KEY_CONCISE_LOG_ENABLED,
-                    title = "\u7b80\u6d01\u65e5\u5fd7",
+                    title = "\u7b80\u6d01\u65e5\u5fd7\uff08\u4ec5\u9519\u8bef\uff09",
                     checked = snapshot.conciseLogEnabled,
                     onChanged = { checked, _ ->
                         settings.setConciseLogEnabled(checked)
@@ -6298,31 +6308,39 @@ class ReaMicroSettingsHook(
         val activity = activityProvider() ?: return
         activity.runOnUiThread {
             runCatching {
-                val container = LinearLayout(activity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(48, 24, 48, 0)
-                }
-                val inputs = addOnlineSourceDownloadPolicyInputs(activity, source, container)
-                val dialog = AlertDialog.Builder(activity)
-                    .setTitle("${source.name} 配置")
-                    .setMessage("下载方式和段评设置按书源独立保存。")
-                    .setView(container)
-                    .setPositiveButton("保存", null)
-                    .setNegativeButton("取消", null)
-                    .setNeutralButton("删除", null)
-                    .create()
-                dialog.setOnShowListener {
-                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                        if (!saveOnlineSourceDownloadPolicy(activity, source, inputs)) {
-                            return@setOnClickListener
-                        }
-                        bumpOnlineSourceVersion()
-                        showToast("已保存在线源配置：${source.name}")
-                        dialog.dismiss()
+                val colors = SettingsDialogColors(activity)
+                val dialog = Dialog(activity)
+                val card = settingsDialogCard(activity, colors)
+                card.addView(settingsDialogTitle(activity, "${source.name} 配置", colors))
+                card.addView(settingsDialogHint(activity, "下载方式和段评设置按书源独立保存。", colors))
+                val inputs = addOnlineSourceDownloadPolicyInputs(activity, source, card, colors)
+                val saveButton = settingsDialogButton(activity, "保存", colors)
+                val deleteButton = settingsDialogButton(
+                    activity,
+                    "删除",
+                    colors,
+                    SettingsDialogButtonRole.Destructive,
+                )
+                val cancelButton = settingsDialogButton(
+                    activity,
+                    "取消",
+                    colors,
+                    SettingsDialogButtonRole.Neutral,
+                )
+                card.addView(settingsDialogButtonRow(activity, listOf(deleteButton, saveButton, cancelButton)))
+                saveButton.setOnClickListener {
+                    if (!saveOnlineSourceDownloadPolicy(activity, source, inputs)) {
+                        return@setOnClickListener
                     }
-                    configureOnlineSourceDeleteButton(activity, source, dialog) { dialog.dismiss() }
+                    bumpOnlineSourceVersion()
+                    showToast("已保存在线源配置：${source.name}")
+                    dialog.dismiss()
                 }
-                dialog.show()
+                deleteButton.setOnClickListener {
+                    confirmOnlineSourceDeletion(activity, source) { dialog.dismiss() }
+                }
+                cancelButton.setOnClickListener { dialog.dismiss() }
+                showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
             }.onFailure {
                 XposedBridge.log("$LOG_PREFIX online source config dialog failed: ${it.stackTraceToString()}")
                 showToast("无法打开在线源配置")
@@ -6330,35 +6348,51 @@ class ReaMicroSettingsHook(
         }
     }
 
-    private fun configureOnlineSourceDeleteButton(
+    private fun confirmOnlineSourceDeletion(
         activity: Activity,
         source: OnlineSourceEntry,
-        dialog: AlertDialog,
         onRemoved: () -> Unit,
     ) {
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.apply {
-            setTextColor(Color.rgb(211, 47, 47))
-            setOnClickListener {
-                AlertDialog.Builder(activity)
-                    .setTitle("删除在线源")
-                    .setMessage("确定删除“${source.name}”吗？保存的登录信息和下载配置也会一并清除。")
-                    .setPositiveButton("删除") { _, _ ->
-                        settings.setOnlineSourceEnabled(source.id, false)
-                        val removed = OnlineSourceStore.remove(activity.applicationContext, source.id)
-                        if (removed) {
-                            OnlineSourceAuth.clearSourceData(activity.applicationContext, source.id)
-                            OnlineSourceDownloadPolicyStore.clear(activity.applicationContext, source.id)
-                            bumpOnlineSourceVersion()
-                            showToast("已移除在线源：${source.name}")
-                            onRemoved()
-                        } else {
-                            showToast("在线源移除失败：${source.name}")
-                        }
-                    }
-                    .setNegativeButton("取消", null)
-                    .show()
+        val colors = SettingsDialogColors(activity)
+        val dialog = Dialog(activity)
+        val card = settingsDialogCard(activity, colors)
+        val deleteButton = settingsDialogButton(
+            activity,
+            "删除",
+            colors,
+            SettingsDialogButtonRole.Destructive,
+        )
+        val cancelButton = settingsDialogButton(
+            activity,
+            "取消",
+            colors,
+            SettingsDialogButtonRole.Neutral,
+        )
+        card.addView(settingsDialogTitle(activity, "删除在线源", colors))
+        card.addView(
+            settingsDialogHint(
+                activity,
+                "确定删除“${source.name}”吗？保存的登录信息和下载配置也会一并清除。",
+                colors,
+            ),
+        )
+        card.addView(settingsDialogButtonRow(activity, listOf(deleteButton, cancelButton)))
+        deleteButton.setOnClickListener {
+            settings.setOnlineSourceEnabled(source.id, false)
+            val removed = OnlineSourceStore.remove(activity.applicationContext, source.id)
+            if (removed) {
+                OnlineSourceAuth.clearSourceData(activity.applicationContext, source.id)
+                OnlineSourceDownloadPolicyStore.clear(activity.applicationContext, source.id)
+                bumpOnlineSourceVersion()
+                showToast("已移除在线源：${source.name}")
+                dialog.dismiss()
+                onRemoved()
+            } else {
+                showToast("在线源移除失败：${source.name}")
             }
         }
+        cancelButton.setOnClickListener { dialog.dismiss() }
+        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
     }
 
     private fun renderOnlineSourceSwitch(source: OnlineSourceEntry, composer: Any) {
@@ -6445,11 +6479,9 @@ class ReaMicroSettingsHook(
             settings.setOnlineSourceEnabled(source.id, false)
             return false
         }
-        if (!source.hasLoginConfig) {
+        val context = activityProvider()?.applicationContext
+        if (!source.hasLoginConfig || OnlineSourceAuth.hasSavedLogin(context, source)) {
             settings.setOnlineSourceEnabled(source.id, true)
-            if (source.hasLoginConfig) {
-                showToast("${source.name} 暂未执行登录，已跳过并启用")
-            }
             return true
         }
         settings.setOnlineSourceEnabled(source.id, false)
@@ -6754,26 +6786,48 @@ class ReaMicroSettingsHook(
                     CookieManager.getInstance().flush()
                     onResult(value)
                 }
-                val dialog = AlertDialog.Builder(activity)
-                    .setTitle("${source.name} 登录")
-                    .setView(webView)
-                    .setPositiveButton("完成", null)
-                    .setNegativeButton(if (enableFlow) "跳过启用" else "取消", null)
-                    .setNeutralButton("删除", null)
-                    .create()
-                dialog.setOnShowListener {
-                    dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-                    dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-                    webView.requestFocus()
-                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                        resolve(true)
-                        dialog.dismiss()
-                    }
-                    dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
-                        resolve(enableFlow)
-                        dialog.dismiss()
-                    }
-                    configureOnlineSourceDeleteButton(activity, source, dialog) {
+                val colors = SettingsDialogColors(activity)
+                val dialog = Dialog(activity)
+                val card = settingsDialogCard(activity, colors)
+                val finishButton = settingsDialogButton(activity, "完成", colors)
+                val deleteButton = settingsDialogButton(
+                    activity,
+                    "删除",
+                    colors,
+                    SettingsDialogButtonRole.Destructive,
+                )
+                val cancelButton = settingsDialogButton(
+                    activity,
+                    if (enableFlow) "跳过启用" else "取消",
+                    colors,
+                    SettingsDialogButtonRole.Neutral,
+                )
+                card.addView(settingsDialogTitle(activity, "${source.name} 登录", colors))
+                card.addView(
+                    settingsDialogHint(
+                        activity,
+                        "请在下方页面完成登录，返回后点击“完成”。",
+                        colors,
+                    ),
+                )
+                card.addView(
+                    webView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        (activity.resources.displayMetrics.heightPixels * 0.58f).toInt(),
+                    ).apply { bottomMargin = settingsDp(activity, 10) },
+                )
+                card.addView(settingsDialogButtonRow(activity, listOf(deleteButton, finishButton, cancelButton)))
+                finishButton.setOnClickListener {
+                    resolve(true)
+                    dialog.dismiss()
+                }
+                cancelButton.setOnClickListener {
+                    resolve(enableFlow)
+                    dialog.dismiss()
+                }
+                deleteButton.setOnClickListener {
+                    confirmOnlineSourceDeletion(activity, source) {
                         resolve(false)
                         dialog.dismiss()
                     }
@@ -6782,9 +6836,10 @@ class ReaMicroSettingsHook(
                     if (!resolved) resolve(false)
                     runCatching { webView.destroy() }
                 }
-                dialog.show()
+                showSettingsDialog(dialog, card, activity, 0.94f)
                 dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
                 dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                webView.requestFocus()
             }.onFailure {
                 XposedBridge.log("$LOG_PREFIX failed to open online source login: ${it.stackTraceToString()}")
                 onResult(false)
@@ -6803,83 +6858,90 @@ class ReaMicroSettingsHook(
             runCatching {
                 val fields = OnlineSourceAuth.loginFields(source)
                 val savedValues = OnlineSourceAuth.loginInfo(activity.applicationContext, source)
-                val container = LinearLayout(activity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(48, 24, 48, 0)
-                }
+                val colors = SettingsDialogColors(activity)
+                val dialog = Dialog(activity)
+                val card = settingsDialogCard(activity, colors)
+                val fieldNames = fields.joinToString("、") { it.name }
+                card.addView(settingsDialogTitle(activity, "${source.name} 登录", colors))
+                card.addView(
+                    settingsDialogHint(
+                        activity,
+                        "请输入$fieldNames。登录信息和下载配置仅保存在本机。",
+                        colors,
+                    ),
+                )
                 val inputs = fields.associateWith { field ->
-                    EditText(activity).apply {
-                        hint = field.name
+                    settingsDialogInput(activity, field.name, singleLine = true, colors = colors).apply {
                         inputType = if (field.isSecret) {
                             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
                         } else {
                             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL
                         }
-                        setSingleLine(true)
                         setText(savedValues[field.name].orEmpty().ifBlank { field.defaultValue })
                         setSelection(text?.length ?: 0)
-                        container.addView(this)
+                        card.addView(this)
                     }
                 }
                 OnlineSourceAuth.browserLoginUrl(source).takeIf { it.isNotBlank() }?.let { browserUrl ->
-                    container.addView(TextView(activity).apply {
-                        text = "打开登录/注册页面"
-                        setTextColor(Color.rgb(33, 150, 243))
-                        setPadding(0, 28, 0, 12)
-                        setOnClickListener {
+                    card.addView(
+                        settingsDialogChoiceRow(activity, "打开登录/注册页面", colors) {
                             runCatching {
                                 activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(browserUrl)))
                             }.onFailure {
                                 Toast.makeText(activity, "无法打开登录/注册页面", Toast.LENGTH_SHORT).show()
                             }
-                        }
-                    })
+                        },
+                    )
                 }
-                val policyInputs = addOnlineSourceDownloadPolicyInputs(activity, source, container)
+                val policyInputs = addOnlineSourceDownloadPolicyInputs(activity, source, card, colors)
                 var resolved = false
                 fun resolve(value: Boolean) {
                     if (resolved) return
                     resolved = true
                     onResult(value)
                 }
-                val fieldNames = fields.joinToString("、") { it.name }
-                val dialog = AlertDialog.Builder(activity)
-                    .setTitle("${source.name} 登录")
-                    .setMessage("请输入$fieldNames。登录信息和下载配置仅保存在本机。")
-                    .setView(container)
-                    .setPositiveButton("保存", null)
-                    .setNegativeButton(if (enableFlow) "跳过启用" else "取消", null)
-                    .setNeutralButton("删除", null)
-                    .create()
-                dialog.setOnShowListener {
-                    dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-                    inputs.values.firstOrNull()?.requestFocus()
-                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                        val values = inputs.entries.associate { (field, input) ->
-                            field.name to input.text?.toString().orEmpty()
-                        }
-                        if (!saveOnlineSourceDownloadPolicy(activity, source, policyInputs)) {
-                            return@setOnClickListener
-                        }
-                        val result = OnlineSourceAuth.saveLoginInfo(activity.applicationContext, source, values)
-                        Toast.makeText(activity, result.message, Toast.LENGTH_SHORT).show()
-                        if (result.success) {
-                            resolve(true)
-                            dialog.dismiss()
-                        }
+                val saveButton = settingsDialogButton(activity, "保存", colors)
+                val deleteButton = settingsDialogButton(
+                    activity,
+                    "删除",
+                    colors,
+                    SettingsDialogButtonRole.Destructive,
+                )
+                val cancelButton = settingsDialogButton(
+                    activity,
+                    if (enableFlow) "跳过启用" else "取消",
+                    colors,
+                    SettingsDialogButtonRole.Neutral,
+                )
+                card.addView(settingsDialogButtonRow(activity, listOf(deleteButton, saveButton, cancelButton)))
+                saveButton.setOnClickListener {
+                    val values = inputs.entries.associate { (field, input) ->
+                        field.name to input.text?.toString().orEmpty()
                     }
-                    dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
-                        resolve(enableFlow)
+                    if (!saveOnlineSourceDownloadPolicy(activity, source, policyInputs)) {
+                        return@setOnClickListener
+                    }
+                    val result = OnlineSourceAuth.saveLoginInfo(activity.applicationContext, source, values)
+                    Toast.makeText(activity, result.message, Toast.LENGTH_SHORT).show()
+                    if (result.success) {
+                        resolve(true)
                         dialog.dismiss()
                     }
-                    configureOnlineSourceDeleteButton(activity, source, dialog) {
+                }
+                cancelButton.setOnClickListener {
+                    resolve(enableFlow)
+                    dialog.dismiss()
+                }
+                deleteButton.setOnClickListener {
+                    confirmOnlineSourceDeletion(activity, source) {
                         resolve(false)
                         dialog.dismiss()
                     }
                 }
                 dialog.setOnCancelListener { resolve(false) }
                 dialog.setOnDismissListener { if (!resolved) resolve(false) }
-                dialog.show()
+                showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
+                inputs.values.firstOrNull()?.requestFocus()
             }.onFailure {
                 XposedBridge.log("$LOG_PREFIX failed to open online source login info dialog: ${it.stackTraceToString()}")
                 onResult(false)
@@ -6896,84 +6958,92 @@ class ReaMicroSettingsHook(
     ) {
         activity.runOnUiThread {
             runCatching {
-                val container = LinearLayout(activity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(48, 24, 48, 0)
-                }
+                val colors = SettingsDialogColors(activity)
+                val dialog = Dialog(activity)
+                val card = settingsDialogCard(activity, colors)
                 val savedCredentials = OnlineSourceAuth.savedCredentials(activity.applicationContext, source)
-                val userInput = EditText(activity).apply {
-                    hint = "账号"
+                val userInput = settingsDialogInput(activity, "账号", singleLine = true, colors = colors).apply {
                     inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL
-                    setSingleLine(true)
                     setText(savedCredentials.first)
                 }
-                val passwordInput = EditText(activity).apply {
-                    hint = "密码"
+                val passwordInput = settingsDialogInput(activity, "密码", singleLine = true, colors = colors).apply {
                     inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                    setSingleLine(true)
                     setText(savedCredentials.second)
                 }
-                container.addView(userInput)
-                container.addView(passwordInput)
-                val policyInputs = addOnlineSourceDownloadPolicyInputs(activity, source, container)
+                card.addView(settingsDialogTitle(activity, "${source.name} 登录", colors))
+                card.addView(
+                    settingsDialogHint(
+                        activity,
+                        "请输入账号密码；下载限速和每日章节限额均可留空。",
+                        colors,
+                    ),
+                )
+                card.addView(userInput)
+                card.addView(passwordInput)
+                val policyInputs = addOnlineSourceDownloadPolicyInputs(activity, source, card, colors)
                 var resolved = false
                 fun resolve(value: Boolean) {
                     if (resolved) return
                     resolved = true
                     onResult(value)
                 }
-                val dialog = AlertDialog.Builder(activity)
-                    .setTitle("${source.name} 登录")
-                    .setMessage("请输入账号密码；下载限速和每日章节限额均可留空。")
-                    .setView(container)
-                    .setPositiveButton("登录并保存", null)
-                    .setNegativeButton(if (enableFlow) "跳过启用" else "取消", null)
-                    .setNeutralButton("删除", null)
-                    .create()
-                dialog.setOnShowListener {
-                    dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                        val username = userInput.text?.toString().orEmpty()
-                        val password = passwordInput.text?.toString().orEmpty()
-                        if (username.isBlank() || password.isBlank()) {
-                            Toast.makeText(activity, "请输入账号和密码", Toast.LENGTH_SHORT).show()
-                            return@setOnClickListener
-                        }
-                        if (!saveOnlineSourceDownloadPolicy(activity, source, policyInputs)) {
-                            return@setOnClickListener
-                        }
-                        val positiveButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-                        positiveButton.isEnabled = false
-                        Toast.makeText(activity, "正在登录 ${source.name}", Toast.LENGTH_SHORT).show()
-                        Thread({
-                            val result = OnlineSourceAuth.login(
-                                activity.applicationContext,
-                                source,
-                                username,
-                                password,
-                            )
-                            activity.runOnUiThread {
-                                positiveButton.isEnabled = true
-                                Toast.makeText(activity, result.message, Toast.LENGTH_SHORT).show()
-                                if (result.success) {
-                                    resolve(true)
-                                    dialog.dismiss()
-                                }
+                val loginButton = settingsDialogButton(activity, "登录并保存", colors)
+                val deleteButton = settingsDialogButton(
+                    activity,
+                    "删除",
+                    colors,
+                    SettingsDialogButtonRole.Destructive,
+                )
+                val cancelButton = settingsDialogButton(
+                    activity,
+                    if (enableFlow) "跳过启用" else "取消",
+                    colors,
+                    SettingsDialogButtonRole.Neutral,
+                )
+                card.addView(settingsDialogButtonRow(activity, listOf(deleteButton, loginButton, cancelButton)))
+                loginButton.setOnClickListener {
+                    val username = userInput.text?.toString().orEmpty()
+                    val password = passwordInput.text?.toString().orEmpty()
+                    if (username.isBlank() || password.isBlank()) {
+                        Toast.makeText(activity, "请输入账号和密码", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                    if (!saveOnlineSourceDownloadPolicy(activity, source, policyInputs)) {
+                        return@setOnClickListener
+                    }
+                    loginButton.isEnabled = false
+                    Toast.makeText(activity, "正在登录 ${source.name}", Toast.LENGTH_SHORT).show()
+                    Thread({
+                        val result = OnlineSourceAuth.login(
+                            activity.applicationContext,
+                            source,
+                            username,
+                            password,
+                        )
+                        activity.runOnUiThread {
+                            loginButton.isEnabled = true
+                            Toast.makeText(activity, result.message, Toast.LENGTH_SHORT).show()
+                            if (result.success) {
+                                resolve(true)
+                                dialog.dismiss()
                             }
-                        }, "ReaMicroOnlineSourceLogin").start()
-                    }
-                    dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
-                        resolve(enableFlow)
-                        dialog.dismiss()
-                    }
-                    configureOnlineSourceDeleteButton(activity, source, dialog) {
+                        }
+                    }, "ReaMicroOnlineSourceLogin").start()
+                }
+                cancelButton.setOnClickListener {
+                    resolve(enableFlow)
+                    dialog.dismiss()
+                }
+                deleteButton.setOnClickListener {
+                    confirmOnlineSourceDeletion(activity, source) {
                         resolve(false)
                         dialog.dismiss()
                     }
                 }
                 dialog.setOnCancelListener { resolve(false) }
                 dialog.setOnDismissListener { if (!resolved) resolve(false) }
-                dialog.show()
+                showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
+                userInput.requestFocus()
             }.onFailure {
                 XposedBridge.log("$LOG_PREFIX failed to open online source credential dialog: ${it.stackTraceToString()}")
                 onResult(false)
@@ -6984,43 +7054,67 @@ class ReaMicroSettingsHook(
     private data class OnlineSourcePolicyInputs(
         val requestsPerSecond: EditText,
         val dailyChapterLimit: EditText,
-        val preferOnDemandLoading: CheckBox,
-        val paragraphCommentsEnabled: CheckBox?,
+        val preferOnDemandLoading: Switch,
+        val paragraphCommentsEnabled: Switch?,
     )
 
     private fun addOnlineSourceDownloadPolicyInputs(
         activity: Activity,
         source: OnlineSourceEntry,
         container: LinearLayout,
+        colors: SettingsDialogColors,
     ): OnlineSourcePolicyInputs {
-        container.addView(TextView(activity).apply {
-            text = "下载配置（可选）"
-            setTextColor(Color.rgb(96, 96, 96))
-            setPadding(0, 28, 0, 4)
-        })
-        val requestsPerSecondInput = EditText(activity).apply {
-            hint = "每秒请求次数（留空使用源内置限速）"
+        container.addView(settingsDialogStatus(activity, "下载配置（可选）", colors))
+        val requestsPerSecondInput = settingsDialogInput(
+            activity,
+            "每秒请求次数（留空使用源内置限速）",
+            singleLine = true,
+            colors = colors,
+        ).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
-            setSingleLine(true)
             setText(source.configuredRequestsPerSecond?.toString().orEmpty())
         }
-        val dailyChapterLimitInput = EditText(activity).apply {
-            hint = "每日章节限额（留空或 0 表示不限额）"
+        val dailyChapterLimitInput = settingsDialogInput(
+            activity,
+            "每日章节限额（留空或 0 表示不限额）",
+            singleLine = true,
+            colors = colors,
+        ).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
-            setSingleLine(true)
             setText(source.dailyChapterLimit?.toString().orEmpty())
         }
-        val preferOnDemandLoading = CheckBox(activity).apply {
-            text = "逐章加载（首次下载前 3 章）"
-            isChecked = source.preferOnDemandLoading
-            setPadding(0, 18, 0, 0)
-        }
-        val paragraphCommentsEnabled = if (source.supportsParagraphComments) {
-            CheckBox(activity).apply {
-                text = "启用段评（下载时获取段评数据）"
-                isChecked = source.paragraphCommentsEnabled
-                setPadding(0, 4, 0, 0)
+        fun policySwitch(title: String, checked: Boolean): Switch =
+            Switch(activity).apply {
+                text = title
+                textSize = 14f
+                setTextColor(colors.title)
+                isChecked = checked
+                showText = false
+                gravity = Gravity.CENTER_VERTICAL
+                minHeight = settingsDp(activity, 48)
+                setPadding(
+                    settingsDp(activity, 12),
+                    settingsDp(activity, 6),
+                    settingsDp(activity, 8),
+                    settingsDp(activity, 6),
+                )
+                background = settingsRoundedRect(colors.field, settingsDp(activity, 8), colors.border)
+                thumbTintList = onlineSourcePolicySwitchThumbColors(colors)
+                trackTintList = onlineSourcePolicySwitchTrackColors(colors)
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = settingsDp(activity, 8) }
             }
+        val preferOnDemandLoading = policySwitch(
+            "逐章加载（首次下载前 3 章）",
+            source.preferOnDemandLoading,
+        )
+        val paragraphCommentsEnabled = if (source.supportsParagraphComments) {
+            policySwitch(
+                "启用段评（下载时获取段评数据）",
+                source.paragraphCommentsEnabled,
+            )
         } else {
             null
         }
@@ -7035,6 +7129,35 @@ class ReaMicroSettingsHook(
             paragraphCommentsEnabled = paragraphCommentsEnabled,
         )
     }
+
+    private fun onlineSourcePolicySwitchThumbColors(colors: SettingsDialogColors): ColorStateList =
+        ColorStateList(
+            arrayOf(
+                intArrayOf(android.R.attr.state_checked),
+                intArrayOf(),
+            ),
+            intArrayOf(colors.primary, colors.body),
+        )
+
+    private fun onlineSourcePolicySwitchTrackColors(colors: SettingsDialogColors): ColorStateList =
+        ColorStateList(
+            arrayOf(
+                intArrayOf(android.R.attr.state_checked),
+                intArrayOf(),
+            ),
+            intArrayOf(
+                settingsColorWithAlpha(colors.primary, 0.42f),
+                settingsColorWithAlpha(colors.body, 0.24f),
+            ),
+        )
+
+    private fun settingsColorWithAlpha(color: Int, alpha: Float): Int =
+        Color.argb(
+            (255 * alpha.coerceIn(0f, 1f)).toInt(),
+            Color.red(color),
+            Color.green(color),
+            Color.blue(color),
+        )
 
     private fun saveOnlineSourceDownloadPolicy(
         activity: Activity,

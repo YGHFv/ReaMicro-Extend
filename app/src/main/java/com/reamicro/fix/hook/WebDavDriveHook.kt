@@ -24,6 +24,7 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.Icon
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.os.Build
 import android.provider.DocumentsContract
 import android.text.Editable
@@ -31,7 +32,6 @@ import android.text.InputType
 import android.text.TextUtils
 import android.text.TextWatcher
 import android.util.Base64
-import android.util.Log
 import android.util.TypedValue
 import android.util.Xml
 import android.view.Gravity
@@ -69,6 +69,9 @@ import com.reamicro.fix.notification.cancelOnlineCompletionNotificationIfDone
 import com.reamicro.fix.notification.onlineCompletionDownloadBigText
 import com.reamicro.fix.notification.onlineCompletionDownloadText
 import com.reamicro.fix.notification.onlineCompletionDownloadTitle
+import com.reamicro.fix.logging.ModuleLogLevel
+import com.reamicro.fix.logging.ModuleLogState
+import com.reamicro.fix.logging.legacyModuleLogLevel
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.webdav.CacheDeleteStat
@@ -77,6 +80,7 @@ import com.reamicro.fix.webdav.CloudDownloadCancelledException
 import com.reamicro.fix.webdav.CloudBookRowExtendedDisplayContext
 import com.reamicro.fix.webdav.CancellableWebDavDownload
 import com.reamicro.fix.webdav.applyOnlineChapterListRuleCompat
+import com.reamicro.fix.webdav.OnlineChapterImageMarkup
 import com.reamicro.fix.webdav.cleanOnlineChapterContentValue
 import com.reamicro.fix.webdav.cleanOnlineChapterTitleValue
 import com.reamicro.fix.webdav.decodeOnlineHtmlEntities
@@ -85,10 +89,26 @@ import com.reamicro.fix.webdav.evaluateQqReaderCoverRule
 import com.reamicro.fix.webdav.formatOnlineWordCountValue
 import com.reamicro.fix.webdav.inferOnlineStatusFromLastChapterTitle
 import com.reamicro.fix.webdav.isOnlineChapterCountSelector
+import com.reamicro.fix.webdav.isPermanentOnlineChapterFailure
 import com.reamicro.fix.webdav.onlineSearchRelevanceScore
+import com.reamicro.fix.webdav.onlineEpubImageManifestItem
 import com.reamicro.fix.webdav.onlineHttpErrorDetail
+import com.reamicro.fix.webdav.onlineHttpRetryDelayMs
+import com.reamicro.fix.webdav.onlineHttpRetryKind
+import com.reamicro.fix.webdav.mergeOnlineEpubImageManifest
+import com.reamicro.fix.webdav.OnlineEpubImageManifestItem
+import com.reamicro.fix.webdav.OnlineFanqieBatchProtocolException
+import com.reamicro.fix.webdav.OnlineHttpRetryKind
+import com.reamicro.fix.webdav.OnlineSourceHttpException
+import com.reamicro.fix.webdav.buildOnlineFanqieBatchBody
+import com.reamicro.fix.webdav.buildOnlineFanqieBatchEndpoint
+import com.reamicro.fix.webdav.parseOnlineFanqieBatchChapterRef
+import com.reamicro.fix.webdav.parseOnlineFanqieBatchResponse
 import com.reamicro.fix.webdav.parseOnlineUrlRequestCompat
 import com.reamicro.fix.webdav.resolveOnlineChapterListRuleCompat
+import com.reamicro.fix.webdav.resolveOnlineUrlCompat
+import com.reamicro.fix.webdav.supportsOnlineFanqieBatch
+import com.reamicro.fix.webdav.stableOnlineImageFileStem
 import com.reamicro.fix.webdav.HomeSearchRenderContext
 import com.reamicro.fix.webdav.HomeSearchSection
 import com.reamicro.fix.webdav.ImportLocalLibraryRowContext
@@ -136,6 +156,8 @@ import java.net.URL
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.Charset
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.UUID
@@ -371,13 +393,23 @@ class WebDavDriveHook(
             val appContext = context.applicationContext ?: context
             val receiver = object : BroadcastReceiver() {
                 override fun onReceive(receiverContext: Context, intent: Intent) {
-                    if (intent.action != ONLINE_COMPLETION_CANCEL_ACTION) return
-                    val id = intent.getIntExtra(ONLINE_COMPLETION_NOTIFICATION_EXTRA_ID, 0)
-                    val key = intent.getStringExtra(ONLINE_COMPLETION_NOTIFICATION_EXTRA_KEY).orEmpty()
-                    requestOnlineCompletionDownloadCancel(receiverContext, id, key)
+                    when (intent.action) {
+                        ONLINE_COMPLETION_CANCEL_ACTION -> {
+                            val id = intent.getIntExtra(ONLINE_COMPLETION_NOTIFICATION_EXTRA_ID, 0)
+                            val key = intent.getStringExtra(ONLINE_COMPLETION_NOTIFICATION_EXTRA_KEY).orEmpty()
+                            requestOnlineCompletionDownloadCancel(receiverContext, id, key)
+                        }
+                        ONLINE_COMPLETION_HEARTBEAT_ACTION -> {
+                            val id = intent.getIntExtra(ONLINE_COMPLETION_NOTIFICATION_EXTRA_ID, 0)
+                            logWebDav("online completion host heartbeat id=$id active=${onlineCompletionRunningDownloads.size}")
+                        }
+                    }
                 }
             }
-            val filter = IntentFilter(ONLINE_COMPLETION_CANCEL_ACTION)
+            val filter = IntentFilter().apply {
+                addAction(ONLINE_COMPLETION_CANCEL_ACTION)
+                addAction(ONLINE_COMPLETION_HEARTBEAT_ACTION)
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 appContext.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
             } else {
@@ -5508,7 +5540,14 @@ class WebDavDriveHook(
                     val reason = onlineHttpErrorDetail(body).ifBlank {
                         if (code == 401 || code == 403) "未登录或会员权限不足" else ""
                     }
-                    error("HTTP $code${reason.takeIf { it.isNotBlank() }?.let { "：$it" }.orEmpty()}")
+                    throw OnlineSourceHttpException(
+                        statusCode = code,
+                        detail = reason,
+                        retryAfterMs = connection.getHeaderField("Retry-After")
+                            ?.trim()
+                            ?.toLongOrNull()
+                            ?.times(1_000L),
+                    )
                 } finally {
                     connection.disconnect()
                 }
@@ -5534,18 +5573,35 @@ class WebDavDriveHook(
     private fun parseOnlineHeaders(raw: String): Map<String, String> {
         val text = raw.trim()
         if (text.isBlank()) return emptyMap()
+        // Legado 的 @js:/<js> header 是脚本指令而非真实请求头；模块不执行 JS，若按“冒号分割”会拼出一个
+        // 名为 "@js" 的非法头。API 主机会忽略它，但封面所在的字节跳动 CDN 会直接判 400，导致封面/图片全部
+        // 加载失败。真正的密钥头由 credentialHeaders 单独注入，这里遇到脚本头直接跳过。
+        if (text.startsWith("@js:", ignoreCase = true) || text.startsWith("<js>", ignoreCase = true)) {
+            return emptyMap()
+        }
         return runCatching {
             val json = JSONObject(text)
-            json.keys().asSequence().associateWith { key -> json.optString(key, "") }
+            json.keys().asSequence()
+                .filter { isValidHttpHeaderName(it) }
+                .associateWith { key -> json.optString(key, "") }
         }.getOrElse {
             text.lineSequence()
                 .mapNotNull { line ->
                     val index = line.indexOf(':')
-                    if (index <= 0) null else line.take(index).trim() to line.substring(index + 1).trim()
+                    if (index <= 0) return@mapNotNull null
+                    val name = line.take(index).trim()
+                    if (!isValidHttpHeaderName(name)) return@mapNotNull null
+                    name to line.substring(index + 1).trim()
                 }
                 .toMap()
         }
     }
+
+    // 只接受合法的 HTTP header 名（RFC 7230 token），过滤掉 @js 之类会被 CDN/WAF 判 400 的非法头名。
+    private fun isValidHttpHeaderName(name: String): Boolean =
+        name.isNotBlank() && HTTP_HEADER_NAME_REGEX.matches(name)
+
+    private val HTTP_HEADER_NAME_REGEX = Regex("""^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$""")
 
     private fun parseOnlineSearchResults(
         source: OnlineSourceEntry,
@@ -6086,6 +6142,8 @@ class WebDavDriveHook(
             else -> value.toString()
         }.trim()
 
+    private val FANQIE_IMAGE_PATH_REGEX = Regex("""(?i)(?:^|/)novel-(?:images|pic|static)/""")
+
     private fun replaceFanqieCover(raw: String): String {
         val clean = raw.trim().substringBefore('~').substringBefore('?').trim()
         if (clean.isBlank()) return ""
@@ -6116,21 +6174,30 @@ class WebDavDriveHook(
     private fun sourceBaseUrl(source: OnlineSourceEntry): String =
         Regex("""https?://[^\s#]+""").find(source.sourceUrl)?.value.orEmpty()
 
-    private fun resolveOnlineUrl(baseUrl: String, value: String): String {
-        val raw = value.trim()
-        if (raw.isBlank()) return ""
-        return runCatching {
-            when {
-                raw.startsWith("http://", ignoreCase = true) || raw.startsWith("https://", ignoreCase = true) -> raw
-                baseUrl.isBlank() -> raw
-                else -> URL(URL(baseUrl), raw).toString()
-            }
-        }.getOrDefault(raw)
-    }
+    private fun resolveOnlineUrl(baseUrl: String, value: String): String =
+        resolveOnlineUrlCompat(baseUrl, value)
 
     private fun normalizeOnlineCoverUrl(source: OnlineSourceEntry, baseUrl: String, value: String): String {
+        val raw = value.trim()
+        if (raw.isBlank()) return ""
+        // 番茄封面常是相对的 novel-images/novel-pic/novel-static 路径，直接按 baseUrl 拼会落到 API 域名下
+        // （如 https://api.yuezhi.me/v1/books/novel-images/...）而 404；这类路径统一走字节跳动图片源。
+        if (!raw.startsWith("http", ignoreCase = true) && FANQIE_IMAGE_PATH_REGEX.containsMatchIn(raw)) {
+            replaceFanqieCover(raw).takeIf { it.isNotBlank() }?.let { return it }
+        }
         val resolved = resolveOnlineUrl(baseUrl.ifBlank { sourceBaseUrl(source) }, value)
-        if (!resolved.startsWith("http://", ignoreCase = true)) return resolved
+        if (!resolved.startsWith("http://", ignoreCase = true)) {
+            // 已被错误拼到 API 域名下的番茄图片路径，纠正为字节跳动图片源。
+            val misrouted = runCatching { URI(resolved) }.getOrNull()
+            val apiHost = runCatching { URI(sourceBaseUrl(source).ifBlank { baseUrl }) }.getOrNull()?.host
+            if (misrouted != null && !apiHost.isNullOrBlank() &&
+                misrouted.host.equals(apiHost, ignoreCase = true) &&
+                FANQIE_IMAGE_PATH_REGEX.containsMatchIn(misrouted.rawPath.orEmpty())
+            ) {
+                replaceFanqieCover(misrouted.rawPath.orEmpty()).takeIf { it.isNotBlank() }?.let { return it }
+            }
+            return resolved
+        }
         val sourceUrl = sourceBaseUrl(source).ifBlank { baseUrl }
         val sourceUri = runCatching { URI(sourceUrl) }.getOrNull()
         if (!sourceUri?.scheme.equals("https", ignoreCase = true)) return resolved
@@ -7113,6 +7180,8 @@ class WebDavDriveHook(
         val failureMessages = candidates.associate { it.index to it.message }.toMutableMap()
         var dailyLimitMessage: String? = null
         var successCount = 0
+        var consecutiveServiceFailures = 0
+        val batchSession = onlineChapterBatchSession(target, remoteChapters, candidates.map { it.index })
 
         fun attemptLoggedChapter(index: Int, immediateRetry: Boolean): Boolean {
             val chapter = remoteChapters[index]
@@ -7139,21 +7208,38 @@ class WebDavDriveHook(
                 val localAttempt = roundAttemptsByIndex[index] ?: 0
                 val totalAttempts = (initialAttempts[index] ?: 0) + localAttempt
                 runCatching {
-                    downloadOnlineChapter(target, tocSnapshot.detail.url, tocSnapshot.detail.body, chapter, index)
+                    downloadOnlineChapter(
+                        target,
+                        tocSnapshot.detail.url,
+                        tocSnapshot.detail.body,
+                        chapter,
+                        index,
+                        batchSession,
+                    )
                 }.onSuccess { chapterContent ->
                     writeOnlineCompletionChapterToBookDir(
                         bookDir = bookDir,
                         index = index,
                         chapter = chapterContent,
                         href = chapterHrefs.getOrNull(index).orEmpty(),
+                        target = target,
                     )
                     failed.remove(index)
                     remaining.remove(index)
                     failureMessages.remove(index)
+                    val recoveredFromServiceFailure = consecutiveServiceFailures > 0
+                    consecutiveServiceFailures = 0
+                    if (recoveredFromServiceFailure) {
+                        onProgress(
+                            12,
+                            "上游已恢复，继续重试第 ${index + 1}/${remoteChapters.size} 章",
+                        )
+                    }
                     successCount++
                     logWebDav(
                         "online completion logged failed chapter retried ${index + 1}/${remoteChapters.size} " +
-                            "attempt=$localAttempt totalAttempts=$totalAttempts content=${chapterContent.content.length}",
+                            "transport=${chapterContent.transport} attempt=$localAttempt " +
+                            "totalAttempts=$totalAttempts content=${chapterContent.content.length}",
                     )
                     return true
                 }.onFailure { error ->
@@ -7161,6 +7247,21 @@ class WebDavDriveHook(
                     if (error is OnlineSourceDailyLimitException) {
                         dailyLimitMessage = message
                         nonRetryable.add(index)
+                    }
+                    if (isPermanentOnlineChapterFailure(error)) {
+                        nonRetryable.add(index)
+                    }
+                    val retryKind = onlineHttpRetryKind(error)
+                    if (retryKind != OnlineHttpRetryKind.NONE && index !in nonRetryable) {
+                        consecutiveServiceFailures++
+                        val waitMs = onlineHttpRetryDelayMs(error, consecutiveServiceFailures)
+                        val reason = if (retryKind == OnlineHttpRetryKind.CIRCUIT_OPEN) "上游熔断" else "上游暂时异常"
+                        onProgress(12, "$reason，等待 ${waitMs / 1_000} 秒后继续重试第 ${index + 1} 章")
+                        logWebDav(
+                            "online completion logged retry service backoff chapter=${index + 1}/${remoteChapters.size} " +
+                                "kind=$retryKind consecutive=$consecutiveServiceFailures wait=${waitMs}ms",
+                        )
+                        sleepOnlineCompletionRetryDelay(null, waitMs)
                     }
                     failureMessages[index] = message
                     remaining[index] = onlineCompletionFailedChapter(
@@ -7308,6 +7409,12 @@ class WebDavDriveHook(
         val nonRetryable = linkedSetOf<Int>()
         val failureMessages = mutableMapOf<Int, String>()
         var dailyLimitMessage: String? = null
+        var consecutiveServiceFailures = 0
+        val batchSession = onlineChapterBatchSession(
+            target,
+            remoteChapters,
+            newRemoteIndices.take(allowedNewChapterCount),
+        )
         for (offset in allowedNewChapterCount until newRemoteIndices.size) {
             failed.add(offset)
             nonRetryable.add(offset)
@@ -7332,14 +7439,30 @@ class WebDavDriveHook(
                 roundAttempts++
                 val attempt = attempts[offset]
                 runCatching {
-                    downloadOnlineChapter(target, tocSnapshot.detail.url, tocSnapshot.detail.body, chapter, remoteIndex)
+                    downloadOnlineChapter(
+                        target,
+                        tocSnapshot.detail.url,
+                        tocSnapshot.detail.body,
+                        chapter,
+                        remoteIndex,
+                        batchSession,
+                    )
                 }.onSuccess { chapterContent ->
                     downloaded[offset] = chapterContent
                     failed.remove(offset)
                     failureMessages.remove(offset)
+                    val recoveredFromServiceFailure = consecutiveServiceFailures > 0
+                    consecutiveServiceFailures = 0
+                    if (recoveredFromServiceFailure) {
+                        onProgress(
+                            32 + ((offset + 1) * 51 / newRemoteIndices.size.coerceAtLeast(1)),
+                            "上游已恢复，继续新增章节 ${offset + 1}/${newRemoteIndices.size}",
+                        )
+                    }
                     logWebDav(
                         "online completion update chapter downloaded ${offset + 1}/${newRemoteIndices.size} " +
-                            "remote=${remoteIndex + 1}/${remoteChapters.size} attempt=$attempt " +
+                            "remote=${remoteIndex + 1}/${remoteChapters.size} " +
+                            "transport=${chapterContent.transport} attempt=$attempt " +
                             "content=${chapterContent.content.length}",
                     )
                     return true
@@ -7350,6 +7473,24 @@ class WebDavDriveHook(
                     if (error is OnlineSourceDailyLimitException) {
                         dailyLimitMessage = message
                         nonRetryable.add(offset)
+                    }
+                    if (isPermanentOnlineChapterFailure(error)) {
+                        nonRetryable.add(offset)
+                    }
+                    val retryKind = onlineHttpRetryKind(error)
+                    if (retryKind != OnlineHttpRetryKind.NONE && offset !in nonRetryable) {
+                        consecutiveServiceFailures++
+                        val waitMs = onlineHttpRetryDelayMs(error, consecutiveServiceFailures)
+                        val reason = if (retryKind == OnlineHttpRetryKind.CIRCUIT_OPEN) "上游熔断" else "上游暂时异常"
+                        onProgress(
+                            32 + ((offset + 1) * 51 / newRemoteIndices.size.coerceAtLeast(1)),
+                            "$reason，等待 ${waitMs / 1_000} 秒后继续新增章节 ${offset + 1}/${newRemoteIndices.size}",
+                        )
+                        logWebDav(
+                            "online completion update service backoff chapter=${offset + 1}/${newRemoteIndices.size} " +
+                                "kind=$retryKind consecutive=$consecutiveServiceFailures wait=${waitMs}ms",
+                        )
+                        sleepOnlineCompletionRetryDelay(null, waitMs)
                     }
                     logWebDav(
                         "online completion update chapter failed ${offset + 1}/${newRemoteIndices.size} " +
@@ -7602,26 +7743,48 @@ class WebDavDriveHook(
         }.getOrNull() ?: error("阅微 EpubFileManager INSTANCE 未找到")
         val bookPath = okioPath(bookDir.canonicalFile)
         val opf = obtainOnlineCompletionOpf(bookPath)
-        val itemRefs = (managerClass.methods.asSequence() + managerClass.declaredMethods.asSequence())
-            .first {
-                it.name == "getItemRefs" &&
-                    it.parameterTypes.size == 3 &&
-                    it.parameterTypes[0] == java.lang.Long.TYPE
-            }
+        val managerMethods = (managerClass.methods.asSequence() + managerClass.declaredMethods.asSequence())
+            .distinct()
+            .toList()
+        val itemRefMethod = managerMethods.firstOrNull {
+            it.name == "getItemRefs" &&
+                it.parameterTypes.size == 3 &&
+                it.parameterTypes[0] == java.lang.Long.TYPE &&
+                it.parameterTypes[1].name == OPF_CLASS &&
+                it.parameterTypes[2].name == OKIO_PATH_CLASS
+        } ?: error(
+            "阅微 EpubFileManager.getItemRefs 方法未找到；候选=" +
+                methodCandidates(managerMethods, "getItemRefs"),
+        )
+        val itemRefs = itemRefMethod
             .apply { isAccessible = true }
             .invoke(manager, java.lang.Long.valueOf(bookId), opf, bookPath) as? List<*>
             ?: emptyList<Any>()
         if (itemRefs.isEmpty()) {
             error("阅微目录条目解析为空，已阻止刷新目录表")
         }
-        val chapters = (managerClass.methods.asSequence() + managerClass.declaredMethods.asSequence())
-            .first {
+        // 阅微 2.3.0 为目录解析新增了可空 Function2<Int, Int, Unit> 进度回调；
+        // 同时兼容旧版三参数签名。宿主默认参数实现同样向第四参传 null。
+        val chapterMethod = managerMethods
+            .filter {
                 it.name == "getChapters" &&
-                    it.parameterTypes.size == 3 &&
-                    List::class.java.isAssignableFrom(it.parameterTypes[0])
+                    (it.parameterTypes.size == 3 || it.parameterTypes.size == 4) &&
+                    List::class.java.isAssignableFrom(it.parameterTypes[0]) &&
+                    it.parameterTypes[1].name == OPF_CLASS &&
+                    it.parameterTypes[2].name == OKIO_PATH_CLASS &&
+                    (it.parameterTypes.size == 3 || it.parameterTypes[3].name == FUNCTION2_CLASS)
             }
+            .minByOrNull { it.parameterTypes.size }
+            ?: error(
+                "阅微 EpubFileManager.getChapters 方法未找到；候选=" +
+                    methodCandidates(managerMethods, "getChapters"),
+            )
+        val chapterArgs = arrayListOf<Any?>(itemRefs, opf, bookPath).apply {
+            if (chapterMethod.parameterTypes.size == 4) add(null)
+        }
+        val chapters = chapterMethod
             .apply { isAccessible = true }
-            .invoke(manager, itemRefs, opf, bookPath) as? List<*>
+            .invoke(manager, *chapterArgs.toTypedArray()) as? List<*>
             ?: emptyList<Any>()
         if (chapters.isEmpty()) {
             error("阅微章节目录解析为空，已阻止刷新目录表")
@@ -7635,27 +7798,41 @@ class WebDavDriveHook(
     }
 
     private fun replaceOnlineCompletionDaoRows(dao: Any, bookId: Long, rows: List<*>, label: String) {
-        val deleteMethod = (dao.javaClass.methods.asSequence() + dao.javaClass.declaredMethods.asSequence())
-            .first {
-                it.name == "deleteByBookId" &&
-                    it.parameterTypes.size == 2 &&
-                    it.parameterTypes[0] == java.lang.Long.TYPE
-            }
-            .apply { isAccessible = true }
-        val upsertMethod = (dao.javaClass.methods.asSequence() + dao.javaClass.declaredMethods.asSequence())
-            .first {
-                it.name == "upsert" &&
-                    it.parameterTypes.size == 2 &&
-                    it.parameterTypes[0].isArray
-            }
-            .apply { isAccessible = true }
-        val componentType = upsertMethod.parameterTypes[0].componentType
+        val daoMethods = (dao.javaClass.methods.asSequence() + dao.javaClass.declaredMethods.asSequence())
+            .distinct()
+            .toList()
+        val deleteMethod = daoMethods.firstOrNull {
+            it.name == "deleteByBookId" &&
+                it.parameterTypes.size == 2 &&
+                it.parameterTypes[0] == java.lang.Long.TYPE &&
+                it.parameterTypes[1].name == KOTLIN_CONTINUATION_CLASS
+        }?.apply { isAccessible = true }
+            ?: error("阅微 $label DAO.deleteByBookId 方法未找到；候选=${methodCandidates(daoMethods, "deleteByBookId")}")
+        val upsertMethod = daoMethods.firstOrNull {
+            it.name == "upsert" &&
+                it.parameterTypes.size == 2 &&
+                it.parameterTypes[0].isArray &&
+                it.parameterTypes[1].name == KOTLIN_CONTINUATION_CLASS
+        }?.apply { isAccessible = true }
+            ?: error("阅微 $label DAO.upsert 方法未找到；候选=${methodCandidates(daoMethods, "upsert")}")
+        val componentType: Class<*> = requireNotNull(upsertMethod.parameterTypes[0].componentType) {
+            "阅微 $label DAO.upsert 数组元素类型不可用"
+        }
         val array = java.lang.reflect.Array.newInstance(componentType, rows.size)
         rows.forEachIndexed { index, row -> java.lang.reflect.Array.set(array, index, row) }
         invokeSuspendBlocking(deleteMethod, dao, java.lang.Long.valueOf(bookId))
         invokeSuspendBlocking(upsertMethod, dao, array)
         logWebDav("online completion $label rows replaced bookId=$bookId count=${rows.size}")
     }
+
+    private fun methodCandidates(methods: List<Method>, name: String): String =
+        methods.filter { it.name == name }
+            .joinToString(prefix = "[", postfix = "]") { method ->
+                method.parameterTypes.joinToString(
+                    prefix = "${method.name}(",
+                    postfix = "):${method.returnType.name}",
+                ) { type -> type.name }
+            }
 
     private fun onlineSourceIdFromEncodedValue(value: String): String {
         val text = value.trim()
@@ -7848,7 +8025,7 @@ class WebDavDriveHook(
                                 )
                                 importResult.bookDir?.let { importedDir ->
                                     task.importedBookDir = importedDir
-                                    flushOnlineCompletionDownloadedChapters(task)
+                                    flushOnlineCompletionDownloadedChapters(task, target)
                                     syncOnlineCompletionImportedBookSize(target)
                                     logWebDav(
                                         "online completion partial import visible book=${target.result.name} " +
@@ -7884,7 +8061,7 @@ class WebDavDriveHook(
                 throwIfOnlineCompletionDownloadCancelled(task)
                 if (task.importedBookDir != null) {
                     progressNotifier.running(94, "写入剩余章节", force = true)
-                    flushOnlineCompletionDownloadedChapters(task)
+                    flushOnlineCompletionDownloadedChapters(task, target)
                     syncOnlineCompletionImportedBookSize(target)
                     logWebDav(
                         "online completion final import skipped; chapters written to imported dir=${task.importedBookDir}",
@@ -8087,15 +8264,106 @@ class WebDavDriveHook(
         (ONLINE_COMPLETION_RETRY_DELAY_MS * round.coerceAtLeast(1)).coerceAtMost(ONLINE_COMPLETION_RETRY_DELAY_MAX_MS)
 
     private fun sleepOnlineCompletionRetryDelay(task: OnlineCompletionDownloadTask?, delayMs: Long) {
-        var remaining = delayMs.coerceAtLeast(0L)
-        while (remaining > 0L) {
+        val deadline = SystemClock.elapsedRealtime() + delayMs.coerceAtLeast(0L)
+        while (true) {
             task?.let { throwIfOnlineCompletionDownloadCancelled(it) }
-            val chunk = remaining.coerceAtMost(500L)
-            Thread.sleep(chunk)
-            remaining -= chunk
+            val remaining = deadline - SystemClock.elapsedRealtime()
+            if (remaining <= 0L) break
+            Thread.sleep(remaining.coerceAtMost(500L))
         }
         task?.let { throwIfOnlineCompletionDownloadCancelled(it) }
     }
+
+    private inner class OnlineChapterBatchSession(
+        private val target: OnlineDownloadTarget,
+        private val chapters: List<OnlineChapter>,
+        private val eligibleIndices: Set<Int>,
+    ) {
+        private val cachedBodies = mutableMapOf<String, String>()
+        private val attemptedItemIds = mutableSetOf<String>()
+        private var disabled = !supportsOnlineFanqieBatch(
+            sourceUrl = target.source.sourceUrl,
+            endpointTemplate = target.source.chapterBatchEndpoint,
+            batchSize = target.source.chapterBatchSize,
+        )
+
+        fun bodyFor(index: Int, chapter: OnlineChapter): String? {
+            if (disabled || index !in eligibleIndices) return null
+            val current = parseOnlineFanqieBatchChapterRef(chapter.url) ?: return null
+            cachedBodies.remove(current.itemId)?.let { return it }
+            if (current.itemId in attemptedItemIds) return null
+            val batch = eligibleIndices.asSequence()
+                .filter { it >= index && it in chapters.indices }
+                .sorted()
+                .mapNotNull { chapterIndex ->
+                    parseOnlineFanqieBatchChapterRef(chapters[chapterIndex].url)
+                        ?.takeIf { it.bookId == current.bookId }
+                }
+                .distinctBy { it.itemId }
+                .take(target.source.chapterBatchSize)
+                .toList()
+            if (batch.isEmpty()) return null
+            val endpoint = buildOnlineFanqieBatchEndpoint(
+                sourceUrl = target.source.sourceUrl,
+                endpointTemplate = target.source.chapterBatchEndpoint,
+                bookId = current.bookId,
+            )
+            try {
+                attemptedItemIds.addAll(batch.map { it.itemId })
+                val response = OnlineConcurrentRateLimiter.withLimitBlocking(target.source) {
+                    requestOnlineSearch(
+                        target.source,
+                        OnlineSearchRequest(
+                            url = endpoint,
+                            method = "POST",
+                            body = buildOnlineFanqieBatchBody(batch.map { it.itemId }),
+                            headers = mapOf(
+                                "Accept" to "application/json",
+                                "Content-Type" to "application/json",
+                            ),
+                        ),
+                    )
+                }
+                val requestedItemIds = batch.mapTo(hashSetOf()) { it.itemId }
+                val parsed = parseOnlineFanqieBatchResponse(response.body)
+                    .filterKeys { it in requestedItemIds }
+                cachedBodies.putAll(parsed)
+                logWebDav(
+                    "online completion fanqie batch downloaded requested=${batch.size} " +
+                        "returned=${parsed.size} bookId=${current.bookId} " +
+                        "range=${index + 1}-${index + batch.size}",
+                )
+                return cachedBodies.remove(current.itemId) ?: run {
+                    logWebDav(
+                        "online completion fanqie batch missing current itemId=${current.itemId}; " +
+                            "falling back to single chapter",
+                    )
+                    null
+                }
+            } catch (error: Throwable) {
+                val unsupported = error is OnlineFanqieBatchProtocolException ||
+                    (error is OnlineSourceHttpException && error.statusCode in setOf(400, 404, 405, 415))
+                if (!unsupported) {
+                    attemptedItemIds.removeAll(batch.map { it.itemId }.toSet())
+                    throw error
+                }
+                disabled = true
+                cachedBodies.clear()
+                logWebDav(
+                    "online completion fanqie batch disabled for current task " +
+                        "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
+                )
+                return null
+            }
+        }
+    }
+
+    private fun onlineChapterBatchSession(
+        target: OnlineDownloadTarget,
+        chapters: List<OnlineChapter>,
+        eligibleIndices: Iterable<Int>,
+    ): OnlineChapterBatchSession =
+        OnlineChapterBatchSession(target, chapters, eligibleIndices.toSet())
 
     private fun downloadOnlineCompletionOnDemandBook(
         target: OnlineDownloadTarget,
@@ -8116,6 +8384,8 @@ class WebDavDriveHook(
         val states = MutableList(chapters.size) { OnlineChapterState.PENDING }
         val attempts = IntArray(chapters.size)
         val errors = MutableList(chapters.size) { "" }
+        val batchSession = onlineChapterBatchSession(target, chapters, 0 until initialCount)
+        var consecutiveServiceFailures = 0
         for (index in 0 until initialCount) {
             throwIfOnlineCompletionDownloadCancelled(task)
             onProgress(10 + ((index + 1) * 45 / initialCount.coerceAtLeast(1)), "下载首批章节 ${index + 1}/$initialCount")
@@ -8130,14 +8400,34 @@ class WebDavDriveHook(
                         tocSnapshot.detail.body,
                         chapters[index],
                         index,
+                        batchSession,
                     )
                 }.onSuccess { content ->
                     downloaded[index] = content
                     task.downloadedChapters[index] = content
                     states[index] = OnlineChapterState.READY
+                    val recoveredFromServiceFailure = consecutiveServiceFailures > 0
+                    consecutiveServiceFailures = 0
+                    if (recoveredFromServiceFailure) {
+                        onProgress(
+                            10 + ((index + 1) * 45 / initialCount.coerceAtLeast(1)),
+                            "上游已恢复，继续下载首批章节 ${index + 1}/$initialCount",
+                        )
+                    }
                 }.onFailure { error ->
                     lastError = error
                     errors[index] = error.message.orEmpty().ifBlank { error.javaClass.name }
+                    val retryKind = onlineHttpRetryKind(error)
+                    if (retryKind != OnlineHttpRetryKind.NONE) {
+                        consecutiveServiceFailures++
+                        val waitMs = onlineHttpRetryDelayMs(error, consecutiveServiceFailures)
+                        val reason = if (retryKind == OnlineHttpRetryKind.CIRCUIT_OPEN) "上游熔断" else "上游暂时异常"
+                        onProgress(
+                            10 + ((index + 1) * 45 / initialCount.coerceAtLeast(1)),
+                            "$reason，等待 ${waitMs / 1_000} 秒后继续首批第 ${index + 1} 章",
+                        )
+                        sleepOnlineCompletionRetryDelay(task, waitMs)
+                    }
                 }
             }
             if (downloaded[index] == null) {
@@ -8251,6 +8541,8 @@ class WebDavDriveHook(
         }
         val shouldImportFirstBatch = chapters.size > ONLINE_COMPLETION_PARTIAL_IMPORT_THRESHOLD
         var firstBatchImported = false
+        var consecutiveServiceFailures = 0
+        val batchSession = onlineChapterBatchSession(target, chapters, 0 until allowedChapterCount)
         fun downloadedCount(): Int = downloaded.count { it != null }
 
         fun maybeImportFirstBatch(progress: Int, processedCount: Int) {
@@ -8300,17 +8592,26 @@ class WebDavDriveHook(
                 val attempt = attempts[index]
                 runCatching {
                     throwIfOnlineCompletionDownloadCancelled(task)
-                    downloadOnlineChapter(target, detail.url, detail.body, chapter, index)
+                    downloadOnlineChapter(target, detail.url, detail.body, chapter, index, batchSession)
                 }.onSuccess { chapterContent ->
                     downloaded[index] = chapterContent
                     task.downloadedChapters[index] = chapterContent
-                    writeOnlineCompletionChapterToImportedBookIfReady(task, index, chapterContent)
+                    writeOnlineCompletionChapterToImportedBookIfReady(task, target, index, chapterContent)
+                    val recoveredFromServiceFailure = consecutiveServiceFailures > 0
+                    consecutiveServiceFailures = 0
+                    if (recoveredFromServiceFailure) {
+                        onProgress(
+                            5 + ((index + 1) * 78 / chapters.size.coerceAtLeast(1)),
+                            "上游已恢复，继续下载章节 ${index + 1}/${chapters.size}",
+                        )
+                    }
                     failed.remove(index)
                     failureMessages.remove(index)
                     if (index == 0 || (index + 1) % 20 == 0 || index == chapters.lastIndex || attempt > 1) {
                         logWebDav(
                             "online completion chapter downloaded ${index + 1}/${chapters.size} " +
-                                "attempt=$attempt content=${chapterContent.content.length} url=${chapter.url.take(120)}",
+                                "transport=${chapterContent.transport} attempt=$attempt " +
+                                "content=${chapterContent.content.length} sourceUrl=${chapter.url.take(120)}",
                         )
                     }
                     return true
@@ -8321,6 +8622,24 @@ class WebDavDriveHook(
                     if (error is OnlineSourceDailyLimitException) {
                         dailyLimitMessage = message
                         nonRetryable.add(index)
+                    }
+                    if (isPermanentOnlineChapterFailure(error)) {
+                        nonRetryable.add(index)
+                    }
+                    val retryKind = onlineHttpRetryKind(error)
+                    if (retryKind != OnlineHttpRetryKind.NONE && index !in nonRetryable) {
+                        consecutiveServiceFailures++
+                        val waitMs = onlineHttpRetryDelayMs(error, consecutiveServiceFailures)
+                        val reason = if (retryKind == OnlineHttpRetryKind.CIRCUIT_OPEN) "上游熔断" else "上游暂时异常"
+                        onProgress(
+                            5 + ((index + 1) * 78 / chapters.size.coerceAtLeast(1)),
+                            "$reason，等待 ${waitMs / 1_000} 秒后继续第 ${index + 1} 章",
+                        )
+                        logWebDav(
+                            "online completion service backoff chapter=${index + 1}/${chapters.size} " +
+                                "kind=$retryKind consecutive=$consecutiveServiceFailures wait=${waitMs}ms",
+                        )
+                        sleepOnlineCompletionRetryDelay(task, waitMs)
                     }
                     logWebDav(
                         "online completion chapter failed ${index + 1}/${chapters.size} " +
@@ -8514,11 +8833,19 @@ class WebDavDriveHook(
         detailBody: String,
         chapter: OnlineChapter,
         index: Int,
+        batchSession: OnlineChapterBatchSession? = null,
     ): OnlineDownloadedChapter =
         OnlineSourceDownloadPolicyStore.withChapterDownload(currentContext(), target.source) {
-            val body = if (chapter.url == detailUrl) {
+            val batchBody = batchSession?.bodyFor(index, chapter)
+            val transport: String
+            val body = if (batchBody != null) {
+                transport = "batch"
+                batchBody
+            } else if (chapter.url == detailUrl) {
+                transport = "detail"
                 detailBody
             } else {
+                transport = "single"
                 OnlineConcurrentRateLimiter.withLimitBlocking(target.source) {
                     requestOnlineSearch(target.source, chapter.url)
                 }.body
@@ -8541,6 +8868,7 @@ class WebDavDriveHook(
                 volumeTitle = chapter.volumeTitle,
                 level = chapter.level,
                 sourceUrl = chapter.url,
+                transport = transport,
             )
         }
 
@@ -8564,7 +8892,7 @@ class WebDavDriveHook(
                 )
                 return
             }
-            val apiKey = OnlineSourceAuth.loginInfo(context, source)["密钥"].orEmpty()
+            val apiKey = OnlineSourceAuth.resolveApiKey(source.header, OnlineSourceAuth.loginInfo(context, source))
             val countsResponse = OnlineConcurrentRateLimiter.withLimitBlocking(source) {
                 requestOnlineSearch(source, FanqieParagraphCommentApi.countsUrl(bookId, itemId, apiKey))
             }
@@ -8832,10 +9160,12 @@ class WebDavDriveHook(
             rawScript = urlRule,
             chapterId = value,
             loginInfo = loginInfo,
-        )?.let { return it }
+        )?.let { return resolveOnlineUrl(baseUrl, it) }
         if (urlRule.contains("<js>", ignoreCase = true) || urlRule.contains("@js:", ignoreCase = true)) {
-            evaluateOnlineChapterUrlRule(urlRule, value, baseUrl)?.let { return it }
-            evaluateOnlineChapterUrlJs(urlRule, value)?.let { return it }
+            evaluateOnlineChapterUrlRule(urlRule, value, baseUrl)
+                ?.let { return resolveOnlineUrl(baseUrl, it) }
+            evaluateOnlineChapterUrlJs(urlRule, value)
+                ?.let { return resolveOnlineUrl(baseUrl, it) }
         }
         if (value.isNotBlank()) {
             onlineContentProxyTemplate(source)?.let { template ->
@@ -8972,7 +9302,7 @@ class WebDavDriveHook(
 
     private fun normalizeOnlineChapterText(raw: String): String {
         if (raw.isBlank()) return ""
-        return raw
+        return OnlineChapterImageMarkup.preserve(raw)
             .let(::cleanOnlineChapterContentValue)
             .replace(Regex("(?is)<script[\\s\\S]*?</script>"), " ")
             .replace(Regex("(?is)<style[\\s\\S]*?</style>"), " ")
@@ -9058,20 +9388,18 @@ class WebDavDriveHook(
         newChapters: Map<Int, OnlineDownloadedChapter>,
     ): Boolean {
         val root = bookDir.canonicalFile
-        val textDir = File(root, "OEBPS/Text").canonicalFile
-        val rootPrefix = root.path.trimEnd(File.separatorChar) + File.separator
-        if (!textDir.path.startsWith(rootPrefix)) {
-            error("EPUB Text directory escapes book dir")
-        }
-        textDir.mkdirs()
         writeOnlineCompletionDefaultStyle(root)
         var changed = false
         newChapters.forEach { (remoteIndex, chapter) ->
             val href = chapterHrefs.getOrNull(remoteIndex)
                 ?: error("EPUB chapter href missing for remote index $remoteIndex")
-            val file = File(root, "OEBPS/${href.removePrefix("OEBPS/")}").canonicalFile
-            if (!file.path.startsWith(rootPrefix)) error("EPUB chapter path escapes book dir")
-            file.writeText(chapterXhtml(chapter.title, chapter.content), Charsets.UTF_8)
+            writeOnlineCompletionChapterToBookDir(
+                bookDir = root,
+                index = remoteIndex,
+                chapter = chapter,
+                href = href,
+                target = target,
+            )
             changed = true
         }
         val tocChapters = remoteChapters.map { chapter ->
@@ -9098,9 +9426,10 @@ class WebDavDriveHook(
             chapterHrefs = chapterHrefs,
         )
         if (!opfFile.isFile || opfFile.readText(Charsets.UTF_8) != nextOpf) {
-            opfFile.writeText(nextOpf, Charsets.UTF_8)
+            writeOnlineCompletionTextAtomically(opfFile, nextOpf)
             changed = true
         }
+        synchronizeOnlineImageManifest(root)
         if (writeOnlineCompletionChapterIndex(root, target, remoteChapters, chapterHrefs)) changed = true
         return changed
     }
@@ -9158,19 +9487,19 @@ class WebDavDriveHook(
             url = current.url,
             volumeTitle = current.volumeTitle,
         )
+        val target = OnlineDownloadTarget(
+            source = source,
+            query = request.metadata.bookName,
+            result = OnlineBookSearchResult(
+                sourceName = source.name,
+                name = request.metadata.bookName,
+                author = "",
+                coverUrl = "",
+                detailUrl = request.metadata.detailUrl,
+                intro = "",
+            ),
+        )
         val result = runCatching {
-            val target = OnlineDownloadTarget(
-                source = source,
-                query = request.metadata.bookName,
-                result = OnlineBookSearchResult(
-                    sourceName = source.name,
-                    name = request.metadata.bookName,
-                    author = "",
-                    coverUrl = "",
-                    detailUrl = request.metadata.detailUrl,
-                    intro = "",
-                ),
-            )
             val detail = OnlineConcurrentRateLimiter.withLimitBlocking(source) {
                 requestOnlineSearch(source, request.metadata.detailUrl)
             }
@@ -9188,6 +9517,7 @@ class WebDavDriveHook(
                 index = request.chapterIndex,
                 chapter = content,
                 href = current.href,
+                target = target,
             )
             OnlineOnDemandMetadataStore.update(request.bookDir) { latest ->
                 latest.updateChapter(request.chapterIndex) {
@@ -9210,6 +9540,7 @@ class WebDavDriveHook(
 
     private fun writeOnlineCompletionChapterToImportedBookIfReady(
         task: OnlineCompletionDownloadTask,
+        target: OnlineDownloadTarget,
         index: Int,
         chapter: OnlineDownloadedChapter,
     ) {
@@ -9217,13 +9548,16 @@ class WebDavDriveHook(
         task.bookDirWriteLock.lock()
         try {
             throwIfOnlineCompletionDownloadCancelled(task)
-            writeOnlineCompletionChapterToBookDir(bookDir, index, chapter)
+            writeOnlineCompletionChapterToBookDir(bookDir, index, chapter, target = target)
         } finally {
             task.bookDirWriteLock.unlock()
         }
     }
 
-    private fun flushOnlineCompletionDownloadedChapters(task: OnlineCompletionDownloadTask) {
+    private fun flushOnlineCompletionDownloadedChapters(
+        task: OnlineCompletionDownloadTask,
+        target: OnlineDownloadTarget,
+    ) {
         val bookDir = task.importedBookDir ?: return
         val chapters = task.downloadedChapters.entries
             .sortedBy { it.key }
@@ -9233,7 +9567,7 @@ class WebDavDriveHook(
         try {
             throwIfOnlineCompletionDownloadCancelled(task)
             chapters.forEach { (index, chapter) ->
-                writeOnlineCompletionChapterToBookDir(bookDir, index, chapter)
+                writeOnlineCompletionChapterToBookDir(bookDir, index, chapter, target = target)
             }
             logWebDav(
                 "online completion flushed downloaded chapters to imported dir=" +
@@ -9249,6 +9583,7 @@ class WebDavDriveHook(
         index: Int,
         chapter: OnlineDownloadedChapter,
         href: String = "",
+        target: OnlineDownloadTarget? = null,
     ) {
         val root = bookDir.canonicalFile
         val textDir = File(root, "OEBPS/Text").canonicalFile
@@ -9263,19 +9598,109 @@ class WebDavDriveHook(
             ?: "Text/chapter_${(index + 1).toString().padStart(4, '0')}.xhtml"
         val file = File(root, "OEBPS/$relativeHref").canonicalFile
         if (!file.path.startsWith(rootPrefix)) error("EPUB chapter path escapes book dir")
-        val temp = File(textDir, "${file.name}.tmp-${Thread.currentThread().id}-${System.nanoTime()}").canonicalFile
-        if (!temp.path.startsWith(rootPrefix)) error("EPUB temp chapter path escapes book dir")
-        temp.writeText(chapterXhtml(chapter.title, chapter.content), Charsets.UTF_8)
-        if (file.exists() && !file.delete()) {
-            temp.delete()
-            error("无法替换章节文件：${file.name}")
+        val imageHrefs = if (target != null) {
+            localizeOnlineChapterImages(root, target, chapter)
+        } else {
+            existingOnlineChapterImageHrefs(root, chapter)
         }
-        if (!temp.renameTo(file)) {
-            temp.copyTo(file, overwrite = true)
-            temp.delete()
-        }
+        writeOnlineCompletionTextAtomically(
+            file,
+            chapterXhtml(chapter.title, chapter.content, imageHrefs),
+        )
         if (index == 0 || (index + 1) % 20 == 0) {
             logWebDav("online completion chapter file updated ${index + 1} path=${file.absolutePath}")
+        }
+    }
+
+    private fun localizeOnlineChapterImages(
+        bookDir: File,
+        target: OnlineDownloadTarget,
+        chapter: OnlineDownloadedChapter,
+    ): Map<String, String> {
+        val urls = OnlineChapterImageMarkup.imageUrls(chapter.content)
+        if (urls.isEmpty()) return emptyMap()
+        val imagesDir = File(bookDir, "OEBPS/Images").apply { mkdirs() }
+        val imageHrefs = linkedMapOf<String, String>()
+        urls.forEach { url ->
+            val stem = stableOnlineImageFileStem(url)
+            val existing = imagesDir.listFiles()?.firstOrNull { file ->
+                file.isFile && file.nameWithoutExtension == stem
+            }
+            if (existing != null) {
+                imageHrefs[url] = existing.name
+                return@forEach
+            }
+            val payload = runCatching { downloadOnlineBytes(target.source, url) }.getOrElse { error ->
+                logWebDav("online imported illustration download failed url=${url.take(120)} error=${error.message.orEmpty()}")
+                null
+            }
+            if (payload == null || payload.bytes.isEmpty()) return@forEach
+            val ext = onlineCoverExtFromMime(payload.mimeType)
+                ?: onlineCoverExtFromBytes(payload.bytes)
+                ?: onlineCoverExtFromUrl(url)
+            val file = File(imagesDir, "$stem.$ext")
+            writeOnlineCompletionBytesAtomically(file, payload.bytes)
+            imageHrefs[url] = file.name
+        }
+        synchronizeOnlineImageManifest(bookDir)
+        return imageHrefs
+    }
+
+    private fun existingOnlineChapterImageHrefs(
+        bookDir: File,
+        chapter: OnlineDownloadedChapter,
+    ): Map<String, String> {
+        val imagesDir = File(bookDir, "OEBPS/Images")
+        if (!imagesDir.isDirectory) return emptyMap()
+        return OnlineChapterImageMarkup.imageUrls(chapter.content).mapNotNull { url ->
+            val stem = stableOnlineImageFileStem(url)
+            val file = imagesDir.listFiles()?.firstOrNull { it.isFile && it.nameWithoutExtension == stem }
+            file?.let { url to it.name }
+        }.toMap()
+    }
+
+    private fun synchronizeOnlineImageManifest(bookDir: File) {
+        val opfFile = File(bookDir, "OEBPS/content.opf")
+        val imagesDir = File(bookDir, "OEBPS/Images")
+        if (!opfFile.isFile || !imagesDir.isDirectory) return
+        val manifestImages = imagesDir.listFiles()
+            ?.filter { it.isFile && it.nameWithoutExtension.startsWith("online_img_") }
+            ?.mapNotNull { onlineEpubImageManifestItem(it.name) }
+            .orEmpty()
+        if (manifestImages.isEmpty()) return
+        val original = opfFile.readText(Charsets.UTF_8)
+        val merged = mergeOnlineEpubImageManifest(original, manifestImages)
+        if (merged != original) {
+            writeOnlineCompletionTextAtomically(opfFile, merged)
+            logWebDav("online completion image manifest synchronized count=${manifestImages.size}")
+        }
+    }
+
+    private fun writeOnlineCompletionTextAtomically(target: File, content: String) {
+        writeOnlineCompletionBytesAtomically(target, content.toByteArray(Charsets.UTF_8))
+    }
+
+    private fun writeOnlineCompletionBytesAtomically(target: File, content: ByteArray) {
+        val parent = target.parentFile ?: error("EPUB target directory missing: ${target.name}")
+        parent.mkdirs()
+        val temp = File(
+            parent,
+            ".${target.name}.tmp-${Thread.currentThread().id}-${System.nanoTime()}",
+        )
+        temp.writeBytes(content)
+        try {
+            Files.move(
+                temp.toPath(),
+                target.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        } catch (_: Exception) {
+            Files.move(
+                temp.toPath(),
+                target.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+            )
         }
     }
 
@@ -9489,11 +9914,16 @@ class WebDavDriveHook(
                 writeBytesZipEntry(zip, "OEBPS/Images/cover.$coverExt", it.bytes)
                 writeTextZipEntry(zip, "OEBPS/Text/cover.xhtml", onlineCoverXhtml(target, coverExt))
             }
+            val contentImages = collectOnlineContentImages(target, chapters)
+            val imageHrefs = contentImages.associate { it.url to it.fileName }
+            contentImages.forEach { image ->
+                writeBytesZipEntry(zip, "OEBPS/Images/${image.fileName}", image.bytes)
+            }
             chapters.forEachIndexed { index, chapter ->
                 writeTextZipEntry(
                     zip,
                     "OEBPS/Text/chapter_${(index + 1).toString().padStart(4, '0')}.xhtml",
-                    chapterXhtml(chapter.title, chapter.content),
+                    chapterXhtml(chapter.title, chapter.content, imageHrefs),
                 )
             }
             val chapterHrefs = defaultOnlineChapterHrefs(chapters.size)
@@ -9501,7 +9931,7 @@ class WebDavDriveHook(
             writeTextZipEntry(
                 zip,
                 "OEBPS/content.opf",
-                onlineContentOpf(target, chapters, coverExt, cover != null, chapterHrefs),
+                onlineContentOpf(target, chapters, coverExt, cover != null, chapterHrefs, contentImages),
             )
             writeTextZipEntry(
                 zip,
@@ -10074,6 +10504,7 @@ class WebDavDriveHook(
                 putExtra(ONLINE_COMPLETION_NOTIFICATION_EXTRA_TEXT, text)
                 putExtra(ONLINE_COMPLETION_NOTIFICATION_EXTRA_PROGRESS, progress.coerceIn(0, 100))
                 putExtra(ONLINE_COMPLETION_NOTIFICATION_EXTRA_DONE, done)
+                putExtra(ModuleLogState.EXTRA_CONCISE_LOG_ENABLED, settingsProvider().conciseLogEnabled)
         }
 
     private fun writeStoredTextZipEntry(zip: ZipOutputStream, path: String, text: String) {
@@ -10175,12 +10606,16 @@ class WebDavDriveHook(
         return result
     }
 
-    private fun chapterXhtml(title: String, content: String): String {
+    private fun chapterXhtml(
+        title: String,
+        content: String,
+        imageHrefs: Map<String, String> = emptyMap(),
+    ): String {
         val bodyLines = stripDuplicatedChapterTitle(title, content.lineSequence()
             .map { it.trim() }
             .filter { it.isNotBlank() }
             .toList())
-        val paragraphs = bodyLines.joinToString("\n", transform = ::chapterParagraphHtml)
+        val paragraphs = bodyLines.joinToString("\n") { line -> chapterParagraphHtml(line, imageHrefs) }
         val heading = chapterHeadingHtml(title)
         return """<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml">
@@ -10191,7 +10626,12 @@ $paragraphs
 </html>"""
     }
 
-    private fun chapterParagraphHtml(line: String): String {
+    private fun chapterParagraphHtml(line: String, imageHrefs: Map<String, String> = emptyMap()): String {
+        OnlineChapterImageMarkup.markerUrl(line)?.let { url ->
+            val fileName = imageHrefs[url]
+            val src = if (fileName != null) "../Images/$fileName" else url
+            return "<div class=\"online-illustration\"><img src=\"${src.xmlEscape()}\" alt=\"\"/></div>"
+        }
         val cssClass = if (ONLINE_DIVIDER_LINE_REGEX.matches(line)) " class=\"divider-line\"" else ""
         return "<p$cssClass>${line.xmlEscape()}</p>"
     }
@@ -10383,6 +10823,7 @@ $points  </navMap>
         coverExt: String,
         hasCover: Boolean,
         chapterHrefs: List<String> = defaultOnlineChapterHrefs(chapters.size),
+        contentImages: List<OnlineContentImage> = emptyList(),
     ): String {
         val manifestChapters = chapters.indices.joinToString("\n") { index ->
             val order = index + 1
@@ -10391,6 +10832,9 @@ $points  </navMap>
             """    <item id="chapter$order" href="${href.xmlEscape()}" media-type="application/xhtml+xml"/>"""
         }
         val spine = chapters.indices.joinToString("\n") { index -> """    <itemref idref="chapter${index + 1}"/>""" }
+        val imageManifest = contentImages.mapIndexed { index, image ->
+            """    <item id="online-img-${index + 1}" href="Images/${image.fileName.xmlEscape()}" media-type="${image.mimeType}"/>"""
+        }.joinToString("\n")
         val coverManifest = if (hasCover) {
             listOf(
                 """    <item id="cover-image" href="Images/cover.$coverExt" media-type="${coverMimeType(coverExt)}" properties="cover-image"/>""",
@@ -10404,6 +10848,7 @@ $points  </navMap>
             """    <item id="default-style" href="Styles/default.css" media-type="text/css"/>""",
             """    <item id="source-chapter-index" href="$ONLINE_COMPLETION_CHAPTER_INDEX" media-type="application/json"/>""",
             coverManifest,
+            imageManifest,
             manifestChapters,
         ).filter { it.isNotBlank() }.joinToString("\n")
         val coverMeta = if (hasCover) """    <meta name="cover" content="cover-image"/>""" else ""
@@ -10534,6 +10979,47 @@ img{max-width:100%;max-height:100%;height:auto;}
             .trim()
             .take(80)
             .ifBlank { "online_completion" }
+
+    /** 一张要嵌入 EPUB 的正文插图。 */
+    private data class OnlineContentImage(
+        val url: String,
+        val fileName: String,
+        val bytes: ByteArray,
+        val mimeType: String,
+    )
+
+    /**
+     * 扫描所有章节里的插图标记，逐张下载并分配 EPUB 内文件名。下载失败的图片会被跳过（正文里回退成远程
+     * `<img>`），不影响其余章节与图片，保证“下载时自动下载插图”尽量成功且不阻断整本导入。
+     */
+    private fun collectOnlineContentImages(
+        target: OnlineDownloadTarget,
+        chapters: List<OnlineDownloadedChapter>,
+    ): List<OnlineContentImage> {
+        val urls = chapters.flatMap { OnlineChapterImageMarkup.imageUrls(it.content) }.distinct()
+        if (urls.isEmpty()) return emptyList()
+        val images = ArrayList<OnlineContentImage>(urls.size)
+        urls.forEach { url ->
+            val payload = runCatching { downloadOnlineBytes(target.source, url) }.getOrElse { error ->
+                logWebDav("online illustration download failed url=${url.take(120)} error=${error.message.orEmpty()}")
+                null
+            }
+            if (payload == null || payload.bytes.isEmpty()) return@forEach
+            val ext = onlineCoverExtFromMime(payload.mimeType)
+                ?: onlineCoverExtFromBytes(payload.bytes)
+                ?: onlineCoverExtFromUrl(url)
+            images.add(
+                OnlineContentImage(
+                    url = url,
+                    fileName = "${stableOnlineImageFileStem(url)}.$ext",
+                    bytes = payload.bytes,
+                    mimeType = coverMimeType(ext),
+                ),
+            )
+        }
+        logWebDav("online illustrations embedded=${images.size}/${urls.size} book=${target.result.name}")
+        return images
+    }
 
     private fun String.xmlEscape(): String =
         replace("&", "&amp;")
@@ -12360,18 +12846,16 @@ img{max-width:100%;max-height:100%;height:auto;}
     private fun android.database.Cursor.longAt(index: Int): Long =
         if (index < 0 || isNull(index)) 0L else getLong(index)
 
-    private fun logWebDav(message: String) {
-        // 简洁日志开启时，LSPosed 面板只保留错误日志（失败/异常），
-        // 其余常规运行日志静音，避免刷屏；关闭简洁日志则全部输出。
-        val conciseLog = runCatching { settingsProvider().conciseLogEnabled }.getOrDefault(true)
-        val isErrorMessage = message.contains("failed", ignoreCase = true) ||
-            message.contains("error", ignoreCase = true) ||
-            message.contains("exception", ignoreCase = true) ||
-            message.contains("crash", ignoreCase = true)
-        if (VERBOSE_WEBDAV_LOG || !conciseLog || isErrorMessage) {
-            XposedBridge.log("$LOG_PREFIX WebDAV $message")
+    private fun logWebDav(
+        message: String,
+        level: ModuleLogLevel = legacyModuleLogLevel(message),
+    ) {
+        when (level) {
+            ModuleLogLevel.ERROR -> XposedBridge.logError("$LOG_PREFIX WebDAV ERROR $message")
+            ModuleLogLevel.WARN,
+            ModuleLogLevel.INFO,
+            -> XposedBridge.log("$LOG_PREFIX WebDAV $message")
         }
-        runCatching { Log.i(LOG_TAG, message) }
     }
 
     private fun method(className: String, methodName: String, parameterCount: Int): Method {
@@ -13416,6 +13900,7 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val ANDROID_OS_ICON_METHOD = "getAndroidOs"
         const val FUNCTION0_CLASS = "kotlin.jvm.functions.Function0"
         const val FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
+        const val FUNCTION2_CLASS = "kotlin.jvm.functions.Function2"
         const val FUNCTION3_CLASS = "kotlin.jvm.functions.Function3"
         const val COMPOSER_CLASS = "androidx.compose.runtime.Composer"
         const val KOTLIN_PAIR_CLASS = "kotlin.Pair"
@@ -13508,6 +13993,17 @@ img{max-width:100%;max-height:100%;height:auto;}
                 text-indent: 2em;
             }
 
+            /* 正文插图 */
+            .online-illustration {
+                margin: 0.8em 0;
+                text-align: center;
+                text-indent: 0;
+            }
+            .online-illustration img {
+                max-width: 100%;
+                height: auto;
+            }
+
             /* 章节标题 */
             .te-chapter-heading {
                 text-align: center;
@@ -13557,6 +14053,7 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val MODULE_PACKAGE_NAME = "com.reamicro.fix"
         const val ONLINE_COMPLETION_NOTIFICATION_ACTION = "com.reamicro.fix.ONLINE_COMPLETION_NOTIFICATION"
         const val ONLINE_COMPLETION_CANCEL_ACTION = "com.reamicro.fix.ONLINE_COMPLETION_CANCEL"
+        const val ONLINE_COMPLETION_HEARTBEAT_ACTION = "com.reamicro.fix.ONLINE_COMPLETION_HEARTBEAT"
         const val ONLINE_COMPLETION_NOTIFICATION_ACTIVITY_CLASS =
             "com.reamicro.fix.notification.OnlineCompletionNotificationActivity"
         const val ONLINE_COMPLETION_NOTIFICATION_RECEIVER_CLASS =

@@ -47,6 +47,7 @@ import com.reamicro.fix.ai.AiApiConfig
 import com.reamicro.fix.ai.AiDictionaryPreset
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.ai.AiApiTestResult
+import com.reamicro.fix.logging.ModuleLogState
 import com.reamicro.fix.online.OnlineReaderContextBridge
 import com.reamicro.fix.reader.SearchHighlightPlanner
 import com.reamicro.fix.settings.ModuleSettings
@@ -1148,7 +1149,9 @@ class ReaderHook(
         targets.forEach { (className, methodName) ->
             runCatching {
                 val cls = classLoader.loadClass(className)
-                val methods = cls.declaredMethods.filter { it.name == methodName }
+                val methods = cls.declaredMethods.filter {
+                    it.name == methodName || it.name.startsWith("$methodName-")
+                }
                 if (methods.isEmpty()) error("$methodName not found")
                 methods.forEach { method ->
                     method.isAccessible = true
@@ -6155,6 +6158,10 @@ class ReaderHook(
                 .putExtra(
                     ReadAloudIntents.EXTRA_LYRICON_ENABLED,
                     settingsProvider().canUseReaderReadAloudLyricon,
+                )
+                .putExtra(
+                    ModuleLogState.EXTRA_CONCISE_LOG_ENABLED,
+                    settingsProvider().conciseLogEnabled,
                 ),
         )
         return sessionId

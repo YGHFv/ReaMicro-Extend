@@ -11,8 +11,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
 import com.reamicro.fix.R
+import com.reamicro.fix.logging.ModuleAndroidLog
+import com.reamicro.fix.logging.ModuleLogState
 
 class OnlineCompletionNotificationActivity : Activity() {
     private var pendingNotificationIntent: Intent? = null
@@ -29,16 +30,17 @@ class OnlineCompletionNotificationActivity : Activity() {
     }
 
     private fun handleNotificationIntent(intent: Intent?): Boolean {
+        ModuleLogState.applyFromIntent(intent)
         if (intent?.action != ACTION_ONLINE_COMPLETION_NOTIFICATION) return true
-        Log.i(LOG_TAG, "module notification activity launched")
+        ModuleAndroidLog.legacy(LOG_TAG, "module notification activity launched")
         if (!hasNotificationPermission()) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 pendingNotificationIntent = Intent(intent)
                 requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_POST_NOTIFICATIONS)
-                Log.i(LOG_TAG, "module notification permission requested")
+                ModuleAndroidLog.legacy(LOG_TAG, "module notification permission requested")
                 return false
             }
-            Log.i(LOG_TAG, "module notification permission denied")
+            ModuleAndroidLog.legacy(LOG_TAG, "module notification permission denied")
             return true
         }
         postNotification(this, intent)
@@ -58,7 +60,7 @@ class OnlineCompletionNotificationActivity : Activity() {
             if (granted && intent != null) {
                 postNotification(this, intent)
             } else {
-                Log.i(LOG_TAG, "module notification permission denied after request")
+                ModuleAndroidLog.legacy(LOG_TAG, "module notification permission denied after request")
             }
             finishWithoutAnimation()
         }
@@ -74,7 +76,7 @@ class OnlineCompletionNotificationActivity : Activity() {
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
-            Log.i(LOG_TAG, "module notification permission denied")
+            ModuleAndroidLog.legacy(LOG_TAG, "module notification permission denied")
             return
         }
         val id = intent.getIntExtra(EXTRA_ID, 0).takeIf { it > 0 } ?: return
@@ -118,7 +120,7 @@ class OnlineCompletionNotificationActivity : Activity() {
         }
         manager.notify(id, builder.build())
         cancelOnlineCompletionNotificationIfDone(manager, id, done)
-        Log.i(LOG_TAG, "module activity notification posted fallback id=$id progress=$progress done=$done title=$title")
+        ModuleAndroidLog.legacy(LOG_TAG, "module activity notification posted fallback id=$id progress=$progress done=$done title=$title")
     }
 
     private fun cancelPendingIntent(context: Context, id: Int, key: String): PendingIntent {

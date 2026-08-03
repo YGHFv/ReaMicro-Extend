@@ -91,6 +91,7 @@ class ReaderDialogueHighlightHook(
             }
             XposedBridge.log("$LOG_PREFIX dialogue highlight hook installed: $className count=${methods.size}")
         }.onFailure {
+            if (it is ClassNotFoundException) return@onFailure
             XposedBridge.log("$LOG_PREFIX dialogue highlight hook failed: $className ${it.stackTraceToString()}")
         }
     }
