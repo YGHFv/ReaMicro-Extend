@@ -77,6 +77,14 @@ class ReaderDialogueHighlightHook(
         hookActivityConfigurationChanges()
     }
 
+    fun releaseMemory(reason: String) {
+        clearHighlightRuntimeCaches()
+        synchronized(fontFamilyCache) { fontFamilyCache.clear() }
+        synchronized(failedFontFamilyLogKeys) { failedFontFamilyLogKeys.clear() }
+        synchronized(onlineParagraphCommentDebugKeys) { onlineParagraphCommentDebugKeys.clear() }
+        XposedBridge.log("$LOG_PREFIX dialogue highlight memory released: $reason")
+    }
+
     private fun hookContentDom(className: String) {
         runCatching {
             val methods = hostCompat.contentDomOnContentMethods(className)

@@ -203,6 +203,58 @@ class ReaderHook(
         hookHomeBookshelfScreen()
     }
 
+    fun onHostActivityDestroyed(reason: String) {
+        unregisterSearchOverlayThemeCallbacks()
+        releaseReaderMemory(reason, releaseEpub = true)
+    }
+
+    fun onTrimMemory(level: Int) {
+        val runningUnderPressure = level in
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW..ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
+        if (runningUnderPressure || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
+            resetFullTextSearchState("trim memory level=$level", removeOverlays = false)
+            cachedThemeColors = null
+        }
+        when {
+            level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND ->
+                releaseReaderStrongReferences("trim memory level=$level", releaseEpub = true)
+            level == ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN ||
+                level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ->
+                releaseReaderStrongReferences("trim memory level=$level", releaseEpub = false)
+        }
+    }
+
+    fun onLowMemory() {
+        releaseReaderMemory("system low memory", releaseEpub = true)
+    }
+
+    private fun releaseReaderStrongReferences(reason: String, releaseEpub: Boolean) {
+        currentPageStrong = null
+        if (releaseEpub) currentEpubStrong = null
+        XposedBridge.log("$LOG_PREFIX reader strong references released: $reason releaseEpub=$releaseEpub")
+    }
+
+    private fun releaseReaderMemory(reason: String, releaseEpub: Boolean) {
+        currentPageRef = null
+        currentPageStrong = null
+        currentVisiblePageSignature = null
+        currentVisiblePageNumber = null
+        lastHandledReaderStatisticsKey = ""
+        lastOnDemandPrefetchSpineKey = ""
+        onDemandPrefetchInFlight.clear()
+        onDemandPrefetchRetryCount.clear()
+        onDemandRefreshPending.clear()
+        onDemandRefreshInFlight.clear()
+        renderingEpubPage.remove()
+        if (releaseEpub) {
+            currentEpubRef = null
+            currentEpubStrong = null
+            OnlineReaderContextBridge.clear()
+        }
+        resetFullTextSearchState(reason, removeOverlays = false)
+        XposedBridge.log("$LOG_PREFIX reader memory released: $reason releaseEpub=$releaseEpub")
+    }
+
     private fun canEditReaderSelection(): Boolean =
         settingsProvider().canEditReaderSelection
 
@@ -3596,16 +3648,20 @@ class ReaderHook(
                             if (previousEpub != null && previousEpub !== param.thisObject) {
                                 val previousDirectory = epubDirectory(previousEpub)
                                 val nextDirectory = epubDirectory(param.thisObject)
+                                // Epub.read 可能由同一本书的恢复流程创建新的 Epub 实例。
+                                // 先释放旧页的 HtmlDocument，再让宿主开始构建新分页窗口，避免旧、新文档重叠。
+                                currentPageRef = null
+                                currentPageStrong = null
+                                currentVisiblePageSignature = null
+                                currentVisiblePageNumber = null
+                                lastHandledReaderStatisticsKey = ""
+                                lastOnDemandPrefetchSpineKey = ""
                                 if (
                                     previousDirectory.isBlank() ||
                                     nextDirectory.isBlank() ||
                                     previousDirectory != nextDirectory
                                 ) {
-                                    currentPageRef = null
-                                    currentPageStrong = null
                                     OnlineReaderContextBridge.clear()
-                                    lastHandledReaderStatisticsKey = ""
-                                    lastOnDemandPrefetchSpineKey = ""
                                     resetFullTextSearchState("epub changed", removeOverlays = true)
                                 }
                             }

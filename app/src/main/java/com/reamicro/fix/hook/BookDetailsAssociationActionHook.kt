@@ -9,16 +9,22 @@ import java.lang.ref.WeakReference
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
-import java.util.concurrent.ConcurrentHashMap
+import java.util.Collections
+import java.util.LinkedHashMap
 import java.util.concurrent.CountDownLatch
 
 class BookDetailsAssociationActionHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
 ) {
-    private val localBooksById = ConcurrentHashMap<Long, Any>()
-    private val localBooksByCloudId = ConcurrentHashMap<Long, Any>()
-    private val completedCoverFixes = ConcurrentHashMap<String, Boolean>()
+    private val localBooksById = Collections.synchronizedMap(limitedBookCache())
+    private val localBooksByCloudId = Collections.synchronizedMap(limitedBookCache())
+    private val completedCoverFixes = Collections.synchronizedMap(
+        object : LinkedHashMap<String, Boolean>(32, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>?): Boolean =
+                size > MAX_COMPLETED_COVER_FIXES
+        },
+    )
     @Volatile private var currentDetailsContext: DetailContext? = null
 
     fun install() {
@@ -33,6 +39,14 @@ class BookDetailsAssociationActionHook(
         val details = currentDetailsContext ?: return false
         fixAssociationCover(details.bookId)
         return true
+    }
+
+    fun releaseMemory(reason: String) {
+        currentDetailsContext = null
+        localBooksById.clear()
+        localBooksByCloudId.clear()
+        completedCoverFixes.clear()
+        XposedBridge.log("$LOG_PREFIX book details memory released: $reason")
     }
 
     private fun hookBookshelfDetailNavigation() {
@@ -502,6 +516,12 @@ class BookDetailsAssociationActionHook(
         }
     }
 
+    private fun limitedBookCache(): LinkedHashMap<Long, Any> =
+        object : LinkedHashMap<Long, Any>(32, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Any>?): Boolean =
+                size > MAX_CACHED_LOCAL_BOOKS
+        }
+
     private fun callLong(target: Any, methodName: String): Long =
         (XposedHelpers.callMethod(target, methodName) as? Number)?.toLong()
             ?: XposedHelpers.callMethod(target, methodName).toString().toLong()
@@ -555,6 +575,8 @@ class BookDetailsAssociationActionHook(
         const val KOTLIN_INTRINSICS_CLASS = "kotlin.coroutines.intrinsics.IntrinsicsKt"
         const val KOTLIN_COROUTINE_SINGLETONS_CLASS = "kotlin.coroutines.intrinsics.CoroutineSingletons"
         const val KOTLIN_RESULT_KT_CLASS = "kotlin.ResultKt"
+        const val MAX_CACHED_LOCAL_BOOKS = 32
+        const val MAX_COMPLETED_COVER_FIXES = 64
         const val LOG_PREFIX = "ReaMicro LSP"
     }
 }

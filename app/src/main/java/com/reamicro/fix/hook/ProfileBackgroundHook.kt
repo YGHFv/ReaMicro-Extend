@@ -499,6 +499,12 @@ class ProfileBackgroundHook(
         }
     }
 
+    fun releaseMemory(reason: String) {
+        invalidateImageCaches()
+        cachedColorScheme = null
+        XposedBridge.log("$LOG_PREFIX profile background memory released: $reason")
+    }
+
     private fun invalidateImageCaches() {
         cachedBitmap = null
         cachedImagePath = null

@@ -1,6 +1,9 @@
 package com.reamicro.fix.hook
 
 import android.app.Activity
+import android.app.Application
+import android.content.ComponentCallbacks2
+import android.content.res.Configuration
 import android.os.Bundle
 import android.widget.Toast
 import com.reamicro.fix.association.model.BookSource
@@ -25,18 +28,20 @@ class ReaMicroHookEntry {
     @Volatile private var currentActivityResumed: Boolean = false
     private val moduleSettings = XposedModuleSettings { currentActivityRef?.get() }
     private val installedFeatureIds = linkedSetOf<String>()
+    @Volatile private var memoryCallbacksInstalled: Boolean = false
 
     fun handleLoadedPackage(packageName: String, classLoader: ClassLoader) {
         if (packageName !in REAMICRO_PACKAGES) return
         XposedBridge.log("$LOG_PREFIX loaded for $packageName")
         YouShuWebSearchBridge.attach { currentActivityRef?.get() }
-        ReaderHook(
+        val readerHook = ReaderHook(
             classLoader = classLoader,
             activityProvider = { currentActivityRef?.get() },
             settingsProvider = moduleSettings::snapshot,
             settings = moduleSettings,
             isActivityResumedProvider = { currentActivityResumed },
-        ).install()
+        )
+        readerHook.install()
         ReaderAutoPageHook(
             classLoader = classLoader,
             activityProvider = { currentActivityRef?.get() },
@@ -58,11 +63,12 @@ class ReaMicroHookEntry {
             activityProvider = { currentActivityRef?.get() },
             settings = moduleSettings,
         ).install()
-        ReaderDialogueHighlightHook(
+        val readerDialogueHighlightHook = ReaderDialogueHighlightHook(
             classLoader = classLoader,
             activityProvider = { currentActivityRef?.get() },
             settings = moduleSettings,
-        ).install()
+        )
+        readerDialogueHighlightHook.install()
         FileEditCompletionHook(
             classLoader = classLoader,
             activityProvider = { currentActivityRef?.get() },
@@ -116,7 +122,14 @@ class ReaMicroHookEntry {
             settingsProvider = moduleSettings::snapshot,
         )
         webDavDriveHook.install()
-        hookMainActivity(classLoader, webDavDriveHook, profileBackgroundHook)
+        hookMainActivity(
+            classLoader = classLoader,
+            webDavDriveHook = webDavDriveHook,
+            profileBackgroundHook = profileBackgroundHook,
+            readerHook = readerHook,
+            readerDialogueHighlightHook = readerDialogueHighlightHook,
+            bookDetailsAssociationActionHook = bookDetailsAssociationActionHook,
+        )
     }
 
     private fun disableSearchSource(source: BookSource, message: String) {
@@ -150,6 +163,9 @@ class ReaMicroHookEntry {
         classLoader: ClassLoader,
         webDavDriveHook: WebDavDriveHook,
         profileBackgroundHook: ProfileBackgroundHook,
+        readerHook: ReaderHook,
+        readerDialogueHighlightHook: ReaderDialogueHighlightHook,
+        bookDetailsAssociationActionHook: BookDetailsAssociationActionHook,
     ) {
         runCatching {
             val mainActivityClass = XposedHelpers.findClass("app.zhendong.reamicro.MainActivity", classLoader)
@@ -167,6 +183,13 @@ class ReaMicroHookEntry {
                         currentActivityResumed = false
                         moduleSettings.attachContext(activity)
                         installExternalFeatures(classLoader)
+                        installMemoryCallbacks(
+                            application = activity.application,
+                            readerHook = readerHook,
+                            readerDialogueHighlightHook = readerDialogueHighlightHook,
+                            profileBackgroundHook = profileBackgroundHook,
+                            bookDetailsAssociationActionHook = bookDetailsAssociationActionHook,
+                        )
                         RotationOrientationController.apply(activity, moduleSettings.snapshot())
                         webDavDriveHook.cleanupStartupCacheIfNeeded(activity)
                         profileBackgroundHook.refreshRandomImageFor(activity)
@@ -219,6 +242,61 @@ class ReaMicroHookEntry {
             }
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to hook MainActivity: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun installMemoryCallbacks(
+        application: Application,
+        readerHook: ReaderHook,
+        readerDialogueHighlightHook: ReaderDialogueHighlightHook,
+        profileBackgroundHook: ProfileBackgroundHook,
+        bookDetailsAssociationActionHook: BookDetailsAssociationActionHook,
+    ) {
+        if (memoryCallbacksInstalled) return
+        synchronized(this) {
+            if (memoryCallbacksInstalled) return
+            application.registerComponentCallbacks(object : ComponentCallbacks2 {
+                override fun onConfigurationChanged(newConfig: Configuration) = Unit
+
+                override fun onTrimMemory(level: Int) {
+                    readerHook.onTrimMemory(level)
+                    if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
+                        readerDialogueHighlightHook.releaseMemory("trim memory level=$level")
+                        profileBackgroundHook.releaseMemory("trim memory level=$level")
+                        bookDetailsAssociationActionHook.releaseMemory("trim memory level=$level")
+                    }
+                }
+
+                override fun onLowMemory() {
+                    readerHook.onLowMemory()
+                    readerDialogueHighlightHook.releaseMemory("system low memory")
+                    profileBackgroundHook.releaseMemory("system low memory")
+                    bookDetailsAssociationActionHook.releaseMemory("system low memory")
+                }
+            })
+            application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+                override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+                override fun onActivityStarted(activity: Activity) = Unit
+                override fun onActivityResumed(activity: Activity) = Unit
+                override fun onActivityPaused(activity: Activity) = Unit
+                override fun onActivityStopped(activity: Activity) = Unit
+                override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+
+                override fun onActivityDestroyed(activity: Activity) {
+                    if (activity.javaClass.name != "app.zhendong.reamicro.MainActivity") return
+                    if (activity.isChangingConfigurations) return
+                    readerHook.onHostActivityDestroyed("MainActivity lifecycle destroyed")
+                    readerDialogueHighlightHook.releaseMemory("MainActivity lifecycle destroyed")
+                    profileBackgroundHook.releaseMemory("MainActivity lifecycle destroyed")
+                    bookDetailsAssociationActionHook.releaseMemory("MainActivity lifecycle destroyed")
+                    if (currentActivityRef?.get() === activity) {
+                        currentActivityRef = null
+                        currentActivityResumed = false
+                    }
+                }
+            })
+            memoryCallbacksInstalled = true
+            XposedBridge.log("$LOG_PREFIX memory callbacks installed")
         }
     }
 
