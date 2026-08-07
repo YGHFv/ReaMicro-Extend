@@ -13,6 +13,7 @@ class ReaMicroLibXposedEntry : XposedModule() {
         val moduleApkPath = runCatching { getModuleApplicationInfo().sourceDir }.getOrNull()
         ExternalSourceLoader.configure(moduleApkPath)
         ReaderHighlightImageAssets.configure(moduleApkPath)
+        ReaderBackgroundAssets.configure(moduleApkPath)
         XposedBridge.log(
             "ReaMicro API101 entry ready: package=${param.packageName}, " +
                 "api=${getApiVersion()}, framework=$frameworkName $frameworkVersion($frameworkVersionCode)",

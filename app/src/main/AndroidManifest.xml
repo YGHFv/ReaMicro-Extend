@@ -8,6 +8,7 @@
 
     <queries>
         <package android:name="app.zhendong.reamicro" />
+        <package android:name="com.reamicro.fix" />
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>

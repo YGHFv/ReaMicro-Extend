@@ -7,6 +7,7 @@ import android.net.Uri
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.view.GestureDetector
 import android.view.MotionEvent
@@ -18,7 +19,6 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import com.reamicro.fix.R
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.settings.XposedModuleSettings
 import de.robv.android.xposed.XC_MethodHook
@@ -27,6 +27,7 @@ import de.robv.android.xposed.XposedHelpers
 import java.io.File
 import java.lang.ref.WeakReference
 import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 import java.security.MessageDigest
 import java.util.Collections
@@ -36,12 +37,12 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 改造阅微阅读页「主题」面板的「背景」区（host `ReaderThemesKt.ReaderBackground-3xixttE`）：
- * 在其下方注入一行模块管理的多图缩略图，按当前深浅模式只显示对应组；
- * 单击切换背景、长按移除、双击当前项回退默认；用户经 host 原选图入口新增的图自动纳入当前组。
+ * 改造阅微阅读页「主题」面板的完整混搭背景区：
+ * 「内置」保留阅微原生的颜色、材质与背景选择；「侧载」显示模块默认背景、用户背景和添加入口。
+ * 单击切换背景、长按移除、双击当前项回退模块默认；深浅模式分别保存。
  *
- * 深浅背景由模块独立保存；正文只在宿主背景绘制 lambda 读取 State 时按真实主题返回对应 URI，
- * 并通过 Compose snapshot 版本 State 触发当前阅读页即时重组，不写入宿主全局 BACKGROUND。
+ * 正文只在宿主背景绘制 lambda 读取 State 时按真实主题返回对应 URI，
+ * 同时持有实际读取该值的 RecomposeScope，选择变化后直接失效当前正文 composition，避免返回书架才刷新。
  */
 class ReaderBackgroundHook(
     private val classLoader: ClassLoader,
@@ -65,9 +66,29 @@ class ReaderBackgroundHook(
     @Volatile private var selectionVersionState: Any? = null
     @Volatile private var lightHostBackgroundState: Any? = null
     @Volatile private var darkHostBackgroundState: Any? = null
+    @Volatile private var lightContainerRecomposeScope: Any? = null
+    @Volatile private var darkContainerRecomposeScope: Any? = null
+    @Volatile private var lightBackgroundRecomposeScope: Any? = null
+    @Volatile private var darkBackgroundRecomposeScope: Any? = null
+    @Volatile private var lightPanelRecomposeScope: Any? = null
+    @Volatile private var darkPanelRecomposeScope: Any? = null
     @Volatile private var lightSelectionOverride: String? = null
     @Volatile private var darkSelectionOverride: String? = null
     @Volatile private var builtInBackgroundsReady: Boolean = false
+    @Volatile private var backgroundHostContext: Context? = null
+    @Volatile private var showNativeBackgrounds: Boolean = true
+    @Volatile private var currentSession: Any? = null
+    @Volatile private var panelRootRecomposeScope: WeakReference<Any>? = null
+    @Volatile private var backgroundPreferenceKey: Any? = null
+    @Volatile private var themePreferenceKey: Any? = null
+    @Volatile private var mipmapPreferenceKey: Any? = null
+    @Volatile private var sessionUpdateMethod: Method? = null
+    @Volatile private var currentHostBackgroundValue: String = ""
+    @Volatile private var globalUiTypeface: Typeface? = null
+    @Volatile private var lightThemePrimaryColor: Int = DEFAULT_THEME_PRIMARY_COLOR
+    @Volatile private var darkThemePrimaryColor: Int = DEFAULT_THEME_PRIMARY_COLOR
+    private val renderingReaderThemesContent = ThreadLocal.withInitial { 0 }
+    private val moduleSessionUpdate = ThreadLocal.withInitial { false }
     private val imagePickInProgress = AtomicBoolean(false)
     private val darkThemeContentHitLogged = AtomicBoolean(false)
     private val darkEpubBackgroundHitLogged = AtomicBoolean(false)
@@ -82,24 +103,39 @@ class ReaderBackgroundHook(
                     m.parameterTypes.getOrNull(0)?.name == SESSION_CLASS &&
                     m.parameterTypes.getOrNull(1)?.name == USER_STORAGE_CLASS
             }?.apply { isAccessible = true } ?: error("ReaderBackground 方法未找到")
-            // 末两参固定为 (Composer, int)，Composer 在倒数第 2 位。
+            // ReaderBackground 位于阅微颜色/材质混搭区之后：内置模式保留宿主内容并在末尾加开关，
+            // 侧载模式则在同一位置绘制模块背景区并跳过宿主原生背景选择。
             val composerIdx = bgMethod.parameterTypes.size - 2
             XposedBridge.hookMethod(bgMethod, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!settingsProvider().canUseReaderBackground) return
                     val args = param.args ?: return
-                    args.getOrNull(0) ?: return
+                    val session = args.getOrNull(0) ?: return
+                    currentSession = session
                     args.getOrNull(1) ?: return
                     val composer = args.getOrNull(composerIdx) ?: return
                     val dark = renderingDarkThemeContent
                     currentReaderDark = dark
-                    // 接管整个「背景」区：模块画标题 + 一行多图，替代 host 单图大条。
-                    val ok = runCatching { emitBackgroundArea(composer, dark) }
-                        .onFailure { XposedBridge.log("$LOG_PREFIX emit area failed: ${it.stackTraceToString()}") }
-                        .isSuccess
-                    if (ok) param.result = null // 跳过 host 原大条渲染
+                    cacheThemePrimaryColor(composer, dark)
+                    observeSelectionVersion()
+                    capturePanelRecomposeScope(composer, dark)
+                    if (showNativeBackgrounds) {
+                        // 内置页只保留阅微自己的颜色与材质混搭；跳过原生“背景/选取相册图片”区，
+                        // 在同一位置绘制固定尺寸的来源页签。
+                        val ok = runCatching { emitBackgroundSourceSwitch(composer, dark) }
+                            .onFailure { XposedBridge.log("$LOG_PREFIX emit native source switch failed: ${it.stackTraceToString()}") }
+                            .isSuccess
+                        if (ok) param.result = null
+                    } else {
+                        val ok = runCatching { emitBackgroundArea(composer, dark) }
+                            .onFailure { XposedBridge.log("$LOG_PREFIX emit side-loaded area failed: ${it.stackTraceToString()}") }
+                            .isSuccess
+                        if (ok) param.result = null
+                    }
                 }
             })
+            hookNativeMixVisibility()
+            hookSessionBackgroundUpdates()
             hookDarkThemeContent()
             hookEpubBackground()
             hookActivityResult()
@@ -107,6 +143,183 @@ class ReaderBackgroundHook(
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to hook reader background: ${it.stackTraceToString()}")
         }
+    }
+
+    private fun hookNativeMixVisibility() {
+        runCatching {
+            val animatedVisibility = cls(ANIMATED_VISIBILITY_KT_CLASS).declaredMethods.firstOrNull {
+                it.name == ANIMATED_VISIBILITY_METHOD &&
+                    it.parameterTypes.size == 10 &&
+                    it.parameterTypes.getOrNull(1) == Boolean::class.javaPrimitiveType &&
+                    it.parameterTypes.getOrNull(7)?.name == COMPOSER_CLASS
+            }?.apply { isAccessible = true }
+                ?: error("AnimatedVisibility 方法未找到")
+            XposedBridge.hookMethod(animatedVisibility, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!settingsProvider().canUseReaderBackground || !showNativeBackgrounds) return
+                    if ((renderingReaderThemesContent.get() ?: 0) > 0) param.args[1] = true
+                }
+            })
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX hook native mix visibility failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun hookSessionBackgroundUpdates() {
+        runCatching {
+            val prefKeysClass = cls(PREF_KEYS_CLASS)
+            val prefKeys = prefKeysClass.getDeclaredField("INSTANCE").apply { isAccessible = true }.get(null)
+            backgroundPreferenceKey = prefKeysClass.getDeclaredMethod("getBACKGROUND").invoke(prefKeys)
+            themePreferenceKey = prefKeysClass.getDeclaredMethod("getTHEME").invoke(prefKeys)
+            mipmapPreferenceKey = prefKeysClass.getDeclaredMethod("getMIPMAP").invoke(prefKeys)
+            val sessionClass = cls(SESSION_CLASS)
+            val updateMethod = sessionClass.declaredMethods.firstOrNull {
+                it.name == "update" && it.parameterTypes.size == 3
+            }?.apply { isAccessible = true } ?: error("Session.update 方法未找到")
+            sessionUpdateMethod = updateMethod
+            XposedBridge.hookMethod(updateMethod, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    currentSession = param.thisObject
+                    if (moduleSessionUpdate.get() == true) return
+                    val key = param.args?.getOrNull(0) ?: return
+                    val value = param.args?.getOrNull(1)
+                    if (key === backgroundPreferenceKey) {
+                        currentHostBackgroundValue = value as? String ?: ""
+                        clearSelectionOverrides()
+                        refreshVisibleArea(currentReaderDark)
+                    } else if (key === themePreferenceKey || key === mipmapPreferenceKey) {
+                        // 具体选择阅微颜色/材质时才退出侧载来源，并清除模块历史勾选。
+                        clearSelectionOverrides()
+                        backgroundExecutor.execute {
+                            runCatching {
+                                settings.setReaderBgCurrent(dark = currentReaderDark, path = "")
+                                updateHostPreference(backgroundPreferenceKey, "")
+                                currentHostBackgroundValue = ""
+                                refreshVisibleArea(currentReaderDark)
+                            }.onFailure {
+                                XposedBridge.log("$LOG_PREFIX clear side-loaded selection failed: ${it.stackTraceToString()}")
+                            }
+                        }
+                    }
+                }
+            })
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX hook Session background updates failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun collapsedNativeBackgroundHeight(): Float = 38f
+
+    private fun updateHostBackground(value: String) {
+        updateHostPreference(backgroundPreferenceKey, value)
+        currentHostBackgroundValue = value
+    }
+
+    private fun updateHostPreference(key: Any?, value: String) {
+        val session = currentSession ?: error("Session 尚未捕获")
+        val resolvedKey = key ?: error("宿主设置 key 尚未捕获")
+        val method = sessionUpdateMethod ?: error("Session.update 尚未捕获")
+        moduleSessionUpdate.set(true)
+        try {
+            invokeSuspendMethod(method, session, resolvedKey, value)
+        } finally {
+            moduleSessionUpdate.set(false)
+        }
+    }
+
+    private fun invokeSuspendMethod(method: Method, target: Any, vararg args: Any?): Any? {
+        val continuationClass = cls(KOTLIN_CONTINUATION_CLASS)
+        val continuation = Proxy.newProxyInstance(classLoader, arrayOf(continuationClass)) { proxy, proxyMethod, proxyArgs ->
+            when (proxyMethod.name) {
+                "getContext" -> cls(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS).getDeclaredField("INSTANCE").get(null)
+                "resumeWith" -> targetUnit()
+                "toString" -> "ReaMicroReaderBackgroundContinuation"
+                "hashCode" -> System.identityHashCode(proxy)
+                "equals" -> proxy === proxyArgs?.getOrNull(0)
+                else -> null
+            }
+        }
+        return method.invoke(target, *(args.toList() + continuation).toTypedArray())
+    }
+
+    private fun updateHostPreferencesInOrder(
+        updates: List<Pair<Any?, String>>,
+        onSuccess: () -> Unit,
+        onFailure: (Throwable) -> Unit,
+    ) {
+        fun updateAt(index: Int) {
+            if (index >= updates.size) {
+                onSuccess()
+                return
+            }
+            val (key, value) = updates[index]
+            updateHostPreferenceAsync(
+                key = key,
+                value = value,
+                onSuccess = { updateAt(index + 1) },
+                onFailure = onFailure,
+            )
+        }
+        updateAt(0)
+    }
+
+    private fun updateHostPreferenceAsync(
+        key: Any?,
+        value: String,
+        onSuccess: () -> Unit,
+        onFailure: (Throwable) -> Unit,
+    ) {
+        val session = currentSession
+        val resolvedKey = key
+        val method = sessionUpdateMethod
+        if (session == null || resolvedKey == null || method == null) {
+            onFailure(IllegalStateException("宿主背景状态尚未初始化"))
+            return
+        }
+        val completed = AtomicBoolean(false)
+        fun finish(result: Any?) {
+            if (!completed.compareAndSet(false, true)) return
+            val error = kotlinResultFailure(result)
+            if (error == null) onSuccess() else onFailure(error)
+        }
+        val continuationClass = cls(KOTLIN_CONTINUATION_CLASS)
+        val continuation = Proxy.newProxyInstance(classLoader, arrayOf(continuationClass)) { proxy, proxyMethod, proxyArgs ->
+            when (proxyMethod.name) {
+                "getContext" -> cls(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS).getDeclaredField("INSTANCE").get(null)
+                "resumeWith" -> {
+                    finish(proxyArgs?.getOrNull(0))
+                    targetUnit()
+                }
+                "toString" -> "ReaMicroReaderBackgroundContinuation"
+                "hashCode" -> System.identityHashCode(proxy)
+                "equals" -> proxy === proxyArgs?.getOrNull(0)
+                else -> null
+            }
+        }
+        moduleSessionUpdate.set(true)
+        try {
+            val result = method.invoke(session, resolvedKey, value, continuation)
+            if (!isCoroutineSuspended(result)) finish(result)
+        } catch (error: Throwable) {
+            if (completed.compareAndSet(false, true)) {
+                onFailure((error as? InvocationTargetException)?.targetException ?: error)
+            }
+        } finally {
+            moduleSessionUpdate.set(false)
+        }
+    }
+
+    private fun isCoroutineSuspended(result: Any?): Boolean =
+        result?.javaClass?.name == KOTLIN_COROUTINE_SINGLETONS_CLASS &&
+            (result as? Enum<*>)?.name == KOTLIN_COROUTINE_SUSPENDED_NAME
+
+    private fun kotlinResultFailure(result: Any?): Throwable? {
+        if (result?.javaClass?.name != KOTLIN_RESULT_FAILURE_CLASS) return null
+        return runCatching {
+            result.javaClass.getDeclaredField("exception")
+                .apply { isAccessible = true }
+                .get(result) as? Throwable
+        }.getOrNull()
     }
 
     private fun hookDarkThemeContent() {
@@ -125,6 +338,83 @@ class ReaderBackgroundHook(
                     it.parameterTypes.getOrNull(0)?.name == COMPOSER_CLASS
             }?.apply { isAccessible = true }
                 ?: error("主题背景内容访问方法未找到")
+            val nativeReaderThemesContent = readerThemesClass.declaredMethods.firstOrNull {
+                it.name == NATIVE_READER_THEMES_CONTENT_METHOD &&
+                    it.parameterTypes.size == 2 &&
+                    it.parameterTypes.getOrNull(0)?.name == COMPOSER_CLASS
+            }?.apply { isAccessible = true }
+                ?: error("主题背景实际内容方法未找到")
+            XposedBridge.hookMethod(nativeReaderThemesContent, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!settingsProvider().canUseReaderBackground) return
+                    val dark = renderingDarkThemeContent
+                    currentReaderDark = dark
+                    val composer = param.args?.getOrNull(0)
+                    val rootScope = composer?.let(::currentRecomposeScope)
+                    val previousRootScope = panelRootRecomposeScope?.get()
+                    if (rootScope != null && rootScope !== previousRootScope) {
+                        panelRootRecomposeScope = WeakReference(rootScope)
+                        showNativeBackgrounds = !dark && !hasSelectedSideLoadedBackground(dark)
+                    }
+                    if (dark) showNativeBackgrounds = false
+                    renderingReaderThemesContent.set((renderingReaderThemesContent.get() ?: 0) + 1)
+                    observeSelectionVersion()
+                }
+
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    renderingReaderThemesContent.set(((renderingReaderThemesContent.get() ?: 0) - 1).coerceAtLeast(0))
+                }
+            })
+
+            val nativeMixContentMethod = readerThemesClass.declaredMethods.firstOrNull {
+                it.name == NATIVE_MIX_CONTENT_METHOD &&
+                    it.parameterTypes.size == 5 &&
+                    it.parameterTypes.getOrNull(0)?.name == MUTABLE_STATE_CLASS &&
+                    it.parameterTypes.getOrNull(1)?.name == MUTABLE_STATE_CLASS &&
+                    it.parameterTypes.getOrNull(3)?.name == COMPOSER_CLASS
+            }?.apply { isAccessible = true }
+                ?: error("阅微混搭背景内容方法未找到")
+
+            XposedBridge.hookMethod(nativeMixContentMethod, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!settingsProvider().canUseReaderBackground) return
+                    val composer = param.args?.getOrNull(3) ?: return
+                    val dark = renderingDarkThemeContent
+                    currentReaderDark = dark
+                    if (dark) showNativeBackgrounds = false
+                    observeSelectionVersion()
+                    capturePanelRecomposeScope(composer, dark)
+                    if (!showNativeBackgrounds) param.result = targetUnit()
+                }
+            })
+
+            val nativeReaderMipmapMethod = readerThemesClass.declaredMethods.firstOrNull {
+                it.name == NATIVE_READER_MIPMAP_METHOD &&
+                    it.parameterTypes.size == 5 &&
+                    it.parameterTypes.getOrNull(0) == String::class.java &&
+                    it.parameterTypes.getOrNull(1) == String::class.java &&
+                    it.parameterTypes.getOrNull(3)?.name == COMPOSER_CLASS
+            }?.apply { isAccessible = true }
+                ?: error("阅微材质选择方法未找到")
+            val nativeReaderThemeMethod = readerThemesClass.declaredMethods.firstOrNull {
+                it.name == NATIVE_READER_THEME_METHOD &&
+                    it.parameterTypes.size == 4 &&
+                    it.parameterTypes.getOrNull(0) == String::class.java &&
+                    it.parameterTypes.getOrNull(2)?.name == COMPOSER_CLASS
+            }?.apply { isAccessible = true }
+                ?: error("阅微颜色选择方法未找到")
+            val clearNativeSelectionHook = object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!settingsProvider().canUseReaderBackground) return
+                    if ((renderingReaderThemesContent.get() ?: 0) <= 0 ||
+                        !hasSelectedSideLoadedBackground(renderingDarkThemeContent)
+                    ) return
+                    // 侧载背景生效时，颜色与材质仍可作为候选展示，但不能继续显示“当前使用”勾选。
+                    param.args[0] = SIDE_LOADED_SELECTION_SENTINEL
+                }
+            }
+            XposedBridge.hookMethod(nativeReaderMipmapMethod, clearNativeSelectionHook)
+            XposedBridge.hookMethod(nativeReaderThemeMethod, clearNativeSelectionHook)
 
             XposedBridge.hookMethod(darkContentMethod, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
@@ -206,11 +496,8 @@ class ReaderBackgroundHook(
             XposedBridge.hookMethod(epubContainerMethod, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!settingsProvider().canUseReaderBackground) return
-                    if (
-                        selectedBackgroundUri(dark = false).isNotBlank() ||
-                        selectedBackgroundUri(dark = true).isNotBlank()
-                    ) {
-                        param.args[EPUB_DRAW_BACKGROUND_ARG_INDEX] = true
+                    param.args?.getOrNull(EPUB_CONTAINER_COMPOSER_ARG_INDEX)?.let { composer ->
+                        captureContainerRecomposeScope(composer, currentReaderDark)
                     }
                 }
             })
@@ -227,7 +514,10 @@ class ReaderBackgroundHook(
             XposedBridge.hookMethod(darkThemeMethod, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     if (!settingsProvider().canUseReaderBackground) return
-                    currentReaderDark = param.result as? Boolean ?: return
+                    val dark = param.result as? Boolean ?: return
+                    val changed = currentReaderDark != dark
+                    currentReaderDark = dark
+                    if (changed) onReaderThemeChanged(dark)
                 }
             })
             XposedBridge.hookMethod(themeToggleMethod, object : XC_MethodHook() {
@@ -250,11 +540,17 @@ class ReaderBackgroundHook(
                     val state = param.args?.getOrNull(0) ?: return
                     val dark = activeBackgroundBranchDark ?: backgroundStateThemes[state] ?: currentReaderDark
                     backgroundStateThemes[state] = dark
-                    backgroundStateHostValues[state] = (param.result as? String).orEmpty()
+                    val hostValue = (param.result as? String).orEmpty()
+                    backgroundStateHostValues[state] = hostValue
+                    currentHostBackgroundValue = hostValue
                     if (dark) darkHostBackgroundState = state else lightHostBackgroundState = state
-                    // 必须先让宿主 State.getValue() 正常执行，Compose 才会登记读取依赖；
-                    // 然后仅替换本次返回的 URI，避免把深浅背景写回宿主全局 BACKGROUND。
-                    param.result = selectedBackgroundUri(dark)
+                    val selectedUri = selectedSideLoadedBackgroundUri(dark)
+                    if (selectedUri.isNotBlank()) {
+                        param.result = selectedUri
+                    } else if (isSideLoadedBackgroundUri(hostValue)) {
+                        // 宿主 BACKGROUND 是全局单值；目标主题没有侧载选中时，不能继承另一主题的图片。
+                        param.result = ""
+                    }
                 }
             })
             XposedBridge.log("$LOG_PREFIX epub background theme isolation hooks installed")
@@ -264,15 +560,52 @@ class ReaderBackgroundHook(
     }
 
     private fun emitBackgroundArea(composer: Any, dark: Boolean) {
-        observeSelectionVersion()
+        emitBackgroundPanel(composer, dark)
+    }
+
+    private fun emitBackgroundSourceSwitch(composer: Any, dark: Boolean) {
+        emitBackgroundPanel(composer, dark)
+    }
+
+    private fun emitBackgroundPanel(composer: Any, dark: Boolean) {
         val factory = functionProxy { fnArgs ->
             val ctx = fnArgs?.getOrNull(0) as? Context ?: activityProvider() ?: error("no context")
-            buildBackgroundArea(ctx, dark)
+            buildBackgroundPanel(ctx, dark)
         }
+        val update = functionProxy { fnArgs ->
+            val root = fnArgs?.getOrNull(0) as? LinearLayout ?: return@functionProxy targetUnit()
+            renderBackgroundPanel(root, dark)
+            targetUnit()
+        }
+        emitAndroidView(composer, factory, update)
+    }
+
+    private fun emitAndroidView(composer: Any, factory: Any, update: Any) {
         val modifier = fillMaxWidthModifier()
         cls(ANDROID_VIEW_KT_CLASS).declaredMethods.first {
             it.name == ANDROID_VIEW_METHOD && it.parameterTypes.size == 6
-        }.apply { isAccessible = true }.invoke(null, factory, modifier, null, composer, 0, 4)
+        }.apply { isAccessible = true }.invoke(null, factory, modifier, update, composer, 0, 0)
+    }
+
+    private fun buildBackgroundPanel(ctx: Context, dark: Boolean): View =
+        LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            renderBackgroundPanel(this, dark)
+        }
+
+    private fun renderBackgroundPanel(root: LinearLayout, dark: Boolean) {
+        root.removeAllViews()
+        if (showNativeBackgrounds) {
+            visibleArea = null
+            root.setPadding(0, 0, 0, 0)
+            root.addView(
+                buildBackgroundSourceSwitch(root.context, root.resources.displayMetrics.density, dark),
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+            )
+        } else {
+            visibleArea = WeakReference(root)
+            renderBackgroundArea(root, dark)
+        }
     }
 
     private fun buildBackgroundArea(ctx: Context, dark: Boolean): View {
@@ -285,15 +618,24 @@ class ReaderBackgroundHook(
 
     private fun renderBackgroundArea(root: LinearLayout, dark: Boolean) {
         val ctx = root.context
-        val images = settingsProvider().readerBgImages(dark)
+        ensureBuiltInBackgrounds(ctx)
+        val builtInPath = builtInBackgroundPath(dark)
+        val images = buildList {
+            if (builtInPath.isNotBlank()) add(builtInPath)
+            addAll(settingsProvider().readerBgImages(dark))
+        }
             .filter { File(it).isFile }
             .distinctBy(::canonicalPathOrSelf)
         val density = ctx.resources.displayMetrics.density
         val itemW = (54 * density).toInt()
         val itemH = (80 * density).toInt()
         root.removeAllViews()
-        root.setPadding((16 * density).toInt(), (10 * density).toInt(), (16 * density).toInt(), (10 * density).toInt())
-        root.addView(TextView(ctx).apply {
+        root.setPadding(0, (10 * density).toInt(), 0, 0)
+        val content = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding((16 * density).toInt(), 0, (16 * density).toInt(), 0)
+        }
+        content.addView(TextView(ctx).apply {
             text = "背景"
             textSize = 13f
             setTextColor(if (dark) Color.rgb(150, 150, 150) else Color.rgb(120, 120, 120))
@@ -306,7 +648,7 @@ class ReaderBackgroundHook(
             runCatching { rowInner.addView(buildThumb(ctx, path, itemW, itemH, density, dark)) }
         }
         rowInner.addView(buildAddTile(ctx, itemW, itemH, density, dark))
-        root.addView(
+        content.addView(
             HorizontalScrollView(ctx).apply {
                 isHorizontalScrollBarEnabled = false
                 addView(
@@ -318,22 +660,64 @@ class ReaderBackgroundHook(
                 )
             },
         )
+        root.addView(content)
+        root.addView(
+            buildBackgroundSourceSwitch(ctx, density, dark),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
     }
 
     private fun refreshVisibleArea(dark: Boolean) {
         val activity = activityProvider()
         if (activity == null) {
-            invalidateHostBackgroundState(dark)
             bumpSelectionVersion()
         } else {
             activity.runOnUiThread {
-                invalidateHostBackgroundState(dark)
                 bumpSelectionVersion()
             }
         }
         val root = visibleArea?.get() ?: return
         root.post {
             if (currentReaderDark == dark) renderBackgroundArea(root, dark)
+        }
+    }
+
+    private fun captureContainerRecomposeScope(composer: Any, dark: Boolean) {
+        val scope = currentRecomposeScope(composer) ?: return
+        if (dark) darkContainerRecomposeScope = scope else lightContainerRecomposeScope = scope
+    }
+
+    private fun captureBackgroundRecomposeScope(composer: Any, dark: Boolean) {
+        val scope = currentRecomposeScope(composer) ?: return
+        if (dark) darkBackgroundRecomposeScope = scope else lightBackgroundRecomposeScope = scope
+    }
+
+    private fun capturePanelRecomposeScope(composer: Any, dark: Boolean) {
+        val scope = currentRecomposeScope(composer) ?: return
+        if (dark) darkPanelRecomposeScope = scope else lightPanelRecomposeScope = scope
+    }
+
+    private fun currentRecomposeScope(composer: Any): Any? = runCatching {
+        composer.javaClass.methods.firstOrNull {
+            it.name == "getRecomposeScope" && it.parameterTypes.isEmpty()
+        }?.invoke(composer)
+    }.getOrNull()
+
+    private fun invalidateBackgroundComposition(dark: Boolean) {
+        val scopes = buildList {
+            add(if (dark) darkContainerRecomposeScope else lightContainerRecomposeScope)
+            add(if (dark) darkBackgroundRecomposeScope else lightBackgroundRecomposeScope)
+            add(if (dark) darkPanelRecomposeScope else lightPanelRecomposeScope)
+        }.filterNotNull().distinctBy(System::identityHashCode)
+        scopes.forEach { scope ->
+            runCatching {
+                val invalidate = scope.javaClass.methods.firstOrNull {
+                    it.name == "invalidate" && it.parameterTypes.isEmpty()
+                } ?: error("Compose RecomposeScope 不可失效")
+                invalidate.invoke(scope)
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX invalidate Compose scope failed dark=$dark: ${it.stackTraceToString()}")
+            }
         }
     }
 
@@ -375,12 +759,12 @@ class ReaderBackgroundHook(
     }
 
     private fun buildThumb(ctx: Context, path: String, w: Int, h: Int, density: Float, dark: Boolean): View {
-        val selected = path == selectedBackgroundPath(dark)
+        val selected = isSelectedBackgroundPath(dark, path)
         val iv = ImageView(ctx).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
             setImageBitmap(decodeThumb(path, w, h))
             clipToOutline = true
-            background = roundedRectDrawable(density, dark, selected)
+            background = roundedRectDrawable(density, dark, selected, themePrimaryColor(dark))
             outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
         }
         val frame = FrameLayout(ctx).apply {
@@ -397,7 +781,7 @@ class ReaderBackgroundHook(
                     setTextColor(Color.WHITE)
                     background = GradientDrawable().apply {
                         shape = GradientDrawable.OVAL
-                        setColor(Color.rgb(255, 90, 31))
+                        setColor(themePrimaryColor(dark))
                     }
                     contentDescription = "当前阅读背景"
                 },
@@ -433,12 +817,12 @@ class ReaderBackgroundHook(
             override fun onDown(e: MotionEvent): Boolean = true
 
             override fun onSingleTapUp(e: MotionEvent): Boolean {
-                if (path != selectedBackgroundPath(dark)) applyBackground(dark, path)
+                if (!isSelectedBackgroundPath(dark, path)) applyBackground(dark, path)
                 return true
             }
 
             override fun onDoubleTap(e: MotionEvent): Boolean {
-                if (path == selectedBackgroundPath(dark)) clearBackground(dark)
+                if (isSelectedBackgroundPath(dark, path)) clearBackground(dark)
                 return true
             }
 
@@ -469,6 +853,146 @@ class ReaderBackgroundHook(
         }
     }
 
+    private fun buildBackgroundSourceSwitch(ctx: Context, density: Float, dark: Boolean): View {
+        val buttonHeight = (36 * density).toInt()
+        val topSpacing = (40 * density).toInt()
+        val bottomSpacing = (16 * density).toInt()
+        val horizontalSpacing = (16 * density).toInt()
+        val gap = (8 * density).toInt()
+        return LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(horizontalSpacing, topSpacing, horizontalSpacing, bottomSpacing)
+            addView(
+                buildBackgroundSourceButton(
+                    ctx = ctx,
+                    text = "混搭",
+                    selected = showNativeBackgrounds,
+                    enabled = !dark,
+                    density = density,
+                    dark = dark,
+                ) {
+                    if (!dark && !showNativeBackgrounds) {
+                        showNativeBackgrounds = true
+                        visibleArea = null
+                        recomposePanel(dark)
+                    }
+                },
+                LinearLayout.LayoutParams(0, buttonHeight, 1f).apply { marginEnd = gap / 2 },
+            )
+            addView(
+                buildBackgroundSourceButton(
+                    ctx = ctx,
+                    text = "背景",
+                    selected = !showNativeBackgrounds,
+                    enabled = true,
+                    density = density,
+                    dark = dark,
+                ) {
+                    if (showNativeBackgrounds) {
+                        showNativeBackgrounds = false
+                        recomposePanel(dark)
+                    }
+                },
+                LinearLayout.LayoutParams(0, buttonHeight, 1f).apply { marginStart = gap / 2 },
+            )
+        }
+    }
+
+    private fun recomposePanel(dark: Boolean) {
+        val action = {
+            bumpSelectionVersion()
+        }
+        activityProvider()?.runOnUiThread(action) ?: action()
+    }
+
+    private fun buildBackgroundSourceButton(
+        ctx: Context,
+        text: String,
+        selected: Boolean,
+        enabled: Boolean,
+        density: Float,
+        dark: Boolean,
+        onClick: () -> Unit,
+    ): View = TextView(ctx).apply {
+        this.text = text
+        textSize = 13f
+        typeface = resolveGlobalUiTypeface(ctx)
+        gravity = android.view.Gravity.CENTER
+        setTextColor(
+            when {
+                !enabled -> if (dark) Color.rgb(100, 100, 100) else Color.rgb(170, 170, 170)
+                selected -> themePrimaryColor(dark)
+                dark -> Color.rgb(210, 210, 210)
+                else -> Color.rgb(80, 80, 80)
+            },
+        )
+        background = GradientDrawable().apply {
+            cornerRadius = 18 * density
+            setColor(if (dark) Color.rgb(30, 30, 30) else Color.rgb(248, 248, 248))
+            setStroke(
+                ((if (selected && enabled) 2f else 1f) * density).toInt(),
+                when {
+                    !enabled -> if (dark) Color.rgb(55, 55, 55) else Color.rgb(220, 220, 220)
+                    selected -> themePrimaryColor(dark)
+                    dark -> Color.rgb(70, 70, 70)
+                    else -> Color.rgb(205, 205, 205)
+                },
+            )
+        }
+        isEnabled = enabled
+        alpha = if (enabled) 1f else 0.55f
+        if (enabled) setOnClickListener { onClick() }
+    }
+
+    private fun cacheThemePrimaryColor(composer: Any, dark: Boolean) {
+        runCatching {
+            val materialTheme = cls(MATERIAL_THEME_CLASS).getDeclaredField("INSTANCE")
+                .apply { isAccessible = true }
+                .get(null)
+            val stable = cls(MATERIAL_THEME_CLASS).getDeclaredField("\$stable")
+                .apply { isAccessible = true }
+                .getInt(null)
+            val colorScheme = cls(MATERIAL_THEME_CLASS).declaredMethods.first {
+                it.name == "getColorScheme" && it.parameterTypes.size == 2
+            }.apply { isAccessible = true }.invoke(materialTheme, composer, stable)
+                ?: error("MaterialTheme.colorScheme unavailable")
+            val primary = colorScheme.javaClass.methods.first {
+                it.name == PRIMARY_COLOR_METHOD && it.parameterTypes.isEmpty()
+            }.apply { isAccessible = true }.invoke(colorScheme) as Long
+            val argb = composeColorToArgb(primary)
+            if (dark) darkThemePrimaryColor = argb else lightThemePrimaryColor = argb
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX resolve host theme primary failed dark=$dark: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun themePrimaryColor(dark: Boolean): Int =
+        if (dark) darkThemePrimaryColor else lightThemePrimaryColor
+
+    private fun composeColorToArgb(color: Long): Int =
+        runCatching {
+            cls(COLOR_KT_CLASS).declaredMethods.firstOrNull { method ->
+                method.name.contains("toArgb", ignoreCase = true) &&
+                    method.parameterTypes.size == 1 &&
+                    method.parameterTypes[0] == Long::class.javaPrimitiveType
+            }?.apply { isAccessible = true }?.invoke(null, color) as? Int
+        }.getOrNull() ?: if ((color and 0x3fL) == 0L) {
+            (color ushr 32).toInt()
+        } else {
+            DEFAULT_THEME_PRIMARY_COLOR
+        }
+
+    private fun resolveGlobalUiTypeface(ctx: Context): Typeface {
+        globalUiTypeface?.let { return it }
+        val loaded = runCatching {
+            Typeface.createFromAsset(ctx.assets, GLOBAL_UI_FONT_ASSET)
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX load global UI font failed: ${it.stackTraceToString()}")
+        }.getOrNull() ?: Typeface.DEFAULT
+        globalUiTypeface = loaded
+        return loaded
+    }
+
     private fun decodeThumb(path: String, w: Int, h: Int): Bitmap? {
         thumbCache[path]?.let { return it }
         return runCatching {
@@ -487,20 +1011,33 @@ class ReaderBackgroundHook(
             showToast("背景图片已失效")
             return
         }
+        val uri = Uri.fromFile(file).toString()
+        val previousHostBackgroundValue = currentHostBackgroundValue
         setSelectionOverride(dark, path)
+        currentHostBackgroundValue = uri
         refreshVisibleArea(dark)
         backgroundExecutor.execute {
-            runCatching {
-                settings.setReaderBgCurrent(dark, path)
-                // 保留进程内覆盖值，避免宿主背景子 composition 持有旧配置快照；后续选择会直接覆盖它。
-                refreshVisibleArea(dark)
-                XposedBridge.log("$LOG_PREFIX selected isolated reader background dark=$dark path=$path")
-            }.onFailure {
-                clearSelectionOverride(dark, path)
-                refreshVisibleArea(dark)
-                showToast("应用阅读背景失败")
-                XposedBridge.log("$LOG_PREFIX apply background failed: ${it.stackTraceToString()}")
-            }
+            // 侧载图片独占正文背景：按宿主异步完成顺序清空颜色、材质，再写入图片 URI。
+            updateHostPreferencesInOrder(
+                updates = listOf(
+                    themePreferenceKey to "",
+                    mipmapPreferenceKey to "",
+                    backgroundPreferenceKey to uri,
+                ),
+                onSuccess = {
+                    settings.setReaderBgCurrent(dark, path)
+                    currentHostBackgroundValue = uri
+                    refreshVisibleArea(dark)
+                    XposedBridge.log("$LOG_PREFIX selected reader background via host state dark=$dark path=$path")
+                },
+                onFailure = { error ->
+                    currentHostBackgroundValue = previousHostBackgroundValue
+                    clearSelectionOverride(dark, path)
+                    refreshVisibleArea(dark)
+                    showToast("应用阅读背景失败")
+                    XposedBridge.log("$LOG_PREFIX apply background failed: ${error.stackTraceToString()}")
+                },
+            )
         }
     }
 
@@ -511,7 +1048,11 @@ class ReaderBackgroundHook(
         backgroundExecutor.execute {
             runCatching {
                 settings.setReaderBgCurrent(dark, defaultPath)
-                // 恢复模块内置的对应主题默认背景，并保留进程内覆盖值保证正文立即更新。
+                updateHostBackground(
+                    defaultPath.takeIf { it.isNotBlank() && File(it).isFile }
+                        ?.let { Uri.fromFile(File(it)).toString() }
+                        .orEmpty(),
+                )
                 refreshVisibleArea(dark)
                 XposedBridge.log("$LOG_PREFIX restored built-in reader background dark=$dark path=$defaultPath")
             }.onFailure {
@@ -530,11 +1071,15 @@ class ReaderBackgroundHook(
         }
         val list = settingsProvider().readerBgImages(dark).toMutableList()
         if (!list.remove(path)) return
-        val selected = path == selectedBackgroundPath(dark)
+        val selected = isSelectedBackgroundPath(dark, path)
         backgroundExecutor.execute {
             runCatching {
                 settings.setReaderBgImages(dark, list)
-                if (selected) settings.setReaderBgCurrent(dark, "")
+                if (selected) {
+                    settings.setReaderBgCurrent(dark, "")
+                    currentHostBackgroundValue = ""
+                    updateHostBackground("")
+                }
                 thumbCache.remove(path)
                 refreshVisibleArea(dark)
                 deleteModuleBackgroundFile(path)
@@ -602,22 +1147,17 @@ class ReaderBackgroundHook(
         synchronized(this) {
             if (builtInBackgroundsReady) return
             runCatching {
-                val hostContext = context.applicationContext ?: context
-                val moduleContext = if (hostContext.packageName == MODULE_PACKAGE_NAME) {
-                    hostContext
-                } else {
-                    hostContext.createPackageContext(MODULE_PACKAGE_NAME, Context.CONTEXT_IGNORE_SECURITY)
+                val hostContext = (context.applicationContext ?: context).also {
+                    backgroundHostContext = it
                 }
                 val dir = File(hostContext.filesDir, BACKGROUND_DIR_NAME).apply { mkdirs() }
-                val light = copyBuiltInBackground(
-                    moduleContext,
-                    R.drawable.reader_background_default_light,
-                    File(dir, BUILTIN_LIGHT_FILE_NAME),
+                val light = ReaderBackgroundAssets.copyTo(
+                    dark = false,
+                    target = File(dir, BUILTIN_LIGHT_FILE_NAME),
                 )
-                val dark = copyBuiltInBackground(
-                    moduleContext,
-                    R.drawable.reader_background_default_dark,
-                    File(dir, BUILTIN_DARK_FILE_NAME),
+                val dark = ReaderBackgroundAssets.copyTo(
+                    dark = true,
+                    target = File(dir, BUILTIN_DARK_FILE_NAME),
                 )
                 registerBuiltInBackground(dark = false, file = light)
                 registerBuiltInBackground(dark = true, file = dark)
@@ -627,14 +1167,6 @@ class ReaderBackgroundHook(
                 XposedBridge.log("$LOG_PREFIX prepare built-in reader backgrounds failed: ${it.stackTraceToString()}")
             }
         }
-    }
-
-    private fun copyBuiltInBackground(moduleContext: Context, resourceId: Int, target: File): File {
-        val resourceBytes = moduleContext.resources.openRawResource(resourceId).use { it.readBytes() }
-        if (!target.isFile || !fileDigest(target).contentEquals(MessageDigest.getInstance("SHA-256").digest(resourceBytes))) {
-            target.outputStream().buffered().use { it.write(resourceBytes) }
-        }
-        return target
     }
 
     private fun registerBuiltInBackground(dark: Boolean, file: File) {
@@ -704,7 +1236,9 @@ class ReaderBackgroundHook(
                 "invoke" -> runCatching {
                     currentReaderDark = dark
                     activeBackgroundBranchDark = dark
+                    val composer = args?.getOrNull(0)
                     observeSelectionVersion()
+                    composer?.let { captureBackgroundRecomposeScope(it, dark) }
                     try {
                         hostLambda.javaClass.methods.first {
                             it.name == "invoke" && it.parameterTypes.size == 2
@@ -745,13 +1279,19 @@ class ReaderBackgroundHook(
             .apply { isAccessible = true }.invoke(null, emptyModifier(), 1f)
     }.getOrElse { emptyModifier() }
 
-    private fun roundedRectDrawable(density: Float, dark: Boolean, selected: Boolean): GradientDrawable =
-        GradientDrawable().apply {
-            cornerRadius = 10 * density
-            setColor(if (dark) Color.rgb(38, 38, 38) else Color.rgb(238, 238, 238))
-            val borderColor = if (selected) Color.rgb(255, 90, 31) else if (dark) Color.rgb(70, 70, 70) else Color.rgb(205, 205, 205)
-            setStroke(((if (selected) 2.5f else 1.5f) * density).toInt(), borderColor)
-        }
+    private fun roundedRectDrawable(
+        density: Float,
+        dark: Boolean,
+        selected: Boolean,
+        selectedColor: Int,
+    ): GradientDrawable = GradientDrawable().apply {
+        cornerRadius = 10 * density
+        setColor(if (dark) Color.rgb(38, 38, 38) else Color.rgb(238, 238, 238))
+        val borderColor = if (selected) selectedColor
+        else if (dark) Color.rgb(70, 70, 70)
+        else Color.rgb(205, 205, 205)
+        setStroke(((if (selected) 2.5f else 1.5f) * density).toInt(), borderColor)
+    }
 
     private fun canonicalPathOrSelf(path: String): String =
         runCatching { File(path).canonicalPath }.getOrDefault(path)
@@ -774,12 +1314,38 @@ class ReaderBackgroundHook(
         return digest.digest()
     }
 
+    private fun isSideLoadedBackgroundUri(uri: String): Boolean {
+        val path = runCatching { Uri.parse(uri).path }.getOrNull().orEmpty()
+        if (path.isBlank()) return false
+        val canonicalPath = canonicalPathOrSelf(path)
+        return sideLoadedBackgroundPaths().any { canonicalPathOrSelf(it) == canonicalPath }
+    }
+
+    private fun isSelectedBackgroundPath(dark: Boolean, path: String): Boolean {
+        if (path.isBlank()) return false
+        val selectedPath = selectedBackgroundPath(dark)
+        if (selectedPath.isBlank()) return false
+        return canonicalPathOrSelf(path) == canonicalPathOrSelf(selectedPath)
+    }
+
+    private fun sideLoadedBackgroundPaths(): List<String> = buildList {
+        add(builtInBackgroundPath(dark = false))
+        add(builtInBackgroundPath(dark = true))
+        addAll(settingsProvider().readerBgImages(dark = false))
+        addAll(settingsProvider().readerBgImages(dark = true))
+    }.filter(String::isNotBlank)
+
     private fun selectedBackgroundPath(dark: Boolean): String =
         (if (dark) darkSelectionOverride else lightSelectionOverride)
             ?: settingsProvider().readerBgCurrent(dark)
 
     private fun setSelectionOverride(dark: Boolean, path: String) {
         if (dark) darkSelectionOverride = path else lightSelectionOverride = path
+    }
+
+    private fun clearSelectionOverrides() {
+        lightSelectionOverride = null
+        darkSelectionOverride = null
     }
 
     private fun clearSelectionOverride(dark: Boolean, expected: String) {
@@ -790,7 +1356,21 @@ class ReaderBackgroundHook(
         }
     }
 
-    private fun selectedBackgroundUri(dark: Boolean): String =
+    private fun onReaderThemeChanged(dark: Boolean) {
+        val selectedUri = selectedSideLoadedBackgroundUri(dark)
+        showNativeBackgrounds = !dark && selectedUri.isBlank()
+        invalidateHostBackgroundState(dark)
+        invalidateBackgroundComposition(dark)
+        recomposePanel(dark)
+        XposedBridge.log(
+            "$LOG_PREFIX reader theme background switched dark=$dark sideLoaded=${selectedUri.isNotBlank()}",
+        )
+    }
+
+    private fun hasSelectedSideLoadedBackground(dark: Boolean): Boolean =
+        selectedSideLoadedBackgroundUri(dark).isNotBlank()
+
+    private fun selectedSideLoadedBackgroundUri(dark: Boolean): String =
         selectedBackgroundPath(dark)
             .takeIf { it.isNotBlank() && File(it).isFile }
             ?.let { Uri.fromFile(File(it)).toString() }
@@ -820,12 +1400,22 @@ class ReaderBackgroundHook(
     }
 
     private fun moduleBgDir(): File? =
-        activityProvider()?.applicationContext?.let { File(it.filesDir, BACKGROUND_DIR_NAME) }
+        backgroundHostContext
+            ?.let { File(it.filesDir, BACKGROUND_DIR_NAME) }
+            ?: activityProvider()?.applicationContext?.let {
+                backgroundHostContext = it
+                File(it.filesDir, BACKGROUND_DIR_NAME)
+            }
 
     private companion object {
         const val LOG_PREFIX = "ReaMicro LSP"
-        const val MODULE_PACKAGE_NAME = "com.reamicro.fix"
         const val BACKGROUND_DIR_NAME = "reamicro-reader-bg"
+        const val GLOBAL_UI_FONT_ASSET =
+            "composeResources/reamicro.composeapp.generated.resources/font/serif_medium.ttf"
+        const val MATERIAL_THEME_CLASS = "androidx.compose.material3.MaterialTheme"
+        const val COLOR_KT_CLASS = "androidx.compose.ui.graphics.ColorKt"
+        const val PRIMARY_COLOR_METHOD = "getPrimary-0d7_KjU"
+        const val DEFAULT_THEME_PRIMARY_COLOR = -42465
         const val BUILTIN_LIGHT_FILE_NAME = "reader_background_default_light.jpg"
         const val BUILTIN_DARK_FILE_NAME = "reader_background_default_dark.png"
         const val HOST_REFRESH_TOKEN_PREFIX = "reamicro-bg-refresh://"
@@ -834,8 +1424,22 @@ class ReaderBackgroundHook(
             "app.zhendong.reamicro.ui.reader.compose.ComposableSingletons\$ReaderThemesKt"
         const val DARK_THEME_CONTENT_METHOD = "lambda__1576463935\$lambda\$0"
         const val READER_THEMES_CONTENT_ACCESS_METHOD = "access\$ReaderThemesContent"
+        const val NATIVE_READER_THEMES_CONTENT_METHOD = "ReaderThemesContent"
+        const val NATIVE_MIX_CONTENT_METHOD = "ReaderThemesContent\$lambda\$15\$0"
+        const val NATIVE_READER_MIPMAP_METHOD = "ReaderMipmap"
+        const val NATIVE_READER_THEME_METHOD = "ReaderThemes"
+        const val SIDE_LOADED_SELECTION_SENTINEL = "reamicro://side-loaded"
         const val READER_BACKGROUND_PREFIX = "ReaderBackground-"
         const val COMPOSER_CLASS = "androidx.compose.runtime.Composer"
+        const val MUTABLE_STATE_CLASS = "androidx.compose.runtime.MutableState"
+        const val ANIMATED_VISIBILITY_KT_CLASS = "androidx.compose.animation.AnimatedVisibilityKt"
+        const val ANIMATED_VISIBILITY_METHOD = "AnimatedVisibility"
+        const val PREF_KEYS_CLASS = "app.zhendong.reamicro.constants.PrefKeys"
+        const val KOTLIN_CONTINUATION_CLASS = "kotlin.coroutines.Continuation"
+        const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = "kotlin.coroutines.EmptyCoroutineContext"
+        const val KOTLIN_COROUTINE_SINGLETONS_CLASS = "kotlin.coroutines.intrinsics.CoroutineSingletons"
+        const val KOTLIN_COROUTINE_SUSPENDED_NAME = "COROUTINE_SUSPENDED"
+        const val KOTLIN_RESULT_FAILURE_CLASS = "kotlin.Result\$Failure"
         const val SESSION_CLASS = "app.zhendong.reamicro.repository.core.Session"
         const val USER_STORAGE_CLASS = "app.zhendong.reamicro.arch.fs.UserStorage"
         const val EPUB_CONTAINER_KT_CLASS = "app.zhendong.reamicro.ui.reader.components.EpubContainerKt"
