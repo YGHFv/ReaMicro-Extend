@@ -34,6 +34,7 @@ data class OnlineSourceEntry(
     val paragraphCommentsEnabled: Boolean = false,
     val chapterBatchEndpoint: String = "",
     val chapterBatchSize: Int = 0,
+    val variableComment: String = "",
 ) {
     val hasLoginConfig: Boolean
         get() = loginUrl.isNotBlank() || loginUi.isNotBlank() || loginCheckJs.isNotBlank()
@@ -239,6 +240,7 @@ object OnlineSourceStore {
         val ruleToc = rawJsonString(json, "ruleToc")
         val ruleContent = rawJsonString(json, "ruleContent")
         val jsLib = rawJsonString(json, "jsLib")
+        val variableComment = firstString(json, "variableComment", "sourceVariableComment")
         val chapterBatchEndpoint = firstString(json, "reamicroChapterBatchEndpoint")
         val chapterBatchSize = firstString(json, "reamicroChapterBatchSize")
             .toIntOrNull()
@@ -270,6 +272,7 @@ object OnlineSourceStore {
             jsLib = jsLib,
             chapterBatchEndpoint = chapterBatchEndpoint,
             chapterBatchSize = chapterBatchSize,
+            variableComment = variableComment,
         )
     }
 

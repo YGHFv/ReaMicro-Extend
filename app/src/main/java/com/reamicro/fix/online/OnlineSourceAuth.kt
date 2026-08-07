@@ -1,6 +1,7 @@
 package com.reamicro.fix.online
 
 import android.content.Context
+import android.provider.Settings
 import com.reamicro.fix.settings.ModuleSettings
 import java.net.HttpURLConnection
 import java.net.URL
@@ -17,6 +18,7 @@ object OnlineSourceAuth {
     private const val KEY_INFO_PREFIX = "online_login_info_"
     private const val KEY_COOKIE_PREFIX = "online_login_cookie_"
     private const val KEY_COOKIE_TIME_PREFIX = "online_login_cookie_time_"
+    private const val KEY_VARIABLE_PREFIX = "online_source_variable_"
 
     fun supportsCredentialLogin(source: OnlineSourceEntry): Boolean =
         loginEndpoint(source) != null || loginFields(source).isNotEmpty()
@@ -33,6 +35,57 @@ object OnlineSourceAuth {
 
     fun browserLoginUrl(source: OnlineSourceEntry): String =
         source.webLoginUrl.ifBlank { OnlineSourceLoginConfig.browserUrl(source.loginUrl) }
+
+    fun sourceVariable(context: Context?, source: OnlineSourceEntry): String =
+        prefs(context)?.getString(KEY_VARIABLE_PREFIX + source.id, "").orEmpty().trim()
+
+    fun saveSourceVariable(context: Context?, source: OnlineSourceEntry, value: String): OnlineSourceAuthResult {
+        val preferences = prefs(context) ?: return OnlineSourceAuthResult(false, "缺少设置存储")
+        val normalized = value.trim()
+        if (normalized.isBlank()) return OnlineSourceAuthResult(false, "请输入${source.variableComment.ifBlank { "源变量" }}")
+        preferences.edit().putString(KEY_VARIABLE_PREFIX + source.id, normalized).apply()
+        return OnlineSourceAuthResult(true, "共享Token已保存")
+    }
+
+    fun registerByInvite(context: Context?, source: OnlineSourceEntry, inviteCode: String): OnlineSourceAuthResult {
+        val appContext = context?.applicationContext ?: return OnlineSourceAuthResult(false, "缺少 Context")
+        if (!OnlineSourceTrxsCompat.isSource(source)) return OnlineSourceAuthResult(false, "该源不支持邀请码登录")
+        val code = inviteCode.trim()
+        if (code.isBlank()) return OnlineSourceAuthResult(false, "请输入邀请码")
+        val androidId = Settings.Secure.getString(appContext.contentResolver, Settings.Secure.ANDROID_ID).orEmpty()
+        val requestUrl = OnlineSourceTrxsCompat.inviteUrl(source, androidId, code)
+            ?: return OnlineSourceAuthResult(false, "无法生成邀请码登录请求")
+        return requestTrxsApi(source, requestUrl, token = "").let { (success, body) ->
+            if (!success) return@let OnlineSourceAuthResult(false, OnlineSourceTrxsCompat.responseMessage(body).ifBlank { "邀请码注册失败" })
+            val token = OnlineSourceTrxsCompat.tokenFromInviteResponse(body)
+            if (token.isBlank()) {
+                OnlineSourceAuthResult(false, OnlineSourceTrxsCompat.responseMessage(body).ifBlank { "邀请码注册成功，但响应未返回 Token" })
+            } else {
+                saveSourceVariable(appContext, source, token)
+                val info = OnlineSourceTrxsCompat.responseData(body) as? JSONObject
+                val user = info?.optString("id", "").orEmpty()
+                val left = info?.optString("left", "").orEmpty()
+                OnlineSourceAuthResult(
+                    true,
+                    listOfNotNull(
+                        "邀请码注册成功",
+                        user.takeIf { it.isNotBlank() }?.let { "用户：$it" },
+                        left.takeIf { it.isNotBlank() }?.let { "日下载剩余：$it" },
+                    ).joinToString("\n"),
+                )
+            }
+        }
+    }
+
+    fun testSourceVariable(context: Context?, source: OnlineSourceEntry): OnlineSourceAuthResult {
+        val token = sourceVariable(context, source)
+        if (token.isBlank()) return OnlineSourceAuthResult(false, "请先填写共享Token")
+        val requestUrl = OnlineSourceTrxsCompat.tokenTestUrl(source)
+            ?: return OnlineSourceAuthResult(false, "该源不支持 Token 校验")
+        val (success, body) = requestTrxsApi(source, requestUrl, token)
+        val message = OnlineSourceTrxsCompat.responseMessage(body)
+        return OnlineSourceAuthResult(success, if (success) message.ifBlank { "Token 有效" } else message.ifBlank { "Token 校验失败" })
+    }
 
     fun loginInfo(context: Context?, source: OnlineSourceEntry): Map<String, String> {
         val preferences = prefs(context) ?: return emptyMap()
@@ -73,7 +126,7 @@ object OnlineSourceAuth {
         return OnlineSourceAuthResult(true, "已保存$label")
     }
 
-    fun requestHeaders(context: Context?, source: OnlineSourceEntry): Map<String, String> {
+    fun requestHeaders(context: Context?, source: OnlineSourceEntry, requestUrl: String = ""): Map<String, String> {
         val headers = linkedMapOf<String, String>()
         if (source.enabledCookieJar) {
             val cookie = prefs(context)?.getString(KEY_COOKIE_PREFIX + source.id, "").orEmpty()
@@ -82,6 +135,11 @@ object OnlineSourceAuth {
         // 一些 JSON 书源把 API 密钥写在 header 的内联 JS 中；原先只保存了密钥，
         // 但普通 HTTP 请求没有执行这段 JS，导致详情接口持续 401，章节数无法补全。
         headers.putAll(credentialHeaders(source.header, loginInfo(context, source)))
+        if (OnlineSourceTrxsCompat.shouldAuthorize(source, requestUrl)) {
+            sourceVariable(context, source).takeIf { it.isNotBlank() }?.let { token ->
+                headers["Authorization"] = "Bearer $token"
+            }
+        }
         return headers
     }
 
@@ -121,6 +179,7 @@ object OnlineSourceAuth {
 
     fun hasSavedLogin(context: Context?, source: OnlineSourceEntry): Boolean {
         val prefs = prefs(context) ?: return false
+        if (OnlineSourceTrxsCompat.isSource(source) && sourceVariable(context, source).isNotBlank()) return true
         val fields = loginFields(source)
         if (!usesAccountPasswordLogin(source) && fields.isNotEmpty()) {
             val info = loginInfo(context, source)
@@ -148,11 +207,19 @@ object OnlineSourceAuth {
             ?.remove(KEY_INFO_PREFIX + sourceId)
             ?.remove(KEY_COOKIE_PREFIX + sourceId)
             ?.remove(KEY_COOKIE_TIME_PREFIX + sourceId)
+            ?.remove(KEY_VARIABLE_PREFIX + sourceId)
             ?.apply()
     }
 
     fun loginWithSavedCredentials(context: Context?, source: OnlineSourceEntry): OnlineSourceAuthResult {
         val prefs = prefs(context) ?: return OnlineSourceAuthResult(false, "缺少设置存储")
+        if (OnlineSourceTrxsCompat.isSource(source)) {
+            return if (sourceVariable(context, source).isNotBlank()) {
+                OnlineSourceAuthResult(true, "已读取共享Token")
+            } else {
+                OnlineSourceAuthResult(false, "未保存共享Token")
+            }
+        }
         if (loginEndpoint(source) == null) {
             val fields = loginFields(source)
             if (fields.isNotEmpty()) {
@@ -246,6 +313,27 @@ object OnlineSourceAuth {
 
     private fun prefs(context: Context?) =
         context?.applicationContext?.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE)
+
+    private fun requestTrxsApi(source: OnlineSourceEntry, requestUrl: String, token: String): Pair<Boolean, String> =
+        runCatching {
+            val connection = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = source.respondTime.coerceIn(15_000, 300_000).coerceAtMost(30_000)
+                readTimeout = source.respondTime.coerceIn(15_000, 300_000)
+                setRequestProperty("User-Agent", "Mozilla/5.0 ReaMicro-Extend/online-source")
+                setRequestProperty("Accept", "application/json,text/plain,*/*")
+                if (token.isNotBlank()) setRequestProperty("Authorization", "Bearer $token")
+            }
+            try {
+                val code = connection.responseCode
+                val body = responseBody(connection, code)
+                val root = runCatching { JSONObject(body) }.getOrNull()
+                val apiSuccess = root?.optString("msg", "").orEmpty().let { it.isBlank() || it == "success" }
+                (code in 200..299 && apiSuccess) to body
+            } finally {
+                connection.disconnect()
+            }
+        }.getOrElse { false to (it.message ?: it.javaClass.simpleName) }
 
     private fun loginEndpoint(source: OnlineSourceEntry): String? {
         val loginUrl = source.loginUrl.trim()

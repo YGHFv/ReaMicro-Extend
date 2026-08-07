@@ -65,6 +65,7 @@ import com.reamicro.fix.online.OnlineSourceLoginConfig
 import com.reamicro.fix.online.OnlineJsonPathCompat
 import com.reamicro.fix.online.OnlineSourceScriptCompat
 import com.reamicro.fix.online.OnlineSourceStore
+import com.reamicro.fix.online.OnlineSourceTrxsCompat
 import com.reamicro.fix.notification.cancelOnlineCompletionNotificationIfDone
 import com.reamicro.fix.notification.onlineCompletionDownloadBigText
 import com.reamicro.fix.notification.onlineCompletionDownloadText
@@ -1377,7 +1378,7 @@ class WebDavDriveHook(
                         parseOnlineHeaders(source.header).forEach { (name, value) ->
                             if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
                         }
-                        OnlineSourceAuth.requestHeaders(currentApplicationContext() ?: currentContext(), source).forEach { (name, value) ->
+                        OnlineSourceAuth.requestHeaders(currentApplicationContext() ?: currentContext(), source, url).forEach { (name, value) ->
                             if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
                         }
                     }
@@ -5459,6 +5460,9 @@ class WebDavDriveHook(
 
     private fun buildOnlineSearchUrlFromJs(source: OnlineSourceEntry, raw: String, query: String): String {
         val context = currentApplicationContext() ?: currentContext()
+        OnlineSourceTrxsCompat.searchUrl(source, query, page = 1)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
         OnlineSourceScriptCompat.resolveSearchUrl(
             sourceUrl = sourceBaseUrl(source),
             rawScript = raw,
@@ -5514,7 +5518,7 @@ class WebDavDriveHook(
                     request.headers.forEach { (name, value) ->
                         if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
                     }
-                    OnlineSourceAuth.requestHeaders(currentApplicationContext() ?: currentContext(), source).forEach { (name, value) ->
+                    OnlineSourceAuth.requestHeaders(currentApplicationContext() ?: currentContext(), source, requestUrl).forEach { (name, value) ->
                         if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
                     }
                     if (isPost) {
@@ -5660,7 +5664,8 @@ class WebDavDriveHook(
             val name = onlineRuleValue(node, rule.optString("name", ""), baseUrl, source = source).cleanOnlineText()
             if (name.isBlank() || name.length > 120) return@mapNotNull null
             val author = onlineRuleValue(node, rule.optString("author", ""), baseUrl, source = source).cleanOnlineText()
-            val detail = onlineRuleValue(node, rule.optString("bookUrl", ""), baseUrl, source = source)
+            val detail = OnlineSourceTrxsCompat.detailUrl(source, node)
+                ?: onlineRuleValue(node, rule.optString("bookUrl", ""), baseUrl, source = source)
             val cover = onlineRuleValue(node, rule.optString("coverUrl", ""), baseUrl, source = source)
             val intro = onlineRuleValue(node, rule.optString("intro", ""), baseUrl, source = source).cleanOnlineText()
             val meta = onlineResultMetadata(source, node, rule, baseUrl)
@@ -8962,6 +8967,9 @@ class WebDavDriveHook(
         detailUrl: String,
         detailBody: String,
     ): String {
+        OnlineSourceTrxsCompat.catalogUrl(source, detailUrl, detailBody)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
         val rule = runCatching { JSONObject(source.ruleBookInfo) }.getOrNull() ?: return ""
         val tocRule = rule.optString("tocUrl", "").trim()
         if (tocRule.isBlank()) return ""
@@ -8984,6 +8992,16 @@ class WebDavDriveHook(
         baseUrl: String,
         html: String,
     ): List<OnlineChapter> {
+        OnlineSourceTrxsCompat.catalogChapters(source, baseUrl, html)?.let { chapters ->
+            return chapters.filterNot { it.isVolume }.map { chapter ->
+                OnlineChapter(
+                    title = chapter.title,
+                    url = chapter.url,
+                    volumeTitle = chapter.volumeTitle,
+                    level = if (chapter.volumeTitle.isBlank()) 0 else 1,
+                )
+            }
+        }
         val body = html.trim()
         if (body.startsWith("{") || body.startsWith("[")) {
             val root = parseOnlineJsonRoot(body)
@@ -9232,10 +9250,15 @@ class WebDavDriveHook(
 
     private fun extractOnlineChapterContent(source: OnlineSourceEntry, baseUrl: String, body: String): String {
         val contentRule = runCatching { JSONObject(source.ruleContent).optString("content", "") }.getOrNull().orEmpty()
-        if (contentRule.startsWith("<js>", ignoreCase = true)) {
+        if (contentRule.startsWith("<js>", ignoreCase = true) || contentRule.startsWith("@js:", ignoreCase = true)) {
             evaluateOnlineContentJs(source, contentRule, body)?.let { return normalizeOnlineChapterText(it) }
         }
         val text = body.trim()
+        if (OnlineSourceTrxsCompat.isSource(source)) {
+            val data = OnlineSourceTrxsCompat.responseData(body)
+            val content = (data as? JSONObject)?.optString("content", "").orEmpty()
+            if (content.isNotBlank()) return normalizeOnlineChapterText(content)
+        }
         if (text.startsWith("{") || text.startsWith("[")) {
             val root = parseOnlineJsonRoot(text)
             if (root != null) {
@@ -9343,7 +9366,7 @@ class WebDavDriveHook(
                     parseOnlineHeaders(source.header).forEach { (name, value) ->
                         if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
                     }
-                    OnlineSourceAuth.requestHeaders(currentApplicationContext() ?: currentContext(), source).forEach { (name, value) ->
+                    OnlineSourceAuth.requestHeaders(currentApplicationContext() ?: currentContext(), source, requestUrl).forEach { (name, value) ->
                         if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
                     }
                 }

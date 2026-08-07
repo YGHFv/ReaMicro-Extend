@@ -66,6 +66,7 @@ import com.reamicro.fix.online.OnlineSourceAuth
 import com.reamicro.fix.online.OnlineSourceDownloadPolicyStore
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.OnlineSourceStore
+import com.reamicro.fix.online.OnlineSourceTrxsCompat
 import com.reamicro.fix.tts.TtsSourceEntry
 import com.reamicro.fix.tts.TtsSourceStore
 import com.reamicro.fix.settings.ModuleSettings
@@ -6750,6 +6751,10 @@ class ReaMicroSettingsHook(
             return
         }
         val loginFields = OnlineSourceAuth.loginFields(source)
+        if (OnlineSourceTrxsCompat.isSource(source)) {
+            openTrxsOnlineSourceLoginDialog(activity, source, enableFlow, onResult)
+            return
+        }
         if (OnlineSourceAuth.usesAccountPasswordLogin(source)) {
             openOnlineSourceCredentialDialog(activity, source, enableFlow, onResult)
             return
@@ -6847,6 +6852,150 @@ class ReaMicroSettingsHook(
         }
     }
 
+
+    private fun openTrxsOnlineSourceLoginDialog(
+        activity: Activity,
+        source: OnlineSourceEntry,
+        enableFlow: Boolean,
+        onResult: (Boolean) -> Unit,
+    ) {
+        activity.runOnUiThread {
+            runCatching {
+                val colors = SettingsDialogColors(activity)
+                val dialog = Dialog(activity)
+                val card = settingsDialogCard(activity, colors)
+                val savedToken = OnlineSourceAuth.sourceVariable(activity.applicationContext, source)
+                val tokenInput = settingsDialogInput(
+                    activity,
+                    source.variableComment.ifBlank { "共享Token" },
+                    singleLine = true,
+                    colors = colors,
+                ).apply {
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    setText(savedToken)
+                    setSelection(text?.length ?: 0)
+                }
+                val inviteInput = settingsDialogInput(activity, "邀请码", singleLine = true, colors = colors)
+                val status = settingsDialogStatus(
+                    activity,
+                    "可直接粘贴共享Token，或输入邀请码自动注册并保存Token。普通登录需先保存Token，再打开账号管理页。",
+                    colors,
+                )
+                card.addView(settingsDialogTitle(activity, "${source.name} 登录", colors))
+                card.addView(settingsDialogHint(activity, "该源的搜索、目录和正文请求均使用共享Token。", colors))
+                card.addView(tokenInput)
+                card.addView(inviteInput)
+                val saveTokenButton = settingsDialogButton(activity, "保存Token", colors)
+                val inviteButton = settingsDialogButton(activity, "邀请码登录", colors)
+                val testButton = settingsDialogButton(activity, "校验Token", colors)
+                val accountButton = settingsDialogButton(activity, "账号管理", colors)
+                card.addView(settingsDialogButtonRow(activity, listOf(saveTokenButton, inviteButton)))
+                card.addView(settingsDialogButtonRow(activity, listOf(testButton, accountButton)))
+                card.addView(status)
+                val policyInputs = addOnlineSourceDownloadPolicyInputs(activity, source, card, colors)
+                var resolved = false
+                fun resolve(value: Boolean) {
+                    if (resolved) return
+                    resolved = true
+                    onResult(value)
+                }
+                fun runAuthTask(button: TextView, task: () -> com.reamicro.fix.online.OnlineSourceAuthResult, onSuccess: (() -> Unit)? = null) {
+                    button.isEnabled = false
+                    Thread({
+                        val result = task()
+                        activity.runOnUiThread {
+                            button.isEnabled = true
+                            status.text = result.message
+                            if (result.success) onSuccess?.invoke()
+                        }
+                    }, "ReaMicroTrxsLogin").start()
+                }
+                saveTokenButton.setOnClickListener {
+                    if (!saveOnlineSourceDownloadPolicy(activity, source, policyInputs)) return@setOnClickListener
+                    val result = OnlineSourceAuth.saveSourceVariable(
+                        activity.applicationContext,
+                        source,
+                        tokenInput.text?.toString().orEmpty(),
+                    )
+                    status.text = result.message
+                }
+                inviteButton.setOnClickListener {
+                    runAuthTask(inviteButton, {
+                        OnlineSourceAuth.registerByInvite(
+                            activity.applicationContext,
+                            source,
+                            inviteInput.text?.toString().orEmpty(),
+                        )
+                    }) {
+                        tokenInput.setText(OnlineSourceAuth.sourceVariable(activity.applicationContext, source))
+                        tokenInput.setSelection(tokenInput.text?.length ?: 0)
+                    }
+                }
+                testButton.setOnClickListener {
+                    val saved = OnlineSourceAuth.saveSourceVariable(
+                        activity.applicationContext,
+                        source,
+                        tokenInput.text?.toString().orEmpty(),
+                    )
+                    if (!saved.success) {
+                        status.text = saved.message
+                        return@setOnClickListener
+                    }
+                    runAuthTask(testButton, { OnlineSourceAuth.testSourceVariable(activity.applicationContext, source) })
+                }
+                accountButton.setOnClickListener {
+                    val token = tokenInput.text?.toString().orEmpty().trim()
+                    val saved = OnlineSourceAuth.saveSourceVariable(activity.applicationContext, source, token)
+                    if (!saved.success) {
+                        status.text = saved.message
+                        return@setOnClickListener
+                    }
+                    val url = OnlineSourceTrxsCompat.accountManagementUrl(source, token).orEmpty()
+                    runCatching { activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                        .onFailure { status.text = "无法打开账号管理页" }
+                }
+                val finishButton = settingsDialogButton(activity, "完成", colors)
+                val deleteButton = settingsDialogButton(activity, "删除", colors, SettingsDialogButtonRole.Destructive)
+                val cancelButton = settingsDialogButton(
+                    activity,
+                    if (enableFlow) "跳过启用" else "取消",
+                    colors,
+                    SettingsDialogButtonRole.Neutral,
+                )
+                card.addView(settingsDialogButtonRow(activity, listOf(deleteButton, finishButton, cancelButton)))
+                finishButton.setOnClickListener {
+                    if (!saveOnlineSourceDownloadPolicy(activity, source, policyInputs)) return@setOnClickListener
+                    val token = tokenInput.text?.toString().orEmpty().trim()
+                    if (token.isNotBlank()) {
+                        val saved = OnlineSourceAuth.saveSourceVariable(activity.applicationContext, source, token)
+                        if (!saved.success) {
+                            status.text = saved.message
+                            return@setOnClickListener
+                        }
+                    }
+                    resolve(true)
+                    dialog.dismiss()
+                }
+                cancelButton.setOnClickListener {
+                    resolve(enableFlow)
+                    dialog.dismiss()
+                }
+                deleteButton.setOnClickListener {
+                    confirmOnlineSourceDeletion(activity, source) {
+                        resolve(false)
+                        dialog.dismiss()
+                    }
+                }
+                dialog.setOnCancelListener { resolve(false) }
+                dialog.setOnDismissListener { if (!resolved) resolve(false) }
+                showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
+                tokenInput.requestFocus()
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX failed to open trxs source login: ${it.stackTraceToString()}")
+                onResult(false)
+            }
+        }
+    }
 
     private fun openOnlineSourceLoginInfoDialog(
         activity: Activity,
