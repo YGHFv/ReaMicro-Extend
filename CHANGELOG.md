@@ -1,10 +1,10 @@
 # 更新记录
 
-## 在线源来源名显示 - 2026-08-09
+## 1.4.1 - 2026-08-09
 
-### 在线源图书长按菜单来源改显源名
-- 在线源下载图书的长按菜单里，「来源」一行原本显示的是详情页网址链接，现改为显示对应在线源的名字（如「晚风」等）。
-- 实现：`WebDavDriveHook` 新增 `hookOnlineCompletionBookPublisherSourceName`，无条件挂钩 `BookLocalSheetKt.BookPublisher(String, Function0, Composer, I)`；在 `beforeHookedMethod` 中用已捕获的当前书 `onlineCompletionLocalSheetBook` 经 `onlineImportedBookSourceInfo` 解析出在线源信息，命中时把首个 `String` 参数（即 `book.getPublisher()`，在线源图书为网址）替换为 `info.sourceName`。仅对模块生成的在线补全 EPUB 生效，普通图书（显示真实出版方 / 「非公开书籍」）不受影响；解析不出真实源名（空 / 「未知源」）或已一致时不改写，保持原网址兜底。
+### 在线源图书长按菜单顶部「网址链接」标签改显源名
+- 在线源下载图书的长按菜单，左上角原本显示的类型标签「网址链接」现改为显示对应在线源的名字（如「晚风里」等）。**不改动**下方「详情」（关联）行的显示。
+- 实现：`WebDavDriveHook` 新增 `hookOnlineCompletionBookSourceLabel`，挂钩 `app.zhendong.reamicro.arch.FileSource.queryName(String): String`（该顶部标签由 `BookLocalSheetKt.BookInfoTitle(title, subtitle, uri)` 调用 `FileSource.queryName(uri)` 渲染，在线源图书 uri 为详情网址故显示为「网址链接」）。在 `afterHookedMethod` 中用已捕获的当前书 `onlineCompletionLocalSheetBook` 经 `onlineImportedBookSourceInfo` 解析在线源，命中时把返回值替换为 `info.sourceName`。仅在长按菜单打开且为模块生成的在线补全 EPUB 时生效（`queryName` 仅被 `BookInfoTitle` 调用），普通图书与「详情/关联」行均不受影响；解析不出真实源名（空 /「未知源」）或已一致时不改写，保留原「网址链接」兜底。
 
 ## 1.4.0 - 2026-08-04
 

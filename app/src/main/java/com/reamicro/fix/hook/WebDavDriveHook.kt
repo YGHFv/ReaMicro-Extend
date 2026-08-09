@@ -234,6 +234,7 @@ class WebDavDriveHook(
     private val onlineCompletionLocalSheetDepth = ThreadLocal<Int>()
     private val onlineCompletionUpdateRowInjecting = ThreadLocal<Boolean>()
     @Volatile private var onlineCompletionCombinedGroupRowHooked = false
+    @Volatile private var onlineCompletionSourceLabelHooked = false
     private val webDavBackupCardDepth = ThreadLocal<Int>()
     private var webDavAccountNavGraphScopeStrong: Any? = null
     private var localLibraryAccountNavGraphScopeStrong: Any? = null
@@ -560,7 +561,7 @@ class WebDavDriveHook(
                     logWebDav("online completion update row hooked after BookPublisher count=${publisherMethods.size}")
                 }
             }
-            hookOnlineCompletionBookPublisherSourceName(sheetClass)
+            hookOnlineCompletionBookSourceLabel()
             hookOnlineCompletionBookGroupRow(sheetClass)
             logWebDav(
                 "online completion local sheet hook installed " +
@@ -571,35 +572,41 @@ class WebDavDriveHook(
         }
     }
 
-    private fun hookOnlineCompletionBookPublisherSourceName(sheetClass: Class<*>) {
-        // BookPublisher(String publisher, Function0 onClick, Composer, I) renders the "来源" row; arg0 == book.getPublisher(),
-        // which for online-source books is the detail URL. Replace it with the resolved online source name (e.g. 晚风).
-        val publisherMethods = sheetClass.declaredMethods.filter {
-            it.name == BOOK_PUBLISHER_METHOD &&
-                it.parameterTypes.size == 4 &&
-                it.parameterTypes.getOrNull(0) == String::class.java &&
-                it.parameterTypes.getOrNull(1)?.name == FUNCTION0_CLASS &&
-                it.parameterTypes.getOrNull(2)?.name == COMPOSER_CLASS
-        }
-        publisherMethods.forEach { method ->
-            method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val book = onlineCompletionLocalSheetBook.get() ?: return
-                    val info = onlineImportedBookSourceInfo(book) ?: return
-                    val sourceName = info.sourceName.takeUnless { it.isBlank() || it == "未知源" } ?: return
-                    val current = param.args?.getOrNull(0) as? String
-                    if (current == sourceName) return
-                    param.args?.set(0, sourceName)
-                    logWebDav(
-                        "book publisher label rewritten to source name=$sourceName " +
-                            "from=${current.orEmpty()} title=${book.callString("getTitle")}",
-                    )
-                }
-            })
-        }
-        if (publisherMethods.isNotEmpty()) {
-            logWebDav("online completion publisher source-name rewrite hooked count=${publisherMethods.size}")
+    // The book local sheet's top-left source tag is FileSource.queryName(book.uri); for online-source books the uri is a
+    // detail URL so it renders as "网址链接". Rewrite that label (and only it) to the resolved online source name (e.g. 晚风里).
+    private fun hookOnlineCompletionBookSourceLabel() {
+        if (onlineCompletionSourceLabelHooked) return
+        runCatching {
+            val fileSourceClass = cls(FILE_SOURCE_CLASS)
+            val methods = fileSourceClass.declaredMethods.filter {
+                it.name == FILE_SOURCE_QUERY_NAME_METHOD &&
+                    it.parameterTypes.size == 1 &&
+                    it.parameterTypes.getOrNull(0) == String::class.java &&
+                    it.returnType == String::class.java
+            }
+            methods.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val book = onlineCompletionLocalSheetBook.get() ?: return
+                        val info = onlineImportedBookSourceInfo(book) ?: return
+                        val sourceName = info.sourceName.takeUnless { it.isBlank() || it == "未知源" } ?: return
+                        if (param.result == sourceName) return
+                        val previous = param.result
+                        param.result = sourceName
+                        logWebDav(
+                            "book source label rewritten to source name=$sourceName " +
+                                "from=${previous?.toString().orEmpty()} title=${book.callString("getTitle")}",
+                        )
+                    }
+                })
+            }
+            onlineCompletionSourceLabelHooked = methods.isNotEmpty()
+            if (methods.isNotEmpty()) {
+                logWebDav("online completion source label hooked count=${methods.size}")
+            }
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX failed to hook online completion source label: ${it.stackTraceToString()}")
         }
     }
 
@@ -13862,6 +13869,8 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val CLOUD_BOOK_CLASS = "app.zhendong.reamicro.data.storage.CloudBook"
         const val CLOUD_FOLDER_CLASS = "app.zhendong.reamicro.data.storage.CloudFolder"
         const val BOOK_CLASS = "app.zhendong.reamicro.data.db.entity.Book"
+        const val FILE_SOURCE_CLASS = "app.zhendong.reamicro.arch.FileSource"
+        const val FILE_SOURCE_QUERY_NAME_METHOD = "queryName"
         const val BOOK_ROW_INFO_CLASS = "app.zhendong.reamicro.ui.storage.components.BookRowInfoKt"
         const val BOOK_ROW_INFO_METHOD = "BookRowInfo"
         const val TIME_EXT_KT_CLASS = "app.zhendong.reamicro.arch.extensions.TimeExtKt"
