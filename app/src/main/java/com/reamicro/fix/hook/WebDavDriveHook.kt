@@ -560,6 +560,7 @@ class WebDavDriveHook(
                     logWebDav("online completion update row hooked after BookPublisher count=${publisherMethods.size}")
                 }
             }
+            hookOnlineCompletionBookPublisherSourceName(sheetClass)
             hookOnlineCompletionBookGroupRow(sheetClass)
             logWebDav(
                 "online completion local sheet hook installed " +
@@ -567,6 +568,38 @@ class WebDavDriveHook(
             )
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to hook online completion local sheet: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun hookOnlineCompletionBookPublisherSourceName(sheetClass: Class<*>) {
+        // BookPublisher(String publisher, Function0 onClick, Composer, I) renders the "来源" row; arg0 == book.getPublisher(),
+        // which for online-source books is the detail URL. Replace it with the resolved online source name (e.g. 晚风).
+        val publisherMethods = sheetClass.declaredMethods.filter {
+            it.name == BOOK_PUBLISHER_METHOD &&
+                it.parameterTypes.size == 4 &&
+                it.parameterTypes.getOrNull(0) == String::class.java &&
+                it.parameterTypes.getOrNull(1)?.name == FUNCTION0_CLASS &&
+                it.parameterTypes.getOrNull(2)?.name == COMPOSER_CLASS
+        }
+        publisherMethods.forEach { method ->
+            method.isAccessible = true
+            XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val book = onlineCompletionLocalSheetBook.get() ?: return
+                    val info = onlineImportedBookSourceInfo(book) ?: return
+                    val sourceName = info.sourceName.takeUnless { it.isBlank() || it == "未知源" } ?: return
+                    val current = param.args?.getOrNull(0) as? String
+                    if (current == sourceName) return
+                    param.args?.set(0, sourceName)
+                    logWebDav(
+                        "book publisher label rewritten to source name=$sourceName " +
+                            "from=${current.orEmpty()} title=${book.callString("getTitle")}",
+                    )
+                }
+            })
+        }
+        if (publisherMethods.isNotEmpty()) {
+            logWebDav("online completion publisher source-name rewrite hooked count=${publisherMethods.size}")
         }
     }
 

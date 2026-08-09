@@ -1,5 +1,11 @@
 # 更新记录
 
+## 在线源来源名显示 - 2026-08-09
+
+### 在线源图书长按菜单来源改显源名
+- 在线源下载图书的长按菜单里，「来源」一行原本显示的是详情页网址链接，现改为显示对应在线源的名字（如「晚风」等）。
+- 实现：`WebDavDriveHook` 新增 `hookOnlineCompletionBookPublisherSourceName`，无条件挂钩 `BookLocalSheetKt.BookPublisher(String, Function0, Composer, I)`；在 `beforeHookedMethod` 中用已捕获的当前书 `onlineCompletionLocalSheetBook` 经 `onlineImportedBookSourceInfo` 解析出在线源信息，命中时把首个 `String` 参数（即 `book.getPublisher()`，在线源图书为网址）替换为 `info.sourceName`。仅对模块生成的在线补全 EPUB 生效，普通图书（显示真实出版方 / 「非公开书籍」）不受影响；解析不出真实源名（空 / 「未知源」）或已一致时不改写，保持原网址兜底。
+
 ## 1.4.0 - 2026-08-04
 
 ### 阅读背景扩展
