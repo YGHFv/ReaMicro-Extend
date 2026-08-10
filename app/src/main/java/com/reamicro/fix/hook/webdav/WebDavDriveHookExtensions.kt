@@ -6,7 +6,7 @@ import android.util.Base64
 import android.widget.Toast
 import com.reamicro.fix.association.model.AssociationPlatforms
 import com.reamicro.fix.online.OnlineSourceEntry
-import com.reamicro.fix.webdav.decodeOnlineHtmlEntities
+import com.reamicro.fix.online.search.decodeOnlineHtmlEntities
 import java.util.Locale
 import org.w3c.dom.Element
 import com.reamicro.fix.hook.webdav.*

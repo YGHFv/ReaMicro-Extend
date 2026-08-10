@@ -37,6 +37,8 @@ object HostClasses {
         const val ANDROID_VIEW_KT = "androidx.compose.ui.viewinterop.AndroidView_androidKt"
         const val ANIMATED_VISIBILITY_KT = "androidx.compose.animation.AnimatedVisibilityKt"
         const val ANNOTATED_STRING = "androidx.compose.ui.text.AnnotatedString"
+        const val ANNOTATED_STRING_BUILDER = "androidx.compose.ui.text.AnnotatedString\$Builder"
+        const val ANNOTATED_STRING_RANGE = "androidx.compose.ui.text.AnnotatedString\$Range"
         const val ARRANGEMENT = "androidx.compose.foundation.layout.Arrangement"
         const val ARROW_BACK_ICON = "androidx.compose.material.icons.automirrored.outlined.ArrowBackKt"
         const val BACKGROUND_KT = "androidx.compose.foundation.BackgroundKt"

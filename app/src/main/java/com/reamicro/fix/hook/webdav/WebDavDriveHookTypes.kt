@@ -12,7 +12,7 @@ import android.view.View
 import android.widget.Toast
 import android.webkit.JavascriptInterface
 import com.reamicro.fix.online.OnlineSourceEntry
-import com.reamicro.fix.webdav.OnlineBodyMarkup
+import com.reamicro.fix.online.epub.OnlineBodyMarkup
 import com.reamicro.fix.settings.OnlineEpubHeaderScope
 import de.robv.android.xposed.XposedBridge
 import java.io.File

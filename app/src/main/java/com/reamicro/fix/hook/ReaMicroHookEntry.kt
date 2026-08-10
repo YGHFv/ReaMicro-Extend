@@ -12,6 +12,7 @@ import com.reamicro.fix.association.provider.ExternalSourceLoader
 import com.reamicro.fix.association.provider.YouShuWebSearchBridge
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.settings.ModuleSettings
+import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.settings.XposedModuleSettings
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -28,6 +29,11 @@ class ReaMicroHookEntry {
     private var currentActivityRef: WeakReference<Activity>? = null
     @Volatile private var currentActivityResumed: Boolean = false
     private val moduleSettings = XposedModuleSettings { currentActivityRef?.get() }
+
+    // 每个功能 hook 都要这两个 provider；此前 17 处各写一遍同样的 lambda，
+    // 收成字段后既少一份重复，也保证所有 hook 拿到的是同一个 Activity 视图。
+    private val activityProvider: () -> Activity? = { currentActivityRef?.get() }
+    private val settingsProvider: () -> ModuleSettingsSnapshot = moduleSettings::snapshot
     private val installedFeatureIds = linkedSetOf<String>()
     @Volatile private var memoryCallbacksInstalled: Boolean = false
 
@@ -37,8 +43,8 @@ class ReaMicroHookEntry {
         YouShuWebSearchBridge.attach { currentActivityRef?.get() }
         val readerHook = ReaderHook(
             classLoader = classLoader,
-            activityProvider = { currentActivityRef?.get() },
-            settingsProvider = moduleSettings::snapshot,
+            activityProvider = activityProvider,
+            settingsProvider = settingsProvider,
             settings = moduleSettings,
             isActivityResumedProvider = { currentActivityResumed },
         )
@@ -46,48 +52,48 @@ class ReaMicroHookEntry {
         installFeature("ReaderAutoPageHook") {
             ReaderAutoPageHook(
                 classLoader = classLoader,
-                activityProvider = { currentActivityRef?.get() },
-                settingsProvider = moduleSettings::snapshot,
+                activityProvider = activityProvider,
+                settingsProvider = settingsProvider,
             ).install()
         }
         installFeature("ReaderImportOverwriteHook") {
             ReaderImportOverwriteHook(
                 classLoader = classLoader,
-                activityProvider = { currentActivityRef?.get() },
-                settingsProvider = moduleSettings::snapshot,
+                activityProvider = activityProvider,
+                settingsProvider = settingsProvider,
             ).install()
         }
         val globalFontHook = ReaMicroGlobalFontHook(
             classLoader = classLoader,
-            activityProvider = { currentActivityRef?.get() },
+            activityProvider = activityProvider,
             settings = moduleSettings,
         )
         installFeature("ReaMicroGlobalFontHook", globalFontHook::install)
         installFeature("ReaderFontCompletionHook") {
             ReaderFontCompletionHook(
                 classLoader = classLoader,
-                activityProvider = { currentActivityRef?.get() },
+                activityProvider = activityProvider,
                 settings = moduleSettings,
             ).install()
         }
         val readerDialogueHighlightHook = ReaderDialogueHighlightHook(
             classLoader = classLoader,
-            activityProvider = { currentActivityRef?.get() },
+            activityProvider = activityProvider,
             settings = moduleSettings,
         )
         installFeature("ReaderDialogueHighlightHook", readerDialogueHighlightHook::install)
         installFeature("FileEditCompletionHook") {
             FileEditCompletionHook(
                 classLoader = classLoader,
-                activityProvider = { currentActivityRef?.get() },
-                settingsProvider = moduleSettings::snapshot,
+                activityProvider = activityProvider,
+                settingsProvider = settingsProvider,
                 fontSettingsProvider = moduleSettings::fontSettings,
             ).install()
         }
         installFeature("ReaMicroSettingsHook") {
             ReaMicroSettingsHook(
                 classLoader = classLoader,
-                activityProvider = { currentActivityRef?.get() },
+                activityProvider = activityProvider,
                 settings = moduleSettings,
                 onGlobalFontChanged = {
                     globalFontHook.invalidateGlobalFontCache()
@@ -98,47 +104,47 @@ class ReaMicroHookEntry {
         installFeature("AssociationSearchHook") {
             AssociationSearchHook(
                 classLoader = classLoader,
-                activityProvider = { currentActivityRef?.get() },
-                settingsProvider = moduleSettings::snapshot,
+                activityProvider = activityProvider,
+                settingsProvider = settingsProvider,
             ).install()
         }
         val profileBackgroundHook = ProfileBackgroundHook(
             classLoader = classLoader,
-            activityProvider = { currentActivityRef?.get() },
+            activityProvider = activityProvider,
             settings = moduleSettings,
-            settingsProvider = moduleSettings::snapshot,
+            settingsProvider = settingsProvider,
         )
         installFeature("ProfileBackgroundHook", profileBackgroundHook::install)
         installFeature("ReaderBackgroundHook") {
             ReaderBackgroundHook(
                 classLoader = classLoader,
-                activityProvider = { currentActivityRef?.get() },
+                activityProvider = activityProvider,
                 settings = moduleSettings,
-                settingsProvider = moduleSettings::snapshot,
+                settingsProvider = settingsProvider,
             ).install()
         }
         val bookDetailsAssociationActionHook = BookDetailsAssociationActionHook(
             classLoader = classLoader,
-            activityProvider = { currentActivityRef?.get() },
+            activityProvider = activityProvider,
         )
         installFeature("BookDetailsAssociationActionHook", bookDetailsAssociationActionHook::install)
         installFeature("BookOverviewImageSelectionHook") {
             BookOverviewImageSelectionHook(
                 classLoader = classLoader,
-                activityProvider = { currentActivityRef?.get() },
+                activityProvider = activityProvider,
                 requestCoverFix = bookDetailsAssociationActionHook::requestCoverFixForCurrentDetails,
             ).install()
         }
         installFeature("LocalExportHook") {
             LocalExportHook(
                 classLoader = classLoader,
-                activityProvider = { currentActivityRef?.get() },
+                activityProvider = activityProvider,
             ).install()
         }
         val webDavDriveHook = WebDavDriveHook(
             classLoader = classLoader,
-            activityProvider = { currentActivityRef?.get() },
-            settingsProvider = moduleSettings::snapshot,
+            activityProvider = activityProvider,
+            settingsProvider = settingsProvider,
         )
         installFeature("WebDavDriveHook", webDavDriveHook::install)
         installFeature("MainActivity") {
@@ -346,8 +352,8 @@ class ReaMicroHookEntry {
         if (features.isEmpty()) return
         val api = ExternalFeatureApi(
             classLoader = classLoader,
-            activityProvider = { currentActivityRef?.get() },
-            settingsProvider = moduleSettings::snapshot,
+            activityProvider = activityProvider,
+            settingsProvider = settingsProvider,
             fontSettingsProvider = moduleSettings::fontSettings,
             onSearchSourceDisabled = ::disableSearchSource,
         )

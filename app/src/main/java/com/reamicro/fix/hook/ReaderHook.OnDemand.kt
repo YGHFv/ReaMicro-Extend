@@ -3,15 +3,16 @@ package com.reamicro.fix.hook
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
-import com.reamicro.fix.webdav.OnlineOnDemandBridge
-import com.reamicro.fix.webdav.OnlineOnDemandChapterRequest
-import com.reamicro.fix.webdav.OnlineOnDemandPrefetchPlanner
+import com.reamicro.fix.online.download.OnlineOnDemandBridge
+import com.reamicro.fix.online.download.OnlineOnDemandChapterRequest
+import com.reamicro.fix.online.download.OnlineOnDemandPrefetchPlanner
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import java.lang.reflect.Method
 import java.io.File
 import com.reamicro.fix.hook.reader.*
+import com.reamicro.fix.online.download.OnlineOnDemandMetadataStore
 
 // 在线补全的按需下载簇。
 //
@@ -292,7 +293,7 @@ internal fun ReaderHook.onDemandRefreshKey(bookDir: File, href: String): String 
 internal fun ReaderHook.scheduleOnDemandVisiblePageRefresh(viewModel: Any, page: Any) {
     val bookDir = currentEpubRoot() ?: return
     val metadata = runCatching {
-        com.reamicro.fix.webdav.OnlineOnDemandMetadataStore.read(bookDir)
+        com.reamicro.fix.online.download.OnlineOnDemandMetadataStore.read(bookDir)
     }.getOrNull() ?: return
     val location = onDemandPageLocation(bookDir, page, metadata) ?: return
     val chapter = metadata.chapter(location.metadataIndex) ?: return
@@ -402,10 +403,10 @@ internal fun ReaderHook.refreshOnDemandVisiblePageWhenSpineCacheReady(
 internal fun ReaderHook.onDemandPageLocation(
     bookDir: File,
     page: Any,
-    knownMetadata: com.reamicro.fix.webdav.OnlineOnDemandMetadata? = null,
+    knownMetadata: com.reamicro.fix.online.download.OnlineOnDemandMetadata? = null,
 ): OnDemandPageLocation? {
     val metadata = knownMetadata ?: runCatching {
-        com.reamicro.fix.webdav.OnlineOnDemandMetadataStore.read(bookDir)
+        com.reamicro.fix.online.download.OnlineOnDemandMetadataStore.read(bookDir)
     }.getOrNull() ?: return null
     val normalizedHrefs = metadata.chapters.map { normalizeOnDemandHref(it.href) }
     val directIndex = readAloudPageHrefCandidates(page)

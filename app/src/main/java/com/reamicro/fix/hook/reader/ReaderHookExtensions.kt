@@ -3,7 +3,7 @@ package com.reamicro.fix.hook.reader
 import android.content.Context
 import android.content.Intent
 import com.reamicro.fix.tts.ReadAloudIntents
-import com.reamicro.fix.webdav.decodeOnlineHtmlEntities
+import com.reamicro.fix.online.search.decodeOnlineHtmlEntities
 import java.io.File
 import java.util.Locale
 import com.reamicro.fix.hook.reader.*

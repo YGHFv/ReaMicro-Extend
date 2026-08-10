@@ -40,6 +40,8 @@ class HostClassesTest {
         assertEquals("androidx.compose.ui.viewinterop.AndroidView_androidKt", HostClasses.Compose.ANDROID_VIEW_KT)
         assertEquals("androidx.compose.animation.AnimatedVisibilityKt", HostClasses.Compose.ANIMATED_VISIBILITY_KT)
         assertEquals("androidx.compose.ui.text.AnnotatedString", HostClasses.Compose.ANNOTATED_STRING)
+        assertEquals("androidx.compose.ui.text.AnnotatedString\$Builder", HostClasses.Compose.ANNOTATED_STRING_BUILDER)
+        assertEquals("androidx.compose.ui.text.AnnotatedString\$Range", HostClasses.Compose.ANNOTATED_STRING_RANGE)
         assertEquals("androidx.compose.foundation.layout.Arrangement", HostClasses.Compose.ARRANGEMENT)
         assertEquals("androidx.compose.material.icons.automirrored.outlined.ArrowBackKt", HostClasses.Compose.ARROW_BACK_ICON)
         assertEquals("androidx.compose.foundation.BackgroundKt", HostClasses.Compose.BACKGROUND_KT)
@@ -286,6 +288,8 @@ class HostClassesTest {
             HostClasses.Compose.ANDROID_VIEW_KT,
             HostClasses.Compose.ANIMATED_VISIBILITY_KT,
             HostClasses.Compose.ANNOTATED_STRING,
+            HostClasses.Compose.ANNOTATED_STRING_BUILDER,
+            HostClasses.Compose.ANNOTATED_STRING_RANGE,
             HostClasses.Compose.ARRANGEMENT,
             HostClasses.Compose.ARROW_BACK_ICON,
             HostClasses.Compose.BACKGROUND_KT,

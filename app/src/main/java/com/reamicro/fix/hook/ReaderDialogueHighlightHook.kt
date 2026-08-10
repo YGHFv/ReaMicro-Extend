@@ -10,7 +10,7 @@ import android.graphics.RectF
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.NinePatchDrawable
-import com.reamicro.fix.compat.ReaMicroHostCompat
+import com.reamicro.fix.core.HostReflect
 import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.online.FanqieParagraphCommentApi
 import com.reamicro.fix.online.OnlineParagraphCommentCacheStore
@@ -22,7 +22,7 @@ import com.reamicro.fix.online.OnlineReaderContextBridge
 import com.reamicro.fix.online.OnlineSourceDownloadPolicyStore
 import com.reamicro.fix.reader.DialogueHighlightRangeFinder
 import com.reamicro.fix.settings.ReaderHighlightRule
-import com.reamicro.fix.webdav.OnlineOnDemandMetadataStore
+import com.reamicro.fix.online.download.OnlineOnDemandMetadataStore
 import com.reamicro.fix.settings.ReaderHighlightBookContext
 import com.reamicro.fix.settings.ReaderHighlightRuleType
 import com.reamicro.fix.settings.ReaderHighlightStyle
@@ -38,7 +38,7 @@ class ReaderDialogueHighlightHook(
     private val activityProvider: () -> Activity?,
     private val settings: XposedModuleSettings,
 ) {
-    private val hostCompat = ReaMicroHostCompat(classLoader)
+    private val hostCompat = HostReflect(classLoader)
     private val fontFamilyCache = HashMap<String, Any>()
     private val failedFontFamilyLogKeys = HashSet<String>()
     private val onlineParagraphCommentDebugKeys = HashSet<String>()
@@ -1831,27 +1831,27 @@ class ReaderDialogueHighlightHook(
         // 暂停段评运行时功能，保留缓存、解析和注入代码供后续继续修复。
         const val ONLINE_PARAGRAPH_COMMENTS_RUNTIME_ENABLED = false
         const val DEFAULT_DIALOGUE_COLOR = "#FF9800"
-        const val SPAN_STYLE_CLASS = ReaMicroHostCompat.ReaderHighlight.SPAN_STYLE_CLASS
-        const val ANNOTATED_STRING_CLASS = ReaMicroHostCompat.ReaderHighlight.ANNOTATED_STRING_CLASS
-        const val ANNOTATED_RANGE_CLASS = ReaMicroHostCompat.ReaderHighlight.ANNOTATED_RANGE_CLASS
+        const val SPAN_STYLE_CLASS = HostReflect.ReaderHighlight.SPAN_STYLE_CLASS
+        const val ANNOTATED_STRING_CLASS = HostReflect.ReaderHighlight.ANNOTATED_STRING_CLASS
+        const val ANNOTATED_RANGE_CLASS = HostReflect.ReaderHighlight.ANNOTATED_RANGE_CLASS
         const val STRING_ANNOTATION_CLASS = HostClasses.Compose.STRING_ANNOTATION
         const val COMMENT_ANNOTATION_CLASS = HostClasses.Epub.COMMENT_ANNOTATION
         const val IMAGE_PLACEHOLDER_CLASS = HostClasses.Epub.IMAGE_PLACEHOLDER
         const val COMPOSE_PLACEHOLDER_CLASS = HostClasses.Compose.COMPOSE_PLACEHOLDER
         const val PLACEHOLDER_VERTICAL_ALIGN_CLASS = HostClasses.Compose.PLACEHOLDER_VERTICAL_ALIGN
         const val UI_EPUB_WINDOW_CLASS = HostClasses.Epub.UI_EPUB_WINDOW
-        const val ANNOTATED_STRING_EXT_CLASS = ReaMicroHostCompat.ReaderHighlight.ANNOTATED_STRING_EXT_CLASS
-        const val DRAW_MODIFIER_KT_CLASS = ReaMicroHostCompat.ReaderHighlight.DRAW_MODIFIER_KT_CLASS
-        const val ANDROID_CANVAS_KT_CLASS = ReaMicroHostCompat.ReaderHighlight.ANDROID_CANVAS_KT_CLASS
-        const val COLOR_KT_CLASS = ReaMicroHostCompat.ReaderHighlight.COLOR_KT_CLASS
+        const val ANNOTATED_STRING_EXT_CLASS = HostReflect.ReaderHighlight.ANNOTATED_STRING_EXT_CLASS
+        const val DRAW_MODIFIER_KT_CLASS = HostReflect.ReaderHighlight.DRAW_MODIFIER_KT_CLASS
+        const val ANDROID_CANVAS_KT_CLASS = HostReflect.ReaderHighlight.ANDROID_CANVAS_KT_CLASS
+        const val COLOR_KT_CLASS = HostReflect.ReaderHighlight.COLOR_KT_CLASS
         const val TEXT_UNIT_KT_CLASS = HostClasses.Compose.TEXT_UNIT_KT
-        const val MODIFIER_CLASS = ReaMicroHostCompat.ReaderHighlight.MODIFIER_CLASS
+        const val MODIFIER_CLASS = HostReflect.ReaderHighlight.MODIFIER_CLASS
         const val FUNCTION1_CLASS = HostClasses.Kotlin.FUNCTION1
         const val UNIT_CLASS = HostClasses.Kotlin.KOTLIN_UNIT
-        const val FONT_PROVIDER_CLASS = ReaMicroHostCompat.ReaderHighlight.FONT_PROVIDER_CLASS
-        const val FONT_FAMILY_CLASS = ReaMicroHostCompat.ReaderHighlight.FONT_FAMILY_CLASS
-        const val FONT_FAMILY_KT_CLASS = ReaMicroHostCompat.ReaderHighlight.FONT_FAMILY_KT_CLASS
-        const val FONT_WEIGHT_CLASS = ReaMicroHostCompat.ReaderHighlight.FONT_WEIGHT_CLASS
+        const val FONT_PROVIDER_CLASS = HostReflect.ReaderHighlight.FONT_PROVIDER_CLASS
+        const val FONT_FAMILY_CLASS = HostReflect.ReaderHighlight.FONT_FAMILY_CLASS
+        const val FONT_FAMILY_KT_CLASS = HostReflect.ReaderHighlight.FONT_FAMILY_KT_CLASS
+        const val FONT_WEIGHT_CLASS = HostReflect.ReaderHighlight.FONT_WEIGHT_CLASS
         const val FAMILY_SYSTEM = "system"
         const val FAMILY_SOURCE_HAN_SERIF = "serif"
         const val SPAN_STYLE_DEFAULT_MASK_EXCEPT_COLOR = 65534
