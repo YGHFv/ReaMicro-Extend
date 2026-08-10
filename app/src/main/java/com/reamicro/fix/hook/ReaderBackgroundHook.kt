@@ -62,9 +62,6 @@ class ReaderBackgroundHook(
     @Volatile private var renderingDarkThemeContent: Boolean = false
     @Volatile private var renderingEpubBackground: Boolean = false
     @Volatile private var activeBackgroundBranchDark: Boolean? = null
-    // 背景值是否走新版的 EpubBackgroundState.getBackground()；新版全局共用一个 state 实例，
-    // 主题必须实时判定而不能按实例缓存。
-    @Volatile private var backgroundValueFromState: Boolean = false
     @Volatile private var visibleArea: WeakReference<LinearLayout>? = null
     @Volatile private var selectionVersionState: Any? = null
     @Volatile private var lightHostBackgroundState: Any? = null
@@ -93,6 +90,9 @@ class ReaderBackgroundHook(
     private val renderingReaderThemesContent = ThreadLocal.withInitial { 0 }
     private val moduleSessionUpdate = ThreadLocal.withInitial { false }
     private val imagePickInProgress = AtomicBoolean(false)
+    // 分支包装的固定实例（0=浅色 1=深色），宿主每次传来的绘制内容存进 hosts 供其调用。
+    private val backgroundBranchLambdas = arrayOfNulls<Any>(2)
+    private val backgroundBranchHosts = arrayOfNulls<Any>(2)
     private val darkThemeContentHitLogged = AtomicBoolean(false)
     private val darkEpubBackgroundHitLogged = AtomicBoolean(false)
 
@@ -478,9 +478,7 @@ class ReaderBackgroundHook(
                 ?: error("ThemeToggleContent 方法未找到")
             // 背景值以前从 ComposableSingletons 的 lambda 里读，新版改由 EpubBackgroundState 承载。
             // 两条路径都尝试挂上，谁在就用谁。
-            val stateValueMethod = backgroundStateValueMethod()
-            backgroundValueFromState = stateValueMethod != null
-            val backgroundValueMethod = stateValueMethod ?: legacyBackgroundValueMethod()
+            val backgroundValueMethod = backgroundStateValueMethod() ?: legacyBackgroundValueMethod()
                 ?: error("正文背景状态读取方法未找到")
 
             XposedBridge.hookMethod(epubContainerMethod, object : XC_MethodHook() {
@@ -513,10 +511,12 @@ class ReaderBackgroundHook(
             XposedBridge.hookMethod(themeToggleMethod, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!renderingEpubBackground || !settingsProvider().canUseReaderBackground) return
-                    // 宿主只给浅色分支传了绘制背景的 lambda，深色分支为空（走月亮动画）。
-                    // 直接把浅色那份复用到深色分支，比自己构造 lambda 稳：宿主换实现也不受影响。
+                    // 宿主只给浅色分支传了绘制背景的内容，深色分支为空（走月亮动画）。
+                    // 两个分支都包上同一份内容：深色因此也能画背景，包装同时记录当前渲染的是哪个分支，
+                    // 供背景值读取点按主题返回对应的图。实例固定，避免 changedInstance 触发重组风暴。
                     val lightContent = param.args?.getOrNull(1) ?: return
-                    param.args[0] = lightContent
+                    param.args[0] = backgroundBranchLambda(lightContent, dark = true)
+                    param.args[1] = backgroundBranchLambda(lightContent, dark = false)
                     // 宿主原调用使用默认参数 darkContent=null（掩码 bit 0）。只改 args[0] 会在函数体内再次被清空。
                     val defaultMask = param.args?.getOrNull(THEME_TOGGLE_DEFAULT_MASK_ARG_INDEX) as? Int ?: 0
                     param.args[THEME_TOGGLE_DEFAULT_MASK_ARG_INDEX] =
@@ -531,14 +531,8 @@ class ReaderBackgroundHook(
                     if (!settingsProvider().canUseReaderBackground) return
                     // 新版是 EpubBackgroundState.getBackground()（无参实例方法），旧版是 singleton lambda(State)。
                     val state = param.args?.getOrNull(0) ?: param.thisObject ?: return
-                    val dark = if (backgroundValueFromState) {
-                        // 新版整个阅读器共用一个 rememberEpubBackgroundState 实例，按实例缓存主题会把
-                        // 第一次的深浅结果永久钉死，切主题后背景就跟不上了；直接用实时的主题判定。
-                        currentReaderDark
-                    } else {
-                        activeBackgroundBranchDark ?: backgroundStateThemes[state] ?: currentReaderDark
-                    }
-                    if (!backgroundValueFromState) backgroundStateThemes[state] = dark
+                    val dark = activeBackgroundBranchDark ?: backgroundStateThemes[state] ?: currentReaderDark
+                    backgroundStateThemes[state] = dark
                     val hostValue = (param.result as? String).orEmpty()
                     backgroundStateHostValues[state] = hostValue
                     currentHostBackgroundValue = hostValue
@@ -563,11 +557,21 @@ class ReaderBackgroundHook(
         parameterTypes.indexOfFirst { it.name == COMPOSER_CLASS }
 
     /** 2.3.0 beta 新构建：正文背景值改由 EpubBackgroundState.getBackground() 提供。 */
+    /**
+     * 正文背景值的读取点。
+     *
+     * A13 及更早：`ComposableSingletons$EpubContainerKt.lambda_1672513034$lambda$0$0(State) -> String`。
+     * 新构建把背景搬进 EpubBackgroundState，等价物是 `rememberEpubBackgroundState__93gMUo$lambda$1`——
+     * 它的返回值是位图加载 LaunchedEffect 的 key，改它才会真正重新加载背景图。
+     * 注意不能改成 `EpubBackgroundState.getBackground()`：那只是普通 getter，绘制时只用于判空，
+     * 到处都会被调用，既拿不到主题分支，也不驱动重新加载。
+     */
     private fun backgroundStateValueMethod(): Method? =
         runCatching {
-            cls(EPUB_BACKGROUND_STATE_CLASS).declaredMethods.firstOrNull {
-                it.name == EPUB_BACKGROUND_STATE_VALUE_METHOD &&
-                    it.parameterTypes.isEmpty() &&
+            cls(EPUB_CONTAINER_KT_CLASS).declaredMethods.firstOrNull {
+                it.name.startsWith(EPUB_BACKGROUND_STATE_VALUE_METHOD) &&
+                    it.parameterTypes.size == 1 &&
+                    it.parameterTypes[0].name == COMPOSE_STATE_CLASS &&
                     it.returnType == String::class.java
             }?.apply { isAccessible = true }
         }.getOrNull()
@@ -1252,6 +1256,51 @@ class ReaderBackgroundHook(
         }
     }
 
+    /**
+     * 取得包住宿主背景绘制内容的分支 lambda，深浅各一个且**实例固定**。
+     *
+     * `ThemeToggleContent` 用 `Composer.changedInstance(darkContent)` 判断参数是否变化，
+     * 每次 hook 新建代理会被判定为「变了」而不断重组。实例只建一次，宿主每次传来的内容存进可变引用。
+     */
+    private fun backgroundBranchLambda(hostLambda: Any, dark: Boolean): Any {
+        val index = if (dark) 1 else 0
+        backgroundBranchHosts[index] = hostLambda
+        backgroundBranchLambdas[index]?.let { return it }
+        return backgroundComposableLambda({ backgroundBranchHosts[index] }, dark)
+            .also { backgroundBranchLambdas[index] = it }
+    }
+
+    /** 把宿主的背景绘制内容包一层，记录当前正在渲染的是哪个主题分支。 */
+    private fun backgroundComposableLambda(hostProvider: () -> Any?, dark: Boolean): Any {
+        val fnClass = cls(FUNCTION2_CLASS)
+        return Proxy.newProxyInstance(classLoader, arrayOf(fnClass)) { _, method, args ->
+            when (method.name) {
+                "invoke" -> runCatching {
+                    val hostLambda = hostProvider() ?: return@runCatching targetUnit()
+                    currentReaderDark = dark
+                    activeBackgroundBranchDark = dark
+                    val composer = args?.getOrNull(0)
+                    observeSelectionVersion()
+                    composer?.let { captureBackgroundRecomposeScope(it, dark) }
+                    try {
+                        hostLambda.javaClass.methods.first {
+                            it.name == "invoke" && it.parameterTypes.size == 2
+                        }.invoke(hostLambda, args?.getOrNull(0), Integer.valueOf(0))
+                    } finally {
+                        activeBackgroundBranchDark = null
+                    }
+                }.getOrElse {
+                    activeBackgroundBranchDark = null
+                    targetUnit()
+                }
+                "toString" -> "ReaderBgComposable(dark=$dark)"
+                "hashCode" -> if (dark) 0x5245414D else 0x5245414C
+                "equals" -> false
+                else -> null
+            }
+        }
+    }
+
     private fun targetUnit(): Any? =
         runCatching {
             cls("kotlin.Unit").getDeclaredField("INSTANCE").apply { isAccessible = true }.get(null)
@@ -1437,9 +1486,8 @@ class ReaderBackgroundHook(
             "app.zhendong.reamicro.ui.reader.components.ComposableSingletons\$EpubContainerKt"
         const val EPUB_CONTAINER_METHOD = "EpubContainer"
         const val EPUB_BACKGROUND_METHOD = "EpubBackground"
-        const val EPUB_BACKGROUND_STATE_CLASS =
-            "app.zhendong.reamicro.ui.reader.components.EpubBackgroundState"
-        const val EPUB_BACKGROUND_STATE_VALUE_METHOD = "getBackground"
+        const val EPUB_BACKGROUND_STATE_VALUE_METHOD = "rememberEpubBackgroundState"
+        const val COMPOSE_STATE_CLASS = "androidx.compose.runtime.State"
         const val EPUB_DRAW_BACKGROUND_ARG_INDEX = 3
         const val EPUB_BACKGROUND_VALUE_METHOD = "lambda_1672513034\$lambda\$0\$0"
         const val DYNAMIC_THEME_CONTENT_KT_CLASS =
