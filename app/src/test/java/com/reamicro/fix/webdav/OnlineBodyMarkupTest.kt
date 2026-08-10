@@ -83,8 +83,86 @@ class OnlineBodyMarkupTest {
     }
 
     @Test
-    fun `migrates legacy illustration div`() {
+    fun `plans a transition only when body text surrounds it`() {
+        // 正文、省略号、正文 -> 中间那段变分割线
+        assertEquals(setOf(1), OnlineBodyMarkup.planTransitions(listOf(false, true, false)).replace)
+    }
+
+    @Test
+    fun `leading and trailing ellipsis stay as plain text`() {
+        val leading = OnlineBodyMarkup.planTransitions(listOf(true, false, false))
+        val trailing = OnlineBodyMarkup.planTransitions(listOf(false, false, true))
+
+        assertTrue(leading.replace.isEmpty() && leading.drop.isEmpty())
+        assertTrue(trailing.replace.isEmpty() && trailing.drop.isEmpty())
+    }
+
+    @Test
+    fun `consecutive ellipsis paragraphs merge into one divider`() {
+        val plan = OnlineBodyMarkup.planTransitions(listOf(false, true, true, true, false))
+
+        assertEquals(setOf(1), plan.replace)
+        assertEquals(setOf(2, 3), plan.drop)
+    }
+
+    @Test
+    fun `whole chapter of ellipsis is left alone`() {
+        val plan = OnlineBodyMarkup.planTransitions(listOf(true, true))
+
+        assertTrue(plan.replace.isEmpty() && plan.drop.isEmpty())
+    }
+
+    @Test
+    fun `migrates the earliest downloads that still use plain paragraphs`() {
+        val html = "<body><p>正文一</p><p>……</p><p>正文二</p></body>"
+
+        val migrated = OnlineBodyMarkup.migrateTransitions(
+            html = html,
+            isDivider = { it == "……" },
+            markup = """<p class="te-transition te-transition--diamond"></p>""",
+            imageHref = null,
+        )
+
         assertEquals(
+            """<body><p>正文一</p><p class="te-transition te-transition--diamond"></p><p>正文二</p></body>""",
+            migrated,
+        )
+    }
+
+    @Test
+    fun `migration merges consecutive ellipsis paragraphs`() {
+        val migrated = OnlineBodyMarkup.migrateTransitions(
+            html = "<body><p>正文一</p><p>……</p><p>……</p><p>正文二</p></body>",
+            isDivider = { it == "……" },
+            markup = "",
+            imageHref = null,
+        )
+
+        assertEquals("<body><p>正文一</p>${OnlineBodyMarkup.divider("……")}<p>正文二</p></body>", migrated)
+    }
+
+    @Test
+    fun `migration keeps chapter-edge ellipsis untouched`() {
+        val html = "<body><p>……</p><p>正文一</p><p>正文二</p><p>……</p></body>"
+
+        assertEquals(html, OnlineBodyMarkup.migrateTransitions(html, { it == "……" }, "", null))
+    }
+
+    @Test
+    fun `migration rewrites existing dividers into the current structure`() {
+        val migrated = OnlineBodyMarkup.migrateTransitions(
+            html = "<body><p>正文一</p>${OnlineBodyMarkup.divider("※※※")}<p>正文二</p></body>",
+            isDivider = { false },
+            markup = """<p class="te-transition te-transition--fade-line"></p>""",
+            imageHref = null,
+        )
+
+        assertTrue(migrated.contains("te-transition--fade-line"))
+        assertFalse(migrated.contains("te-divider-line"))
+    }
+
+    @Test
+    fun `migrates legacy illustration div`() {        assertEquals(
             OnlineBodyMarkup.illustration("../Images/a.jpg"),
             OnlineBodyMarkup.migrateLegacyBody(
                 "<div class=\"online-illustration\"><img src=\"../Images/a.jpg\" alt=\"\"/></div>",

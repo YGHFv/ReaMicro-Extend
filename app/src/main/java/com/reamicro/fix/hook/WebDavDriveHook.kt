@@ -10853,6 +10853,7 @@ class WebDavDriveHook(
             changed = true
         }
         val textDir = File(root, "OEBPS/Text")
+        val decor = onlineCompletionBookDirDecor(root)
         textDir.listFiles()
             ?.filter {
                 ONLINE_COMPLETION_CHAPTER_FILE_REGEX.matches(it.name) ||
@@ -10860,7 +10861,7 @@ class WebDavDriveHook(
             }
             ?.forEach { chapterFile ->
                 val original = chapterFile.readText(Charsets.UTF_8)
-                val migrated = migrateOnlineCompletionChapterStyle(original)
+                val migrated = migrateOnlineCompletionChapterStyle(original, decor)
                 if (migrated != original) {
                     chapterFile.writeText(migrated, Charsets.UTF_8)
                     changed = true
@@ -10886,7 +10887,10 @@ class WebDavDriveHook(
         return changed
     }
 
-    private fun migrateOnlineCompletionChapterStyle(original: String): String {
+    private fun migrateOnlineCompletionChapterStyle(
+        original: String,
+        decor: OnlineEpubDecor = OnlineEpubDecor(),
+    ): String {
         var result = original.replace(
             ONLINE_COMPLETION_INLINE_STYLE_REGEX,
             "<link rel=\"stylesheet\" type=\"text/css\" href=\"../Styles/default.css\"/>",
@@ -10918,6 +10922,13 @@ class WebDavDriveHook(
             "<h1$nextAttributes><span class=\"te-chapter-name\">$content</span></h1>"
         }
         result = OnlineBodyMarkup.migrateLegacyBody(result)
+        // 早期下载的章节里省略号还是普通 <p>，历史分割线的结构也未必对得上当前样式，这里一并改写。
+        result = OnlineBodyMarkup.migrateTransitions(
+            html = result,
+            isDivider = { text -> ONLINE_DIVIDER_LINE_REGEX.matches(text) },
+            markup = decor.transitionMarkup,
+            imageHref = decor.dividerImageHref,
+        )
         return result
     }
 
@@ -10932,7 +10943,23 @@ class WebDavDriveHook(
             .map { it.trim() }
             .filter { it.isNotBlank() }
             .toList())
-        val paragraphs = bodyLines.joinToString("\n") { line -> chapterParagraphHtml(line, imageHrefs, decor) }
+        // 转场只认前后都有正文的省略号段，连续多段合并成一条；首尾的孤立省略号保持原样。
+        val plan = OnlineBodyMarkup.planTransitions(
+            bodyLines.map { line ->
+                OnlineChapterImageMarkup.markerUrl(line) == null && ONLINE_DIVIDER_LINE_REGEX.matches(line)
+            },
+        )
+        val paragraphs = bodyLines.mapIndexedNotNull { index, line ->
+            when (index) {
+                in plan.drop -> null
+                in plan.replace -> OnlineBodyMarkup.transition(
+                    markup = decor.transitionMarkup,
+                    textHtml = line.xmlEscape(),
+                    imageHref = decor.dividerImageHref,
+                )
+                else -> chapterParagraphHtml(line, imageHrefs, decor)
+            }
+        }.joinToString("\n")
         val heading = chapterHeadingHtml(title)
         val header = decor.headerHtml(isVolumePage = false, isVolumeFirstChapter = isVolumeFirstChapter)
         return """<?xml version="1.0" encoding="UTF-8"?>
@@ -10953,13 +10980,6 @@ $paragraphs
             val fileName = imageHrefs[url]
             val src = if (fileName != null) "../Images/$fileName" else url
             return OnlineBodyMarkup.illustration(src.xmlEscape())
-        }
-        if (ONLINE_DIVIDER_LINE_REGEX.matches(line)) {
-            return OnlineBodyMarkup.transition(
-                markup = decor.transitionMarkup,
-                textHtml = line.xmlEscape(),
-                imageHref = decor.dividerImageHref,
-            )
         }
         return OnlineBodyMarkup.paragraph(line.xmlEscape())
     }

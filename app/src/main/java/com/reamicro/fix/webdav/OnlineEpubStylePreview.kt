@@ -67,5 +67,12 @@ $bookCss
             max-width: 100%;
             height: auto;
         }
+        /*
+         * 贴边头图靠 duokan-bleed 出血到页顶，WebView 不认这个指令，预览里就会在头图上方留一条纸色。
+         * 这里把 body 的上内边距抵消掉，让预览的贴边效果与成书一致。
+         */
+        body > .te-header-figure:first-child {
+            margin-top: -20px;
+        }
     """.trimIndent()
 }

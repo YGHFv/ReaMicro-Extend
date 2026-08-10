@@ -62,6 +62,9 @@ class ReaderBackgroundHook(
     @Volatile private var renderingDarkThemeContent: Boolean = false
     @Volatile private var renderingEpubBackground: Boolean = false
     @Volatile private var activeBackgroundBranchDark: Boolean? = null
+    // 背景值是否走新版的 EpubBackgroundState.getBackground()；新版全局共用一个 state 实例，
+    // 主题必须实时判定而不能按实例缓存。
+    @Volatile private var backgroundValueFromState: Boolean = false
     @Volatile private var visibleArea: WeakReference<LinearLayout>? = null
     @Volatile private var selectionVersionState: Any? = null
     @Volatile private var lightHostBackgroundState: Any? = null
@@ -450,53 +453,40 @@ class ReaderBackgroundHook(
     private fun hookEpubBackground() {
         runCatching {
             val epubContainerClass = cls(EPUB_CONTAINER_KT_CLASS)
+            // 2.3.0 beta 新构建给 EpubBackground/EpubContainer 都加了 EpubBackgroundState 参数，
+            // Composer 的位置随之后移。这里一律按「方法名 + 含 Composer 参数」定位，不再写死参数个数与下标。
             val epubBackgroundMethod = epubContainerClass.declaredMethods.firstOrNull {
-                it.name == EPUB_BACKGROUND_METHOD &&
-                    it.parameterTypes.size == 2 &&
-                    it.parameterTypes.getOrNull(0)?.name == COMPOSER_CLASS
+                it.name == EPUB_BACKGROUND_METHOD && it.composerParameterIndex() >= 0
             }?.apply { isAccessible = true }
                 ?: error("EpubBackground 方法未找到")
             val epubContainerMethod = epubContainerClass.declaredMethods.firstOrNull {
                 it.name == EPUB_CONTAINER_METHOD &&
-                    it.parameterTypes.size == 16 &&
-                    it.parameterTypes.getOrNull(EPUB_DRAW_BACKGROUND_ARG_INDEX) == Boolean::class.javaPrimitiveType &&
-                    it.parameterTypes.getOrNull(EPUB_CONTAINER_COMPOSER_ARG_INDEX)?.name == COMPOSER_CLASS
+                    it.composerParameterIndex() >= 0 &&
+                    it.parameterTypes.getOrNull(EPUB_DRAW_BACKGROUND_ARG_INDEX) == Boolean::class.javaPrimitiveType
             }?.apply { isAccessible = true }
                 ?: error("EpubContainer 方法未找到")
+            val epubContainerComposerIndex = epubContainerMethod.composerParameterIndex()
             val darkThemeMethod = cls(DYNAMIC_THEME_CONTENT_KT_CLASS).declaredMethods.firstOrNull {
                 it.name == REMEMBER_READER_DARK_METHOD &&
                     it.parameterTypes.size == 2 &&
                     it.parameterTypes.getOrNull(0)?.name == COMPOSER_CLASS
             }?.apply { isAccessible = true }
                 ?: error("阅读主题状态方法未找到")
-            val backgroundSingletons = cls(EPUB_CONTAINER_SINGLETONS_CLASS)
-            val singletonInstance = backgroundSingletons.getDeclaredField("INSTANCE")
-                .apply { isAccessible = true }
-                .get(null)
-                ?: error("EpubContainer singleton unavailable")
-            val backgroundLambdaGetter = backgroundSingletons.declaredMethods.firstOrNull {
-                it.name == EPUB_BACKGROUND_LAMBDA_GETTER && it.parameterTypes.isEmpty()
-            }?.apply { isAccessible = true }
-                ?: error("正文背景绘制 lambda 未找到")
-            val hostBackgroundLambda = backgroundLambdaGetter.invoke(singletonInstance)
-                ?: error("正文背景绘制 lambda unavailable")
-            val lightBackgroundLambda = backgroundComposableLambda(hostBackgroundLambda, dark = false)
-            val darkBackgroundLambda = backgroundComposableLambda(hostBackgroundLambda, dark = true)
             val themeToggleMethod = cls(DYNAMIC_THEME_CONTENT_KT_CLASS).declaredMethods.firstOrNull {
                 it.name == THEME_TOGGLE_CONTENT_METHOD && it.parameterTypes.size == 5
             }?.apply { isAccessible = true }
                 ?: error("ThemeToggleContent 方法未找到")
-            val backgroundValueMethod = backgroundSingletons.declaredMethods.firstOrNull {
-                it.name == EPUB_BACKGROUND_VALUE_METHOD &&
-                    it.parameterTypes.size == 1 &&
-                    it.returnType == String::class.java
-            }?.apply { isAccessible = true }
+            // 背景值以前从 ComposableSingletons 的 lambda 里读，新版改由 EpubBackgroundState 承载。
+            // 两条路径都尝试挂上，谁在就用谁。
+            val stateValueMethod = backgroundStateValueMethod()
+            backgroundValueFromState = stateValueMethod != null
+            val backgroundValueMethod = stateValueMethod ?: legacyBackgroundValueMethod()
                 ?: error("正文背景状态读取方法未找到")
 
             XposedBridge.hookMethod(epubContainerMethod, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!settingsProvider().canUseReaderBackground) return
-                    param.args?.getOrNull(EPUB_CONTAINER_COMPOSER_ARG_INDEX)?.let { composer ->
+                    param.args?.getOrNull(epubContainerComposerIndex)?.let { composer ->
                         captureContainerRecomposeScope(composer, currentReaderDark)
                     }
                 }
@@ -523,8 +513,10 @@ class ReaderBackgroundHook(
             XposedBridge.hookMethod(themeToggleMethod, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!renderingEpubBackground || !settingsProvider().canUseReaderBackground) return
-                    param.args[0] = darkBackgroundLambda
-                    param.args[1] = lightBackgroundLambda
+                    // 宿主只给浅色分支传了绘制背景的 lambda，深色分支为空（走月亮动画）。
+                    // 直接把浅色那份复用到深色分支，比自己构造 lambda 稳：宿主换实现也不受影响。
+                    val lightContent = param.args?.getOrNull(1) ?: return
+                    param.args[0] = lightContent
                     // 宿主原调用使用默认参数 darkContent=null（掩码 bit 0）。只改 args[0] 会在函数体内再次被清空。
                     val defaultMask = param.args?.getOrNull(THEME_TOGGLE_DEFAULT_MASK_ARG_INDEX) as? Int ?: 0
                     param.args[THEME_TOGGLE_DEFAULT_MASK_ARG_INDEX] =
@@ -537,9 +529,16 @@ class ReaderBackgroundHook(
             XposedBridge.hookMethod(backgroundValueMethod, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     if (!settingsProvider().canUseReaderBackground) return
-                    val state = param.args?.getOrNull(0) ?: return
-                    val dark = activeBackgroundBranchDark ?: backgroundStateThemes[state] ?: currentReaderDark
-                    backgroundStateThemes[state] = dark
+                    // 新版是 EpubBackgroundState.getBackground()（无参实例方法），旧版是 singleton lambda(State)。
+                    val state = param.args?.getOrNull(0) ?: param.thisObject ?: return
+                    val dark = if (backgroundValueFromState) {
+                        // 新版整个阅读器共用一个 rememberEpubBackgroundState 实例，按实例缓存主题会把
+                        // 第一次的深浅结果永久钉死，切主题后背景就跟不上了；直接用实时的主题判定。
+                        currentReaderDark
+                    } else {
+                        activeBackgroundBranchDark ?: backgroundStateThemes[state] ?: currentReaderDark
+                    }
+                    if (!backgroundValueFromState) backgroundStateThemes[state] = dark
                     val hostValue = (param.result as? String).orEmpty()
                     backgroundStateHostValues[state] = hostValue
                     currentHostBackgroundValue = hostValue
@@ -558,6 +557,30 @@ class ReaderBackgroundHook(
             XposedBridge.log("$LOG_PREFIX hook epub background failed: ${it.stackTraceToString()}")
         }
     }
+
+    /** Composer 参数在方法签名里的下标；宿主加参数时位置会变，一律动态查找。 */
+    private fun Method.composerParameterIndex(): Int =
+        parameterTypes.indexOfFirst { it.name == COMPOSER_CLASS }
+
+    /** 2.3.0 beta 新构建：正文背景值改由 EpubBackgroundState.getBackground() 提供。 */
+    private fun backgroundStateValueMethod(): Method? =
+        runCatching {
+            cls(EPUB_BACKGROUND_STATE_CLASS).declaredMethods.firstOrNull {
+                it.name == EPUB_BACKGROUND_STATE_VALUE_METHOD &&
+                    it.parameterTypes.isEmpty() &&
+                    it.returnType == String::class.java
+            }?.apply { isAccessible = true }
+        }.getOrNull()
+
+    /** 旧版路径：ComposableSingletons 里的 lambda(State) -> String。 */
+    private fun legacyBackgroundValueMethod(): Method? =
+        runCatching {
+            cls(EPUB_CONTAINER_SINGLETONS_CLASS).declaredMethods.firstOrNull {
+                it.name == EPUB_BACKGROUND_VALUE_METHOD &&
+                    it.parameterTypes.size == 1 &&
+                    it.returnType == String::class.java
+            }?.apply { isAccessible = true }
+        }.getOrNull()
 
     private fun emitBackgroundArea(composer: Any, dark: Boolean) {
         emitBackgroundPanel(composer, dark)
@@ -1229,39 +1252,6 @@ class ReaderBackgroundHook(
         }
     }
 
-    private fun backgroundComposableLambda(hostLambda: Any, dark: Boolean): Any {
-        val fnClass = cls(FUNCTION2_CLASS)
-        return Proxy.newProxyInstance(classLoader, arrayOf(fnClass)) { _, method, args ->
-            when (method.name) {
-                "invoke" -> runCatching {
-                    currentReaderDark = dark
-                    activeBackgroundBranchDark = dark
-                    val composer = args?.getOrNull(0)
-                    observeSelectionVersion()
-                    composer?.let { captureBackgroundRecomposeScope(it, dark) }
-                    try {
-                        hostLambda.javaClass.methods.first {
-                            it.name == "invoke" && it.parameterTypes.size == 2
-                        }.invoke(
-                            hostLambda,
-                            args?.getOrNull(0),
-                            Integer.valueOf(0),
-                        )
-                    } finally {
-                        activeBackgroundBranchDark = null
-                    }
-                }.getOrElse {
-                    activeBackgroundBranchDark = null
-                    targetUnit()
-                }
-                "toString" -> "ReaderBgComposable(dark=$dark)"
-                "hashCode" -> System.identityHashCode(hostLambda) * 31 + dark.hashCode()
-                "equals" -> false
-                else -> null
-            }
-        }
-    }
-
     private fun targetUnit(): Any? =
         runCatching {
             cls("kotlin.Unit").getDeclaredField("INSTANCE").apply { isAccessible = true }.get(null)
@@ -1447,9 +1437,10 @@ class ReaderBackgroundHook(
             "app.zhendong.reamicro.ui.reader.components.ComposableSingletons\$EpubContainerKt"
         const val EPUB_CONTAINER_METHOD = "EpubContainer"
         const val EPUB_BACKGROUND_METHOD = "EpubBackground"
+        const val EPUB_BACKGROUND_STATE_CLASS =
+            "app.zhendong.reamicro.ui.reader.components.EpubBackgroundState"
+        const val EPUB_BACKGROUND_STATE_VALUE_METHOD = "getBackground"
         const val EPUB_DRAW_BACKGROUND_ARG_INDEX = 3
-        const val EPUB_CONTAINER_COMPOSER_ARG_INDEX = 12
-        const val EPUB_BACKGROUND_LAMBDA_GETTER = "getLambda\$1672513034\$reamicro_composeApp"
         const val EPUB_BACKGROUND_VALUE_METHOD = "lambda_1672513034\$lambda\$0\$0"
         const val DYNAMIC_THEME_CONTENT_KT_CLASS =
             "app.zhendong.reamicro.ui.reader.theme.DynamicThemeContentKt"

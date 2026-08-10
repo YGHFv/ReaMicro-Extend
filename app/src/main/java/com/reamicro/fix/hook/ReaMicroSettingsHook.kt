@@ -2695,6 +2695,11 @@ class ReaMicroSettingsHook(
                 val preview = WebView(activity).apply {
                     setBackgroundColor(Color.TRANSPARENT)
                     webViewClient = WebViewClient()
+                    // Android 11 起 allowFileAccess 默认 false，合成好的头图与设备字体都走 file://，
+                    // 不放开的话图片静默加载失败；头图 figure 又是 line-height:0，失败后高度归零就整个不见了。
+                    settings.allowFileAccess = true
+                    @Suppress("DEPRECATION")
+                    settings.allowFileAccessFromFileURLs = true
                 }
                 fun composedCss(): String =
                     OnlineEpubCssBlocks.compose(drafts.map { (selector, body) -> OnlineEpubCssBlock(selector, body) })

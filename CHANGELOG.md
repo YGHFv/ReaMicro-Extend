@@ -1,5 +1,25 @@
 # 更新记录
 
+## 1.4.8 - 2026-08-11
+
+### 修复阅微 2.3.0 beta 新构建导致的深色背景失效
+- 从 LSPosed 模块日志里拿到了确凿证据：`hook epub background failed: EpubBackground 方法未找到`，整个 `hookEpubBackground` 没装上。
+- 根因是宿主重构了正文背景：新增 `EpubBackgroundState`，`EpubBackground` 由 `(Composer, I)` 变成 `(EpubBackgroundState, Composer, I, I)`，`EpubContainer` 的 Composer 下标由 12 移到 13，背景值也从 `ComposableSingletons` 的 lambda 改由 `EpubBackgroundState.getBackground()` 提供（原来的 `getLambda$1672513034` 已不存在，同名 singleton 的 lambda 变成了 Function3）。
+- 修复：方法定位一律改成「方法名 + 动态查找 Composer 参数下标」，不再写死参数个数与位置；背景值读取优先挂 `EpubBackgroundState.getBackground()`，找不到时回退旧的 singleton lambda；深色分支不再自造 lambda，而是直接复用宿主传给 `ThemeToggleContent` 的浅色绘制内容 —— 宿主换实现也不受影响。
+- **背景跟随深浅色切换**：新版整个阅读器共用一个 `rememberEpubBackgroundState` 实例，按实例缓存主题会把第一次的深浅结果永久钉死，导致切主题后背景不跟着变。走新路径时改用实时的主题判定，不再按实例缓存。
+
+### 分割线识别规则收紧
+- **只有前后都还有正文的省略号段才算转场**：章节开头、结尾的孤立省略号是排版装饰或残留，不再误判成分割线。
+- **连续多段省略号合并成一条分割线**，不再连出好几条。
+- 规则抽成 `OnlineBodyMarkup.planTransitions` 纯函数，生成与迁移两条路径共用同一套判断。
+
+### 早期下载的图书一并迁移
+- 最早下载的章节里省略号仍是普通 `<p>……</p>`，历史分割线的结构也未必对得上当前样式（菱形、渐隐线等把效果挂在 `te-transition--*` 上，结构不对就退回显示原始符号）。现在点「更新」时会把这两种情况都改写成当前分割样式的结构。
+
+### 头图预览贴边
+- 贴边头图靠 `duokan-bleed` 出血到页顶，WebView 不认这个指令，预览里头图上方总留一条纸色。预览样式里抵消掉 body 的上内边距，贴边效果与成书一致。
+- 上一版头图预览完全不显示，是因为 Android 11 起 WebView `allowFileAccess` 默认为 `false`，合成好的头图与设备字体都走 `file://` 被静默拦下；头图 `figure` 又是 `line-height: 0`，图片失败后高度归零就整个不见了。预览 WebView 已开启文件访问。
+
 ## 1.4.7 - 2026-08-10
 
 ### 分割样式按各自结构渲染
