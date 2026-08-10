@@ -30,6 +30,7 @@ tools/*
 !tools/fix-imports.mjs
 !tools/split-hook.mjs
 !tools/split-config/
+!tools/gen-settings-contract-test.mjs
 decompiled/
 dex_tmp/
 base_decompiled/
