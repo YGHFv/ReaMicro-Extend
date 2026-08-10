@@ -5,11 +5,11 @@
 //   2. 函数体整体反缩进 4 空格，但三引号原始字符串内部一行不动——那里的空格是内容；
 //   3. 搬完后把新文件里的函数体重新缩进回去，与原文逐字节比对，不一致就中止。
 //
-// 用法：node tools/extract-hook-cluster.mjs <源文件> <目标文件> <类名> <函数名清单文件> <文件头注释>
+// 用法：node tools/extract-hook-cluster.mjs <源文件> <目标文件> <类名> <函数名清单文件> <文件头注释> [包名]
 
 import fs from 'node:fs'
 
-const [, , sourcePath, targetPath, className, namesPath, headerComment] = process.argv
+const [, , sourcePath, targetPath, className, namesPath, headerComment, packageName] = process.argv
 if (!sourcePath || !targetPath || !className || !namesPath) {
   console.error('参数不足')
   process.exit(1)
@@ -134,7 +134,7 @@ for (const m of moved) {
 // ---- 生成目标文件 ----
 const importBlock = lines.slice(0, classStart).join('\n').match(/^import .+$/gm) || []
 const header = [
-  `package com.reamicro.fix.hook`,
+  `package ${packageName || 'com.reamicro.fix.hook'}`,
   '',
   ...importBlock,
   '',
