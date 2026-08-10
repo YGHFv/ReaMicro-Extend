@@ -51,6 +51,7 @@ import android.widget.Toast
 import android.webkit.JavascriptInterface
 import com.reamicro.fix.R
 import com.reamicro.fix.association.model.AssociationPlatforms
+import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.online.FanqieParagraphCommentApi
 import com.reamicro.fix.online.OnlineConcurrentRateLimiter
 import com.reamicro.fix.online.OnlineParagraphCommentCache
@@ -314,56 +315,63 @@ class WebDavDriveHook(
     fun install() {
         logWebDav("install start")
         OnlineOnDemandBridge.attach(::downloadOnlineCompletionOnDemandChapter)
-        hookWebDavCleartextPolicy()
-        hookBackupTypeName()
-        hookOnlineCompletionBookRowDuration()
-        hookOnlineCompletionBookLocalSheet()
-        hookHomeCloudResultListRenderContext()
-        hookOnlineCompletionHomeCloudBookRow()
-        hookHomeViewModelDependencies()
-        hookWebDavRowIcon()
-        hookWebDavYun115Icon()
-        hookWebDavFileFolderIcon()
-        hookWebDavCloudTreeIcon()
-        hookImportCloudRowLabels()
-        hookImportCloudRowDetail()
-        hookCloudBookRowExtendedDisplay()
-        hookLocalLibraryFolderPickerResult()
-        hookWebDavStorageNavigate()
-        hookThirdLoginWebDavRoute()
-        hookWebDavAccountScreenReuse()
-        hookWebDavAccountSettingComponents()
-        hookWebDavAccountAuthFlow()
-        hookWebDavAccountTopBarTitle()
-        hookWebDavAccountDefaultFolderLambda()
-        hookCloudStorageWebDavData()
-        hookCloudStorageWebDavStrings()
-        hookCloudStorageWebDavTitle()
-        hookCloudStorageWebDavScreenScope()
-        hookCloudStorageWebDavAuthTips()
-        hookCloudStorageWebDavViewModelState()
-        hookWebDavCloudTap()
-        hookNativeCloudDownloadCancellation()
-        hookSyncAuthCard()
-        hookSyncAuthCardContent()
-        hookDriveAuthCard()
-        hookDriveOtherAvailableCard()
-        hookWebDavSyncUploadRunningCard()
-        hookImportAuthorizedList()
-        hookImportLocalLibraryRow()
-        hookImportUnauthList()
-        hookImportCloudAuthorizedRow()
-        hookImportCloudUnauthRow()
-        hookWebDavCloudDownload()
-        hookWebDavImportBookSource()
-        hookWebDavCloudBackup()
-        hookBookBackupViewModelState()
-        hookBookBackupWebDavCard()
-        hookWebDavYun115BackupCard()
-        hookHomeWebDavSearch()
-        hookHomeSearchTapCancellation()
-        hookHomeSearchResultWebDavSection()
-        hookThirdAccountWebDavRoute()
+        // 逐个登记安装结果：宿主升级导致某个 hook 装不上时，靠启动汇总即可定位，
+        // 且单个 hook 失败不再中断后续 hook 的安装。
+        HookInstallReport.installAll(
+            FEATURE_ID,
+            listOf(
+                "webDavCleartextPolicy" to ::hookWebDavCleartextPolicy,
+                "backupTypeName" to ::hookBackupTypeName,
+                "onlineCompletionBookRowDuration" to ::hookOnlineCompletionBookRowDuration,
+                "onlineCompletionBookLocalSheet" to ::hookOnlineCompletionBookLocalSheet,
+                "homeCloudResultListRenderContext" to ::hookHomeCloudResultListRenderContext,
+                "onlineCompletionHomeCloudBookRow" to ::hookOnlineCompletionHomeCloudBookRow,
+                "homeViewModelDependencies" to ::hookHomeViewModelDependencies,
+                "webDavRowIcon" to ::hookWebDavRowIcon,
+                "webDavYun115Icon" to ::hookWebDavYun115Icon,
+                "webDavFileFolderIcon" to ::hookWebDavFileFolderIcon,
+                "webDavCloudTreeIcon" to ::hookWebDavCloudTreeIcon,
+                "importCloudRowLabels" to ::hookImportCloudRowLabels,
+                "importCloudRowDetail" to ::hookImportCloudRowDetail,
+                "cloudBookRowExtendedDisplay" to ::hookCloudBookRowExtendedDisplay,
+                "localLibraryFolderPickerResult" to ::hookLocalLibraryFolderPickerResult,
+                "webDavStorageNavigate" to ::hookWebDavStorageNavigate,
+                "thirdLoginWebDavRoute" to ::hookThirdLoginWebDavRoute,
+                "webDavAccountScreenReuse" to ::hookWebDavAccountScreenReuse,
+                "webDavAccountSettingComponents" to ::hookWebDavAccountSettingComponents,
+                "webDavAccountAuthFlow" to ::hookWebDavAccountAuthFlow,
+                "webDavAccountTopBarTitle" to ::hookWebDavAccountTopBarTitle,
+                "webDavAccountDefaultFolderLambda" to ::hookWebDavAccountDefaultFolderLambda,
+                "cloudStorageWebDavData" to ::hookCloudStorageWebDavData,
+                "cloudStorageWebDavStrings" to ::hookCloudStorageWebDavStrings,
+                "cloudStorageWebDavTitle" to ::hookCloudStorageWebDavTitle,
+                "cloudStorageWebDavScreenScope" to ::hookCloudStorageWebDavScreenScope,
+                "cloudStorageWebDavAuthTips" to ::hookCloudStorageWebDavAuthTips,
+                "cloudStorageWebDavViewModelState" to ::hookCloudStorageWebDavViewModelState,
+                "webDavCloudTap" to ::hookWebDavCloudTap,
+                "nativeCloudDownloadCancellation" to ::hookNativeCloudDownloadCancellation,
+                "syncAuthCard" to ::hookSyncAuthCard,
+                "syncAuthCardContent" to ::hookSyncAuthCardContent,
+                "driveAuthCard" to ::hookDriveAuthCard,
+                "driveOtherAvailableCard" to ::hookDriveOtherAvailableCard,
+                "webDavSyncUploadRunningCard" to ::hookWebDavSyncUploadRunningCard,
+                "importAuthorizedList" to ::hookImportAuthorizedList,
+                "importLocalLibraryRow" to ::hookImportLocalLibraryRow,
+                "importUnauthList" to ::hookImportUnauthList,
+                "importCloudAuthorizedRow" to ::hookImportCloudAuthorizedRow,
+                "importCloudUnauthRow" to ::hookImportCloudUnauthRow,
+                "webDavCloudDownload" to ::hookWebDavCloudDownload,
+                "webDavImportBookSource" to ::hookWebDavImportBookSource,
+                "webDavCloudBackup" to ::hookWebDavCloudBackup,
+                "bookBackupViewModelState" to ::hookBookBackupViewModelState,
+                "bookBackupWebDavCard" to ::hookBookBackupWebDavCard,
+                "webDavYun115BackupCard" to ::hookWebDavYun115BackupCard,
+                "homeWebDavSearch" to ::hookHomeWebDavSearch,
+                "homeSearchTapCancellation" to ::hookHomeSearchTapCancellation,
+                "homeSearchResultWebDavSection" to ::hookHomeSearchResultWebDavSection,
+                "thirdAccountWebDavRoute" to ::hookThirdAccountWebDavRoute,
+            ),
+        )
     }
 
     fun cleanupStartupCacheIfNeeded(context: Context) {
@@ -14223,6 +14231,7 @@ img{max-width:100%;max-height:100%;height:auto;}
         }
 
     private companion object {
+        const val FEATURE_ID = "WebDavDriveHook"
         const val LOG_TAG = "ReaMicroWebDAV"
         const val LOG_PREFIX = "ReaMicro LSP"
         // 暂停段评网络请求与缓存写入，保留实现供后续继续修复。

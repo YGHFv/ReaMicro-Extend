@@ -1,0 +1,74 @@
+# detekt 配置：只做「体积与复杂度」基线度量，不做风格检查。
+#
+# 背景：本仓库是 Xposed 模块，大量代码是宿主反射互操作，天然会触发
+#       风格类规则（长方法、魔法数字、命名等），全开会淹没真正的信号。
+#       这里只保留能反映「文件是否过大、职责是否过多」的规则，
+#       并以 report-only 方式运行，用于重构前后的对比。
+
+build:
+  maxIssues: 2147483647 # 永不因 issue 数失败，护栏只负责报数
+
+config:
+  validation: true
+  warningsAsErrors: false
+
+# 以下类别整体关闭，只保留 complexity 下的体积度量规则。
+comments:
+  active: false
+coroutines:
+  active: false
+empty-blocks:
+  active: false
+exceptions:
+  active: false
+naming:
+  active: false
+performance:
+  active: false
+potential-bugs:
+  active: false
+style:
+  active: false
+
+complexity:
+  active: true
+  CognitiveComplexMethod:
+    active: false
+  ComplexCondition:
+    active: false
+  ComplexInterface:
+    active: false
+  CyclomaticComplexMethod:
+    active: false
+  LabeledExpression:
+    active: false
+  LargeClass:
+    active: true
+    threshold: 1500
+  LongMethod:
+    active: true
+    threshold: 120
+  LongParameterList:
+    active: false
+  MethodOverloading:
+    active: false
+  NamedArguments:
+    active: false
+  NestedBlockDepth:
+    active: false
+  NestedScopeFunctions:
+    active: false
+  ReplaceSafeCallChainWithRun:
+    active: false
+  StringLiteralDuplication:
+    active: false
+  TooManyFunctions:
+    active: true
+    thresholdInFiles: 80
+    thresholdInClasses: 80
+    thresholdInInterfaces: 80
+    thresholdInObjects: 80
+    thresholdInEnums: 80
+    ignoreDeprecated: false
+    ignorePrivate: false
+    ignoreOverridden: true

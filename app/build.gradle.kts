@@ -4,6 +4,7 @@ import java.util.Properties
 
 plugins {
     id("com.android.application")
+    id("io.gitlab.arturbosch.detekt")
 }
 
 val bundledSourceFilesDir = rootProject.layout.projectDirectory.dir("source-files")
@@ -97,6 +98,28 @@ tasks.matching { task ->
 
 tasks.matching { task -> task.name.contains("lint", ignoreCase = true) }.configureEach {
     dependsOn(syncBundledSources)
+}
+
+// detekt 只做体积/复杂度基线度量，不参与构建成败判定。
+// 用途：重构前后对比「单文件行数、单类成员数、超长方法数」是否收敛。
+detekt {
+    buildUponDefaultConfig = true
+    allRules = false
+    config.setFrom(rootProject.files("config/detekt/detekt.yml"))
+    source.setFrom(files("src/main/java", "src/test/java"))
+    ignoreFailures = true
+    parallel = true
+}
+
+tasks.withType<io.gitlab.arturbosch.detekt.Detekt>().configureEach {
+    jvmTarget = JavaVersion.VERSION_17.toString()
+    reports {
+        html.required.set(true)
+        txt.required.set(true)
+        xml.required.set(false)
+        sarif.required.set(false)
+        md.required.set(false)
+    }
 }
 
 dependencies {

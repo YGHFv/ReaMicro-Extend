@@ -55,6 +55,7 @@ import android.widget.Toast
 import com.reamicro.fix.ai.AiApiConfig
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.ai.AiDictionaryPreset
+import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.ai.AiImagePreset
 import com.reamicro.fix.ai.AiImagePresetTarget
 import com.reamicro.fix.association.model.BookSource
@@ -189,15 +190,21 @@ class ReaMicroSettingsHook(
 
     fun install() {
         activeInstance = this
-        hookStringResource()
-        hookNavGraphScope()
-        hookAboutScreen()
-        hookSettingsListBuilder()
-        hookLazyListItem()
-        hookFontDocumentPickerResult()
-        hookExternalSourceImportIntent()
-        hookHostAccountSignOut()
-        hookAccountSecurityScreen()
+        // 逐个登记安装结果，宿主升级后靠启动汇总定位掉线的 hook。
+        HookInstallReport.installAll(
+            FEATURE_ID,
+            listOf(
+                "stringResource" to ::hookStringResource,
+                "navGraphScope" to ::hookNavGraphScope,
+                "aboutScreen" to ::hookAboutScreen,
+                "settingsListBuilder" to ::hookSettingsListBuilder,
+                "lazyListItem" to ::hookLazyListItem,
+                "fontDocumentPickerResult" to ::hookFontDocumentPickerResult,
+                "externalSourceImportIntent" to ::hookExternalSourceImportIntent,
+                "hostAccountSignOut" to ::hookHostAccountSignOut,
+                "accountSecurityScreen" to ::hookAccountSecurityScreen,
+            ),
+        )
     }
 
     private fun hookStringResource() {
@@ -1238,6 +1245,12 @@ class ReaMicroSettingsHook(
             )
             val actionRows = listOf(
                 ActionRow(
+                    key = "about_completion_hook_report",
+                    title = "\u6a21\u5757\u81ea\u68c0",
+                    subtitle = HookInstallReport.summaryLine(),
+                    onClick = { openHookInstallReportDialog() },
+                ),
+                ActionRow(
                     key = "about_completion_export_log",
                     title = "\u5bfc\u51fa\u65e5\u5fd7",
                     subtitle = "\u5c06\u6a21\u5757\u8fd0\u884c\u65e5\u5fd7\u5bfc\u51fa\u5230\u4e0b\u8f7d\u76ee\u5f55",
@@ -1253,6 +1266,48 @@ class ReaMicroSettingsHook(
             targetUnit()
         }
         renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    /**
+     * 展示 hook 安装自检结果。
+     *
+     * 宿主升级后，先看这里的「已安装 N/M」与失败列表，能直接定位掉线的 hook，
+     * 不必再靠功能表现反推。
+     */
+    private fun openHookInstallReportDialog() {
+        val activity = activityProvider() ?: return
+        activity.runOnUiThread {
+            runCatching {
+                val colors = SettingsDialogColors(activity)
+                val dialog = Dialog(activity)
+                val card = settingsDialogCard(activity, colors)
+                card.addView(settingsDialogTitle(activity, "模块自检", colors))
+                card.addView(
+                    settingsDialogChoiceRow(activity, HookInstallReport.summaryLine(), colors) {},
+                )
+                HookInstallReport.featureSummaries().forEach { line ->
+                    card.addView(settingsDialogChoiceRow(activity, line, colors) {})
+                }
+                val failures = HookInstallReport.failureDetails()
+                if (failures.isNotEmpty()) {
+                    card.addView(settingsDialogTitle(activity, "失败明细", colors))
+                    failures.forEach { line ->
+                        card.addView(settingsDialogChoiceRow(activity, line, colors) {})
+                    }
+                }
+                val actions = settingsDialogActions(activity)
+                actions.addView(
+                    settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply {
+                        setOnClickListener { dialog.dismiss() }
+                    },
+                    settingsDialogButtonParams(activity),
+                )
+                card.addView(actions)
+                showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX hook install report dialog failed: ${it.stackTraceToString()}")
+            }
+        }
     }
 
     private fun exportModuleLog() {
@@ -10223,6 +10278,8 @@ class ReaMicroSettingsHook(
     }
 
     companion object {
+        const val FEATURE_ID = "ReaMicroSettingsHook"
+
         @Volatile private var activeInstance: ReaMicroSettingsHook? = null
 
         // 从阅读页原生高亮界面点击"补全计划"进入完整聚合页（复用宿主 NavHost 页面框架，遵循宿主返回）。

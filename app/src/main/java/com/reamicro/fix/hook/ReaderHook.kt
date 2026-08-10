@@ -46,6 +46,7 @@ import android.widget.Toast
 import com.reamicro.fix.ai.AiApiConfig
 import com.reamicro.fix.ai.AiDictionaryPreset
 import com.reamicro.fix.ai.AiApiStore
+import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.ai.AiApiTestResult
 import com.reamicro.fix.logging.ModuleLogState
 import com.reamicro.fix.online.OnlineReaderContextBridge
@@ -190,17 +191,23 @@ class ReaderHook(
             } ?: refreshReaderHighlightWindow(source)
         }
         ensureReadAloudHighlightReceiver()
-        hookContentDomRenderTextWidthFallback()
-        hookScrollPagerCrashGuard()
-        installNativeSelectionHooks()
-        hookReaderViewModel()
-        hookReaderCatalog()
-        hookReaderBottomBar()
-        hookInlineSearchIcon()
-        hookReaderHighlightScreenEntry()
-        hookReaderHighlightRuleSheet()
-        hookReaderFamilySheetHeight()
-        hookHomeBookshelfScreen()
+        // 逐个登记安装结果，宿主升级后靠启动汇总定位掉线的 hook。
+        HookInstallReport.installAll(
+            FEATURE_ID,
+            listOf(
+                "contentDomRenderTextWidthFallback" to ::hookContentDomRenderTextWidthFallback,
+                "scrollPagerCrashGuard" to ::hookScrollPagerCrashGuard,
+                "nativeSelection" to ::installNativeSelectionHooks,
+                "readerViewModel" to ::hookReaderViewModel,
+                "readerCatalog" to ::hookReaderCatalog,
+                "readerBottomBar" to ::hookReaderBottomBar,
+                "inlineSearchIcon" to ::hookInlineSearchIcon,
+                "readerHighlightScreenEntry" to ::hookReaderHighlightScreenEntry,
+                "readerHighlightRuleSheet" to ::hookReaderHighlightRuleSheet,
+                "readerFamilySheetHeight" to ::hookReaderFamilySheetHeight,
+                "homeBookshelfScreen" to ::hookHomeBookshelfScreen,
+            ),
+        )
     }
 
     fun onHostActivityDestroyed(reason: String) {
@@ -8243,6 +8250,7 @@ class ReaderHook(
     )
 
     private companion object {
+        const val FEATURE_ID = "ReaderHook"
         const val READER_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.reader.ReaderViewModel"
         const val ON_DEMAND_CACHE_LOCK_RETRIES = 20
         const val ON_DEMAND_CACHE_LOCK_RETRY_MS = 100L

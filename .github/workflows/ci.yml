@@ -51,6 +51,21 @@ jobs:
       - name: Test
         run: ./gradlew :app:testDebugUnitTest
 
+      # 体积/复杂度基线度量，只报数不阻断构建（见 config/detekt/detekt.yml）。
+      - name: Detekt (report only)
+        continue-on-error: true
+        run: ./gradlew :app:detekt
+
+      - name: Upload detekt report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v5
+        with:
+          name: detekt-report
+          path: app/build/reports/detekt/
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Decode release keystore
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
