@@ -21,6 +21,10 @@ signing/
 tools/*
 !tools/gen-epub-styles.mjs
 !tools/gen-header-masks.mjs
+!tools/extract-hook-cluster.mjs
+!tools/hoist-nested-types.mjs
+!tools/hoist-member-extensions.mjs
+!tools/split-webdav-drive-hook.mjs
 decompiled/
 dex_tmp/
 base_decompiled/
