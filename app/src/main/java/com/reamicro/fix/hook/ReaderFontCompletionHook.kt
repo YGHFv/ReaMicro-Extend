@@ -1,6 +1,7 @@
 package com.reamicro.fix.hook
 
 import android.app.Activity
+import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.settings.XposedModuleSettings
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -548,15 +549,15 @@ class ReaderFontCompletionHook(
 
     private companion object {
         const val LOG_PREFIX = "ReaMicro LSP"
-        const val READER_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.reader.ReaderViewModel"
+        const val READER_VIEW_MODEL_CLASS = HostClasses.Host.READER_VIEW_MODEL
         const val READER_EPUB_CONFIG_CLASS = "app.zhendong.reamicro.ui.reader.ReaderViewModel\$ReaderEpubConfig"
         const val READER_PAGER_INPUT_CLASS = "app.zhendong.reamicro.ui.reader.ReaderViewModel\$PagerInput"
         const val APPLY_EPUB_CONFIG_METHOD = "applyEpubConfig"
-        const val FONT_PROVIDER_CLASS = "org.epub.FontProvider"
-        const val FONT_FAMILY_CLASS = "androidx.compose.ui.text.font.FontFamily"
-        const val FONT_FAMILY_KT_CLASS = "androidx.compose.ui.text.font.FontFamilyKt"
-        const val FONT_WEIGHT_CLASS = "androidx.compose.ui.text.font.FontWeight"
-        const val KOTLIN_PAIR_CLASS = "kotlin.Pair"
+        const val FONT_PROVIDER_CLASS = HostClasses.Epub.FONT_PROVIDER
+        const val FONT_FAMILY_CLASS = HostClasses.Compose.FONT_FAMILY
+        const val FONT_FAMILY_KT_CLASS = HostClasses.Compose.FONT_FAMILY_KT
+        const val FONT_WEIGHT_CLASS = HostClasses.Compose.FONT_WEIGHT
+        const val KOTLIN_PAIR_CLASS = HostClasses.Kotlin.KOTLIN_PAIR
         const val FAMILY_SYSTEM = "system"
         const val FAMILY_SOURCE_HAN_SERIF = "serif"
         fun isBuiltinFontSelection(selection: String): Boolean =

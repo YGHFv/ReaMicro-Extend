@@ -19,6 +19,8 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import com.reamicro.fix.core.ComposeInterop
+import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.settings.XposedModuleSettings
 import de.robv.android.xposed.XC_MethodHook
@@ -50,6 +52,14 @@ class ReaderBackgroundHook(
     private val settings: XposedModuleSettings,
     private val settingsProvider: () -> ModuleSettingsSnapshot = settings::snapshot,
 ) {
+    // Compose 反射互操作的共用实现，避免各 hook 各存一份逐渐漂移的副本。
+    private val composeInterop = ComposeInterop(
+        classLoader = classLoader,
+        resolveClass = ::cls,
+        unitInstance = ::targetUnit,
+        logPrefix = LOG_PREFIX,
+    )
+
     private val thumbCache = ConcurrentHashMap<String, Bitmap>()
     private val backgroundStateThemes = Collections.synchronizedMap(WeakHashMap<Any, Boolean>())
     private val backgroundStateHostValues = Collections.synchronizedMap(WeakHashMap<Any, String>())
@@ -997,17 +1007,7 @@ class ReaderBackgroundHook(
         if (dark) darkThemePrimaryColor else lightThemePrimaryColor
 
     private fun composeColorToArgb(color: Long): Int =
-        runCatching {
-            cls(COLOR_KT_CLASS).declaredMethods.firstOrNull { method ->
-                method.name.contains("toArgb", ignoreCase = true) &&
-                    method.parameterTypes.size == 1 &&
-                    method.parameterTypes[0] == Long::class.javaPrimitiveType
-            }?.apply { isAccessible = true }?.invoke(null, color) as? Int
-        }.getOrNull() ?: if ((color and 0x3fL) == 0L) {
-            (color ushr 32).toInt()
-        } else {
-            DEFAULT_THEME_PRIMARY_COLOR
-        }
+        composeInterop.colorToArgb(color, DEFAULT_THEME_PRIMARY_COLOR)
 
     private fun resolveGlobalUiTypeface(ctx: Context): Typeface {
         globalUiTypeface?.let { return it }
@@ -1451,14 +1451,14 @@ class ReaderBackgroundHook(
         const val BACKGROUND_DIR_NAME = "reamicro-reader-bg"
         const val GLOBAL_UI_FONT_ASSET =
             "composeResources/reamicro.composeapp.generated.resources/font/serif_medium.ttf"
-        const val MATERIAL_THEME_CLASS = "androidx.compose.material3.MaterialTheme"
-        const val COLOR_KT_CLASS = "androidx.compose.ui.graphics.ColorKt"
+        const val MATERIAL_THEME_CLASS = HostClasses.Compose.MATERIAL_THEME
+        const val COLOR_KT_CLASS = HostClasses.Compose.COLOR_KT
         const val PRIMARY_COLOR_METHOD = "getPrimary-0d7_KjU"
         const val DEFAULT_THEME_PRIMARY_COLOR = -42465
         const val BUILTIN_LIGHT_FILE_NAME = "reader_background_default_light.jpg"
         const val BUILTIN_DARK_FILE_NAME = "reader_background_default_dark.png"
         const val HOST_REFRESH_TOKEN_PREFIX = "reamicro-bg-refresh://"
-        const val READER_THEMES_KT_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderThemesKt"
+        const val READER_THEMES_KT_CLASS = HostClasses.Host.READER_THEMES_KT
         const val READER_THEMES_SINGLETONS_CLASS =
             "app.zhendong.reamicro.ui.reader.compose.ComposableSingletons\$ReaderThemesKt"
         const val DARK_THEME_CONTENT_METHOD = "lambda__1576463935\$lambda\$0"
@@ -1469,40 +1469,40 @@ class ReaderBackgroundHook(
         const val NATIVE_READER_THEME_METHOD = "ReaderThemes"
         const val SIDE_LOADED_SELECTION_SENTINEL = "reamicro://side-loaded"
         const val READER_BACKGROUND_PREFIX = "ReaderBackground-"
-        const val COMPOSER_CLASS = "androidx.compose.runtime.Composer"
-        const val MUTABLE_STATE_CLASS = "androidx.compose.runtime.MutableState"
-        const val ANIMATED_VISIBILITY_KT_CLASS = "androidx.compose.animation.AnimatedVisibilityKt"
+        const val COMPOSER_CLASS = HostClasses.Compose.COMPOSER
+        const val MUTABLE_STATE_CLASS = HostClasses.Compose.MUTABLE_STATE
+        const val ANIMATED_VISIBILITY_KT_CLASS = HostClasses.Compose.ANIMATED_VISIBILITY_KT
         const val ANIMATED_VISIBILITY_METHOD = "AnimatedVisibility"
-        const val PREF_KEYS_CLASS = "app.zhendong.reamicro.constants.PrefKeys"
-        const val KOTLIN_CONTINUATION_CLASS = "kotlin.coroutines.Continuation"
-        const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = "kotlin.coroutines.EmptyCoroutineContext"
-        const val KOTLIN_COROUTINE_SINGLETONS_CLASS = "kotlin.coroutines.intrinsics.CoroutineSingletons"
+        const val PREF_KEYS_CLASS = HostClasses.Host.PREF_KEYS
+        const val KOTLIN_CONTINUATION_CLASS = HostClasses.Kotlin.KOTLIN_CONTINUATION
+        const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = HostClasses.Kotlin.KOTLIN_EMPTY_COROUTINE_CONTEXT
+        const val KOTLIN_COROUTINE_SINGLETONS_CLASS = HostClasses.Kotlin.KOTLIN_COROUTINE_SINGLETONS
         const val KOTLIN_COROUTINE_SUSPENDED_NAME = "COROUTINE_SUSPENDED"
         const val KOTLIN_RESULT_FAILURE_CLASS = "kotlin.Result\$Failure"
-        const val SESSION_CLASS = "app.zhendong.reamicro.repository.core.Session"
-        const val USER_STORAGE_CLASS = "app.zhendong.reamicro.arch.fs.UserStorage"
-        const val EPUB_CONTAINER_KT_CLASS = "app.zhendong.reamicro.ui.reader.components.EpubContainerKt"
+        const val SESSION_CLASS = HostClasses.Host.SESSION
+        const val USER_STORAGE_CLASS = HostClasses.Host.USER_STORAGE
+        const val EPUB_CONTAINER_KT_CLASS = HostClasses.Host.EPUB_CONTAINER_KT
         const val EPUB_CONTAINER_SINGLETONS_CLASS =
             "app.zhendong.reamicro.ui.reader.components.ComposableSingletons\$EpubContainerKt"
         const val EPUB_CONTAINER_METHOD = "EpubContainer"
         const val EPUB_BACKGROUND_METHOD = "EpubBackground"
         const val EPUB_BACKGROUND_STATE_VALUE_METHOD = "rememberEpubBackgroundState"
-        const val COMPOSE_STATE_CLASS = "androidx.compose.runtime.State"
+        const val COMPOSE_STATE_CLASS = HostClasses.Compose.COMPOSE_STATE
         const val EPUB_DRAW_BACKGROUND_ARG_INDEX = 3
         const val EPUB_BACKGROUND_VALUE_METHOD = "lambda_1672513034\$lambda\$0\$0"
         const val DYNAMIC_THEME_CONTENT_KT_CLASS =
-            "app.zhendong.reamicro.ui.reader.theme.DynamicThemeContentKt"
+            HostClasses.Host.DYNAMIC_THEME_CONTENT_KT
         const val REMEMBER_READER_DARK_METHOD = "rememberReaderShouldUseDarkTheme"
         const val THEME_TOGGLE_CONTENT_METHOD = "ThemeToggleContent"
         const val THEME_TOGGLE_DEFAULT_MASK_ARG_INDEX = 4
         const val THEME_TOGGLE_DARK_CONTENT_DEFAULT_MASK = 0x1
-        const val ANDROID_VIEW_KT_CLASS = "androidx.compose.ui.viewinterop.AndroidView_androidKt"
+        const val ANDROID_VIEW_KT_CLASS = HostClasses.Compose.ANDROID_VIEW_KT
         const val ANDROID_VIEW_METHOD = "AndroidView"
-        const val FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
-        const val FUNCTION2_CLASS = "kotlin.jvm.functions.Function2"
-        const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
-        const val SIZE_KT_CLASS = "androidx.compose.foundation.layout.SizeKt"
-        const val SNAPSHOT_STATE_KT_CLASS = "androidx.compose.runtime.SnapshotStateKt__SnapshotStateKt"
+        const val FUNCTION1_CLASS = HostClasses.Kotlin.FUNCTION1
+        const val FUNCTION2_CLASS = HostClasses.Kotlin.FUNCTION2
+        const val MODIFIER_CLASS = HostClasses.Compose.MODIFIER
+        const val SIZE_KT_CLASS = HostClasses.Compose.SIZE_KT
+        const val SNAPSHOT_STATE_KT_CLASS = HostClasses.Compose.SNAPSHOT_STATE_KT
         const val MUTABLE_STATE_OF_DEFAULT_METHOD = "mutableStateOf\$default"
         const val IMAGE_REQUEST_CODE = 47615
     }

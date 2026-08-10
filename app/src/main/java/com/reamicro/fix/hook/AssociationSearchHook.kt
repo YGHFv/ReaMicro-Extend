@@ -8,6 +8,7 @@ import com.reamicro.fix.association.normalizedAssociationSearchKey
 import com.reamicro.fix.association.normalizedAssociationTitleKey
 import com.reamicro.fix.association.orderAssociationMatches
 import com.reamicro.fix.association.provider.AssociationSearchProviderRegistry
+import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -442,8 +443,8 @@ class AssociationSearchHook(
     )
 
     private companion object {
-        const val BOOK_PUBLISH_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.book.BookPublishViewModel"
-        const val KOTLIN_FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
+        const val BOOK_PUBLISH_VIEW_MODEL_CLASS = HostClasses.Host.BOOK_PUBLISH_VIEW_MODEL
+        const val KOTLIN_FUNCTION1_CLASS = HostClasses.Kotlin.FUNCTION1
         const val SEARCH_GROUP_PREFIX = "关联补全-"
         const val SOURCE_SEARCH_WAIT_TIMEOUT_MS = 4_500L
         const val LOG_PREFIX = "ReaMicro LSP"

@@ -6,6 +6,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.widget.Toast
+import com.reamicro.fix.core.ComposeInterop
+import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -21,6 +23,14 @@ class ReaderAutoPageHook(
     private val activityProvider: () -> Activity?,
     private val settingsProvider: () -> ModuleSettingsSnapshot = { ModuleSettingsSnapshot() },
 ) {
+    // Compose 反射互操作的共用实现，避免各 hook 各存一份逐渐漂移的副本。
+    private val composeInterop = ComposeInterop(
+        classLoader = classLoader,
+        resolveClass = ::cls,
+        unitInstance = ::targetUnit,
+        logPrefix = LOG_PREFIX,
+    )
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private val methodCache = HashMap<String, Method>()
     private val readerSettingsBuildDepth = ThreadLocal.withInitial { 0 }
@@ -772,22 +782,8 @@ class ReaderAutoPageHook(
     private fun Any.longMethod(name: String): Long =
         method0(name) as Long
 
-    private fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any {
-        val functionClass = cls(functionClassName)
-        return Proxy.newProxyInstance(classLoader, arrayOf(functionClass)) { proxy, method, args ->
-            when (method.name) {
-                "invoke" -> runCatching {
-                    block(args)
-                }.onFailure {
-                    XposedBridge.log("$LOG_PREFIX failed in $name callback: ${it.stackTraceToString()}")
-                }.getOrElse { targetUnit() }
-                "toString" -> "ReaMicro$name"
-                "hashCode" -> System.identityHashCode(proxy)
-                "equals" -> proxy === args?.getOrNull(0)
-                else -> null
-            }
-        }
-    }
+    private fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any =
+        composeInterop.functionProxy(name, functionClassName, block)
 
     private fun targetUnit(): Any =
         staticObject(UNIT_CLASS, "INSTANCE")
@@ -829,77 +825,77 @@ class ReaderAutoPageHook(
     companion object {
         const val LOG_PREFIX = "ReaMicro LSP"
 
-        const val READER_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.reader.ReaderViewModel"
+        const val READER_VIEW_MODEL_CLASS = HostClasses.Host.READER_VIEW_MODEL
         // 阅微 2.3.0：阅读设置界面由 ReaderSettingsKt 重构为 ReaderMoreSettingScreenKt
-        const val READER_SETTINGS_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderMoreSettingScreenKt"
+        const val READER_SETTINGS_CLASS = HostClasses.Host.READER_SETTINGS
         const val READER_SETTINGS_SCREEN_METHOD = "ReaderMoreSettingScreen"
         const val SECTION_TITLE_METHOD = "SectionTitle"
         // 更多设置是 LazyColumn，通过 hook LazyListScope.item$default 在第一个 item 前插入自动翻页项
-        const val LAZY_LIST_SCOPE_CLASS = "androidx.compose.foundation.lazy.LazyListScope"
+        const val LAZY_LIST_SCOPE_CLASS = HostClasses.Compose.LAZY_LIST_SCOPE
         const val LAZY_ITEM_DEFAULT_METHOD = "item\$default"
         // 自动翻页 item 的唯一 key，避免与宿主 item key 冲突
         const val AUTO_PAGE_ITEM_KEY = 0x7A70_0001
-        const val TAP_GESTURES_BOX_CLASS = "app.zhendong.reamicro.ui.reader.components.TapGesturesBoxKt"
+        const val TAP_GESTURES_BOX_CLASS = HostClasses.Host.TAP_GESTURES_BOX
         const val TAP_GESTURES_BOX_METHOD = "TapGesturesBox"
         const val TAP_DIRECTION_CLASS = "app.zhendong.reamicro.ui.reader.ReaderUiIntent\$TapDirection"
         const val UPDATE_UI_STATUS_CLASS = "app.zhendong.reamicro.ui.reader.ReaderUiIntent\$UpdateUIStatus"
-        const val UI_STATUS_CLASS = "app.zhendong.reamicro.ui.reader.UiStatus"
+        const val UI_STATUS_CLASS = HostClasses.Host.UI_STATUS
         const val UI_STATUS_READER_CLASS = "app.zhendong.reamicro.ui.reader.UiStatus\$Reader"
 
-        const val TEXT_KT_CLASS = "androidx.compose.material3.TextKt"
+        const val TEXT_KT_CLASS = HostClasses.Compose.TEXT_KT
         const val TEXT_METHOD = "Text-Nvy7gAk"
-        const val ROW_KT_CLASS = "androidx.compose.foundation.layout.RowKt"
+        const val ROW_KT_CLASS = HostClasses.Compose.ROW_KT
         const val ROW_METHOD = "Row"
-        const val ROW_SCOPE_CLASS = "androidx.compose.foundation.layout.RowScope"
+        const val ROW_SCOPE_CLASS = HostClasses.Compose.ROW_SCOPE
         const val WEIGHT_DEFAULT_METHOD = "weight\$default"
-        const val COLUMN_KT_CLASS = "androidx.compose.foundation.layout.ColumnKt"
+        const val COLUMN_KT_CLASS = HostClasses.Compose.COLUMN_KT
         const val COLUMN_METHOD = "Column"
-        const val BOX_KT_CLASS = "androidx.compose.foundation.layout.BoxKt"
+        const val BOX_KT_CLASS = HostClasses.Compose.BOX_KT
         const val BOX_METHOD = "Box"
-        const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
-        const val SIZE_KT_CLASS = "androidx.compose.foundation.layout.SizeKt"
+        const val MODIFIER_CLASS = HostClasses.Compose.MODIFIER
+        const val SIZE_KT_CLASS = HostClasses.Compose.SIZE_KT
         const val SIZE_METHOD = "size-3ABfNKs"
         const val FILL_MAX_WIDTH_DEFAULT_METHOD = "fillMaxWidth\$default"
         const val HEIGHT_METHOD = "height-3ABfNKs"
-        const val PADDING_KT_CLASS = "androidx.compose.foundation.layout.PaddingKt"
+        const val PADDING_KT_CLASS = HostClasses.Compose.PADDING_KT
         const val PADDING_ABSOLUTE_DEFAULT_METHOD = "padding-qDBjuR0\$default"
-        const val CLICKABLE_KT_CLASS = "androidx.compose.foundation.ClickableKt"
+        const val CLICKABLE_KT_CLASS = HostClasses.Compose.CLICKABLE_KT
         const val CLICKABLE_DEFAULT_METHOD = "clickable-O2vRcR0\$default"
-        const val BACKGROUND_KT_CLASS = "androidx.compose.foundation.BackgroundKt"
+        const val BACKGROUND_KT_CLASS = HostClasses.Compose.BACKGROUND_KT
         const val BACKGROUND_DEFAULT_METHOD = "background-bw27NRU\$default"
-        const val BORDER_KT_CLASS = "androidx.compose.foundation.BorderKt"
+        const val BORDER_KT_CLASS = HostClasses.Compose.BORDER_KT
         const val BORDER_METHOD = "border-xT4_qwU"
-        const val CLIP_KT_CLASS = "androidx.compose.ui.draw.ClipKt"
+        const val CLIP_KT_CLASS = HostClasses.Compose.CLIP_KT
         const val CLIP_METHOD = "clip"
-        const val SHAPE_KT_CLASS = "app.zhendong.reamicro.arch.components.ShapeKt"
+        const val SHAPE_KT_CLASS = HostClasses.Host.SHAPE_KT
         const val ROUNDED_SHAPE_METHOD = "getRoundedSmallShape"
-        const val FOUNDATION_SHAPE_KT_CLASS = "androidx.compose.foundation.shape.RoundedCornerShapeKt"
+        const val FOUNDATION_SHAPE_KT_CLASS = HostClasses.Compose.FOUNDATION_SHAPE_KT
         const val CIRCLE_SHAPE_METHOD = "getCircleShape"
-        const val MATERIAL_THEME_CLASS = "androidx.compose.material3.MaterialTheme"
-        const val ICON_KT_CLASS = "androidx.compose.material3.IconKt"
-        const val ARRANGEMENT_CLASS = "androidx.compose.foundation.layout.Arrangement"
+        const val MATERIAL_THEME_CLASS = HostClasses.Compose.MATERIAL_THEME
+        const val ICON_KT_CLASS = HostClasses.Compose.ICON_KT
+        const val ARRANGEMENT_CLASS = HostClasses.Compose.ARRANGEMENT
         const val SPACED_BY_METHOD = "spacedBy-0680j_4"
-        const val ALIGNMENT_CLASS = "androidx.compose.ui.Alignment"
-        const val THEME_KT_CLASS = "app.zhendong.reamicro.arch.theme.ThemeKt"
+        const val ALIGNMENT_CLASS = HostClasses.Compose.ALIGNMENT
+        const val THEME_KT_CLASS = HostClasses.Host.THEME_KT
         const val ON_BACKGROUND_VARIANT_METHOD = "getOnBackgroundVariant"
         const val BACKGROUND_DIM_METHOD = "getBackgroundDim"
         const val BACKGROUND_BRIGHT_METHOD = "getBackgroundBright"
         const val BORDER_VARIANT_METHOD = "getBorderVariant"
-        const val COLOR_CLASS = "androidx.compose.ui.graphics.Color"
-        const val UNIT_EXT_KT_CLASS = "app.zhendong.reamicro.arch.extensions.UnitExtKt"
+        const val COLOR_CLASS = HostClasses.Compose.COLOR
+        const val UNIT_EXT_KT_CLASS = HostClasses.Host.UNIT_EXT_KT
         const val UDP_METHOD = "getUdp"
-        const val COMPOSER_CLASS = "androidx.compose.runtime.Composer"
-        const val SNAPSHOT_STATE_KT_CLASS = "androidx.compose.runtime.SnapshotStateKt__SnapshotStateKt"
+        const val COMPOSER_CLASS = HostClasses.Compose.COMPOSER
+        const val SNAPSHOT_STATE_KT_CLASS = HostClasses.Compose.SNAPSHOT_STATE_KT
         const val MUTABLE_STATE_OF_DEFAULT_METHOD = "mutableStateOf\$default"
-        const val TYPE_SETTING_SLIDER_CLASS = "app.zhendong.reamicro.ui.reader.components.TypeSettingSliderKt"
+        const val TYPE_SETTING_SLIDER_CLASS = HostClasses.Host.TYPE_SETTING_SLIDER
         const val TYPE_SETTING_SLIDER_METHOD = "TypeSettingSlider-S6oqaS4"
-        const val SLIDER_BRUSH_COLOR_CLASS = "app.zhendong.reamicro.arch.components.slider.SliderBrushColor"
-        const val MATERIAL_SLIDER_DEFAULTS_CLASS = "app.zhendong.reamicro.arch.components.slider.MaterialSliderDefaults"
+        const val SLIDER_BRUSH_COLOR_CLASS = HostClasses.Host.SLIDER_BRUSH_COLOR
+        const val MATERIAL_SLIDER_DEFAULTS_CLASS = HostClasses.Host.MATERIAL_SLIDER_DEFAULTS
         const val SLIDER_DEFAULT_COLORS_METHOD = "defaultColors"
-        const val FUNCTION0_CLASS = "kotlin.jvm.functions.Function0"
-        const val FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
-        const val FUNCTION3_CLASS = "kotlin.jvm.functions.Function3"
-        const val UNIT_CLASS = "kotlin.Unit"
+        const val FUNCTION0_CLASS = HostClasses.Kotlin.FUNCTION0
+        const val FUNCTION1_CLASS = HostClasses.Kotlin.FUNCTION1
+        const val FUNCTION3_CLASS = HostClasses.Kotlin.FUNCTION3
+        const val UNIT_CLASS = HostClasses.Kotlin.KOTLIN_UNIT
         const val EVA_ICONS_CLASS = "compose.icons.EvaIcons"
         const val EVA_FILL_KT_CLASS = "compose.icons.evaicons.__FillKt"
         const val EVA_FILL_METHOD = "getFill"

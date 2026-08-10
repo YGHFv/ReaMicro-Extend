@@ -1,11 +1,13 @@
 package com.reamicro.fix.tts
 
+import com.reamicro.fix.core.HostClasses
+
 object ReadAloudIntents {
     const val MODULE_PACKAGE_NAME = "com.reamicro.fix"
     const val SERVICE_CLASS_NAME = "com.reamicro.fix.tts.ReadAloudService"
     const val COMMAND_RECEIVER_CLASS_NAME = "com.reamicro.fix.tts.ReadAloudCommandReceiver"
     const val COMMAND_ACTIVITY_CLASS_NAME = "com.reamicro.fix.tts.ReadAloudCommandActivity"
-    const val HOST_PACKAGE_NAME = "app.zhendong.reamicro"
+    const val HOST_PACKAGE_NAME = HostClasses.Host.HOST_PACKAGE_NAME
 
     const val ACTION_PREPARE = "com.reamicro.fix.READ_ALOUD_PREPARE"
     const val ACTION_APPEND = "com.reamicro.fix.READ_ALOUD_APPEND"

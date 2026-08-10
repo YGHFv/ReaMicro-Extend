@@ -52,6 +52,8 @@ import android.webkit.JavascriptInterface
 import com.reamicro.fix.R
 import com.reamicro.fix.association.model.AssociationPlatforms
 import com.reamicro.fix.core.HookInstallReport
+import com.reamicro.fix.core.ComposeInterop
+import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.online.FanqieParagraphCommentApi
 import com.reamicro.fix.online.OnlineConcurrentRateLimiter
 import com.reamicro.fix.online.OnlineParagraphCommentCache
@@ -203,6 +205,14 @@ class WebDavDriveHook(
     private val activityProvider: () -> Activity?,
     private val settingsProvider: () -> ModuleSettingsSnapshot = { ModuleSettingsSnapshot() },
 ) {
+    // Compose 反射互操作的共用实现，避免各 hook 各存一份逐渐漂移的副本。
+    private val composeInterop = ComposeInterop(
+        classLoader = classLoader,
+        resolveClass = ::cls,
+        unitInstance = ::targetUnit,
+        logPrefix = LOG_PREFIX,
+    )
+
     private val methodCache = mutableMapOf<String, Method>()
     // Compose renders nested lambdas without passing enough host context to later hooks.
     // ThreadLocal render contexts mark the current host row/screen while its children compose.
@@ -13059,7 +13069,7 @@ img{max-width:100%;max-height:100%;height:auto;}
         }
 
     private fun composeColorToArgb(color: Long): Int =
-        method(COLOR_KT_CLASS, "toArgb-8_81llA", 1).invoke(null, color) as Int
+        composeInterop.colorToArgb(color)
 
     private fun withAlpha(color: Int, alpha: Int): Int =
         (color and 0x00FFFFFF) or ((alpha.coerceIn(0, 255)) shl 24)
@@ -13653,20 +13663,8 @@ img{max-width:100%;max-height:100%;height:auto;}
         ).apply { isAccessible = true }.newInstance(status, progress, error, result, name)
     }
 
-    private fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any {
-        val functionClass = cls(functionClassName)
-        return Proxy.newProxyInstance(classLoader, arrayOf(functionClass)) { proxy, method, args ->
-            when (method.name) {
-                "invoke" -> runCatching { block(args) }
-                    .onFailure { XposedBridge.log("$LOG_PREFIX failed in $name callback: ${it.stackTraceToString()}") }
-                    .getOrElse { targetUnit() }
-                "toString" -> "ReaMicro$name"
-                "hashCode" -> System.identityHashCode(proxy)
-                "equals" -> proxy === args?.getOrNull(0)
-                else -> null
-            }
-        }
-    }
+    private fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any =
+        composeInterop.functionProxy(name, functionClassName, block)
 
     private fun cls(className: String): Class<*> =
         XposedHelpers.findClass(className, classLoader)
@@ -14238,14 +14236,14 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val ONLINE_PARAGRAPH_COMMENTS_RUNTIME_ENABLED = false
         // 关闭常规运行日志向 LSPosed 面板输出，避免刷屏；错误日志不受影响。
         const val VERBOSE_WEBDAV_LOG = false
-        const val BACKUP_TYPE_CLASS = "app.zhendong.reamicro.constants.BackupType"
+        const val BACKUP_TYPE_CLASS = HostClasses.Host.BACKUP_TYPE
         const val BACKUP_TYPE_NAME_METHOD = "getName"
-        const val AUTH_CARD_CLASS = "app.zhendong.reamicro.ui.backup.components.AuthCardKt"
+        const val AUTH_CARD_CLASS = HostClasses.Host.AUTH_CARD
         const val AUTH_CARD_METHOD = "AuthCard"
         const val AUTH_CARD_CONTENT_METHOD = "AuthCard\$lambda\$5"
         const val DRIVE_AUTH_CARD_METHOD = "DriveAuthCard"
         const val DRIVE_OTHER_AVAILABLE_CARD_METHOD = "DriveOtherAvailableCard"
-        const val BOOK_LIBRARY_SHEET_CLASS = "app.zhendong.reamicro.ui.home.components.BookLibrarySheetKt"
+        const val BOOK_LIBRARY_SHEET_CLASS = HostClasses.Host.BOOK_LIBRARY_SHEET
         const val BOOK_LIBRARY_AUTH_LIST_METHOD = "BookLibrarySheet\$lambda\$9\$0\$1"
         const val BOOK_LIBRARY_AUTH_ROW_CLICK_METHOD = "BookLibrarySheet\$lambda\$9\$0\$1\$0\$1\$0\$0"
         const val BOOK_LIBRARY_LOCAL_METHOD = "LocalLibrary"
@@ -14255,29 +14253,29 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val CLOUD_UNAUTH_ROW_METHOD = "CloudUnauthRow"
         const val CLOUD_UNAUTH_LABEL_METHOD = "CloudUnauthRow\$lambda\$1"
         const val CLOUD_AUTHORIZED_DETAIL_METHOD = "CloudAuthorizedRow\$lambda\$3"
-        const val CLOUD_STORAGE_SCREEN_CLASS = "app.zhendong.reamicro.ui.storage.CloudStorageScreenKt"
+        const val CLOUD_STORAGE_SCREEN_CLASS = HostClasses.Host.CLOUD_STORAGE_SCREEN
         const val CLOUD_STORAGE_SCREEN_METHOD = "CloudStorageScreen"
         const val CLOUD_STORAGE_BAR_METHOD = "CloudStorageBar"
-        const val CLOUD_STORAGE_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.storage.CloudStorageViewModel"
-        const val CLOUD_STORAGE_UI_STATE_CLASS = "app.zhendong.reamicro.ui.storage.CloudStorageUiState"
-        const val CLOUD_STORAGE_UI_EVENT_CLASS = "app.zhendong.reamicro.ui.storage.CloudStorageUIEvent"
+        const val CLOUD_STORAGE_VIEW_MODEL_CLASS = HostClasses.Host.CLOUD_STORAGE_VIEW_MODEL
+        const val CLOUD_STORAGE_UI_STATE_CLASS = HostClasses.Host.CLOUD_STORAGE_UI_STATE
+        const val CLOUD_STORAGE_UI_EVENT_CLASS = HostClasses.Host.CLOUD_STORAGE_UI_EVENT
         const val CLOUD_STORAGE_UI_EVENT_TAP_CLASS = "app.zhendong.reamicro.ui.storage.CloudStorageUIEvent\$Tap"
         const val CLOUD_STORAGE_ON_INTENT_METHOD = "onIntent"
-        const val CLOUD_STORAGE_REPOSITORY_CLASS = "app.zhendong.reamicro.repository.storage.CloudStorageRepository"
+        const val CLOUD_STORAGE_REPOSITORY_CLASS = HostClasses.Host.CLOUD_STORAGE_REPOSITORY
         const val CLOUD_STORAGE_GET_AUTH = "getAuth"
         const val CLOUD_STORAGE_GET_USER_INFO = "getUserInfo"
         const val CLOUD_STORAGE_GET_LIBRARY = "getLibrary"
-        const val CLOUD_TREE_CLASS = "app.zhendong.reamicro.ui.storage.components.CloudTreeKt"
+        const val CLOUD_TREE_CLASS = HostClasses.Host.CLOUD_TREE
         const val CLOUD_TREE_METHOD = "CloudTree"
-        const val HOME_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.home.HomeViewModel"
+        const val HOME_VIEW_MODEL_CLASS = HostClasses.Host.HOME_VIEW_MODEL
         const val HOME_SEARCH_METHOD = "search"
-        const val HOME_SEARCH_BAR_CLASS = "app.zhendong.reamicro.ui.home.components.HomeSearchBarKt"
+        const val HOME_SEARCH_BAR_CLASS = HostClasses.Host.HOME_SEARCH_BAR
         const val HOME_SEARCH_RESULT_LAZY_METHOD = "SearchResult\$lambda\$0\$0"
         const val HOME_CLOUD_RESULT_LIST_METHOD = "CloudResultList"
         const val HOME_CLOUD_BOOK_ROW_METHOD = "CloudBookRow"
         const val HOME_SEARCH_TAP_METHOD = "SearchResult\$lambda\$0\$0\$1\$0\$0\$0\$0"
-        const val INTENT_RECEIVER_CLASS = "app.zhendong.reamicro.arch.IntentReceiver"
-        const val BOOK_LOCAL_SHEET_CLASS = "app.zhendong.reamicro.ui.home.components.BookLocalSheetKt"
+        const val INTENT_RECEIVER_CLASS = HostClasses.Host.INTENT_RECEIVER
+        const val BOOK_LOCAL_SHEET_CLASS = HostClasses.Host.BOOK_LOCAL_SHEET
         const val BOOK_LOCAL_SHEET_METHOD = "BookLocalSheet"
         const val BOOK_LOCAL_SHEET_CONTENT_METHOD = "BookLocalSheet\$lambda\$2"
         const val FILE_BACKUP_METHOD = "FileBackup"
@@ -14285,43 +14283,43 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val BOOK_PUBLISHER_METHOD = "BookPublisher"
         const val BOOK_META_ACTION_ROW_METHOD = "BookMetaActionRow"
         const val BOOK_ACTION_CELL_METHOD = "BookActionCell"
-        const val FOOTER_CLASS = "app.zhendong.reamicro.arch.components.item.FooterKt"
+        const val FOOTER_CLASS = HostClasses.Host.FOOTER
         const val FOOTER_METHOD = "footer"
-        const val CLOUD_BOOK_LIST_CLASS = "app.zhendong.reamicro.ui.storage.components.CloudBookListKt"
+        const val CLOUD_BOOK_LIST_CLASS = HostClasses.Host.CLOUD_BOOK_LIST
         const val CLOUD_BOOK_ROW_METHOD = "CloudBookRow"
-        const val CLOUD_BOOK_CLASS = "app.zhendong.reamicro.data.storage.CloudBook"
-        const val CLOUD_FOLDER_CLASS = "app.zhendong.reamicro.data.storage.CloudFolder"
-        const val BOOK_CLASS = "app.zhendong.reamicro.data.db.entity.Book"
-        const val FILE_SOURCE_CLASS = "app.zhendong.reamicro.arch.FileSource"
+        const val CLOUD_BOOK_CLASS = HostClasses.Host.CLOUD_BOOK
+        const val CLOUD_FOLDER_CLASS = HostClasses.Host.CLOUD_FOLDER
+        const val BOOK_CLASS = HostClasses.Host.BOOK
+        const val FILE_SOURCE_CLASS = HostClasses.Host.FILE_SOURCE
         const val FILE_SOURCE_QUERY_NAME_METHOD = "queryName"
-        const val BOOK_ROW_INFO_CLASS = "app.zhendong.reamicro.ui.storage.components.BookRowInfoKt"
+        const val BOOK_ROW_INFO_CLASS = HostClasses.Host.BOOK_ROW_INFO
         const val BOOK_ROW_INFO_METHOD = "BookRowInfo"
-        const val TIME_EXT_KT_CLASS = "app.zhendong.reamicro.arch.extensions.TimeExtKt"
+        const val TIME_EXT_KT_CLASS = HostClasses.Host.TIME_EXT_KT
         const val SECOND_TO_HOURS_METHOD = "secondToHours"
-        const val DRIVE_CARD_CLASS = "app.zhendong.reamicro.ui.backup.components.DriveCardKt"
+        const val DRIVE_CARD_CLASS = HostClasses.Host.DRIVE_CARD
         const val YUN115_NET_DISK_CARD_METHOD = "Yun115NetDiskCard"
-        const val BOOK_BACKUP_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.backup.BookBackupViewModel"
-        const val BOOK_BACKUP_SCREEN_CLASS = "app.zhendong.reamicro.ui.backup.BookBackupScreenKt"
+        const val BOOK_BACKUP_VIEW_MODEL_CLASS = HostClasses.Host.BOOK_BACKUP_VIEW_MODEL
+        const val BOOK_BACKUP_SCREEN_CLASS = HostClasses.Host.BOOK_BACKUP_SCREEN
         const val BOOK_BACKUP_CONTENT_METHOD = "BookBackupContent"
-        const val BOOKSHELF_REPOSITORY_CLASS = "app.zhendong.reamicro.repository.BookshelfRepository"
+        const val BOOKSHELF_REPOSITORY_CLASS = HostClasses.Host.BOOKSHELF_REPOSITORY
         const val BOOKSHELF_IMPORT_BOOK_METHOD = "importBook"
         const val BOOKSHELF_UPDATE_BOOK_METHOD = "updateBook"
-        const val OPF_CLASS = "org.epub.structure.opf.Opf"
-        const val EPUB_FILE_MANAGER_CLASS = "app.zhendong.reamicro.arch.EpubFileManager"
+        const val OPF_CLASS = HostClasses.Epub.OPF
+        const val EPUB_FILE_MANAGER_CLASS = HostClasses.Host.EPUB_FILE_MANAGER
         const val EPUB_IMPORT_METHOD = "import"
-        const val OKIO_PATH_CLASS = "okio.Path"
-        const val WORKER_MANAGER_CLASS = "app.zhendong.reamicro.arch.WorkerManager"
-        const val WORK_TRACKER_CLASS = "app.zhendong.reamicro.arch.WorkTracker"
+        const val OKIO_PATH_CLASS = HostClasses.ThirdParty.OKIO_PATH
+        const val WORKER_MANAGER_CLASS = HostClasses.Host.WORKER_MANAGER
+        const val WORK_TRACKER_CLASS = HostClasses.Host.WORK_TRACKER
         const val WORKER_ENQUEUE_DOWNLOAD_METHOD = "enqueueDownload"
         const val WORKER_ENQUEUE_BACKUP_METHOD = "enqueueBackup"
         const val WORKER_ENQUEUE_IMPORT_METHOD = "enqueueImport"
-        const val WORK_HANDLE_CLASS = "app.zhendong.reamicro.arch.WorkHandle"
-        const val WORK_STATE_CLASS = "app.zhendong.reamicro.arch.WorkState"
-        const val WORK_STATUS_CLASS = "app.zhendong.reamicro.arch.WorkStatus"
-        const val NOT_AUTH_CLASS = "app.zhendong.reamicro.ui.storage.components.NotAuthKt"
+        const val WORK_HANDLE_CLASS = HostClasses.Host.WORK_HANDLE
+        const val WORK_STATE_CLASS = HostClasses.Host.WORK_STATE
+        const val WORK_STATUS_CLASS = HostClasses.Host.WORK_STATUS
+        const val NOT_AUTH_CLASS = HostClasses.Host.NOT_AUTH
         const val NOT_AUTH_METHOD = "NotAuth"
-        const val APP_KT_CLASS = "app.zhendong.reamicro.AppKt"
-        const val NAV_GRAPH_SCOPE_CLASS = "app.zhendong.reamicro.NavGraphScope"
+        const val APP_KT_CLASS = HostClasses.Host.APP_KT
+        const val NAV_GRAPH_SCOPE_CLASS = HostClasses.Host.NAV_GRAPH_SCOPE
         const val NAVIGATE_METHOD = "navigate"
         const val SETUP_ROUTE_METHOD_PREFIX = "setup\$lambda\$0\$"
         const val ROUTE_HOME_CLASS = "app.zhendong.reamicro.Route\$Home"
@@ -14329,123 +14327,123 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val ROUTE_CLOUD_FOLDER_CLASS = "app.zhendong.reamicro.Route\$CloudFolder"
         const val ROUTE_THIRD_LOGIN_CLASS = "app.zhendong.reamicro.Route\$ThirdLogin"
         const val ROUTE_THIRD_ACCOUNT_CLASS = "app.zhendong.reamicro.Route\$ThirdAccount"
-        const val NAV_BACK_STACK_ENTRY_KT_CLASS = "androidx.navigation.NavBackStackEntryKt"
+        const val NAV_BACK_STACK_ENTRY_KT_CLASS = HostClasses.AndroidX.NAV_BACK_STACK_ENTRY_KT
         const val NAV_BACK_STACK_ENTRY_TO_ROUTE_METHOD = "toRoute"
-        const val KOTLIN_REFLECTION_CLASS = "kotlin.jvm.internal.Reflection"
-        const val STRING_RESOURCES_KT_CLASS = "org.jetbrains.compose.resources.StringResourcesKt"
+        const val KOTLIN_REFLECTION_CLASS = HostClasses.Kotlin.KOTLIN_REFLECTION
+        const val STRING_RESOURCES_KT_CLASS = HostClasses.Compose.STRING_RESOURCES
         const val STRING_RESOURCE_METHOD = "stringResource"
-        const val APP_TOP_BAR_CLASS = "app.zhendong.reamicro.arch.components.AppTopBarKt"
+        const val APP_TOP_BAR_CLASS = HostClasses.Host.APP_TOP_BAR
         const val APP_TOP_BAR_METHOD = "AppTopBar"
-        const val KOTLIN_RESULT_CLASS = "kotlin.Result"
-        const val KOTLIN_RESULT_KT_CLASS = "kotlin.ResultKt"
-        const val KOTLIN_CONTINUATION_CLASS = "kotlin.coroutines.Continuation"
-        const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = "kotlin.coroutines.EmptyCoroutineContext"
-        const val KOTLIN_INTRINSICS_CLASS = "kotlin.coroutines.intrinsics.IntrinsicsKt"
-        const val KOTLIN_COROUTINE_SINGLETONS_CLASS = "kotlin.coroutines.intrinsics.CoroutineSingletons"
+        const val KOTLIN_RESULT_CLASS = HostClasses.Kotlin.KOTLIN_RESULT
+        const val KOTLIN_RESULT_KT_CLASS = HostClasses.Kotlin.KOTLIN_RESULT_KT
+        const val KOTLIN_CONTINUATION_CLASS = HostClasses.Kotlin.KOTLIN_CONTINUATION
+        const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = HostClasses.Kotlin.KOTLIN_EMPTY_COROUTINE_CONTEXT
+        const val KOTLIN_INTRINSICS_CLASS = HostClasses.Kotlin.KOTLIN_INTRINSICS
+        const val KOTLIN_COROUTINE_SINGLETONS_CLASS = HostClasses.Kotlin.KOTLIN_COROUTINE_SINGLETONS
         const val FLOW_KT_CLASS = "kotlinx.coroutines.flow.FlowKt"
         const val FLOW_CLASS = "kotlinx.coroutines.flow.Flow"
         const val STATE_FLOW_CLASS = "kotlinx.coroutines.flow.StateFlow"
         const val STATE_FLOW_KT_CLASS = "kotlinx.coroutines.flow.StateFlowKt"
         const val FLOW_OF_METHOD = "flowOf"
-        const val LOAD_STATES_CLASS = "androidx.paging.LoadStates"
+        const val LOAD_STATES_CLASS = HostClasses.AndroidX.LOAD_STATES
         const val PLATFORM_FILE_ANDROID_KT_CLASS = "io.github.vinceglb.filekit.PlatformFile_androidKt"
         const val PLATFORM_FILE_METHOD = "PlatformFile"
         const val PLATFORM_FILE_GET_PATH_METHOD = "getPath"
         const val PLATFORM_FILE_ABSOLUTE_PATH_METHOD = "absolutePath"
         const val AUTH_BAIDU_CLASS = "app.zhendong.reamicro.data.third.Auth\$BaiduAuth"
         const val AUTH_YUN115_CLASS = "app.zhendong.reamicro.data.third.Auth\$Yun115Auth"
-        const val BAIDU_ACCOUNT_SCREEN_CLASS = "app.zhendong.reamicro.ui.storage.baidu.BaiduNetDiskAccountScreenKt"
+        const val BAIDU_ACCOUNT_SCREEN_CLASS = HostClasses.Host.BAIDU_ACCOUNT_SCREEN
         const val BAIDU_ACCOUNT_SCREEN_METHOD = "BaiduNetDiskAccountScreen"
         const val BAIDU_ACCOUNT_DEFAULT_FOLDER_METHOD = "DefaultFolder"
         const val BAIDU_ACCOUNT_LOGOUT_METHOD = "LogOut"
         const val BAIDU_ACCOUNT_QUERY_ORDER_BY_METHOD = "QueryOrderBy"
         const val BAIDU_ACCOUNT_QUERY_ORDER_DIRECTION_METHOD = "QueryOrderDirection"
         const val BAIDU_ACCOUNT_DEFAULT_FOLDER_LAMBDA_METHOD = "BaiduNetDiskAccountScreen\$lambda\$0\$0\$1\$0\$0\$0"
-        const val BAIDU_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.storage.baidu.BaiduNetDiskViewModel"
+        const val BAIDU_VIEW_MODEL_CLASS = HostClasses.Host.BAIDU_VIEW_MODEL
         const val BAIDU_VIEW_MODEL_GET_AUTH_METHOD = "getAuth"
-        const val Y115_ACCOUNT_SCREEN_CLASS = "app.zhendong.reamicro.ui.storage.c115.Y115NetDiskAccountScreenKt"
+        const val Y115_ACCOUNT_SCREEN_CLASS = HostClasses.Host.Y115_ACCOUNT_SCREEN
         const val Y115_ACCOUNT_SCREEN_METHOD = "Y115NetDiskAccountScreen"
         const val Y115_ACCOUNT_DEFAULT_FOLDER_METHOD = "DefaultFolder"
         const val Y115_ACCOUNT_LOGOUT_METHOD = "LogOut"
         const val Y115_ACCOUNT_QUERY_ORDER_BY_METHOD = "QueryOrderBy"
         const val Y115_ACCOUNT_QUERY_ORDER_DIRECTION_METHOD = "QueryOrderDirection"
         const val Y115_ACCOUNT_LIBRARY_BLOCK_METHOD = "Y115NetDiskAccountScreen\$lambda\$0\$0\$1\$1"
-        const val Y115_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.storage.c115.Y115NetDiskViewModel"
+        const val Y115_VIEW_MODEL_CLASS = HostClasses.Host.Y115_VIEW_MODEL
         const val Y115_VIEW_MODEL_GET_AUTH_METHOD = "getAuth"
-        const val DIR_CLASS = "app.zhendong.reamicro.data.third.Dir"
-        const val CLOUD_USER_INFO_CLASS = "app.zhendong.reamicro.data.storage.CloudUserInfo"
-        const val PAGING_DATA_CLASS = "androidx.paging.PagingData"
+        const val DIR_CLASS = HostClasses.Host.DIR
+        const val CLOUD_USER_INFO_CLASS = HostClasses.Host.CLOUD_USER_INFO
+        const val PAGING_DATA_CLASS = HostClasses.AndroidX.PAGING_DATA
         const val PAGING_DATA_EMPTY_METHOD = "empty"
-        const val BAIDU_ICON_CLASS = "app.zhendong.reamicro.arch.icons.colored.BaiduNetdiskKt"
+        const val BAIDU_ICON_CLASS = HostClasses.Host.BAIDU_ICON
         const val BAIDU_ICON_METHOD = "getBaiduNetdisk"
-        const val YUN115_ICON_CLASS = "app.zhendong.reamicro.arch.icons.colored.Yun115Kt"
+        const val YUN115_ICON_CLASS = HostClasses.Host.YUN115_ICON
         const val YUN115_ICON_METHOD = "getYun115"
-        const val FILE_FOLDER_ICON_CLASS = "app.zhendong.reamicro.arch.icons.colored.FileFolderKt"
+        const val FILE_FOLDER_ICON_CLASS = HostClasses.Host.FILE_FOLDER_ICON
         const val FILE_FOLDER_ICON_METHOD = "getFileFolder"
-        const val CLOUD_ROW_ICON_CLASS = "app.zhendong.reamicro.ui.storage.components.BookRowInfoKt"
+        const val CLOUD_ROW_ICON_CLASS = HostClasses.Host.BOOK_ROW_INFO
         const val CLOUD_ROW_ICON_METHOD = "getIconForFileType"
-        const val ANDROID_OS_ICON_CLASS = "app.zhendong.reamicro.arch.icons.colored.AndroidOsKt"
+        const val ANDROID_OS_ICON_CLASS = HostClasses.Host.ANDROID_OS_ICON
         const val ANDROID_OS_ICON_METHOD = "getAndroidOs"
-        const val FUNCTION0_CLASS = "kotlin.jvm.functions.Function0"
-        const val FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
-        const val FUNCTION2_CLASS = "kotlin.jvm.functions.Function2"
-        const val FUNCTION3_CLASS = "kotlin.jvm.functions.Function3"
-        const val COMPOSER_CLASS = "androidx.compose.runtime.Composer"
-        const val KOTLIN_PAIR_CLASS = "kotlin.Pair"
-        const val ROW_KT_CLASS = "androidx.compose.foundation.layout.RowKt"
+        const val FUNCTION0_CLASS = HostClasses.Kotlin.FUNCTION0
+        const val FUNCTION1_CLASS = HostClasses.Kotlin.FUNCTION1
+        const val FUNCTION2_CLASS = HostClasses.Kotlin.FUNCTION2
+        const val FUNCTION3_CLASS = HostClasses.Kotlin.FUNCTION3
+        const val COMPOSER_CLASS = HostClasses.Compose.COMPOSER
+        const val KOTLIN_PAIR_CLASS = HostClasses.Kotlin.KOTLIN_PAIR
+        const val ROW_KT_CLASS = HostClasses.Compose.ROW_KT
         const val ROW_METHOD = "Row"
-        const val ARRANGEMENT_CLASS = "androidx.compose.foundation.layout.Arrangement"
-        const val ALIGNMENT_CLASS = "androidx.compose.ui.Alignment"
-        const val TEXT_OVERFLOW_CLASS = "androidx.compose.ui.text.style.TextOverflow"
-        const val ICON_KT_CLASS = "androidx.compose.material3.IconKt"
+        const val ARRANGEMENT_CLASS = HostClasses.Compose.ARRANGEMENT
+        const val ALIGNMENT_CLASS = HostClasses.Compose.ALIGNMENT
+        const val TEXT_OVERFLOW_CLASS = HostClasses.Compose.TEXT_OVERFLOW
+        const val ICON_KT_CLASS = HostClasses.Compose.ICON_KT
         const val ICON_METHOD = "Icon-ww6aTOc"
-        const val IMAGE_VECTOR_CLASS = "androidx.compose.ui.graphics.vector.ImageVector"
-        const val EDIT_ICON_CLASS = "androidx.compose.material.icons.outlined.EditKt"
-        const val NAVIGATE_NEXT_ICON_CLASS = "androidx.compose.material.icons.automirrored.filled.NavigateNextKt"
+        const val IMAGE_VECTOR_CLASS = HostClasses.Compose.IMAGE_VECTOR
+        const val EDIT_ICON_CLASS = HostClasses.Compose.EDIT_ICON
+        const val NAVIGATE_NEXT_ICON_CLASS = HostClasses.Compose.NAVIGATE_NEXT_ICON
         const val ICONS_FILLED_CLASS = "androidx.compose.material.icons.Icons\$Filled"
         const val ICONS_OUTLINED_CLASS = "androidx.compose.material.icons.Icons\$Outlined"
         const val ICONS_AUTO_MIRRORED_FILLED_CLASS = "androidx.compose.material.icons.Icons\$AutoMirrored\$Filled"
         const val MATERIAL3_TEXT_METHOD = "Text-Nvy7gAk"
-        const val MATERIAL_THEME_CLASS = "androidx.compose.material3.MaterialTheme"
-        const val THEME_KT_CLASS = "app.zhendong.reamicro.arch.theme.ThemeKt"
-        const val CLICKABLE_KT_CLASS = "androidx.compose.foundation.ClickableKt"
+        const val MATERIAL_THEME_CLASS = HostClasses.Compose.MATERIAL_THEME
+        const val THEME_KT_CLASS = HostClasses.Host.THEME_KT
+        const val CLICKABLE_KT_CLASS = HostClasses.Compose.CLICKABLE_KT
         const val CLICKABLE_DEFAULT_METHOD = "clickable-O2vRcR0\$default"
         const val IMAGE_VECTOR_BUILDER_CLASS = "androidx.compose.ui.graphics.vector.ImageVector\$Builder"
-        const val VECTOR_KT_CLASS = "androidx.compose.ui.graphics.vector.VectorKt"
-        const val COLOR_KT_CLASS = "androidx.compose.ui.graphics.ColorKt"
-        const val SOLID_COLOR_CLASS = "androidx.compose.ui.graphics.SolidColor"
-        const val DEFAULT_CONSTRUCTOR_MARKER_CLASS = "kotlin.jvm.internal.DefaultConstructorMarker"
-        const val ANDROID_VIEW_KT_CLASS = "androidx.compose.ui.viewinterop.AndroidView_androidKt"
+        const val VECTOR_KT_CLASS = HostClasses.Compose.VECTOR_KT
+        const val COLOR_KT_CLASS = HostClasses.Compose.COLOR_KT
+        const val SOLID_COLOR_CLASS = HostClasses.Compose.SOLID_COLOR
+        const val DEFAULT_CONSTRUCTOR_MARKER_CLASS = HostClasses.Kotlin.DEFAULT_CONSTRUCTOR_MARKER
+        const val ANDROID_VIEW_KT_CLASS = HostClasses.Compose.ANDROID_VIEW_KT
         const val ANDROID_VIEW_METHOD = "AndroidView"
-        const val MATERIAL3_TEXT_CLASS = "androidx.compose.material3.TextKt"
-        const val DIVIDER_KT_CLASS = "app.zhendong.reamicro.arch.components.DividerKt"
+        const val MATERIAL3_TEXT_CLASS = HostClasses.Compose.TEXT_KT
+        const val DIVIDER_KT_CLASS = HostClasses.Host.DIVIDER_KT
         const val SIMPLE_DIVIDER_METHOD = "SimpleDivider-iJQMabo"
-        const val BOX_KT_CLASS = "androidx.compose.foundation.layout.BoxKt"
+        const val BOX_KT_CLASS = HostClasses.Compose.BOX_KT
         const val BOX_METHOD = "Box"
-        const val BACKGROUND_KT_CLASS = "androidx.compose.foundation.BackgroundKt"
-        const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
-        const val SIZE_KT_CLASS = "androidx.compose.foundation.layout.SizeKt"
+        const val BACKGROUND_KT_CLASS = HostClasses.Compose.BACKGROUND_KT
+        const val MODIFIER_CLASS = HostClasses.Compose.MODIFIER
+        const val SIZE_KT_CLASS = HostClasses.Compose.SIZE_KT
         const val SIZE_METHOD = "size-3ABfNKs"
         const val FILL_MAX_SIZE_METHOD = "fillMaxSize"
         const val FILL_MAX_WIDTH_METHOD = "fillMaxWidth"
-        const val PADDING_KT_CLASS = "androidx.compose.foundation.layout.PaddingKt"
+        const val PADDING_KT_CLASS = HostClasses.Compose.PADDING_KT
         const val PADDING_METHOD = "padding-qDBjuR0"
         const val PADDING_ABSOLUTE_DEFAULT_METHOD = "padding-qDBjuR0\$default"
-        const val UNIT_EXT_KT_CLASS = "app.zhendong.reamicro.arch.extensions.UnitExtKt"
+        const val UNIT_EXT_KT_CLASS = HostClasses.Host.UNIT_EXT_KT
         const val UDP_METHOD = "getUdp"
         const val TEXT_DEFAULT_MASK_WITH_MODIFIER = 131064
         const val TEXT_SECONDARY_SINGLE_LINE_MASK = 110586
-        const val OKHTTP_CLIENT_CLASS = "okhttp3.OkHttpClient"
-        const val OKHTTP_REQUEST_CLASS = "okhttp3.Request"
+        const val OKHTTP_CLIENT_CLASS = HostClasses.ThirdParty.OKHTTP_CLIENT
+        const val OKHTTP_REQUEST_CLASS = HostClasses.ThirdParty.OKHTTP_REQUEST
         const val OKHTTP_REQUEST_BUILDER_CLASS = "okhttp3.Request\$Builder"
-        const val OKHTTP_REQUEST_BODY_CLASS = "okhttp3.RequestBody"
-        const val OKHTTP_MEDIA_TYPE_CLASS = "okhttp3.MediaType"
+        const val OKHTTP_REQUEST_BODY_CLASS = HostClasses.ThirdParty.OKHTTP_REQUEST_BODY
+        const val OKHTTP_MEDIA_TYPE_CLASS = HostClasses.ThirdParty.OKHTTP_MEDIA_TYPE
         const val NETWORK_SECURITY_POLICY_CLASS = "android.security.NetworkSecurityPolicy"
         const val ANDROID_OKHTTP_CLEARTEXT_FILTER_CLASS = "com.android.okhttp.HttpHandler\$CleartextURLFilter"
         const val ANDROID_OKHTTP_PLATFORM_CLASS = "com.android.okhttp.internal.Platform"
-        const val OKHTTP_PLATFORM_CLASS = "okhttp3.internal.platform.Platform"
-        const val OKHTTP_ANDROID_PLATFORM_CLASS = "okhttp3.internal.platform.AndroidPlatform"
-        const val OKHTTP_ANDROID10_PLATFORM_CLASS = "okhttp3.internal.platform.Android10Platform"
+        const val OKHTTP_PLATFORM_CLASS = HostClasses.ThirdParty.OKHTTP_PLATFORM
+        const val OKHTTP_ANDROID_PLATFORM_CLASS = HostClasses.ThirdParty.OKHTTP_ANDROID_PLATFORM
+        const val OKHTTP_ANDROID10_PLATFORM_CLASS = HostClasses.ThirdParty.OKHTTP_ANDROID10_PLATFORM
         const val BACKUP_TYPE_WEBDAV = 8
         const val BACKUP_TYPE_LOCAL_LIBRARY = 9
         const val BACKUP_TYPE_ONLINE_COMPLETION = 10

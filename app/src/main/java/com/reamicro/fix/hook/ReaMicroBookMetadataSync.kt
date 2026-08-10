@@ -1,5 +1,6 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.HostClasses
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import java.lang.ref.WeakReference
@@ -19,11 +20,11 @@ internal data class BookMetadataPatch(
 
 internal object ReaMicroBookMetadataSync {
     private const val LOG_PREFIX = "ReaMicro LSP"
-    private const val KOTLIN_CONTINUATION_CLASS = "kotlin.coroutines.Continuation"
-    private const val KOTLIN_RESULT_KT_CLASS = "kotlin.ResultKt"
-    private const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = "kotlin.coroutines.EmptyCoroutineContext"
-    private const val KOTLIN_INTRINSICS_CLASS = "kotlin.coroutines.intrinsics.IntrinsicsKt"
-    private const val KOTLIN_COROUTINE_SINGLETONS_CLASS = "kotlin.coroutines.intrinsics.CoroutineSingletons"
+    private const val KOTLIN_CONTINUATION_CLASS = HostClasses.Kotlin.KOTLIN_CONTINUATION
+    private const val KOTLIN_RESULT_KT_CLASS = HostClasses.Kotlin.KOTLIN_RESULT_KT
+    private const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = HostClasses.Kotlin.KOTLIN_EMPTY_COROUTINE_CONTEXT
+    private const val KOTLIN_INTRINSICS_CLASS = HostClasses.Kotlin.KOTLIN_INTRINSICS
+    private const val KOTLIN_COROUTINE_SINGLETONS_CLASS = HostClasses.Kotlin.KOTLIN_COROUTINE_SINGLETONS
     private const val ONLINE_COMPLETION_UUID_PREFIX = "reamicro-online-"
 
     private var bookshelfRepositoryRef: WeakReference<Any>? = null

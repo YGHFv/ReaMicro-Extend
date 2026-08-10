@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
 import android.graphics.Shader
+import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.settings.XposedModuleSettings
@@ -1535,20 +1536,20 @@ class ProfileBackgroundHook(
         const val PROFILE_BACKGROUND_HOUMO_SAMPLE_COLUMNS = 28
         const val PROFILE_BACKGROUND_HOUMO_SAMPLE_ROWS = 6
 
-        const val PROFILE_SCREEN_CLASS = "app.zhendong.reamicro.ui.profile.ProfileScreenKt"
-        const val PADDING_VALUES_CLASS = "androidx.compose.foundation.layout.PaddingValues"
+        const val PROFILE_SCREEN_CLASS = HostClasses.Host.PROFILE_SCREEN
+        const val PADDING_VALUES_CLASS = HostClasses.Compose.PADDING_VALUES
 
-        const val THEME_KT_CLASS = "app.zhendong.reamicro.arch.theme.ThemeKt"
+        const val THEME_KT_CLASS = HostClasses.Host.THEME_KT
         const val THEME_GET_BACKGROUND_AUTO_METHOD = "getBackgroundAuto"
         const val THEME_GET_BACKGROUND_DIM_METHOD = "getBackgroundDim"
         const val THEME_GET_BACKGROUND_BRIGHT_METHOD = "getBackgroundBright"
-        const val MATERIAL_THEME_CLASS = "androidx.compose.material3.MaterialTheme"
-        const val COMPOSER_CLASS = "androidx.compose.runtime.Composer"
+        const val MATERIAL_THEME_CLASS = HostClasses.Compose.MATERIAL_THEME
+        const val COMPOSER_CLASS = HostClasses.Compose.COMPOSER
 
-        const val DIVIDER_KT_CLASS = "app.zhendong.reamicro.arch.components.DividerKt"
+        const val DIVIDER_KT_CLASS = HostClasses.Host.DIVIDER_KT
         const val SIMPLE_DIVIDER_METHOD = "SimpleDivider-iJQMabo"
 
-        const val COLOR_SCHEME_CLASS = "androidx.compose.material3.ColorScheme"
+        const val COLOR_SCHEME_CLASS = HostClasses.Compose.COLOR_SCHEME
         const val SURFACE_CONTAINER_HIGH_METHOD = "getSurfaceContainerHigh-0d7_KjU"
         val PROFILE_BACKGROUND_SURFACE_COLOR_METHODS = arrayOf(
             "getSurface-0d7_KjU",
@@ -1567,25 +1568,25 @@ class ProfileBackgroundHook(
             THEME_GET_BACKGROUND_BRIGHT_METHOD,
         )
 
-        const val BACKGROUND_KT_CLASS = "androidx.compose.foundation.BackgroundKt"
+        const val BACKGROUND_KT_CLASS = HostClasses.Compose.BACKGROUND_KT
         const val COLOR_BACKGROUND_DEFAULT_METHOD = "background-bw27NRU\$default"
         const val BRUSH_BACKGROUND_DEFAULT_METHOD = "background\$default"
 
-        const val SIZE_KT_CLASS = "androidx.compose.foundation.layout.SizeKt"
+        const val SIZE_KT_CLASS = HostClasses.Compose.SIZE_KT
         const val FILL_MAX_SIZE_DEFAULT_METHOD = "fillMaxSize\$default"
 
-        const val BRUSH_KT_CLASS = "androidx.compose.ui.graphics.BrushKt"
+        const val BRUSH_KT_CLASS = HostClasses.Compose.BRUSH_KT
         const val SHADER_BRUSH_METHOD = "ShaderBrush"
 
-        const val BRUSH_COMPANION_CLASS = "androidx.compose.ui.graphics.Brush"
+        const val BRUSH_COMPANION_CLASS = HostClasses.Compose.BRUSH_COMPANION
         const val VERTICAL_GRADIENT_DEFAULT_METHOD = "verticalGradient-8A-3gB4\$default"
 
-        const val RECTANGLE_SHAPE_KT_CLASS = "androidx.compose.ui.graphics.RectangleShapeKt"
+        const val RECTANGLE_SHAPE_KT_CLASS = HostClasses.Compose.RECTANGLE_SHAPE_KT
 
-        const val COLOR_KT_CLASS = "androidx.compose.ui.graphics.ColorKt"
+        const val COLOR_KT_CLASS = HostClasses.Compose.COLOR_KT
         const val COLOR_METHOD = "Color"
 
-        const val COLOR_CLASS = "androidx.compose.ui.graphics.Color"
+        const val COLOR_CLASS = HostClasses.Compose.COLOR
         const val COLOR_BOX_METHOD = "box-impl"
         const val PROFILE_BACKGROUND_IMAGE_URL_MAX_LENGTH = 2048
         const val RANDOM_IMAGE_CONNECT_TIMEOUT_MS = 12_000

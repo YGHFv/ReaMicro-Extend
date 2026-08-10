@@ -11,6 +11,7 @@ import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.NinePatchDrawable
 import com.reamicro.fix.compat.ReaMicroHostCompat
+import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.online.FanqieParagraphCommentApi
 import com.reamicro.fix.online.OnlineParagraphCommentCacheStore
 import com.reamicro.fix.online.OnlineParagraphCommentInjectionPlan
@@ -1833,20 +1834,20 @@ class ReaderDialogueHighlightHook(
         const val SPAN_STYLE_CLASS = ReaMicroHostCompat.ReaderHighlight.SPAN_STYLE_CLASS
         const val ANNOTATED_STRING_CLASS = ReaMicroHostCompat.ReaderHighlight.ANNOTATED_STRING_CLASS
         const val ANNOTATED_RANGE_CLASS = ReaMicroHostCompat.ReaderHighlight.ANNOTATED_RANGE_CLASS
-        const val STRING_ANNOTATION_CLASS = "androidx.compose.ui.text.StringAnnotation"
-        const val COMMENT_ANNOTATION_CLASS = "org.epub.ui.CommentAnnotation"
-        const val IMAGE_PLACEHOLDER_CLASS = "org.epub.html.ImagePlaceholder"
-        const val COMPOSE_PLACEHOLDER_CLASS = "androidx.compose.ui.text.Placeholder"
-        const val PLACEHOLDER_VERTICAL_ALIGN_CLASS = "androidx.compose.ui.text.PlaceholderVerticalAlign"
-        const val UI_EPUB_WINDOW_CLASS = "org.epub.UIEpubWindow"
+        const val STRING_ANNOTATION_CLASS = HostClasses.Compose.STRING_ANNOTATION
+        const val COMMENT_ANNOTATION_CLASS = HostClasses.Epub.COMMENT_ANNOTATION
+        const val IMAGE_PLACEHOLDER_CLASS = HostClasses.Epub.IMAGE_PLACEHOLDER
+        const val COMPOSE_PLACEHOLDER_CLASS = HostClasses.Compose.COMPOSE_PLACEHOLDER
+        const val PLACEHOLDER_VERTICAL_ALIGN_CLASS = HostClasses.Compose.PLACEHOLDER_VERTICAL_ALIGN
+        const val UI_EPUB_WINDOW_CLASS = HostClasses.Epub.UI_EPUB_WINDOW
         const val ANNOTATED_STRING_EXT_CLASS = ReaMicroHostCompat.ReaderHighlight.ANNOTATED_STRING_EXT_CLASS
         const val DRAW_MODIFIER_KT_CLASS = ReaMicroHostCompat.ReaderHighlight.DRAW_MODIFIER_KT_CLASS
         const val ANDROID_CANVAS_KT_CLASS = ReaMicroHostCompat.ReaderHighlight.ANDROID_CANVAS_KT_CLASS
         const val COLOR_KT_CLASS = ReaMicroHostCompat.ReaderHighlight.COLOR_KT_CLASS
-        const val TEXT_UNIT_KT_CLASS = "androidx.compose.ui.unit.TextUnitKt"
+        const val TEXT_UNIT_KT_CLASS = HostClasses.Compose.TEXT_UNIT_KT
         const val MODIFIER_CLASS = ReaMicroHostCompat.ReaderHighlight.MODIFIER_CLASS
-        const val FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
-        const val UNIT_CLASS = "kotlin.Unit"
+        const val FUNCTION1_CLASS = HostClasses.Kotlin.FUNCTION1
+        const val UNIT_CLASS = HostClasses.Kotlin.KOTLIN_UNIT
         const val FONT_PROVIDER_CLASS = ReaMicroHostCompat.ReaderHighlight.FONT_PROVIDER_CLASS
         const val FONT_FAMILY_CLASS = ReaMicroHostCompat.ReaderHighlight.FONT_FAMILY_CLASS
         const val FONT_FAMILY_KT_CLASS = ReaMicroHostCompat.ReaderHighlight.FONT_FAMILY_KT_CLASS
@@ -1875,7 +1876,7 @@ class ReaderDialogueHighlightHook(
         const val HIGHLIGHT_ANNOTATION_TAG = "reamicro.highlight.span"
         const val NINE_PATCH_ANNOTATION_TAG = "reamicro.highlight.ninepatch"
         const val COMMENT_ANNOTATION_TAG = "#comment"
-        const val INLINE_CONTENT_ANNOTATION_TAG = "androidx.compose.foundation.text.inlineContent"
+        const val INLINE_CONTENT_ANNOTATION_TAG = HostClasses.Compose.INLINE_CONTENT_ANNOTATION_TAG
         const val ONLINE_COMMENT_ANNOTATION_PREFIX = "reamicro-online-comment"
         const val NINE_PATCH_ANNOTATION_SEPARATOR = "\u001F"
         const val MARKUP_TEXT = "#text"

@@ -6,6 +6,8 @@ import android.net.Uri
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.widget.Toast
+import com.reamicro.fix.core.ComposeInterop
+import com.reamicro.fix.core.HostClasses
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
@@ -23,6 +25,14 @@ class LocalExportHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
 ) {
+    // Compose 反射互操作的共用实现，避免各 hook 各存一份逐渐漂移的副本。
+    private val composeInterop = ComposeInterop(
+        classLoader = classLoader,
+        resolveClass = ::cls,
+        unitInstance = ::targetUnit,
+        logPrefix = LOG_PREFIX,
+    )
+
     private val methodCache = mutableMapOf<String, Method>()
     private val currentBackupContext = ThreadLocal<BackupContext?>()
     private val renderingLocalExport = ThreadLocal<Boolean>()
@@ -607,20 +617,8 @@ class LocalExportHook(
         }
     }
 
-    private fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any {
-        val functionClass = cls(functionClassName)
-        return Proxy.newProxyInstance(classLoader, arrayOf(functionClass)) { proxy, method, args ->
-            when (method.name) {
-                "invoke" -> runCatching { block(args) }
-                    .onFailure { XposedBridge.log("$LOG_PREFIX failed in $name callback: ${it.stackTraceToString()}") }
-                    .getOrElse { targetUnit() }
-                "toString" -> "ReaMicro$name"
-                "hashCode" -> System.identityHashCode(proxy)
-                "equals" -> proxy === args?.getOrNull(0)
-                else -> null
-            }
-        }
-    }
+    private fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any =
+        composeInterop.functionProxy(name, functionClassName, block)
 
     private fun invokeFunction1(function: Any, arg: Any?) {
         instanceMethod(function, "invoke", 1).invoke(function, arg)
@@ -663,17 +661,17 @@ class LocalExportHook(
 
     private companion object {
         const val LOG_PREFIX = "ReaMicro LSP"
-        const val MAIN_ACTIVITY_CLASS = "app.zhendong.reamicro.MainActivity"
-        const val BOOK_BACKUP_SCREEN_CLASS = "app.zhendong.reamicro.ui.backup.BookBackupScreenKt"
+        const val MAIN_ACTIVITY_CLASS = HostClasses.Host.MAIN_ACTIVITY
+        const val BOOK_BACKUP_SCREEN_CLASS = HostClasses.Host.BOOK_BACKUP_SCREEN
         const val BOOK_BACKUP_CONTENT_METHOD = "BookBackupContent"
         const val BOOK_BACKUP_DELETE_EVENT_CLASS = "app.zhendong.reamicro.ui.backup.BookBackupUIEvent\$Delete"
         const val BOOK_BACKUP_UPLOAD_EVENT_CLASS = "app.zhendong.reamicro.ui.backup.BookBackupUIEvent\$Upload"
-        const val LOCAL_STORAGE_CARD_CLASS = "app.zhendong.reamicro.ui.backup.components.LocalStorageCardKt"
+        const val LOCAL_STORAGE_CARD_CLASS = HostClasses.Host.LOCAL_STORAGE_CARD
         const val LOCAL_STORAGE_CARD_METHOD = "LocalStorageCard"
-        const val AUTH_CARD_CLASS = "app.zhendong.reamicro.ui.backup.components.AuthCardKt"
+        const val AUTH_CARD_CLASS = HostClasses.Host.AUTH_CARD
         const val AUTH_CARD_METHOD = "AuthCard"
         const val DRIVE_AUTH_CARD_METHOD = "DriveAuthCard"
-        const val DRIVE_CARD_CLASS = "app.zhendong.reamicro.ui.backup.components.DriveCardKt"
+        const val DRIVE_CARD_CLASS = HostClasses.Host.DRIVE_CARD
         const val ALIYUN_DRIVE_CARD_METHOD = "AliyunDriveCard"
         const val BAIDU_NET_DISK_CARD_METHOD = "BaiduNetDiskCard"
         const val YUN115_NET_DISK_CARD_METHOD = "Yun115NetDiskCard"
@@ -682,31 +680,31 @@ class LocalExportHook(
         const val BACKUP_TYPE_ALIYUN = 4
         const val BACKUP_TYPE_WEBDAV = 8
         const val APP_ICONS_COLORED_CLASS = "app.zhendong.reamicro.arch.icons.AppIcons\$Colored"
-        const val ANDROID_OS_KT_CLASS = "app.zhendong.reamicro.arch.icons.colored.AndroidOsKt"
+        const val ANDROID_OS_KT_CLASS = HostClasses.Host.ANDROID_OS_ICON
         const val ANDROID_OS_METHOD = "getAndroidOs"
-        const val COLUMN_KT_CLASS = "androidx.compose.foundation.layout.ColumnKt"
+        const val COLUMN_KT_CLASS = HostClasses.Compose.COLUMN_KT
         const val COLUMN_METHOD = "Column"
-        const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
-        const val SIZE_KT_CLASS = "androidx.compose.foundation.layout.SizeKt"
+        const val MODIFIER_CLASS = HostClasses.Compose.MODIFIER
+        const val SIZE_KT_CLASS = HostClasses.Compose.SIZE_KT
         const val FILL_MAX_SIZE_DEFAULT_METHOD = "fillMaxSize\$default"
         const val FILL_MAX_WIDTH_DEFAULT_METHOD = "fillMaxWidth\$default"
-        const val PADDING_KT_CLASS = "androidx.compose.foundation.layout.PaddingKt"
+        const val PADDING_KT_CLASS = HostClasses.Compose.PADDING_KT
         const val PADDING_HORIZONTAL_DEFAULT_METHOD = "padding-VpY3zN4\$default"
         const val PADDING_INDIVIDUAL_DEFAULT_METHOD = "padding-qDBjuR0\$default"
-        const val ARRANGEMENT_CLASS = "androidx.compose.foundation.layout.Arrangement"
+        const val ARRANGEMENT_CLASS = HostClasses.Compose.ARRANGEMENT
         const val ARRANGEMENT_TOP_METHOD = "getTop"
         const val SPACED_BY_METHOD = "spacedBy-0680j_4"
-        const val ALIGNMENT_CLASS = "androidx.compose.ui.Alignment"
+        const val ALIGNMENT_CLASS = HostClasses.Compose.ALIGNMENT
         const val ALIGNMENT_START_METHOD = "getStart"
-        const val SCROLL_KT_CLASS = "androidx.compose.foundation.ScrollKt"
+        const val SCROLL_KT_CLASS = HostClasses.Compose.SCROLL_KT
         const val REMEMBER_SCROLL_STATE_METHOD = "rememberScrollState"
         const val VERTICAL_SCROLL_DEFAULT_METHOD = "verticalScroll\$default"
-        const val UNIT_EXT_KT_CLASS = "app.zhendong.reamicro.arch.extensions.UnitExtKt"
+        const val UNIT_EXT_KT_CLASS = HostClasses.Host.UNIT_EXT_KT
         const val UDP_METHOD = "getUdp"
-        const val FUNCTION0_CLASS = "kotlin.jvm.functions.Function0"
-        const val FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
-        const val FUNCTION2_CLASS = "kotlin.jvm.functions.Function2"
-        const val FUNCTION3_CLASS = "kotlin.jvm.functions.Function3"
+        const val FUNCTION0_CLASS = HostClasses.Kotlin.FUNCTION0
+        const val FUNCTION1_CLASS = HostClasses.Kotlin.FUNCTION1
+        const val FUNCTION2_CLASS = HostClasses.Kotlin.FUNCTION2
+        const val FUNCTION3_CLASS = HostClasses.Kotlin.FUNCTION3
         const val REQUEST_PICK_EXPORT_DIR = 0x524D47
         const val EPUB_MIME_TYPE = "application/epub+zip"
         const val EXPORT_TITLE = "导出到本地存储"

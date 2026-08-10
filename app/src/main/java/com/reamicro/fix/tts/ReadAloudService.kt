@@ -25,6 +25,7 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Base64
 import com.reamicro.fix.R
+import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.logging.ModuleAndroidLog
 import com.reamicro.fix.logging.ModuleLogState
 import java.io.File
@@ -1495,7 +1496,7 @@ class ReadAloudService : Service() {
         const val LOG_TAG = "ReaMicroReadAloud"
         const val CHANNEL_ID = "reamicro_read_aloud"
         const val NOTIFICATION_ID = 4400
-        const val HOST_PACKAGE = "app.zhendong.reamicro"
+        const val HOST_PACKAGE = HostClasses.Host.HOST_PACKAGE_NAME
         const val WAKE_LOCK_TIMEOUT_MS = 30L * 60L * 1000L
         const val COVER_MAX_EDGE_PX = 512
         const val MAX_SPEAK_FAILURES = 3

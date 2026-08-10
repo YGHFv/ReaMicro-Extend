@@ -11,6 +11,7 @@ import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -1048,20 +1049,20 @@ class ReaderImportOverwriteHook(
 
     private companion object {
         const val LOG_PREFIX = "ReaMicro LSP"
-        const val BOOKSHELF_REPOSITORY_CLASS = "app.zhendong.reamicro.repository.BookshelfRepository"
+        const val BOOKSHELF_REPOSITORY_CLASS = HostClasses.Host.BOOKSHELF_REPOSITORY
         const val BOOKSHELF_IMPORT_BOOK_METHOD = "importBook"
-        const val WORKER_MANAGER_CLASS = "app.zhendong.reamicro.arch.WorkerManager"
-        const val EPUB_FILE_MANAGER_CLASS = "app.zhendong.reamicro.arch.EpubFileManager"
+        const val WORKER_MANAGER_CLASS = HostClasses.Host.WORKER_MANAGER
+        const val EPUB_FILE_MANAGER_CLASS = HostClasses.Host.EPUB_FILE_MANAGER
         const val EPUB_IMPORT_METHOD = "import"
-        const val OPF_CLASS = "org.epub.structure.opf.Opf"
-        const val OKIO_PATH_CLASS = "okio.Path"
-        const val KOTLIN_PAIR_CLASS = "kotlin.Pair"
+        const val OPF_CLASS = HostClasses.Epub.OPF
+        const val OKIO_PATH_CLASS = HostClasses.ThirdParty.OKIO_PATH
+        const val KOTLIN_PAIR_CLASS = HostClasses.Kotlin.KOTLIN_PAIR
         const val FLOW_KT_CLASS = "kotlinx.coroutines.flow.FlowKt"
-        const val KOTLIN_CONTINUATION_CLASS = "kotlin.coroutines.Continuation"
-        const val KOTLIN_RESULT_KT_CLASS = "kotlin.ResultKt"
-        const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = "kotlin.coroutines.EmptyCoroutineContext"
-        const val KOTLIN_INTRINSICS_CLASS = "kotlin.coroutines.intrinsics.IntrinsicsKt"
-        const val KOTLIN_COROUTINE_SINGLETONS_CLASS = "kotlin.coroutines.intrinsics.CoroutineSingletons"
+        const val KOTLIN_CONTINUATION_CLASS = HostClasses.Kotlin.KOTLIN_CONTINUATION
+        const val KOTLIN_RESULT_KT_CLASS = HostClasses.Kotlin.KOTLIN_RESULT_KT
+        const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = HostClasses.Kotlin.KOTLIN_EMPTY_COROUTINE_CONTEXT
+        const val KOTLIN_INTRINSICS_CLASS = HostClasses.Kotlin.KOTLIN_INTRINSICS
+        const val KOTLIN_COROUTINE_SINGLETONS_CLASS = HostClasses.Kotlin.KOTLIN_COROUTINE_SINGLETONS
         const val BACKUP_TYPE_ONLINE_COMPLETION = 10
         const val ONLINE_COMPLETION_SOURCE_PREFIX = "reamicro-online-source://"
         const val ONLINE_COMPLETION_BOOK_PREFIX = "reamicro-online-book://"

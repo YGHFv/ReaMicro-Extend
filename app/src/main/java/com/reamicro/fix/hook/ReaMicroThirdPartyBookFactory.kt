@@ -2,6 +2,7 @@ package com.reamicro.fix.hook
 
 import com.reamicro.fix.association.model.BookSearchResult
 import com.reamicro.fix.association.model.ManualAssociationCandidate
+import com.reamicro.fix.core.HostClasses
 
 class ReaMicroThirdPartyBookFactory(
     private val classLoader: ClassLoader,
@@ -116,7 +117,7 @@ class ReaMicroThirdPartyBookFactory(
     }
 
     private companion object {
-        const val THIRD_PARTY_BOOK_CLASS = "app.zhendong.reamicro.data.search.ThirdPartyBook"
-        const val THIRD_PARTY_CLASS = "app.zhendong.reamicro.data.search.ThirdParty"
+        const val THIRD_PARTY_BOOK_CLASS = HostClasses.Host.THIRD_PARTY_BOOK
+        const val THIRD_PARTY_CLASS = HostClasses.Host.THIRD_PARTY
     }
 }

@@ -1,5 +1,6 @@
 package com.reamicro.fix.compat
 
+import com.reamicro.fix.core.HostClasses
 import de.robv.android.xposed.XposedHelpers
 import java.lang.reflect.Field
 import java.lang.reflect.Method
@@ -109,21 +110,21 @@ class ReaMicroHostCompat(
     }
 
     object ReaderHighlight {
-        const val SPAN_STYLE_CLASS = "androidx.compose.ui.text.SpanStyle"
-        const val ANNOTATED_STRING_CLASS = "androidx.compose.ui.text.AnnotatedString"
+        const val SPAN_STYLE_CLASS = HostClasses.Compose.SPAN_STYLE
+        const val ANNOTATED_STRING_CLASS = HostClasses.Compose.ANNOTATED_STRING
         const val ANNOTATED_STRING_BUILDER_CLASS = "androidx.compose.ui.text.AnnotatedString\$Builder"
         const val ANNOTATED_RANGE_CLASS = "androidx.compose.ui.text.AnnotatedString\$Range"
-        const val ANNOTATED_STRING_EXT_CLASS = "org.epub.utils.AnnotatedStringExtKt"
-        const val JUSTIFY_TEXT_CLASS = "app.zhendong.reamicro.arch.components.JustifyText_androidKt"
-        const val BASIC_TEXT_CLASS = "androidx.compose.foundation.text.BasicTextKt"
-        const val DRAW_MODIFIER_KT_CLASS = "androidx.compose.ui.draw.DrawModifierKt"
-        const val ANDROID_CANVAS_KT_CLASS = "androidx.compose.ui.graphics.AndroidCanvas_androidKt"
-        const val COLOR_KT_CLASS = "androidx.compose.ui.graphics.ColorKt"
-        const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
-        const val FONT_PROVIDER_CLASS = "org.epub.FontProvider"
-        const val FONT_FAMILY_CLASS = "androidx.compose.ui.text.font.FontFamily"
-        const val FONT_FAMILY_KT_CLASS = "androidx.compose.ui.text.font.FontFamilyKt"
-        const val FONT_WEIGHT_CLASS = "androidx.compose.ui.text.font.FontWeight"
+        const val ANNOTATED_STRING_EXT_CLASS = HostClasses.Epub.ANNOTATED_STRING_EXT
+        const val JUSTIFY_TEXT_CLASS = HostClasses.Host.JUSTIFY_TEXT
+        const val BASIC_TEXT_CLASS = HostClasses.Compose.BASIC_TEXT
+        const val DRAW_MODIFIER_KT_CLASS = HostClasses.Compose.DRAW_MODIFIER_KT
+        const val ANDROID_CANVAS_KT_CLASS = HostClasses.Compose.ANDROID_CANVAS_KT
+        const val COLOR_KT_CLASS = HostClasses.Compose.COLOR_KT
+        const val MODIFIER_CLASS = HostClasses.Compose.MODIFIER
+        const val FONT_PROVIDER_CLASS = HostClasses.Epub.FONT_PROVIDER
+        const val FONT_FAMILY_CLASS = HostClasses.Compose.FONT_FAMILY
+        const val FONT_FAMILY_KT_CLASS = HostClasses.Compose.FONT_FAMILY_KT
+        const val FONT_WEIGHT_CLASS = HostClasses.Compose.FONT_WEIGHT
         const val CONTENT_DOM_ON_CONTENT_METHOD = "onContent"
         const val CONTENT_DOM_ON_CONTENT_PARAMETER_COUNT = 2
         const val JUSTIFY_TEXT_METHOD = "JustifyText"

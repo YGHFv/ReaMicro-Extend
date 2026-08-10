@@ -8,6 +8,7 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteStatement
 import android.util.Base64
+import com.reamicro.fix.core.HostClasses
 import de.robv.android.xposed.XposedBridge
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
@@ -36,22 +37,22 @@ private const val STORE_KEY_ACCOUNTS = "accounts"
 private const val PORTABLE_PREFIX = "REAMICRO_ACCOUNT_1:"
 private const val PORTABLE_FORMAT = 1
 private const val HOST_DB_NAME = "app.db"
-private const val HOST_USER_CLASS = "app.zhendong.reamicro.data.db.entity.User"
-private const val HOST_USER_DAO_CLASS = "app.zhendong.reamicro.data.db.dao.UserDao"
-private const val CACHED_CLASS = "app.zhendong.reamicro.repository.core.Cached"
-private const val SESSION_CLASS = "app.zhendong.reamicro.repository.core.Session"
-private const val USER_REPOSITORY_CLASS = "app.zhendong.reamicro.repository.UserRepository"
-private const val PREF_KEYS_CLASS = "app.zhendong.reamicro.constants.PrefKeys"
-private const val THIRD_PARTY_KEYS_CLASS = "app.zhendong.reamicro.data.third.ThirdPartyKeys"
+private const val HOST_USER_CLASS = HostClasses.Host.HOST_USER
+private const val HOST_USER_DAO_CLASS = HostClasses.Host.HOST_USER_DAO
+private const val CACHED_CLASS = HostClasses.Host.CACHED
+private const val SESSION_CLASS = HostClasses.Host.SESSION
+private const val USER_REPOSITORY_CLASS = HostClasses.Host.USER_REPOSITORY
+private const val PREF_KEYS_CLASS = HostClasses.Host.PREF_KEYS
+private const val THIRD_PARTY_KEYS_CLASS = HostClasses.Host.THIRD_PARTY_KEYS
 private const val FLOW_KT_CLASS = "kotlinx.coroutines.flow.FlowKt"
-private const val KOTLIN_CONTINUATION_CLASS = "kotlin.coroutines.Continuation"
-private const val KOTLIN_RESULT_KT_CLASS = "kotlin.ResultKt"
-private const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = "kotlin.coroutines.EmptyCoroutineContext"
-private const val KOTLIN_INTRINSICS_CLASS = "kotlin.coroutines.intrinsics.IntrinsicsKt"
-private const val KOTLIN_COROUTINE_SINGLETONS_CLASS = "kotlin.coroutines.intrinsics.CoroutineSingletons"
-private const val KOTLIN_UNIT_CLASS = "kotlin.Unit"
+private const val KOTLIN_CONTINUATION_CLASS = HostClasses.Kotlin.KOTLIN_CONTINUATION
+private const val KOTLIN_RESULT_KT_CLASS = HostClasses.Kotlin.KOTLIN_RESULT_KT
+private const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = HostClasses.Kotlin.KOTLIN_EMPTY_COROUTINE_CONTEXT
+private const val KOTLIN_INTRINSICS_CLASS = HostClasses.Kotlin.KOTLIN_INTRINSICS
+private const val KOTLIN_COROUTINE_SINGLETONS_CLASS = HostClasses.Kotlin.KOTLIN_COROUTINE_SINGLETONS
+private const val KOTLIN_UNIT_CLASS = HostClasses.Kotlin.KOTLIN_UNIT
 private const val ANDROID_KOIN_SCOPE_EXT_CLASS = "org.koin.android.ext.android.AndroidKoinScopeExtKt"
-private const val KOTLIN_REFLECTION_CLASS = "kotlin.jvm.internal.Reflection"
+private const val KOTLIN_REFLECTION_CLASS = HostClasses.Kotlin.KOTLIN_REFLECTION
 private const val WEBDAV_PREFS = "reamicro_fix_webdav"
 private const val LOCAL_LIBRARY_PREFS = "reamicro_fix_local_library"
 private const val MODULE_SETTINGS_PREFS = "reamicro_fix_module_settings"

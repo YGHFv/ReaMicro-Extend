@@ -63,6 +63,8 @@ import com.reamicro.fix.association.provider.AssociationSearchProviderRegistry
 import com.reamicro.fix.association.provider.ExternalSourceLoader
 import com.reamicro.fix.association.provider.YouShuLoginCookies
 import com.reamicro.fix.association.provider.YouShuLoginState
+import com.reamicro.fix.core.ComposeInterop
+import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.online.OnlineSourceAuth
 import com.reamicro.fix.online.OnlineSourceDownloadPolicyStore
 import com.reamicro.fix.online.OnlineSourceEntry
@@ -119,6 +121,14 @@ class ReaMicroSettingsHook(
     private val settings: XposedModuleSettings,
     private val onGlobalFontChanged: () -> Unit = {},
 ) {
+    // Compose 反射互操作的共用实现，避免各 hook 各存一份逐渐漂移的副本。
+    private val composeInterop = ComposeInterop(
+        classLoader = classLoader,
+        resolveClass = ::cls,
+        unitInstance = ::targetUnit,
+        logPrefix = LOG_PREFIX,
+    )
+
     private val accountController = AccountCompletionController(classLoader, activityProvider)
     private val settingsBuildDepth = ThreadLocal.withInitial { 0 }
     private val itemCount = ThreadLocal.withInitial { 0 }
@@ -9944,22 +9954,8 @@ class ReaMicroSettingsHook(
             functionProxy("Composable$key", functionClassName, block),
         )
 
-    private fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any {
-        val functionClass = cls(functionClassName)
-        return Proxy.newProxyInstance(classLoader, arrayOf(functionClass)) { proxy, method, args ->
-            when (method.name) {
-                "invoke" -> runCatching {
-                    block(args)
-                }.onFailure {
-                    XposedBridge.log("$LOG_PREFIX failed in $name callback: ${it.stackTraceToString()}")
-                }.getOrElse { targetUnit() }
-                "toString" -> "ReaMicro$name"
-                "hashCode" -> System.identityHashCode(proxy)
-                "equals" -> proxy === args?.getOrNull(0)
-                else -> null
-            }
-        }
-    }
+    private fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any =
+        composeInterop.functionProxy(name, functionClassName, block)
 
     private fun cls(className: String): Class<*> =
         XposedHelpers.findClass(className, classLoader)
@@ -10031,20 +10027,7 @@ class ReaMicroSettingsHook(
         method0(name) as Long
 
     private fun composeColorToArgb(color: Long): Int =
-        runCatching {
-            cls(COLOR_KT_CLASS).declaredMethods.firstOrNull { method ->
-                method.name.contains("toArgb", ignoreCase = true) &&
-                    method.parameterTypes.size == 1 &&
-                    method.parameterTypes[0] == Long::class.javaPrimitiveType
-            }?.apply { isAccessible = true }?.invoke(null, color) as? Int
-        }.getOrNull() ?: composeColorFallbackToArgb(color)
-
-    private fun composeColorFallbackToArgb(color: Long): Int =
-        if ((color and 0x3fL) == 0L) {
-            (color ushr 32).toInt()
-        } else {
-            0
-        }
+        composeInterop.colorToArgb(color)
 
     private fun targetUnit(): Any? = runCatching {
         staticObject("kotlin.Unit", "INSTANCE")
@@ -10423,112 +10406,112 @@ class ReaMicroSettingsHook(
 
         const val LOG_PREFIX = "ReaMicro LSP"
 
-        const val SETTINGS_SCREEN_CLASS = "app.zhendong.reamicro.ui.setting.SettingsScreenKt"
+        const val SETTINGS_SCREEN_CLASS = HostClasses.Host.SETTINGS_SCREEN
         // 2.2 更名后的设置列表构建 lambda；旧版名称不存在时会回退到签名匹配。
         const val SETTINGS_LIST_BUILDER_METHOD = "SettingsScreen\$lambda\$0\$1\$0\$0"
-        const val ACCOUNT_SECURITY_SCREEN_CLASS = "app.zhendong.reamicro.ui.setting.AccountSecurityScreenKt"
+        const val ACCOUNT_SECURITY_SCREEN_CLASS = HostClasses.Host.ACCOUNT_SECURITY_SCREEN
         const val ACCOUNT_SECURITY_DELETE_CONTENT_METHOD = "AccountSecurityScreen\$lambda\$0\$0\$4\$0\$2"
         const val ACCOUNT_SECURITY_DELETE_ITEM_METHOD = "DeleteAccountItem"
-        const val NAV_GRAPH_SCOPE_CLASS = "app.zhendong.reamicro.NavGraphScope"
-        const val NAV_CONTROLLER_CLASS = "androidx.navigation.NavController"
+        const val NAV_GRAPH_SCOPE_CLASS = HostClasses.Host.NAV_GRAPH_SCOPE
+        const val NAV_CONTROLLER_CLASS = HostClasses.AndroidX.NAV_CONTROLLER
         const val ROUTE_ABOUT_CLASS = "app.zhendong.reamicro.Route\$About"
-        const val BACK_HANDLER_KT_CLASS = "androidx.activity.compose.BackHandlerKt"
+        const val BACK_HANDLER_KT_CLASS = HostClasses.AndroidX.BACK_HANDLER_KT
         const val BACK_HANDLER_METHOD = "BackHandler"
         const val NAVIGATION_EVENT_INFO_NONE_CLASS = "androidx.navigationevent.NavigationEventInfo\$None"
-        const val REMEMBER_NAVIGATION_EVENT_STATE_KT_CLASS = "androidx.navigationevent.compose.RememberNavigationEventStateKt"
+        const val REMEMBER_NAVIGATION_EVENT_STATE_KT_CLASS = HostClasses.AndroidX.REMEMBER_NAVIGATION_EVENT_STATE_KT
         const val REMEMBER_NAVIGATION_EVENT_STATE_METHOD = "rememberNavigationEventState"
-        const val NAVIGATION_EVENT_HANDLER_KT_CLASS = "androidx.navigationevent.compose.NavigationEventHandlerKt"
+        const val NAVIGATION_EVENT_HANDLER_KT_CLASS = HostClasses.AndroidX.NAVIGATION_EVENT_HANDLER_KT
         const val NAVIGATION_BACK_HANDLER_METHOD = "NavigationBackHandler"
-        const val ABOUT_SCREEN_CLASS = "app.zhendong.reamicro.ui.setting.AboutScreenKt"
+        const val ABOUT_SCREEN_CLASS = HostClasses.Host.ABOUT_SCREEN
         const val ABOUT_SCREEN_METHOD = "AboutScreen"
-        const val APP_ABOUT_CLASS = "app.zhendong.reamicro.ui.setting.components.AppAboutKt"
+        const val APP_ABOUT_CLASS = HostClasses.Host.APP_ABOUT
         const val APP_ABOUT_METHOD = "AppAbout"
-        const val APP_TOP_BAR_CLASS = "app.zhendong.reamicro.arch.components.AppTopBarKt"
+        const val APP_TOP_BAR_CLASS = HostClasses.Host.APP_TOP_BAR
         const val APP_TOP_BAR_METHOD = "AppTopBar"
-        const val TOP_APP_BAR_DEFAULTS_CLASS = "androidx.compose.material3.TopAppBarDefaults"
-        const val WINDOW_INSETS_CLASS = "androidx.compose.foundation.layout.WindowInsets"
-        const val IMAGE_VECTOR_CLASS = "androidx.compose.ui.graphics.vector.ImageVector"
-        const val WINDOW_INSETS_KT_CLASS = "androidx.compose.foundation.layout.WindowInsetsKt"
-        const val WINDOW_INSETS_EXT_ANDROID_KT_CLASS = "app.zhendong.reamicro.ui.insets.WindowInsetsExt_androidKt"
+        const val TOP_APP_BAR_DEFAULTS_CLASS = HostClasses.Compose.TOP_APP_BAR_DEFAULTS
+        const val WINDOW_INSETS_CLASS = HostClasses.Compose.WINDOW_INSETS
+        const val IMAGE_VECTOR_CLASS = HostClasses.Compose.IMAGE_VECTOR
+        const val WINDOW_INSETS_KT_CLASS = HostClasses.Compose.WINDOW_INSETS_KT
+        const val WINDOW_INSETS_EXT_ANDROID_KT_CLASS = HostClasses.Host.WINDOW_INSETS_EXT_ANDROID_KT
         const val EVA_ICONS_CLASS = "compose.icons.EvaIcons"
         const val EVA_OUTLINE_KT_CLASS = "compose.icons.evaicons.__OutlineKt"
         const val EVA_CLOSE_KT_CLASS = "compose.icons.evaicons.outline.CloseKt"
 
-        const val SCAFFOLD_KT_CLASS = "androidx.compose.material3.ScaffoldKt"
+        const val SCAFFOLD_KT_CLASS = HostClasses.Compose.SCAFFOLD_KT
         const val SCAFFOLD_METHOD = "Scaffold-TvnljyQ"
-        const val LAZY_DSL_KT_CLASS = "androidx.compose.foundation.lazy.LazyDslKt"
+        const val LAZY_DSL_KT_CLASS = HostClasses.Compose.LAZY_DSL_KT
         const val LAZY_COLUMN_METHOD = "LazyColumn"
-        const val LAZY_LIST_SCOPE_CLASS = "androidx.compose.foundation.lazy.LazyListScope"
+        const val LAZY_LIST_SCOPE_CLASS = HostClasses.Compose.LAZY_LIST_SCOPE
         const val LAZY_ITEM_DEFAULT_METHOD = "item\$default"
-        const val COLUMN_KT_CLASS = "androidx.compose.foundation.layout.ColumnKt"
+        const val COLUMN_KT_CLASS = HostClasses.Compose.COLUMN_KT
         const val COLUMN_METHOD = "Column"
-        const val LIST_ITEM_KT_CLASS = "androidx.compose.material3.ListItemKt"
+        const val LIST_ITEM_KT_CLASS = HostClasses.Compose.LIST_ITEM_KT
         const val LIST_ITEM_METHOD = "ListItem-HXNGIdc"
-        const val LIST_ITEM_DEFAULTS_CLASS = "androidx.compose.material3.ListItemDefaults"
+        const val LIST_ITEM_DEFAULTS_CLASS = HostClasses.Compose.LIST_ITEM_DEFAULTS
         const val LIST_ITEM_COLORS_METHOD = "colors-J08w3-E"
-        const val SWITCH_KT_CLASS = "androidx.compose.material3.SwitchKt"
+        const val SWITCH_KT_CLASS = HostClasses.Compose.SWITCH_KT
         const val SWITCH_METHOD = "Switch"
-        const val SWITCH_DEFAULTS_CLASS = "androidx.compose.material3.SwitchDefaults"
+        const val SWITCH_DEFAULTS_CLASS = HostClasses.Compose.SWITCH_DEFAULTS
         const val SWITCH_COLORS_METHOD = "colors-V1nXRL4"
-        const val TEXT_KT_CLASS = "androidx.compose.material3.TextKt"
+        const val TEXT_KT_CLASS = HostClasses.Compose.TEXT_KT
         const val TEXT_METHOD = "Text-Nvy7gAk"
-        const val DIVIDER_KT_CLASS = "app.zhendong.reamicro.arch.components.DividerKt"
+        const val DIVIDER_KT_CLASS = HostClasses.Host.DIVIDER_KT
         const val DASHED_DIVIDER_METHOD = "DashedHorizontalDivider-aM-cp0Q"
 
-        const val SIZE_KT_CLASS = "androidx.compose.foundation.layout.SizeKt"
+        const val SIZE_KT_CLASS = HostClasses.Compose.SIZE_KT
         const val FILL_MAX_SIZE_DEFAULT_METHOD = "fillMaxSize\$default"
         const val FILL_MAX_WIDTH_DEFAULT_METHOD = "fillMaxWidth\$default"
         const val HEIGHT_METHOD = "height-3ABfNKs"
-        const val PADDING_KT_CLASS = "androidx.compose.foundation.layout.PaddingKt"
+        const val PADDING_KT_CLASS = HostClasses.Compose.PADDING_KT
         const val PADDING_VALUES_METHOD = "padding"
         const val PADDING_HORIZONTAL_DEFAULT_METHOD = "padding-VpY3zN4\$default"
         const val PADDING_ABSOLUTE_DEFAULT_METHOD = "padding-qDBjuR0\$default"
-        const val BACKGROUND_KT_CLASS = "androidx.compose.foundation.BackgroundKt"
+        const val BACKGROUND_KT_CLASS = HostClasses.Compose.BACKGROUND_KT
         const val BACKGROUND_DEFAULT_METHOD = "background-bw27NRU\$default"
-        const val BORDER_KT_CLASS = "androidx.compose.foundation.BorderKt"
+        const val BORDER_KT_CLASS = HostClasses.Compose.BORDER_KT
         const val BORDER_METHOD = "border-xT4_qwU"
-        const val CLIP_KT_CLASS = "androidx.compose.ui.draw.ClipKt"
+        const val CLIP_KT_CLASS = HostClasses.Compose.CLIP_KT
         const val CLIP_METHOD = "clip"
-        const val SCALE_KT_CLASS = "androidx.compose.ui.draw.ScaleKt"
+        const val SCALE_KT_CLASS = HostClasses.Compose.SCALE_KT
         const val SCALE_METHOD = "scale"
-        const val ALPHA_KT_CLASS = "androidx.compose.ui.draw.AlphaKt"
+        const val ALPHA_KT_CLASS = HostClasses.Compose.ALPHA_KT
         const val ALPHA_METHOD = "alpha"
-        const val CLICKABLE_KT_CLASS = "androidx.compose.foundation.ClickableKt"
+        const val CLICKABLE_KT_CLASS = HostClasses.Compose.CLICKABLE_KT
         const val CLICKABLE_DEFAULT_METHOD = "clickable-O2vRcR0\$default"
         const val COMBINED_CLICKABLE_DEFAULT_METHOD = "combinedClickable-hoGz1lA\$default"
-        const val SHAPE_KT_CLASS = "app.zhendong.reamicro.arch.components.ShapeKt"
+        const val SHAPE_KT_CLASS = HostClasses.Host.SHAPE_KT
         const val ROUNDED_SHAPE_METHOD = "getRoundedShape"
-        const val THEME_KT_CLASS = "app.zhendong.reamicro.arch.theme.ThemeKt"
+        const val THEME_KT_CLASS = HostClasses.Host.THEME_KT
         const val BACKGROUND_AUTO_METHOD = "getBackgroundAuto"
         const val BACKGROUND_DIM_METHOD = "getBackgroundDim"
         const val BORDER_VARIANT_METHOD = "getBorderVariant"
-        const val MATERIAL_THEME_CLASS = "androidx.compose.material3.MaterialTheme"
-        const val COLOR_CLASS = "androidx.compose.ui.graphics.Color"
-        const val COLOR_KT_CLASS = "androidx.compose.ui.graphics.ColorKt"
+        const val MATERIAL_THEME_CLASS = HostClasses.Compose.MATERIAL_THEME
+        const val COLOR_CLASS = HostClasses.Compose.COLOR
+        const val COLOR_KT_CLASS = HostClasses.Compose.COLOR_KT
         const val COLOR_TRANSPARENT_METHOD = "getTransparent-0d7_KjU"
-        const val FONT_PROVIDER_CLASS = "org.epub.FontProvider"
-        const val FONT_FAMILY_CLASS = "androidx.compose.ui.text.font.FontFamily"
-        const val FONT_FAMILY_KT_CLASS = "androidx.compose.ui.text.font.FontFamilyKt"
-        const val FONT_WEIGHT_CLASS = "androidx.compose.ui.text.font.FontWeight"
-        const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
+        const val FONT_PROVIDER_CLASS = HostClasses.Epub.FONT_PROVIDER
+        const val FONT_FAMILY_CLASS = HostClasses.Compose.FONT_FAMILY
+        const val FONT_FAMILY_KT_CLASS = HostClasses.Compose.FONT_FAMILY_KT
+        const val FONT_WEIGHT_CLASS = HostClasses.Compose.FONT_WEIGHT
+        const val MODIFIER_CLASS = HostClasses.Compose.MODIFIER
         const val READER_RULE_SHEET_HEIGHT_DP = 355
-        const val ARRANGEMENT_CLASS = "androidx.compose.foundation.layout.Arrangement"
+        const val ARRANGEMENT_CLASS = HostClasses.Compose.ARRANGEMENT
         const val SPACED_BY_METHOD = "spacedBy-0680j_4"
-        const val ALIGNMENT_CLASS = "androidx.compose.ui.Alignment"
-        const val UNIT_EXT_KT_CLASS = "app.zhendong.reamicro.arch.extensions.UnitExtKt"
+        const val ALIGNMENT_CLASS = HostClasses.Compose.ALIGNMENT
+        const val UNIT_EXT_KT_CLASS = HostClasses.Host.UNIT_EXT_KT
         const val UDP_METHOD = "getUdp"
-        const val COMPOSER_CLASS = "androidx.compose.runtime.Composer"
-        const val SNAPSHOT_STATE_KT_CLASS = "androidx.compose.runtime.SnapshotStateKt__SnapshotStateKt"
+        const val COMPOSER_CLASS = HostClasses.Compose.COMPOSER
+        const val SNAPSHOT_STATE_KT_CLASS = HostClasses.Compose.SNAPSHOT_STATE_KT
         const val MUTABLE_STATE_OF_DEFAULT_METHOD = "mutableStateOf\$default"
-        const val COMPOSABLE_LAMBDA_KT_CLASS = "androidx.compose.runtime.internal.ComposableLambdaKt"
+        const val COMPOSABLE_LAMBDA_KT_CLASS = HostClasses.Compose.COMPOSABLE_LAMBDA_KT
         const val COMPOSABLE_LAMBDA_METHOD = "composableLambdaInstance"
-        const val STRING_RESOURCES_CLASS = "org.jetbrains.compose.resources.StringResourcesKt"
+        const val STRING_RESOURCES_CLASS = HostClasses.Compose.STRING_RESOURCES
         const val STRING_RESOURCE_METHOD = "stringResource"
-        const val FUNCTION0_CLASS = "kotlin.jvm.functions.Function0"
-        const val FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
-        const val FUNCTION2_CLASS = "kotlin.jvm.functions.Function2"
-        const val FUNCTION3_CLASS = "kotlin.jvm.functions.Function3"
-        const val USER_REPOSITORY_CLASS = "app.zhendong.reamicro.repository.UserRepository"
+        const val FUNCTION0_CLASS = HostClasses.Kotlin.FUNCTION0
+        const val FUNCTION1_CLASS = HostClasses.Kotlin.FUNCTION1
+        const val FUNCTION2_CLASS = HostClasses.Kotlin.FUNCTION2
+        const val FUNCTION3_CLASS = HostClasses.Kotlin.FUNCTION3
+        const val USER_REPOSITORY_CLASS = HostClasses.Host.USER_REPOSITORY
         const val USER_REPOSITORY_SIGN_OUT_METHOD = "signOut"
 
         const val INSERT_AFTER_SETTINGS_ITEM_COUNT = 2
@@ -10620,7 +10603,7 @@ class ReaMicroSettingsHook(
         const val FONT_DOCUMENT_REQUEST_CODE = 0x524D46
         const val FONT_IMPORT_DEDUPE_WINDOW_MS = 2_500L
         const val ONLINE_SOURCE_IMPORT_DEDUPE_WINDOW_MS = 2_500L
-        const val HOST_PACKAGE_NAME = "app.zhendong.reamicro"
+        const val HOST_PACKAGE_NAME = HostClasses.Host.HOST_PACKAGE_NAME
         const val EXTRA_IMPORT_PAYLOAD = "com.reamicro.fix.import.PAYLOAD"
         const val EXTRA_IMPORT_NAME = "com.reamicro.fix.import.NAME"
         const val ONLINE_SOURCE_REMOVE_CONFIRM_WINDOW_MS = 3_000L

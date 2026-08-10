@@ -6,6 +6,7 @@ import android.graphics.Typeface
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
+import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.settings.XposedModuleSettings
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -486,15 +487,15 @@ class ReaMicroGlobalFontHook(
 
     private companion object {
         const val LOG_PREFIX = "ReaMicro LSP"
-        const val HOST_TEXT_STYLE_KT_CLASS = "app.zhendong.reamicro.arch.theme.TextStyleKt"
-        const val READER_SCREEN_KT_CLASS = "app.zhendong.reamicro.ui.reader.ReaderScreenKt"
-        const val READER_FAMILY_USER_KT_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderFamilyUserKt"
-        const val MATERIAL_TEXT_KT_CLASS = "androidx.compose.material3.TextKt"
-        const val TEXT_STYLE_CLASS = "androidx.compose.ui.text.TextStyle"
-        const val FONT_PROVIDER_CLASS = "org.epub.FontProvider"
-        const val FONT_FAMILY_CLASS = "androidx.compose.ui.text.font.FontFamily"
-        const val FONT_FAMILY_KT_CLASS = "androidx.compose.ui.text.font.FontFamilyKt"
-        const val FONT_WEIGHT_CLASS = "androidx.compose.ui.text.font.FontWeight"
+        const val HOST_TEXT_STYLE_KT_CLASS = HostClasses.Host.HOST_TEXT_STYLE_KT
+        const val READER_SCREEN_KT_CLASS = HostClasses.Host.READER_SCREEN_KT
+        const val READER_FAMILY_USER_KT_CLASS = HostClasses.Host.READER_FAMILY_USER
+        const val MATERIAL_TEXT_KT_CLASS = HostClasses.Compose.TEXT_KT
+        const val TEXT_STYLE_CLASS = HostClasses.Compose.TEXT_STYLE
+        const val FONT_PROVIDER_CLASS = HostClasses.Epub.FONT_PROVIDER
+        const val FONT_FAMILY_CLASS = HostClasses.Compose.FONT_FAMILY
+        const val FONT_FAMILY_KT_CLASS = HostClasses.Compose.FONT_FAMILY_KT
+        const val FONT_WEIGHT_CLASS = HostClasses.Compose.FONT_WEIGHT
         const val FAMILY_SYSTEM = "system"
         const val FAMILY_SOURCE_HAN_SERIF = "serif"
         const val GLOBAL_FONT_CACHE_WINDOW_MS = 300L

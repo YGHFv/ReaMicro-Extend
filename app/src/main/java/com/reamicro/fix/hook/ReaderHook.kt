@@ -48,6 +48,8 @@ import com.reamicro.fix.ai.AiDictionaryPreset
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.ai.AiApiTestResult
+import com.reamicro.fix.core.ComposeInterop
+import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.logging.ModuleLogState
 import com.reamicro.fix.online.OnlineReaderContextBridge
 import com.reamicro.fix.reader.SearchHighlightPlanner
@@ -90,6 +92,14 @@ class ReaderHook(
     private val settings: XposedModuleSettings? = null,
     private val isActivityResumedProvider: () -> Boolean = { true },
 ) {
+    // Compose 反射互操作的共用实现，避免各 hook 各存一份逐渐漂移的副本。
+    private val composeInterop = ComposeInterop(
+        classLoader = classLoader,
+        resolveClass = classLoader::loadClass,
+        unitInstance = ::targetUnit,
+        logPrefix = LOG_PREFIX,
+    )
+
     private var nativeSelectionHookInstalled: Boolean = false
     private var currentSelectionControllerRef: WeakReference<Any>? = null
     private var currentEpubRef: WeakReference<Any>? = null
@@ -3374,22 +3384,8 @@ class ReaderHook(
             it.name == UDP_METHOD && it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
         }.apply { isAccessible = true }.invoke(null, value) as Float
 
-    private fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any {
-        val functionClass = classLoader.loadClass(functionClassName)
-        return Proxy.newProxyInstance(classLoader, arrayOf(functionClass)) { proxy, method, args ->
-            when (method.name) {
-                "invoke" -> runCatching {
-                    block(args)
-                }.onFailure {
-                    XposedBridge.log("$LOG_PREFIX failed in $name callback: ${it.stackTraceToString()}")
-                }.getOrElse { targetUnit() }
-                "toString" -> "ReaMicro$name"
-                "hashCode" -> System.identityHashCode(proxy)
-                "equals" -> proxy === args?.getOrNull(0)
-                else -> null
-            }
-        }
-    }
+    private fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any =
+        composeInterop.functionProxy(name, functionClassName, block)
 
     private fun composeMethod(className: String, methodName: String, parameterCount: Int): Method {
         val cacheKey = "$className#$methodName/$parameterCount"
@@ -3442,20 +3438,7 @@ class ReaderHook(
         )
 
     private fun composeColorToArgb(color: Long): Int =
-        runCatching {
-            classLoader.loadClass(COLOR_KT_CLASS).declaredMethods.firstOrNull { method ->
-                method.name.contains("toArgb", ignoreCase = true) &&
-                    method.parameterTypes.size == 1 &&
-                    method.parameterTypes[0] == Long::class.javaPrimitiveType
-            }?.apply { isAccessible = true }?.invoke(null, color) as? Int
-        }.getOrNull() ?: composeColorFallbackToArgb(color)
-
-    private fun composeColorFallbackToArgb(color: Long): Int =
-        if ((color and 0x3fL) == 0L) {
-            (color ushr 32).toInt()
-        } else {
-            0
-        }
+        composeInterop.colorToArgb(color)
 
     private fun staticInt(className: String, fieldName: String): Int =
         classLoader.loadClass(className).getDeclaredField(fieldName).apply { isAccessible = true }.getInt(null)
@@ -8251,84 +8234,84 @@ class ReaderHook(
 
     private companion object {
         const val FEATURE_ID = "ReaderHook"
-        const val READER_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.reader.ReaderViewModel"
+        const val READER_VIEW_MODEL_CLASS = HostClasses.Host.READER_VIEW_MODEL
         const val ON_DEMAND_CACHE_LOCK_RETRIES = 20
         const val ON_DEMAND_CACHE_LOCK_RETRY_MS = 100L
         const val ON_DEMAND_PREFETCH_429_RETRIES = 2
         const val ON_DEMAND_PREFETCH_429_RETRY_MS = 10_000L
-        const val READER_UI_INTENT_CLASS = "app.zhendong.reamicro.ui.reader.ReaderUiIntent"
-        const val NAV_GRAPH_SCOPE_CLASS = "app.zhendong.reamicro.NavGraphScope"
-        const val READER_CATALOG_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderCatalogKt"
-        const val READER_TYPE_SETTING_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderTypeSettingKt"
-        const val READER_HIGHLIGHT_SCREEN_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderHighlightScreenKt"
-        const val LAZY_LIST_SCOPE_CLASS = "androidx.compose.foundation.lazy.LazyListScope"
-        const val READER_FAMILY_EPUB_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderFamilyEpubKt"
-        const val READER_FAMILY_USER_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderFamilyUserKt"
-        const val READER_FAMILY_BUILD_IN_CLASS = "app.zhendong.reamicro.ui.reader.compose.ReaderFamilyBuildInKt"
-        const val READER_BOTTOM_BAR_CLASS = "app.zhendong.reamicro.ui.reader.components.ReaderBottomBarKt"
-        const val UI_SHEET_STATUS_CLASS = "app.zhendong.reamicro.ui.reader.UiSheetStatus"
-        const val READER_SHARED_STATE_CLASS = "app.zhendong.reamicro.ui.reader.components.ReaderSharedState"
-        const val SCROLL_PAGER_KT_CLASS = "app.zhendong.reamicro.ui.reader.components.ScrollPagerKt"
-        const val SESSION_CLASS = "app.zhendong.reamicro.repository.core.Session"
-        const val PREF_KEYS_CLASS = "app.zhendong.reamicro.constants.PrefKeys"
-        const val EPUB_PAGE_CLASS = "app.zhendong.reamicro.data.epub.EpubPage"
-        const val HTML_DOCUMENT_CLASS = "org.epub.html.HtmlDocument"
-        const val EPUB_CFI_CLASS = "org.epub.html.EpubCFI"
-        const val CONTENT_DOM_CLASS = "org.epub.html.node.ContentDom"
-        const val UI_EPUB_WINDOW_CLASS = "org.epub.UIEpubWindow"
-        const val HOME_SCREEN_CLASS = "app.zhendong.reamicro.ui.home.HomeScreenKt"
-        const val BOOKSHELF_SCREEN_CLASS = "app.zhendong.reamicro.ui.home.BookshelfScreenKt"
-        const val BOOKMARK_CLASS = "app.zhendong.reamicro.data.reader.Bookmark"
-        const val MARK_CLASS = "app.zhendong.reamicro.data.db.entity.Mark"
-        const val CATALOG_CHAPTER_ITEM_CLASS = "app.zhendong.reamicro.ui.reader.CatalogChapterItem"
-        const val EDIT_ICON_CLASS = "androidx.compose.material.icons.outlined.EditKt"
-        const val DICTIONARY_ICON_TRANSLATE_CLASS = "androidx.compose.material.icons.outlined.TranslateKt"
-        const val DICTIONARY_ICON_MENU_BOOK_CLASS = "androidx.compose.material.icons.outlined.MenuBookKt"
-        const val DICTIONARY_ICON_AUTO_STORIES_CLASS = "androidx.compose.material.icons.outlined.AutoStoriesKt"
-        const val DICTIONARY_ICON_BOOK_CLASS = "androidx.compose.material.icons.outlined.BookKt"
-        const val HIGHLIGHT_ICON_BORDER_COLOR_CLASS = "androidx.compose.material.icons.outlined.BorderColorKt"
-        const val HIGHLIGHT_ICON_FORMAT_COLOR_FILL_CLASS = "androidx.compose.material.icons.outlined.FormatColorFillKt"
-        const val HIGHLIGHT_ICON_MODE_EDIT_CLASS = "androidx.compose.material.icons.outlined.ModeEditKt"
-        const val READ_ALOUD_ICON_VOLUME_UP_CLASS = "androidx.compose.material.icons.outlined.VolumeUpKt"
-        const val READ_ALOUD_ICON_RECORD_VOICE_OVER_CLASS = "androidx.compose.material.icons.outlined.RecordVoiceOverKt"
+        const val READER_UI_INTENT_CLASS = HostClasses.Host.READER_UI_INTENT
+        const val NAV_GRAPH_SCOPE_CLASS = HostClasses.Host.NAV_GRAPH_SCOPE
+        const val READER_CATALOG_CLASS = HostClasses.Host.READER_CATALOG
+        const val READER_TYPE_SETTING_CLASS = HostClasses.Host.READER_TYPE_SETTING
+        const val READER_HIGHLIGHT_SCREEN_CLASS = HostClasses.Host.READER_HIGHLIGHT_SCREEN
+        const val LAZY_LIST_SCOPE_CLASS = HostClasses.Compose.LAZY_LIST_SCOPE
+        const val READER_FAMILY_EPUB_CLASS = HostClasses.Host.READER_FAMILY_EPUB
+        const val READER_FAMILY_USER_CLASS = HostClasses.Host.READER_FAMILY_USER
+        const val READER_FAMILY_BUILD_IN_CLASS = HostClasses.Host.READER_FAMILY_BUILD_IN
+        const val READER_BOTTOM_BAR_CLASS = HostClasses.Host.READER_BOTTOM_BAR
+        const val UI_SHEET_STATUS_CLASS = HostClasses.Host.UI_SHEET_STATUS
+        const val READER_SHARED_STATE_CLASS = HostClasses.Host.READER_SHARED_STATE
+        const val SCROLL_PAGER_KT_CLASS = HostClasses.Host.SCROLL_PAGER_KT
+        const val SESSION_CLASS = HostClasses.Host.SESSION
+        const val PREF_KEYS_CLASS = HostClasses.Host.PREF_KEYS
+        const val EPUB_PAGE_CLASS = HostClasses.Host.EPUB_PAGE
+        const val HTML_DOCUMENT_CLASS = HostClasses.Epub.HTML_DOCUMENT
+        const val EPUB_CFI_CLASS = HostClasses.Epub.EPUB_CFI
+        const val CONTENT_DOM_CLASS = HostClasses.Epub.CONTENT_DOM
+        const val UI_EPUB_WINDOW_CLASS = HostClasses.Epub.UI_EPUB_WINDOW
+        const val HOME_SCREEN_CLASS = HostClasses.Host.HOME_SCREEN
+        const val BOOKSHELF_SCREEN_CLASS = HostClasses.Host.BOOKSHELF_SCREEN
+        const val BOOKMARK_CLASS = HostClasses.Host.BOOKMARK
+        const val MARK_CLASS = HostClasses.Host.MARK
+        const val CATALOG_CHAPTER_ITEM_CLASS = HostClasses.Host.CATALOG_CHAPTER_ITEM
+        const val EDIT_ICON_CLASS = HostClasses.Compose.EDIT_ICON
+        const val DICTIONARY_ICON_TRANSLATE_CLASS = HostClasses.Compose.DICTIONARY_ICON_TRANSLATE
+        const val DICTIONARY_ICON_MENU_BOOK_CLASS = HostClasses.Compose.DICTIONARY_ICON_MENU_BOOK
+        const val DICTIONARY_ICON_AUTO_STORIES_CLASS = HostClasses.Compose.DICTIONARY_ICON_AUTO_STORIES
+        const val DICTIONARY_ICON_BOOK_CLASS = HostClasses.Compose.DICTIONARY_ICON_BOOK
+        const val HIGHLIGHT_ICON_BORDER_COLOR_CLASS = HostClasses.Compose.HIGHLIGHT_ICON_BORDER_COLOR
+        const val HIGHLIGHT_ICON_FORMAT_COLOR_FILL_CLASS = HostClasses.Compose.HIGHLIGHT_ICON_FORMAT_COLOR_FILL
+        const val HIGHLIGHT_ICON_MODE_EDIT_CLASS = HostClasses.Compose.HIGHLIGHT_ICON_MODE_EDIT
+        const val READ_ALOUD_ICON_VOLUME_UP_CLASS = HostClasses.Compose.READ_ALOUD_ICON_VOLUME_UP
+        const val READ_ALOUD_ICON_RECORD_VOICE_OVER_CLASS = HostClasses.Compose.READ_ALOUD_ICON_RECORD_VOICE_OVER
         const val ICONS_OUTLINED_CLASS = "androidx.compose.material.icons.Icons\$Outlined"
         const val LOG_PREFIX = "ReaMicro LSP"
         const val FLIP_STYLE_TRANSLATE = 0
         const val SCROLL_CRASH_PREFS = "reamicro_scroll_crash_guard"
         const val SCROLL_CRASH_PENDING_KEY = "scroll_crash_pending"
-        const val KOTLIN_FUNCTION0_CLASS = "kotlin.jvm.functions.Function0"
-        const val KOTLIN_FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
-        const val KOTLIN_FUNCTION3_CLASS = "kotlin.jvm.functions.Function3"
-        const val DARK_MODE_ICON_CLASS = "androidx.compose.material.icons.outlined.DarkModeKt"
-        const val LIGHT_MODE_ICON_CLASS = "androidx.compose.material.icons.outlined.LightModeKt"
-        const val ARROW_BACK_ICON_CLASS = "androidx.compose.material.icons.automirrored.outlined.ArrowBackKt"
-        const val SEARCH_ICON_CLASS = "androidx.compose.material.icons.outlined.SearchKt"
-        const val KOTLIN_UNIT_CLASS = "kotlin.Unit"
-        const val KOTLIN_CONTINUATION_CLASS = "kotlin.coroutines.Continuation"
-        const val COMPOSER_CLASS = "androidx.compose.runtime.Composer"
-        const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = "kotlin.coroutines.EmptyCoroutineContext"
-        const val KOTLIN_INTRINSICS_CLASS = "kotlin.coroutines.intrinsics.IntrinsicsKt"
-        const val KOTLIN_COROUTINE_SINGLETONS_CLASS = "kotlin.coroutines.intrinsics.CoroutineSingletons"
-        const val KOTLIN_RESULT_KT_CLASS = "kotlin.ResultKt"
-        const val FLOW_LAYOUT_KT_CLASS = "androidx.compose.foundation.layout.FlowLayoutKt"
+        const val KOTLIN_FUNCTION0_CLASS = HostClasses.Kotlin.FUNCTION0
+        const val KOTLIN_FUNCTION1_CLASS = HostClasses.Kotlin.FUNCTION1
+        const val KOTLIN_FUNCTION3_CLASS = HostClasses.Kotlin.FUNCTION3
+        const val DARK_MODE_ICON_CLASS = HostClasses.Compose.DARK_MODE_ICON
+        const val LIGHT_MODE_ICON_CLASS = HostClasses.Compose.LIGHT_MODE_ICON
+        const val ARROW_BACK_ICON_CLASS = HostClasses.Compose.ARROW_BACK_ICON
+        const val SEARCH_ICON_CLASS = HostClasses.Compose.SEARCH_ICON
+        const val KOTLIN_UNIT_CLASS = HostClasses.Kotlin.KOTLIN_UNIT
+        const val KOTLIN_CONTINUATION_CLASS = HostClasses.Kotlin.KOTLIN_CONTINUATION
+        const val COMPOSER_CLASS = HostClasses.Compose.COMPOSER
+        const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = HostClasses.Kotlin.KOTLIN_EMPTY_COROUTINE_CONTEXT
+        const val KOTLIN_INTRINSICS_CLASS = HostClasses.Kotlin.KOTLIN_INTRINSICS
+        const val KOTLIN_COROUTINE_SINGLETONS_CLASS = HostClasses.Kotlin.KOTLIN_COROUTINE_SINGLETONS
+        const val KOTLIN_RESULT_KT_CLASS = HostClasses.Kotlin.KOTLIN_RESULT_KT
+        const val FLOW_LAYOUT_KT_CLASS = HostClasses.Compose.FLOW_LAYOUT_KT
         const val FLOW_ROW_METHOD = "FlowRow"
-        const val ROW_KT_CLASS = "androidx.compose.foundation.layout.RowKt"
+        const val ROW_KT_CLASS = HostClasses.Compose.ROW_KT
         const val ROW_METHOD = "Row"
-        const val PADDING_KT_CLASS = "androidx.compose.foundation.layout.PaddingKt"
+        const val PADDING_KT_CLASS = HostClasses.Compose.PADDING_KT
         const val PADDING_METHOD = "padding-qDBjuR0"
         const val PADDING_DEFAULT_METHOD = "padding-qDBjuR0\$default"
-        const val ARRANGEMENT_CLASS = "androidx.compose.foundation.layout.Arrangement"
-        const val ALIGNMENT_CLASS = "androidx.compose.ui.Alignment"
-        const val MATERIAL_THEME_CLASS = "androidx.compose.material3.MaterialTheme"
-        const val MATERIAL3_TEXT_CLASS = "androidx.compose.material3.TextKt"
-        const val THEME_KT_CLASS = "app.zhendong.reamicro.arch.theme.ThemeKt"
-        const val COLOR_KT_CLASS = "androidx.compose.ui.graphics.ColorKt"
-        const val MODIFIER_CLASS = "androidx.compose.ui.Modifier"
-        const val SIZE_KT_CLASS = "androidx.compose.foundation.layout.SizeKt"
+        const val ARRANGEMENT_CLASS = HostClasses.Compose.ARRANGEMENT
+        const val ALIGNMENT_CLASS = HostClasses.Compose.ALIGNMENT
+        const val MATERIAL_THEME_CLASS = HostClasses.Compose.MATERIAL_THEME
+        const val MATERIAL3_TEXT_CLASS = HostClasses.Compose.TEXT_KT
+        const val THEME_KT_CLASS = HostClasses.Host.THEME_KT
+        const val COLOR_KT_CLASS = HostClasses.Compose.COLOR_KT
+        const val MODIFIER_CLASS = HostClasses.Compose.MODIFIER
+        const val SIZE_KT_CLASS = HostClasses.Compose.SIZE_KT
         const val HEIGHT_METHOD = "height-3ABfNKs"
         const val FILL_MAX_WIDTH_METHOD = "fillMaxWidth"
         const val FILL_MAX_WIDTH_DEFAULT_METHOD = "fillMaxWidth\$default"
-        const val UNIT_EXT_KT_CLASS = "app.zhendong.reamicro.arch.extensions.UnitExtKt"
+        const val UNIT_EXT_KT_CLASS = HostClasses.Host.UNIT_EXT_KT
         const val UDP_METHOD = "getUdp"
         const val TYPE_SETTING_FAMILY_METHOD = "TypeSettingFamily"
         const val HOST_READER_FAMILY_SHEET_HEIGHT_DP = 305

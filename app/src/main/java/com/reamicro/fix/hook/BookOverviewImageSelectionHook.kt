@@ -30,6 +30,7 @@ import android.widget.Toast
 import com.reamicro.fix.ai.AiApiConfig
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.ai.AiImagePresetTarget
+import com.reamicro.fix.core.HostClasses
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
@@ -1155,15 +1156,15 @@ class BookOverviewImageSelectionHook(
 
     private companion object {
         private const val LOG_PREFIX = "ReaMicro LSP"
-        private const val BOOK_OVERVIEW_ITEMS_CLASS = "app.zhendong.reamicro.ui.home.components.BookOverviewItemsKt"
-        private const val BOOK_CLASS = "app.zhendong.reamicro.data.db.entity.Book"
+        private const val BOOK_OVERVIEW_ITEMS_CLASS = HostClasses.Host.BOOK_OVERVIEW_ITEMS
+        private const val BOOK_CLASS = HostClasses.Host.BOOK
         private const val BOOK_COVER_BANNER_ITEM_METHOD = "BookCoverBannerItem"
         private const val COVER_BOTTOM_SHEET_METHOD = "CoverBottomSheet"
         private const val BANNER_BOTTOM_SHEET_METHOD = "BannerBottomSheet"
-        private const val COMPOSER_CLASS = "androidx.compose.runtime.Composer"
-        private const val FUNCTION0_CLASS = "kotlin.jvm.functions.Function0"
-        private const val FUNCTION1_CLASS = "kotlin.jvm.functions.Function1"
-        private const val KOTLIN_UNIT_CLASS = "kotlin.Unit"
+        private const val COMPOSER_CLASS = HostClasses.Compose.COMPOSER
+        private const val FUNCTION0_CLASS = HostClasses.Kotlin.FUNCTION0
+        private const val FUNCTION1_CLASS = HostClasses.Kotlin.FUNCTION1
+        private const val KOTLIN_UNIT_CLASS = HostClasses.Kotlin.KOTLIN_UNIT
         private const val DEFAULT_COVER_FILE = "book.cover"
         private const val DEFAULT_IMAGE_SIZE = "2k"
         private const val USER_AGENT = "ReaMicro-Extend/book-image"

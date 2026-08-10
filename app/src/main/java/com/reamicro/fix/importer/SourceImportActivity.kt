@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.provider.OpenableColumns
 import android.util.Base64
 import android.widget.Toast
+import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.logging.ModuleAndroidLog
 
 /**
@@ -113,7 +114,7 @@ class SourceImportActivity : Activity() {
 
     companion object {
         private const val LOG_TAG = "ReaMicroImport"
-        const val HOST_PACKAGE = "app.zhendong.reamicro"
+        const val HOST_PACKAGE = HostClasses.Host.HOST_PACKAGE_NAME
         const val EXTRA_IMPORT_PAYLOAD = "com.reamicro.fix.import.PAYLOAD"
         const val EXTRA_IMPORT_NAME = "com.reamicro.fix.import.NAME"
     }

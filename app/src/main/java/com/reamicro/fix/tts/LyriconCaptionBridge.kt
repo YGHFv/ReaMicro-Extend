@@ -2,6 +2,7 @@ package com.reamicro.fix.tts
 
 import android.content.Context
 import android.os.SystemClock
+import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.logging.ModuleAndroidLog
 import io.github.proify.lyricon.provider.LyriconFactory
 import io.github.proify.lyricon.provider.LyriconProvider
@@ -97,6 +98,6 @@ object LyriconCaptionBridge {
     }
 
     private const val LOG_TAG = "ReaMicroLyricon"
-    private const val HOST_PACKAGE_NAME = "app.zhendong.reamicro"
+    private const val HOST_PACKAGE_NAME = HostClasses.Host.HOST_PACKAGE_NAME
     private const val REGISTER_RETRY_INTERVAL_MS = 2_000L
 }

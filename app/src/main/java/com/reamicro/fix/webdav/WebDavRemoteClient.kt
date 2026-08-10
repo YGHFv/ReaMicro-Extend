@@ -1,6 +1,7 @@
 package com.reamicro.fix.webdav
 
 import android.util.Base64
+import com.reamicro.fix.core.HostClasses
 import de.robv.android.xposed.XposedHelpers
 import java.io.File
 import java.net.URI
@@ -658,11 +659,11 @@ internal class WebDavRemoteClient(
     )
 
     private companion object {
-        const val OKHTTP_CLIENT_CLASS = "okhttp3.OkHttpClient"
-        const val OKHTTP_REQUEST_CLASS = "okhttp3.Request"
+        const val OKHTTP_CLIENT_CLASS = HostClasses.ThirdParty.OKHTTP_CLIENT
+        const val OKHTTP_REQUEST_CLASS = HostClasses.ThirdParty.OKHTTP_REQUEST
         const val OKHTTP_REQUEST_BUILDER_CLASS = "okhttp3.Request\$Builder"
-        const val OKHTTP_REQUEST_BODY_CLASS = "okhttp3.RequestBody"
-        const val OKHTTP_MEDIA_TYPE_CLASS = "okhttp3.MediaType"
+        const val OKHTTP_REQUEST_BODY_CLASS = HostClasses.ThirdParty.OKHTTP_REQUEST_BODY
+        const val OKHTTP_MEDIA_TYPE_CLASS = HostClasses.ThirdParty.OKHTTP_MEDIA_TYPE
         const val ALIST_TOKEN_CACHE_TTL_MS = 10 * 60_000L
         const val ALIST_UNSUPPORTED_CACHE_TTL_MS = 10 * 60_000L
     }

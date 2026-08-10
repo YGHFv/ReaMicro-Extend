@@ -2,6 +2,7 @@ package com.reamicro.fix.hook
 
 import android.app.Activity
 import android.widget.Toast
+import com.reamicro.fix.core.HostClasses
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
@@ -556,25 +557,25 @@ class BookDetailsAssociationActionHook(
     )
 
     private companion object {
-        const val BOOK_DETAILS_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.book.BookDetailsViewModel"
-        const val BOOK_OVERVIEW_VIEW_MODEL_CLASS = "app.zhendong.reamicro.ui.home.BookOverviewViewModel"
-        const val BOOKSHELF_SCREEN_CLASS = "app.zhendong.reamicro.ui.home.BookshelfScreenKt"
-        const val BOOK_CLASS = "app.zhendong.reamicro.data.db.entity.Book"
+        const val BOOK_DETAILS_VIEW_MODEL_CLASS = HostClasses.Host.BOOK_DETAILS_VIEW_MODEL
+        const val BOOK_OVERVIEW_VIEW_MODEL_CLASS = HostClasses.Host.BOOK_OVERVIEW_VIEW_MODEL
+        const val BOOKSHELF_SCREEN_CLASS = HostClasses.Host.BOOKSHELF_SCREEN
+        const val BOOK_CLASS = HostClasses.Host.BOOK
         const val ROUTE_BOOK_DETAIL_CLASS = "app.zhendong.reamicro.Route\$BookDetail"
         const val ROUTE_BOOK_OVERVIEW_CLASS = "app.zhendong.reamicro.Route\$BookOverview"
-        const val POST_USER_BOOK_REQ_CLASS = "app.zhendong.reamicro.data.res.book.PostUserBookReq"
-        const val ENVELOPE_KT_CLASS = "app.zhendong.reamicro.data.res.EnvelopeKt"
+        const val POST_USER_BOOK_REQ_CLASS = HostClasses.Host.POST_USER_BOOK_REQ
+        const val ENVELOPE_KT_CLASS = HostClasses.Host.ENVELOPE_KT
         const val BOOKSHELF_FIND_BOOK_BY_ID_METHOD = "findBookById"
         const val BOOKSHELF_SEARCH_METHOD_KEYWORD = "search"
-        const val NAV_GRAPH_SCOPE_CLASS = "app.zhendong.reamicro.NavGraphScope"
-        const val NAV_CONTROLLER_HOLDER_CLASS = "app.zhendong.reamicro.arch.components.NavControllerHolder"
-        const val ANDROIDX_NAV_CONTROLLER_CLASS = "androidx.navigation.NavController"
-        const val KOTLIN_UNIT_CLASS = "kotlin.Unit"
-        const val KOTLIN_CONTINUATION_CLASS = "kotlin.coroutines.Continuation"
-        const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = "kotlin.coroutines.EmptyCoroutineContext"
-        const val KOTLIN_INTRINSICS_CLASS = "kotlin.coroutines.intrinsics.IntrinsicsKt"
-        const val KOTLIN_COROUTINE_SINGLETONS_CLASS = "kotlin.coroutines.intrinsics.CoroutineSingletons"
-        const val KOTLIN_RESULT_KT_CLASS = "kotlin.ResultKt"
+        const val NAV_GRAPH_SCOPE_CLASS = HostClasses.Host.NAV_GRAPH_SCOPE
+        const val NAV_CONTROLLER_HOLDER_CLASS = HostClasses.Host.NAV_CONTROLLER_HOLDER
+        const val ANDROIDX_NAV_CONTROLLER_CLASS = HostClasses.AndroidX.NAV_CONTROLLER
+        const val KOTLIN_UNIT_CLASS = HostClasses.Kotlin.KOTLIN_UNIT
+        const val KOTLIN_CONTINUATION_CLASS = HostClasses.Kotlin.KOTLIN_CONTINUATION
+        const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = HostClasses.Kotlin.KOTLIN_EMPTY_COROUTINE_CONTEXT
+        const val KOTLIN_INTRINSICS_CLASS = HostClasses.Kotlin.KOTLIN_INTRINSICS
+        const val KOTLIN_COROUTINE_SINGLETONS_CLASS = HostClasses.Kotlin.KOTLIN_COROUTINE_SINGLETONS
+        const val KOTLIN_RESULT_KT_CLASS = HostClasses.Kotlin.KOTLIN_RESULT_KT
         const val MAX_CACHED_LOCAL_BOOKS = 32
         const val MAX_COMPLETED_COVER_FIXES = 64
         const val LOG_PREFIX = "ReaMicro LSP"
