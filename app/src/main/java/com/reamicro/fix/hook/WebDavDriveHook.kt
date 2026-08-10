@@ -133,6 +133,9 @@ import com.reamicro.fix.webdav.OnlineBodyMarkup
 import com.reamicro.fix.webdav.OnlineEpubFontEmbedder
 import com.reamicro.fix.webdav.OnlineEpubFontFace
 import com.reamicro.fix.webdav.OnlineEpubStyleCss
+import com.reamicro.fix.webdav.OnlineHeaderImageComposer
+import com.reamicro.fix.settings.OnlineEpubHeaderScope
+import com.reamicro.fix.settings.OnlineEpubStyleKind
 import com.reamicro.fix.settings.OnlineEpubStyleSettings
 import com.reamicro.fix.settings.OnlineEpubStyleStore
 import com.reamicro.fix.webdav.OnlineVolumeHeadingMarkup
@@ -9512,6 +9515,10 @@ class WebDavDriveHook(
         val root = bookDir.canonicalFile
         writeOnlineCompletionDefaultStyle(root)
         var changed = false
+        val decor = onlineCompletionBookDirDecor(root)
+        val volumeFirstChapters = onlineVolumeSegments(
+            remoteChapters.map { OnlineDownloadedChapter(title = it.title, content = "", volumeTitle = it.volumeTitle) },
+        ).mapTo(hashSetOf()) { it.startIndex }
         newChapters.forEach { (remoteIndex, chapter) ->
             val href = chapterHrefs.getOrNull(remoteIndex)
                 ?: error("EPUB chapter href missing for remote index $remoteIndex")
@@ -9521,6 +9528,8 @@ class WebDavDriveHook(
                 chapter = chapter,
                 href = href,
                 target = target,
+                decor = decor,
+                isVolumeFirstChapter = remoteIndex in volumeFirstChapters,
             )
             changed = true
         }
@@ -9533,7 +9542,7 @@ class WebDavDriveHook(
             )
         }
         val coverExt = onlineCompletionExistingCoverExt(root)
-        if (writeOnlineCompletionVolumePages(root, tocChapters)) changed = true
+        if (writeOnlineCompletionVolumePages(root, tocChapters, decor)) changed = true
         val tocFile = File(root, "OEBPS/toc.ncx")
         val nextToc = onlineTocNcx(target, tocChapters, chapterHrefs)
         if (!tocFile.isFile || tocFile.readText(Charsets.UTF_8) != nextToc) {
@@ -9707,6 +9716,8 @@ class WebDavDriveHook(
         chapter: OnlineDownloadedChapter,
         href: String = "",
         target: OnlineDownloadTarget? = null,
+        decor: OnlineEpubDecor? = null,
+        isVolumeFirstChapter: Boolean = false,
     ) {
         val root = bookDir.canonicalFile
         val textDir = File(root, "OEBPS/Text").canonicalFile
@@ -9728,7 +9739,13 @@ class WebDavDriveHook(
         }
         writeOnlineCompletionTextAtomically(
             file,
-            chapterXhtml(chapter.title, chapter.content, imageHrefs),
+            chapterXhtml(
+                title = chapter.title,
+                content = chapter.content,
+                imageHrefs = imageHrefs,
+                decor = decor ?: onlineCompletionBookDirDecor(root),
+                isVolumeFirstChapter = isVolumeFirstChapter,
+            ),
         )
         if (index == 0 || (index + 1) % 20 == 0) {
             logWebDav("online completion chapter file updated ${index + 1} path=${file.absolutePath}")
@@ -10049,18 +10066,29 @@ class WebDavDriveHook(
             contentImages.forEach { image ->
                 writeBytesZipEntry(zip, "OEBPS/Images/${image.fileName}", image.bytes)
             }
+            val decor = resolveOnlineCompletionDecor(styleSettings) { fileName, bytes ->
+                writeBytesZipEntry(zip, "OEBPS/Images/$fileName", bytes)
+            }
+            val volumeSegments = onlineVolumeSegments(chapters)
+            val volumeFirstChapters = volumeSegments.mapTo(hashSetOf()) { it.startIndex }
             chapters.forEachIndexed { index, chapter ->
                 writeTextZipEntry(
                     zip,
                     "OEBPS/Text/chapter_${(index + 1).toString().padStart(4, '0')}.xhtml",
-                    chapterXhtml(chapter.title, chapter.content, imageHrefs),
+                    chapterXhtml(
+                        title = chapter.title,
+                        content = chapter.content,
+                        imageHrefs = imageHrefs,
+                        decor = decor,
+                        isVolumeFirstChapter = index in volumeFirstChapters,
+                    ),
                 )
             }
-            onlineVolumeSegments(chapters).forEach { segment ->
+            volumeSegments.forEach { segment ->
                 writeTextZipEntry(
                     zip,
                     "OEBPS/${onlineVolumeHref(segment.order)}",
-                    volumeXhtml(segment.title),
+                    volumeXhtml(segment.title, decor),
                 )
             }
             val chapterHrefs = defaultOnlineChapterHrefs(chapters.size)
@@ -10068,7 +10096,16 @@ class WebDavDriveHook(
             writeTextZipEntry(
                 zip,
                 "OEBPS/content.opf",
-                onlineContentOpf(target, chapters, coverExt, cover != null, chapterHrefs, contentImages, fontFaces.values),
+                onlineContentOpf(
+                    target = target,
+                    chapters = chapters,
+                    coverExt = coverExt,
+                    hasCover = cover != null,
+                    chapterHrefs = chapterHrefs,
+                    contentImages = contentImages,
+                    fontFaces = fontFaces.values,
+                    decorImages = onlineCompletionDecorManifestItems(decor),
+                ),
             )
             writeTextZipEntry(
                 zip,
@@ -10746,19 +10783,114 @@ class WebDavDriveHook(
         return embedded
     }
 
-    /** 参与成书的四类样式里选中的字体文件，key 为样式 id。 */
+    /**
+     * 参与成书的样式里选中的字体文件，key 为样式 id。
+     *
+     * 「仅声明字体名」模式不复制文件，因此不出现在结果里，CSS 侧会退回写裸 family 名。
+     */
     private fun onlineCompletionFontFaces(
         settings: OnlineEpubStyleSettings,
     ): Map<String, Pair<OnlineEpubFontFace, File>> {
         val result = LinkedHashMap<String, Pair<OnlineEpubFontFace, File>>()
-        OnlineEpubStyleCss.APPLIED_KINDS.forEach { kind ->
+        OnlineEpubStyleCss.appliedKinds(settings).forEach { kind ->
             val style = settings.selected(kind) ?: return@forEach
+            if (!style.embedFont) return@forEach
             val path = style.fontFamily.trim()
             if (path.isBlank() || !path.contains(File.separatorChar) && !path.contains('/')) return@forEach
             val face = OnlineEpubFontEmbedder.faceFor(path) ?: return@forEach
             result[style.id] = face to File(path)
         }
         return result
+    }
+
+    /** 分割样式选中的装饰图，成书时固定写成 Images/divider.<ext>。 */
+    private fun onlineCompletionDividerImage(settings: OnlineEpubStyleSettings): Pair<File, String>? {
+        val style = settings.selected(OnlineEpubStyleKind.Transition) ?: return null
+        if (!style.needsAsset) return null
+        val file = File(style.assetPath.trim()).takeIf { it.isFile } ?: return null
+        val extension = file.extension.lowercase(Locale.ROOT).ifBlank { "png" }
+        return file to "divider.$extension"
+    }
+
+    /**
+     * 头图：把用户选的原图按样式蒙版合成后，固定写成 Images/header.png（全书一份）。
+     *
+     * 蒙版从模块 assets 读取，与高亮图片走同一套 asset:// 机制。
+     */
+    private fun onlineCompletionHeaderImage(settings: OnlineEpubStyleSettings): ByteArray? {
+        if (!settings.headerEnabled) return null
+        val style = settings.selected(OnlineEpubStyleKind.Header) ?: return null
+        val source = File(style.assetPath.trim()).takeIf { it.isFile } ?: return null
+        val mask = style.maskAsset.takeIf { it.isNotBlank() }?.let { asset ->
+            ReaderHighlightImageAssets.decodeBitmap("asset://$asset", currentContext(), LOG_PREFIX)
+        }
+        return runCatching {
+            OnlineHeaderImageComposer.compose(source, mask, style.sampleWidth, style.sampleHeight)
+        }.onFailure { error ->
+            logWebDav("online completion header compose failed: ${error.message.orEmpty()}")
+        }.getOrNull().also { mask?.recycle() }
+    }
+
+    /**
+     * 解析本次成书要用的装饰资源，并交给 [writeImage] 落地。
+     *
+     * 整本下载写 zip 条目、增量更新写书目录，落地方式不同但选图与合成逻辑一致。
+     */
+    private fun resolveOnlineCompletionDecor(
+        settings: OnlineEpubStyleSettings,
+        writeImage: (fileName: String, bytes: ByteArray) -> Unit,
+    ): OnlineEpubDecor {
+        var dividerHref: String? = null
+        onlineCompletionDividerImage(settings)?.let { (file, fileName) ->
+            runCatching {
+                writeImage(fileName, file.readBytes())
+                dividerHref = "../Images/$fileName"
+            }.onFailure { error ->
+                logWebDav("online completion divider image failed: ${error.message.orEmpty()}")
+            }
+        }
+        var headerHref: String? = null
+        onlineCompletionHeaderImage(settings)?.let { bytes ->
+            runCatching {
+                writeImage(ONLINE_COMPLETION_HEADER_IMAGE, bytes)
+                headerHref = "../Images/$ONLINE_COMPLETION_HEADER_IMAGE"
+            }.onFailure { error ->
+                logWebDav("online completion header image failed: ${error.message.orEmpty()}")
+            }
+        }
+        return OnlineEpubDecor(
+            dividerImageHref = dividerHref,
+            headerImageHref = headerHref,
+            headerScope = settings.headerScope,
+        )
+    }
+
+    /** 装饰图在 manifest 里的登记项，与正文插图共用 Images 目录。 */
+    private fun onlineCompletionDecorManifestItems(decor: OnlineEpubDecor): List<OnlineEpubImageManifestItem> =
+        listOfNotNull(decor.dividerImageHref, decor.headerImageHref)
+            .map { it.substringAfterLast('/') }
+            .mapNotNull(::onlineEpubImageManifestItem)
+
+    /** 书目录侧的装饰资源：图片直接落到 OEBPS/Images 并登记 manifest。 */
+    private fun onlineCompletionBookDirDecor(bookDir: File): OnlineEpubDecor {
+        val settings = OnlineEpubStyleStore.read(currentApplicationContext() ?: currentContext())
+        val root = bookDir.canonicalFile
+        val imagesDir = File(root, "OEBPS/Images")
+        val decor = resolveOnlineCompletionDecor(settings) { fileName, bytes ->
+            imagesDir.mkdirs()
+            val target = File(imagesDir, fileName)
+            if (!target.isFile || !target.readBytes().contentEquals(bytes)) target.writeBytes(bytes)
+        }
+        val manifestItems = onlineCompletionDecorManifestItems(decor)
+        if (manifestItems.isNotEmpty()) {
+            val opfFile = File(root, "OEBPS/content.opf")
+            if (opfFile.isFile) {
+                val original = opfFile.readText(Charsets.UTF_8)
+                val merged = mergeOnlineEpubImageManifest(original, manifestItems)
+                if (merged != original) writeOnlineCompletionTextAtomically(opfFile, merged)
+            }
+        }
+        return decor
     }
 
     private fun syncOnlineCompletionDefaultStyle(bookDir: File): Boolean {
@@ -10844,29 +10976,39 @@ class WebDavDriveHook(
         title: String,
         content: String,
         imageHrefs: Map<String, String> = emptyMap(),
+        decor: OnlineEpubDecor = OnlineEpubDecor(),
+        isVolumeFirstChapter: Boolean = false,
     ): String {
         val bodyLines = stripDuplicatedChapterTitle(title, content.lineSequence()
             .map { it.trim() }
             .filter { it.isNotBlank() }
             .toList())
-        val paragraphs = bodyLines.joinToString("\n") { line -> chapterParagraphHtml(line, imageHrefs) }
+        val paragraphs = bodyLines.joinToString("\n") { line -> chapterParagraphHtml(line, imageHrefs, decor) }
         val heading = chapterHeadingHtml(title)
+        val header = decor.headerHtml(isVolumePage = false, isVolumeFirstChapter = isVolumeFirstChapter)
         return """<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head><title>${title.xmlEscape()}</title><link rel="stylesheet" type="text/css" href="../Styles/default.css"/></head>
-<body>$heading
+<body>$header$heading
 $paragraphs
 </body>
 </html>"""
     }
 
-    private fun chapterParagraphHtml(line: String, imageHrefs: Map<String, String> = emptyMap()): String {
+    private fun chapterParagraphHtml(
+        line: String,
+        imageHrefs: Map<String, String> = emptyMap(),
+        decor: OnlineEpubDecor = OnlineEpubDecor(),
+    ): String {
         OnlineChapterImageMarkup.markerUrl(line)?.let { url ->
             val fileName = imageHrefs[url]
             val src = if (fileName != null) "../Images/$fileName" else url
             return OnlineBodyMarkup.illustration(src.xmlEscape())
         }
-        if (ONLINE_DIVIDER_LINE_REGEX.matches(line)) return OnlineBodyMarkup.divider(line.xmlEscape())
+        if (ONLINE_DIVIDER_LINE_REGEX.matches(line)) {
+            decor.dividerImageHref?.let { return OnlineBodyMarkup.dividerImage(it.xmlEscape()) }
+            return OnlineBodyMarkup.divider(line.xmlEscape())
+        }
         return OnlineBodyMarkup.paragraph(line.xmlEscape())
     }
 
@@ -11016,7 +11158,7 @@ $paragraphs
         "Text/volume_${order.toString().padStart(4, '0')}.xhtml"
 
     /** 卷首页文档：仿起点单独成页，序号与卷名自动分行。 */
-    private fun volumeXhtml(volumeTitle: String): String {
+    private fun volumeXhtml(volumeTitle: String, decor: OnlineEpubDecor = OnlineEpubDecor()): String {
         val heading = OnlineVolumeHeadingMarkup.parse(volumeTitle)
         val body = if (heading.number.isNotBlank() && heading.title.isNotBlank()) {
             OnlineVolumeHeadingMarkup.split(heading.number.xmlEscape(), heading.title.xmlEscape())
@@ -11024,10 +11166,11 @@ $paragraphs
             OnlineVolumeHeadingMarkup.single(heading.title.ifBlank { heading.number }.xmlEscape())
         }
         val documentTitle = volumeTitle.trim().ifBlank { "卷首页" }
+        val header = decor.headerHtml(isVolumePage = true, isVolumeFirstChapter = false)
         return """<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head><title>${documentTitle.xmlEscape()}</title><link rel="stylesheet" type="text/css" href="../Styles/default.css"/></head>
-<body>$body
+<body>$header$body
 </body>
 </html>"""
     }
@@ -11036,6 +11179,7 @@ $paragraphs
     private fun writeOnlineCompletionVolumePages(
         bookDir: File,
         chapters: List<OnlineDownloadedChapter>,
+        decor: OnlineEpubDecor = OnlineEpubDecor(),
     ): Boolean {
         val root = bookDir.canonicalFile
         File(root, "OEBPS/Text").mkdirs()
@@ -11044,7 +11188,7 @@ $paragraphs
         onlineVolumeSegments(chapters).forEach { segment ->
             val file = onlineCompletionChapterFile(root, onlineVolumeHref(segment.order))
             expectedNames += file.name
-            val next = volumeXhtml(segment.title)
+            val next = volumeXhtml(segment.title, decor)
             if (!file.isFile || file.readText(Charsets.UTF_8) != next) {
                 writeOnlineCompletionTextAtomically(file, next)
                 changed = true
@@ -11134,6 +11278,7 @@ $points  </navMap>
         chapterHrefs: List<String> = defaultOnlineChapterHrefs(chapters.size),
         contentImages: List<OnlineContentImage> = emptyList(),
         fontFaces: Collection<OnlineEpubFontFace> = emptyList(),
+        decorImages: List<OnlineEpubImageManifestItem> = emptyList(),
     ): String {
         val manifestChapters = chapters.indices.joinToString("\n") { index ->
             val order = index + 1
@@ -11158,6 +11303,9 @@ $points  </navMap>
         val fontManifest = fontFaces.distinctBy { it.family }.joinToString("\n") { face ->
             """    <item id="${face.family}" href="${OnlineEpubFontEmbedder.manifestHref(face)}" media-type="${OnlineEpubFontEmbedder.mediaType(face)}"/>"""
         }
+        val decorManifest = decorImages.distinctBy { it.fileName }.joinToString("\n") { image ->
+            """    <item id="online-decor-${image.fileName.substringBeforeLast('.')}" href="Images/${image.fileName.xmlEscape()}" media-type="${image.mimeType}"/>"""
+        }
         val coverManifest = if (hasCover) {
             listOf(
                 """    <item id="cover-image" href="Images/cover.$coverExt" media-type="${coverMimeType(coverExt)}" properties="cover-image"/>""",
@@ -11172,6 +11320,7 @@ $points  </navMap>
             """    <item id="source-chapter-index" href="$ONLINE_COMPLETION_CHAPTER_INDEX" media-type="application/json"/>""",
             coverManifest,
             imageManifest,
+            decorManifest,
             fontManifest,
             manifestVolumes,
             manifestChapters,
@@ -13637,6 +13786,28 @@ img{max-width:100%;max-height:100%;height:auto;}
         val startIndex: Int,
     )
 
+    /**
+     * 成书时随样式一起写入的装饰资源。
+     *
+     * 分割装饰图与头图都是全书一份，这里只带相对 href 与套用范围，避免把设置对象透到每个渲染函数。
+     */
+    private data class OnlineEpubDecor(
+        val dividerImageHref: String? = null,
+        val headerImageHref: String? = null,
+        val headerScope: OnlineEpubHeaderScope = OnlineEpubHeaderScope.Off,
+    ) {
+        fun headerHtml(isVolumePage: Boolean, isVolumeFirstChapter: Boolean): String {
+            val href = headerImageHref ?: return ""
+            val applies = when (headerScope) {
+                OnlineEpubHeaderScope.Off -> false
+                OnlineEpubHeaderScope.EveryChapter -> !isVolumePage
+                OnlineEpubHeaderScope.VolumePage -> isVolumePage
+                OnlineEpubHeaderScope.VolumeFirstChapter -> isVolumePage || isVolumeFirstChapter
+            }
+            return if (applies) OnlineBodyMarkup.header(href) else ""
+        }
+    }
+
     private data class OnlineChapter(
         val title: String,
         val url: String,
@@ -14306,6 +14477,7 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val ONLINE_COMPLETION_CACHE_ROOT = "reamicro-online-completion"
         const val ONLINE_COMPLETION_DEFAULT_STYLE_PATH = "OEBPS/Styles/default.css"
         const val ONLINE_COMPLETION_CHAPTER_INDEX = "reamicro-online-chapters.json"
+        const val ONLINE_COMPLETION_HEADER_IMAGE = "header.png"
         const val ONLINE_COMPLETION_FAILED_CHAPTER_LOG = "reamicro-online-failed-chapters.json"
         const val ONLINE_COMPLETION_NOTIFICATION_CHANNEL = "reamicro_online_completion_download"
         const val MODULE_PACKAGE_NAME = "com.reamicro.fix"

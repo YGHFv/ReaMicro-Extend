@@ -2,6 +2,7 @@ package com.reamicro.fix.webdav
 
 import com.reamicro.fix.settings.OnlineEpubCssBlock
 import com.reamicro.fix.settings.OnlineEpubCssBlocks
+import com.reamicro.fix.settings.OnlineEpubHeaderScope
 import com.reamicro.fix.settings.OnlineEpubStyle
 import com.reamicro.fix.settings.OnlineEpubStyleDefaults
 import com.reamicro.fix.settings.OnlineEpubStyleKind
@@ -16,13 +17,26 @@ internal data class OnlineEpubFontFace(
 
 /** 由成书样式配置拼装 EPUB 的 Styles/default.css。 */
 internal object OnlineEpubStyleCss {
-    /** 参与成书的样式类别；头图样式只做配置与预览，暂不套用。 */
+    /** 始终参与成书的样式类别；头图另外由 headerScope 决定。 */
     val APPLIED_KINDS = listOf(
         OnlineEpubStyleKind.Title,
         OnlineEpubStyleKind.Volume,
         OnlineEpubStyleKind.Transition,
         OnlineEpubStyleKind.Illustration,
     )
+
+    /**
+     * 本次成书实际写入 CSS 的类别。
+     *
+     * 头图只要范围没关就写入 CSS —— 是否真的插入图片元素由 [OnlineEpubStyleSettings.headerEnabled]
+     * 另行决定，多一段用不上的样式无害，但少一段会让预览看不到效果。
+     */
+    fun appliedKinds(settings: OnlineEpubStyleSettings): List<OnlineEpubStyleKind> =
+        if (settings.headerScope != OnlineEpubHeaderScope.Off) {
+            APPLIED_KINDS + OnlineEpubStyleKind.Header
+        } else {
+            APPLIED_KINDS
+        }
 
     /**
      * @param fontFaces 已嵌入 EPUB 的字体，key 为样式 id。
@@ -39,7 +53,7 @@ internal object OnlineEpubStyleCss {
                 "}"
         }
         sections += BASE_CSS
-        APPLIED_KINDS.forEach { kind ->
+        appliedKinds(settings).forEach { kind ->
             val style = settings.selected(kind) ?: return@forEach
             sections += "/* ${kind.title}：${style.name} */"
             sections += styleCss(style, fontFaces[style.id])
@@ -69,12 +83,18 @@ internal object OnlineEpubStyleCss {
         return OnlineEpubCssBlocks.compose(next)
     }
 
-    /** 选中字体文件时用嵌入名，选中内置字体时直接写名字，未选则不注入。 */
+    /**
+     * 选中字体文件时：嵌入模式用 `@font-face` 的族名，仅声明模式用文件名（去扩展名）当族名，
+     * 由阅读器自行解析同名字体。选内置字体名时直接写名字。
+     */
     private fun fontStack(style: OnlineEpubStyle, fontFace: OnlineEpubFontFace?): String {
         if (fontFace != null) return "\"${fontFace.family}\", serif"
         val selection = style.fontFamily.trim()
-        if (selection.isBlank() || selection.contains('/') || selection.contains('\\')) return ""
-        return "\"$selection\", serif"
+        if (selection.isBlank()) return ""
+        if (!selection.contains('/') && !selection.contains('\\')) return "\"$selection\", serif"
+        if (style.embedFont) return ""
+        val declaredName = selection.substringAfterLast('/').substringAfterLast('\\').substringBeforeLast('.')
+        return if (declaredName.isBlank()) "" else "\"$declaredName\", serif"
     }
 
     /** 与样式无关的基础排版：正文、卷首页容器和旧书兜底。 */

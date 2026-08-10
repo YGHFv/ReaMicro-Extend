@@ -12,6 +12,14 @@ internal object OnlineBodyMarkup {
 
     fun divider(textHtml: String): String = "<p class=\"te-divider-line fg1\">$textHtml</p>"
 
+    /** 选了装饰图的分割样式：用图片替换原来的省略号/符号行。 */
+    fun dividerImage(srcHtml: String): String =
+        "<div class=\"te-divider-image\"><img class=\"te-divider-img\" src=\"$srcHtml\" alt=\"\"/></div>"
+
+    /** 章节头图，结构与 TEpub 的头图接口一致。 */
+    fun header(srcHtml: String): String =
+        "<figure class=\"te-header-figure\"><img class=\"te-header-image\" src=\"$srcHtml\" alt=\"\"/></figure>"
+
     fun illustration(srcHtml: String, captionHtml: String = ""): String =
         "<figure class=\"te-illustration\">" +
             "<img class=\"te-illustration-image\" src=\"$srcHtml\" alt=\"\"/>" +

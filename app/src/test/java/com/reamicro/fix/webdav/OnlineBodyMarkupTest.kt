@@ -29,6 +29,26 @@ class OnlineBodyMarkupTest {
     }
 
     @Test
+    fun `image divider uses the standard interface`() {
+        assertEquals(
+            "<div class=\"te-divider-image\">" +
+                "<img class=\"te-divider-img\" src=\"../Images/divider.png\" alt=\"\"/>" +
+                "</div>",
+            OnlineBodyMarkup.dividerImage("../Images/divider.png"),
+        )
+    }
+
+    @Test
+    fun `header uses the standard figure interface`() {
+        assertEquals(
+            "<figure class=\"te-header-figure\">" +
+                "<img class=\"te-header-image\" src=\"../Images/header.png\" alt=\"\"/>" +
+                "</figure>",
+            OnlineBodyMarkup.header("../Images/header.png"),
+        )
+    }
+
+    @Test
     fun `migrates legacy illustration div`() {
         assertEquals(
             OnlineBodyMarkup.illustration("../Images/a.jpg"),

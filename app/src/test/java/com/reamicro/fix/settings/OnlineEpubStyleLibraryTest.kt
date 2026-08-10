@@ -64,6 +64,29 @@ class OnlineEpubStyleLibraryTest {
                 .contains("""<p class="te-divider-line fg1">"""),
         )
     }
+
+    @Test
+    fun `template header styles ship a mask`() {
+        val templates = OnlineEpubStyleLibrary.byKind(OnlineEpubStyleKind.Header)
+            .filter { it.id.startsWith("header-template-") }
+
+        assertTrue("样板头图未移植", templates.isNotEmpty())
+        templates.forEach { style ->
+            assertTrue("${style.id} 缺少蒙版", style.maskAsset.startsWith("epub_header_mask/"))
+            assertTrue("${style.id} 缺少样板尺寸", style.sampleWidth > 0 && style.sampleHeight > 0)
+        }
+    }
+
+    @Test
+    fun `styles needing an image are detected`() {
+        val imageDivider = requireNotNull(OnlineEpubStyleLibrary.byId("transition-image-divider"))
+        val textDivider = requireNotNull(OnlineEpubStyleLibrary.byId("transition-fg1-stars"))
+        val header = requireNotNull(OnlineEpubStyleLibrary.byId("header-standard-edge"))
+
+        assertTrue(imageDivider.needsAsset)
+        assertFalse(textDivider.needsAsset)
+        assertTrue(header.needsAsset)
+    }
 }
 
 class OnlineEpubCssBlocksTest {

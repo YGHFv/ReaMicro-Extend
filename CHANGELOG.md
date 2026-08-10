@@ -1,5 +1,34 @@
 # 更新记录
 
+## 1.4.4 - 2026-08-10
+
+### 配置弹窗预览重做：与成书 CSS 完全一致
+- 修复预览效果与实际排版严重不符。根因：预览只把**当前样式那几段 CSS** 注入 WebView，没带基础排版（body 楷体、`p{text-indent:2em}`、`.te-volume-page` 容器等），还硬编码了 `p{margin:0.6em 0}` 和 WebView 默认白底 16px，与成书是两套渲染。
+- 新增 `OnlineEpubStylePreview`：预览注入的 CSS 就是 `OnlineEpubStyleCss.build()` 的输出 —— 与写进 `Styles/default.css` 的内容逐字一致。`OnlineEpubStyleSettings.withDraft` 把编辑中的草稿覆盖进设置再拼装，改一个字预览就跟着变。
+- 预览侧只保留最小 reset（`html/body/img` 三条），另加一层模拟阅微阅读页的纸张外观（`#F5EFE0` 底、17px、`20px 18px` 页边距）。预览高度由 240dp 提到 320dp 并允许滚动。
+- 顺带用 MT MCP 核过宿主的 CSS 能力：`org.epub.css.property.*` 有 679 个类（含 `BoxShadow`/`BorderRadius`/`BackgroundImage`/`CSSGradient`/`Content`/`Display`），`org.epub.css.query.Selector` 支持 `@font-face`，内置样式与字体嵌入在宿主侧无需降级。
+
+### 图片装饰转场可以选图了
+- 样式模型新增 `assetPath`。分割样式的 CSS 含 `.te-divider-img`（即「图片装饰转场」）时，配置弹窗出现「选择装饰图 / 更换图片」按钮；选中的图复制到模块私有目录 `reamicro_epub_style_assets/`。
+- 成书时分割行改为输出 `div.te-divider-image > img.te-divider-img`，图片写入 `OEBPS/Images/divider.<ext>` 并登记 manifest；没选图时仍是原来的文字分割线。
+
+### 头图蒙版与自动生成
+- 新增本地脚本 `tools/gen-header-masks.mjs`：把 TEpub-Editor 的 8 张样板图提取 alpha 通道存成 8-bit 灰度 PNG，落到 `app/src/main/assets/epub_header_mask/`。原图共 ~17 MB，只取蒙版后**合计 647 KB**。
+- `tools/gen-epub-styles.mjs` 补上解析 `headerTemplateStyle(...)` 工厂调用的能力，之前跳过的 7 条样板头图现在都进了样式库，并各自带上 `maskAsset` / `sampleWidth` / `sampleHeight`。内置样式总数 40 → **47**（14 头图 / 12 标题 / 4 插图 / 5 分割 / 12 卷标）。
+- 新增 `OnlineHeaderImageComposer`，照搬 TEpub 的 `buildProcessedHeaderFromAsset`：按样板尺寸建画布 → 用户图 cover 缩放居中 → 蒙版拉伸后以 `PorterDuff.Mode.DST_IN` 裁切（先抽样确认蒙版确有透明像素）→ 输出 PNG。蒙版通过既有的 `ReaderHighlightImageAssets` `asset://` 机制从模块 APK 读取。
+- 头图样式弹窗新增**套用范围**：关闭 / 每章 / 卷首页 / 每卷首章（默认关闭）。选好原图并选定范围后，合成结果写入 `OEBPS/Images/header.png`（全书一份），按范围插到章节或卷首页正文顶部的 `figure.te-header-figure`。范围一旦不为「关闭」，头图 CSS 也会进入成书样式表。
+
+### 字体两种模式
+- 样式新增 `embedFont`，弹窗字体行下方多一组二选一：**嵌入 EPUB** / **仅声明字体名**。
+- 嵌入模式与此前一致（复制进 `OEBPS/Fonts/` + `@font-face`）；仅声明模式不复制任何文件，CSS 里直接写字体文件名（去扩展名）作为 `font-family`，交给阅读器自行解析。预览两种模式都用 `file://` 直读设备字体，所见即所得。
+
+### 样式导出导入带图
+- 配置弹窗按钮行新增**「导出」**，写到下载目录；列表页首行长按导入、每行长按导出保留。
+- 导出 JSON 把关联图片以 base64 内嵌（`assetData` / `assetName`），并带上 `embedFont` / `maskAsset` / 样板尺寸；导入时图片自动还原到模块私有目录并回填路径，别人拿到单个 JSON 即可开箱即用。字体因体积过大仍只导出选择路径。
+
+### 仓库同步
+- `.gitignore` 里 `tools/` 整目录忽略导致代码生成脚本没入库。改为 `tools/*` 加两条放行：`!tools/gen-epub-styles.mjs`、`!tools/gen-header-masks.mjs`。头图蒙版 assets 随源码入库。其余忽略项（`.claude/`、`outputs/`、`source-files/*.rmsource`、`external-sources/` 等）经核对均为有意保留。
+
 ## 1.4.3 - 2026-08-10
 
 ### 在线补全新增「下载配置」：成书样式可自定义

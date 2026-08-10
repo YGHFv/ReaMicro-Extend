@@ -17,7 +17,10 @@ signing/
 *.aab
 !RM1.3.0+.APK
 .tools/
-tools/
+# tools/ 放本地分析工具，只放行随仓库分发的代码生成脚本
+tools/*
+!tools/gen-epub-styles.mjs
+!tools/gen-header-masks.mjs
 decompiled/
 dex_tmp/
 base_decompiled/

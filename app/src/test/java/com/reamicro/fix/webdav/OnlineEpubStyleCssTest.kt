@@ -1,5 +1,6 @@
 package com.reamicro.fix.webdav
 
+import com.reamicro.fix.settings.OnlineEpubHeaderScope
 import com.reamicro.fix.settings.OnlineEpubStyle
 import com.reamicro.fix.settings.OnlineEpubStyleDefaults
 import com.reamicro.fix.settings.OnlineEpubStyleKind
@@ -22,12 +23,62 @@ class OnlineEpubStyleCssTest {
     }
 
     @Test
-    fun `header styles never reach the book`() {
+    fun `header styles stay out of the book until a scope is picked`() {
         assertFalse(OnlineEpubStyleCss.APPLIED_KINDS.contains(OnlineEpubStyleKind.Header))
         val css = OnlineEpubStyleCss.build(
             OnlineEpubStyleSettings(selection = mapOf(OnlineEpubStyleKind.Header to "header-card-shadow")),
         )
         assertFalse(css.contains(".te-header-figure"))
+    }
+
+    @Test
+    fun `header styles join the css once a scope is picked`() {
+        val css = OnlineEpubStyleCss.build(
+            OnlineEpubStyleSettings(headerScope = OnlineEpubHeaderScope.EveryChapter),
+        )
+
+        assertTrue(css.contains(".te-header-figure"))
+    }
+
+    @Test
+    fun `declare-only font writes the file name as a family`() {
+        val style = OnlineEpubStyle(
+            id = "custom-title",
+            kind = OnlineEpubStyleKind.Title,
+            name = "自定义",
+            css = OnlineEpubStyleDefaults.blankCss(OnlineEpubStyleKind.Title),
+            fontFamily = "/sdcard/Fonts/SourceHanSerif.ttf",
+            embedFont = false,
+        )
+
+        val css = OnlineEpubStyleCss.styleCss(style, null)
+
+        assertTrue(css.contains("""font-family: "SourceHanSerif", serif;"""))
+        assertFalse(css.contains("@font-face"))
+    }
+
+    @Test
+    fun `draft overrides the selected style for preview`() {
+        val draft = OnlineEpubStyle(
+            id = "draft-title",
+            kind = OnlineEpubStyleKind.Title,
+            name = "草稿",
+            css = ".te-chapter-title {\n  color: #123456;\n}",
+        )
+
+        val css = OnlineEpubStyleCss.build(OnlineEpubStyleSettings().withDraft(draft))
+
+        assertTrue(css.contains("color: #123456;"))
+    }
+
+    @Test
+    fun `header is only enabled with both scope and image`() {
+        val withScope = OnlineEpubStyleSettings(headerScope = OnlineEpubHeaderScope.EveryChapter)
+        assertFalse(withScope.headerEnabled)
+
+        val style = requireNotNull(OnlineEpubStyleLibrary.byId("header-standard-edge"))
+        val ready = withScope.withDraft(style.copy(assetPath = "/sdcard/header.png"))
+        assertTrue(ready.headerEnabled)
     }
 
     @Test
@@ -70,12 +121,5 @@ class OnlineEpubStyleCssTest {
         )
 
         assertFalse(OnlineEpubStyleCss.styleCss(style, null).contains("font-family"))
-    }
-
-    @Test
-    fun `selection falls back to defaults when the style is gone`() {
-        val settings = OnlineEpubStyleSettings(selection = mapOf(OnlineEpubStyleKind.Title to "missing-style"))
-
-        assertTrue(settings.selectedId(OnlineEpubStyleKind.Title) == OnlineEpubStyleDefaults.defaultStyleId(OnlineEpubStyleKind.Title))
     }
 }

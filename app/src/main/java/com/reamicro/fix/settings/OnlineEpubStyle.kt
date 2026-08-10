@@ -28,8 +28,34 @@ data class OnlineEpubStyle(
     val css: String = "",
     /** 字体文件绝对路径 / 内置 family 名 / 空串表示跟随全局。 */
     val fontFamily: String = "",
+    /** 字体文件是否随书嵌入；false 时只在 CSS 里声明字体名，交给阅读器自行解析。 */
+    val embedFont: Boolean = true,
+    /** 样式关联的本地图片：分割样式的装饰图、头图样式的原图。 */
+    val assetPath: String = "",
+    /** 头图样式的蒙版 asset 名与样板尺寸，随内置样式生成，用户样式为空。 */
+    val maskAsset: String = "",
+    val sampleWidth: Int = 0,
+    val sampleHeight: Int = 0,
     val builtIn: Boolean = false,
-)
+) {
+    /** 分割样式引用了图片选择器，或头图样式，都需要用户指定一张图片。 */
+    val needsAsset: Boolean
+        get() = kind == OnlineEpubStyleKind.Header ||
+            (kind == OnlineEpubStyleKind.Transition && css.contains(".te-divider-img"))
+}
+
+/** 头图套用范围。 */
+enum class OnlineEpubHeaderScope(val id: String, val title: String) {
+    Off("off", "关闭"),
+    EveryChapter("every_chapter", "每章"),
+    VolumePage("volume_page", "卷首页"),
+    VolumeFirstChapter("volume_first_chapter", "每卷首章"),
+    ;
+
+    companion object {
+        fun fromId(id: String): OnlineEpubHeaderScope? = entries.firstOrNull { it.id == id }
+    }
+}
 
 /** 一段可独立填写的 CSS：[selector] 为选择器，[declarations] 为花括号内的声明。 */
 data class OnlineEpubCssBlock(
@@ -77,9 +103,14 @@ object OnlineEpubStyleDefaults {
             else -> selector.substringBefore(',').trim().removePrefix(".").ifBlank { selector }
         }
 
-    /** 弹窗预览用的正文片段，结构与成书完全一致，便于所见即所得。 */
-    fun previewBody(kind: OnlineEpubStyleKind): String =
-        when (kind) {
+    /**
+     * 弹窗预览用的正文片段，结构与成书完全一致，便于所见即所得。
+     *
+     * @param assetUrl 分割图 / 头图的实际地址，为空时用内置占位图。
+     */
+    fun previewBody(kind: OnlineEpubStyleKind, assetUrl: String = ""): String {
+        val image = assetUrl.takeIf { it.isNotBlank() } ?: PREVIEW_IMAGE
+        return when (kind) {
             OnlineEpubStyleKind.Title ->
                 """<h1 class="te-chapter-title"><span class="te-chapter-number">第三章</span>""" +
                     """<span class="te-chapter-name">计划不如变化</span></h1>$PREVIEW_PARAGRAPHS"""
@@ -94,12 +125,22 @@ object OnlineEpubStyleDefaults {
                     PREVIEW_PARAGRAPHS
             OnlineEpubStyleKind.Transition ->
                 """<p class="te-paragraph">夜色沉入城市边缘，风从旧站台吹过。</p>""" +
-                    """<p class="te-divider-line fg1">※※※</p>$PREVIEW_PARAGRAPHS"""
+                    transitionPreviewMark(assetUrl) +
+                    PREVIEW_PARAGRAPHS
             OnlineEpubStyleKind.Header ->
-                """<figure class="te-header-figure"><img class="te-header-image" src="$PREVIEW_IMAGE" alt=""/>""" +
+                """<figure class="te-header-figure"><img class="te-header-image" src="$image" alt=""/>""" +
                     """<figcaption class="te-header-caption">章节头图</figcaption></figure>""" +
                     """<h1 class="te-chapter-title"><span class="te-chapter-name">计划不如变化</span></h1>""" +
                     PREVIEW_PARAGRAPHS
+        }
+    }
+
+    /** 选了装饰图就预览图片转场，否则预览文字转场。 */
+    private fun transitionPreviewMark(assetUrl: String): String =
+        if (assetUrl.isBlank()) {
+            """<p class="te-divider-line fg1">※※※</p>"""
+        } else {
+            """<div class="te-divider-image"><img class="te-divider-img" src="$assetUrl" alt=""/></div>"""
         }
 
     private const val PREVIEW_PARAGRAPHS =

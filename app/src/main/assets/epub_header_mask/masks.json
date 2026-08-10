@@ -1,0 +1,42 @@
+{
+  "header-template-bottom-fade": {
+    "width": 1080,
+    "height": 750,
+    "bytes": 217880
+  },
+  "header-template-torn-edge": {
+    "width": 1080,
+    "height": 784,
+    "bytes": 91772
+  },
+  "header-template-scatter-edge": {
+    "width": 1080,
+    "height": 608,
+    "bytes": 59397
+  },
+  "header-template-ink-edge": {
+    "width": 1080,
+    "height": 608,
+    "bytes": 13314
+  },
+  "header-template-diagonal-brush": {
+    "width": 1080,
+    "height": 608,
+    "bytes": 28090
+  },
+  "header-template-right-memory-collage": {
+    "width": 1080,
+    "height": 664,
+    "bytes": 113815
+  },
+  "header-template-delivery-bike-collage": {
+    "width": 1080,
+    "height": 810,
+    "bytes": 44760
+  },
+  "header-template-cloud-gate-ink-banner": {
+    "width": 1080,
+    "height": 650,
+    "bytes": 93610
+  }
+}

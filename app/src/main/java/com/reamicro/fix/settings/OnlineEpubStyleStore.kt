@@ -1,6 +1,8 @@
 package com.reamicro.fix.settings
 
 import android.content.Context
+import android.util.Base64
+import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -8,6 +10,7 @@ import org.json.JSONObject
 data class OnlineEpubStyleSettings(
     val styles: List<OnlineEpubStyle> = OnlineEpubStyleLibrary.BUILT_INS,
     val selection: Map<OnlineEpubStyleKind, String> = emptyMap(),
+    val headerScope: OnlineEpubHeaderScope = OnlineEpubHeaderScope.Off,
 ) {
     fun byKind(kind: OnlineEpubStyleKind): List<OnlineEpubStyle> = styles.filter { it.kind == kind }
 
@@ -18,6 +21,24 @@ data class OnlineEpubStyleSettings(
     fun selected(kind: OnlineEpubStyleKind): OnlineEpubStyle? {
         val id = selectedId(kind)
         return styles.firstOrNull { it.id == id } ?: byKind(kind).firstOrNull()
+    }
+
+    /** 头图是否真正参与成书：范围没关且已选好图。 */
+    val headerEnabled: Boolean
+        get() = headerScope != OnlineEpubHeaderScope.Off &&
+            selected(OnlineEpubStyleKind.Header)?.assetPath?.isNotBlank() == true
+
+    /**
+     * 用编辑中的草稿样式覆盖同 id 项并选中它。
+     *
+     * 供配置弹窗预览使用：预览注入的 CSS 与这份设置写出的成书 CSS 完全一致。
+     */
+    fun withDraft(style: OnlineEpubStyle): OnlineEpubStyleSettings {
+        val replaced = styles.filterNot { it.id == style.id } + style
+        return copy(
+            styles = replaced,
+            selection = selection + (style.kind to style.id),
+        )
     }
 }
 
@@ -43,7 +64,18 @@ object OnlineEpubStyleStore {
         return OnlineEpubStyleSettings(
             styles = merged.values.toList(),
             selection = decodeSelection(prefs.getString(ModuleSettings.KEY_ONLINE_EPUB_STYLE_SELECTION, "").orEmpty()),
+            headerScope = OnlineEpubHeaderScope.fromId(
+                prefs.getString(ModuleSettings.KEY_ONLINE_EPUB_HEADER_SCOPE, "").orEmpty(),
+            ) ?: OnlineEpubHeaderScope.Off,
         )
+    }
+
+    fun setHeaderScope(context: Context?, scope: OnlineEpubHeaderScope) {
+        context ?: return
+        context.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(ModuleSettings.KEY_ONLINE_EPUB_HEADER_SCOPE, scope.id)
+            .commit()
     }
 
     /** 新建或改写一条样式。 */
@@ -95,6 +127,28 @@ object OnlineEpubStyleStore {
             .put("description", style.description)
             .put("css", style.css)
             .put("fontFamily", style.fontFamily)
+            .put("embedFont", style.embedFont)
+            .put("assetPath", style.assetPath)
+            .put("maskAsset", style.maskAsset)
+            .put("sampleWidth", style.sampleWidth)
+            .put("sampleHeight", style.sampleHeight)
+
+    /**
+     * 导出用 JSON：把关联图片以 base64 内嵌，别人导入后开箱即用。
+     *
+     * 字体因体积过大只导出选择路径，导入方没有同名字体时会回退到跟随全局。
+     */
+    fun exportJson(style: OnlineEpubStyle): JSONObject {
+        val json = styleJson(style)
+        val asset = File(style.assetPath.trim())
+        if (style.assetPath.isNotBlank() && asset.isFile) {
+            runCatching {
+                json.put("assetName", asset.name)
+                json.put("assetData", Base64.encodeToString(asset.readBytes(), Base64.NO_WRAP))
+            }
+        }
+        return json
+    }
 
     fun styleFromJson(json: JSONObject): OnlineEpubStyle? {
         val kind = OnlineEpubStyleKind.fromId(json.optString("kind")) ?: return null
@@ -106,7 +160,29 @@ object OnlineEpubStyleStore {
             description = json.optString("description"),
             css = json.optString("css"),
             fontFamily = json.optString("fontFamily"),
+            embedFont = json.optBoolean("embedFont", true),
+            assetPath = json.optString("assetPath"),
+            maskAsset = json.optString("maskAsset"),
+            sampleWidth = json.optInt("sampleWidth"),
+            sampleHeight = json.optInt("sampleHeight"),
         )
+    }
+
+    /**
+     * 导入一条样式：内嵌的图片会还原到 [assetDir]，并把 assetPath 指向还原后的文件。
+     *
+     * 没有内嵌图片时保留原 assetPath，本机恰好存在同路径文件就仍然可用。
+     */
+    fun importStyle(json: JSONObject, assetDir: File): OnlineEpubStyle? {
+        val style = styleFromJson(json) ?: return null
+        val data = json.optString("assetData").takeIf { it.isNotBlank() } ?: return style
+        val name = json.optString("assetName").trim().ifBlank { "${style.id}.png" }
+        return runCatching {
+            assetDir.mkdirs()
+            val target = File(assetDir, "${style.id}_${name.substringAfterLast('/')}")
+            target.writeBytes(Base64.decode(data, Base64.DEFAULT))
+            style.copy(assetPath = target.absolutePath)
+        }.getOrDefault(style)
     }
 
     private fun encodeStyles(styles: List<OnlineEpubStyle>): String =

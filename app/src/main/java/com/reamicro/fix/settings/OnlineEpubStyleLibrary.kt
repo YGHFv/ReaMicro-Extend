@@ -44,6 +44,9 @@ internal object OnlineEpubStyleLibrary {
             name = "右侧散边留白头图",
             description = "主体集中在右侧，左侧保留大片留白，并带碎片、颗粒和旧照散边效果。",
             builtIn = true,
+            maskAsset = "epub_header_mask/header-template-right-memory-collage.png",
+            sampleWidth = 1080,
+            sampleHeight = 664,
             css = """.te-header-figure {
   margin: 0 -1.5em 1.65em;
   padding: 0;
@@ -948,6 +951,237 @@ p.te-divider-line {
   height: auto;
   border: 0;
   vertical-align: middle;
+}""",
+        ),
+        OnlineEpubStyle(
+            id = "header-template-bottom-fade",
+            kind = OnlineEpubStyleKind.Header,
+            name = "底部渐隐贴边头图",
+            description = "底部透明渐隐，适合让用户上传的头图自然过渡到正文留白。",
+            builtIn = true,
+            maskAsset = "epub_header_mask/header-template-bottom-fade.png",
+            sampleWidth = 1080,
+            sampleHeight = 750,
+            css = """.te-header-figure {
+  margin: 0 -1.5em 1.6em;
+  padding: 0;
+  position: relative;
+  overflow: hidden;
+  line-height: 0;
+  text-align: center;
+  text-indent: 0;
+  duokan-text-indent: 0;
+  duokan-bleed: lefttopright;
+}
+
+.te-header-image {
+  display: block;
+  width: 100%;
+  max-width: none;
+  height: auto;
+  object-fit: cover;
+}
+
+.te-header-caption {
+  display: none;
+}""",
+        ),
+        OnlineEpubStyle(
+            id = "header-template-torn-edge",
+            kind = OnlineEpubStyleKind.Header,
+            name = "底部撕边贴边头图",
+            description = "底部不规则透明撕边，适合有动作感或场景切换感的章节头图。",
+            builtIn = true,
+            maskAsset = "epub_header_mask/header-template-torn-edge.png",
+            sampleWidth = 1080,
+            sampleHeight = 784,
+            css = """.te-header-figure {
+  margin: 0 -1.5em 1.6em;
+  padding: 0;
+  position: relative;
+  overflow: hidden;
+  line-height: 0;
+  text-align: center;
+  text-indent: 0;
+  duokan-text-indent: 0;
+  duokan-bleed: lefttopright;
+}
+
+.te-header-image {
+  display: block;
+  width: 100%;
+  max-width: none;
+  height: auto;
+  object-fit: cover;
+}
+
+.te-header-caption {
+  display: none;
+}""",
+        ),
+        OnlineEpubStyle(
+            id = "header-template-scatter-edge",
+            kind = OnlineEpubStyleKind.Header,
+            name = "底部散点贴边头图",
+            description = "底部散点透明过渡，适合较柔和的横向头图样式。",
+            builtIn = true,
+            maskAsset = "epub_header_mask/header-template-scatter-edge.png",
+            sampleWidth = 1080,
+            sampleHeight = 608,
+            css = """.te-header-figure {
+  margin: 0 -1.5em 1.6em;
+  padding: 0;
+  position: relative;
+  overflow: hidden;
+  line-height: 0;
+  text-align: center;
+  text-indent: 0;
+  duokan-text-indent: 0;
+  duokan-bleed: lefttopright;
+}
+
+.te-header-image {
+  display: block;
+  width: 100%;
+  max-width: none;
+  height: auto;
+  object-fit: cover;
+}
+
+.te-header-caption {
+  display: none;
+}""",
+        ),
+        OnlineEpubStyle(
+            id = "header-template-ink-edge",
+            kind = OnlineEpubStyleKind.Header,
+            name = "底部墨痕贴边头图",
+            description = "底部墨痕状透明留白，适合边缘更硬朗的章节头图。",
+            builtIn = true,
+            maskAsset = "epub_header_mask/header-template-ink-edge.png",
+            sampleWidth = 1080,
+            sampleHeight = 608,
+            css = """.te-header-figure {
+  margin: 0 -1.5em 1.6em;
+  padding: 0;
+  position: relative;
+  overflow: hidden;
+  line-height: 0;
+  text-align: center;
+  text-indent: 0;
+  duokan-text-indent: 0;
+  duokan-bleed: lefttopright;
+}
+
+.te-header-image {
+  display: block;
+  width: 100%;
+  max-width: none;
+  height: auto;
+  object-fit: cover;
+}
+
+.te-header-caption {
+  display: none;
+}""",
+        ),
+        OnlineEpubStyle(
+            id = "header-template-diagonal-brush",
+            kind = OnlineEpubStyleKind.Header,
+            name = "斜向笔刷贴边头图",
+            description = "斜向笔刷透明边缘，适合需要强烈斜切构图的头图样式。",
+            builtIn = true,
+            maskAsset = "epub_header_mask/header-template-diagonal-brush.png",
+            sampleWidth = 1080,
+            sampleHeight = 608,
+            css = """.te-header-figure {
+  margin: 0 -1.5em 1.6em;
+  padding: 0;
+  position: relative;
+  overflow: hidden;
+  line-height: 0;
+  text-align: center;
+  text-indent: 0;
+  duokan-text-indent: 0;
+  duokan-bleed: lefttopright;
+}
+
+.te-header-image {
+  display: block;
+  width: 100%;
+  max-width: none;
+  height: auto;
+  object-fit: cover;
+}
+
+.te-header-caption {
+  display: none;
+}""",
+        ),
+        OnlineEpubStyle(
+            id = "header-template-delivery-bike-collage",
+            kind = OnlineEpubStyleKind.Header,
+            name = "左叠拼片散边头图",
+            description = "左侧拼片式透明轮廓，主体向中下部展开，适合需要留白和碎片感的章节头图。",
+            builtIn = true,
+            maskAsset = "epub_header_mask/header-template-delivery-bike-collage.png",
+            sampleWidth = 1080,
+            sampleHeight = 810,
+            css = """.te-header-figure {
+  margin: 0 -1.5em 1.6em;
+  padding: 0;
+  position: relative;
+  overflow: hidden;
+  line-height: 0;
+  text-align: center;
+  text-indent: 0;
+  duokan-text-indent: 0;
+  duokan-bleed: lefttopright;
+}
+
+.te-header-image {
+  display: block;
+  width: 100%;
+  max-width: none;
+  height: auto;
+  object-fit: cover;
+}
+
+.te-header-caption {
+  display: none;
+}""",
+        ),
+        OnlineEpubStyle(
+            id = "header-template-cloud-gate-ink-banner",
+            kind = OnlineEpubStyleKind.Header,
+            name = "墨染横幅散边头图",
+            description = "横幅式透明蒙版，四周带墨染散边，适合需要大场景铺陈和卷首仪式感的章节头图。",
+            builtIn = true,
+            maskAsset = "epub_header_mask/header-template-cloud-gate-ink-banner.png",
+            sampleWidth = 1080,
+            sampleHeight = 650,
+            css = """.te-header-figure {
+  margin: 0 -1.5em 1.6em;
+  padding: 0;
+  position: relative;
+  overflow: hidden;
+  line-height: 0;
+  text-align: center;
+  text-indent: 0;
+  duokan-text-indent: 0;
+  duokan-bleed: lefttopright;
+}
+
+.te-header-image {
+  display: block;
+  width: 100%;
+  max-width: none;
+  height: auto;
+  object-fit: cover;
+}
+
+.te-header-caption {
+  display: none;
 }""",
         ),
         OnlineEpubStyle(
