@@ -27,17 +27,17 @@ internal object OnlineVolumeHeadingMarkup {
     fun single(titleHtml: String): String =
         "<div class=\"te-volume-page\">" +
             ORNAMENT +
-            "<h1 class=\"te-volume-title\">$titleHtml</h1>" +
+            "<h1 class=\"te-volume-title\"><span class=\"te-volume-name\">$titleHtml</span></h1>" +
             "</div>"
 
     /** 序号与卷名分行展示的卷首页正文。 */
     fun split(numberHtml: String, titleHtml: String): String =
         "<div class=\"te-volume-page\">" +
             ORNAMENT +
-            "<div class=\"te-volume-heading\">" +
-            "<div class=\"te-volume-number\">$numberHtml</div>" +
-            "<h1 class=\"te-volume-title\">$titleHtml</h1>" +
-            "</div>" +
+            "<h1 class=\"te-volume-title\">" +
+            "<span class=\"te-volume-number\">$numberHtml</span>" +
+            "<span class=\"te-volume-name\">$titleHtml</span>" +
+            "</h1>" +
             "</div>"
 
     /** 以匹配到的卷标为界拆分，序号内部空白按语言习惯压缩。 */

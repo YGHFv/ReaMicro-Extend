@@ -88,13 +88,13 @@ class OnlineVolumeHeadingMarkupTest {
         assertEquals(
             "<div class=\"te-volume-page\">" +
                 "<div class=\"te-volume-ornament\">※</div>" +
-                "<div class=\"te-volume-heading\">" +
-                "<div class=\"te-volume-number\">第八小节</div>" +
-                "<h1 class=\"te-volume-title\">直至时间的尽头</h1>" +
-                "</div></div>",
+                "<h1 class=\"te-volume-title\">" +
+                "<span class=\"te-volume-number\">第八小节</span>" +
+                "<span class=\"te-volume-name\">直至时间的尽头</span>" +
+                "</h1></div>",
             html,
         )
-        assertTrue(html.indexOf("te-volume-number") < html.indexOf("te-volume-title"))
+        assertTrue(html.indexOf("te-volume-number") < html.indexOf("te-volume-name"))
     }
 
     @Test
@@ -102,7 +102,7 @@ class OnlineVolumeHeadingMarkupTest {
         assertEquals(
             "<div class=\"te-volume-page\">" +
                 "<div class=\"te-volume-ornament\">※</div>" +
-                "<h1 class=\"te-volume-title\">第二卷</h1>" +
+                "<h1 class=\"te-volume-title\"><span class=\"te-volume-name\">第二卷</span></h1>" +
                 "</div>",
             OnlineVolumeHeadingMarkup.single("第二卷"),
         )

@@ -141,6 +141,9 @@ object ModuleSettings {
     const val KEY_READER_HIGHLIGHT_DEFAULT_LIGHT_STYLE_ID = "reader_highlight_default_light_style_id"
     const val KEY_READER_HIGHLIGHT_DEFAULT_DARK_STYLE_ID = "reader_highlight_default_dark_style_id"
     const val KEY_READER_HIGHLIGHT_BOOK_GLOBAL_RULES = "reader_highlight_book_global_rules"
+    const val KEY_ONLINE_EPUB_STYLES = "online_epub_styles"
+    const val KEY_ONLINE_EPUB_STYLES_REMOVED = "online_epub_styles_removed"
+    const val KEY_ONLINE_EPUB_STYLE_SELECTION = "online_epub_style_selection"
     const val DEFAULT_READER_HIGHLIGHT_STYLE_ID = "default"
     const val DEFAULT_READER_HIGHLIGHT_LIGHT_STYLE_ID = "builtin_rainbow_glass"
     const val DEFAULT_READER_HIGHLIGHT_DARK_STYLE_ID = DEFAULT_READER_HIGHLIGHT_STYLE_ID

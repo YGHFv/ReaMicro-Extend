@@ -71,6 +71,13 @@ import com.reamicro.fix.tts.TtsSourceEntry
 import com.reamicro.fix.tts.TtsSourceStore
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
+import com.reamicro.fix.settings.OnlineEpubCssBlock
+import com.reamicro.fix.settings.OnlineEpubCssBlocks
+import com.reamicro.fix.settings.OnlineEpubStyle
+import com.reamicro.fix.settings.OnlineEpubStyleDefaults
+import com.reamicro.fix.settings.OnlineEpubStyleKind
+import com.reamicro.fix.settings.OnlineEpubStyleSettings
+import com.reamicro.fix.settings.OnlineEpubStyleStore
 import com.reamicro.fix.settings.ReaderHighlightBookContext
 import com.reamicro.fix.settings.ReaderHighlightSettingsSnapshot
 import com.reamicro.fix.settings.ReaderHighlightRule
@@ -106,6 +113,8 @@ class ReaMicroSettingsHook(
     private val activityProvider: () -> Activity?,
     private val settings: XposedModuleSettings,
     private val onGlobalFontChanged: () -> Unit = {},
+    /** 把当前成书样式重新写入所有在线补全图书；由 WebDavDriveHook 提供实现。 */
+    private val applyOnlineEpubStyles: (onDone: (String) -> Unit) -> Unit = { it("在线补全服务暂不可用") },
 ) {
     private val accountController = AccountCompletionController(classLoader, activityProvider)
     private val settingsBuildDepth = ThreadLocal.withInitial { 0 }
@@ -133,6 +142,9 @@ class ReaMicroSettingsHook(
     @Volatile private var onlineSourceVersionUiState: Any? = null
     @Volatile private var aiApiVersionUiState: Any? = null
     @Volatile private var readerHighlightVersionUiState: Any? = null
+    @Volatile private var onlineEpubStyleVersionUiState: Any? = null
+    // 成书样式弹窗里 CSS 预览的防抖任务，逐字输入时只保留最后一次刷新。
+    @Volatile private var pendingOnlineEpubPreviewRefresh: Runnable = Runnable {}
     // 阅读页高亮规则 sheet 内的子页面导航状态：0=规则列表，1=高亮样式列表。
     // 借用 mutableState 让 sheet 的 content lambda 读取后可随点击重组，实现 sheet 内翻页而非弹窗。
     @Volatile private var readerHighlightSheetSubPageUiState: Any? = null
@@ -551,6 +563,7 @@ class ReaMicroSettingsHook(
             currentRoute !is InjectedRoute.ReaderBookHighlightRules &&
             currentRoute !is InjectedRoute.ReaderBookOnlyHighlightRules &&
             currentRoute !is InjectedRoute.ReaderBookGlobalHighlightRules &&
+            currentRoute !is InjectedRoute.OnlineEpubStyleList &&
             currentRoute != InjectedRoute.FontLibrary &&
             currentRoute !in MODULE_CHILD_ROUTES &&
             currentRoute !in READER_CHILD_ROUTES &&
@@ -564,6 +577,7 @@ class ReaMicroSettingsHook(
                     currentRoute is InjectedRoute.ReaderBookHighlightRules -> InjectedRoute.ReaderHighlightTextSettings
                     currentRoute is InjectedRoute.ReaderBookOnlyHighlightRules -> InjectedRoute.ReaderHighlightTextSettings
                     currentRoute is InjectedRoute.ReaderBookGlobalHighlightRules -> InjectedRoute.ReaderBookHighlightRules(currentRoute.bookKey, currentRoute.bookTitle)
+                    currentRoute is InjectedRoute.OnlineEpubStyleList -> InjectedRoute.OnlineDownloadStyleSettings
                     currentRoute in READER_CHILD_ROUTES -> InjectedRoute.ReaderCompletionSettings
                     currentRoute in MODULE_CHILD_ROUTES -> InjectedRoute.ModuleSettings
                     currentRoute in AI_CHILD_ROUTES -> InjectedRoute.AiConfigSettings
@@ -631,6 +645,8 @@ class ReaMicroSettingsHook(
                 InjectedRoute.RotationCompletionSettings -> renderRotationCompletionSettingsContent(innerPaddings, innerComposer)
                 InjectedRoute.AccountSwitch -> renderAccountSwitchContent(innerPaddings, innerComposer)
                 InjectedRoute.OnlineCompletionSettings -> renderOnlineCompletionSettingsContent(innerPaddings, innerComposer)
+                InjectedRoute.OnlineDownloadStyleSettings -> renderOnlineDownloadStyleSettingsContent(innerPaddings, innerComposer)
+                is InjectedRoute.OnlineEpubStyleList -> renderOnlineEpubStyleListContent(currentRoute.kind, innerPaddings, innerComposer)
                 InjectedRoute.AiConfigSettings -> renderAiConfigSettingsContent(innerPaddings, innerComposer)
                 InjectedRoute.DictionarySettings -> renderDictionarySettingsContent(innerPaddings, innerComposer)
                 InjectedRoute.DictionaryApiPicker -> renderDictionaryApiPickerContent(innerPaddings, innerComposer)
@@ -669,6 +685,7 @@ class ReaMicroSettingsHook(
             route is InjectedRoute.ReaderBookHighlightRules ||
             route is InjectedRoute.ReaderBookOnlyHighlightRules ||
             route is InjectedRoute.ReaderBookGlobalHighlightRules ||
+            route is InjectedRoute.OnlineEpubStyleList ||
             route == InjectedRoute.FontLibrary ||
             route in MODULE_CHILD_ROUTES ||
             route in READER_CHILD_ROUTES ||
@@ -2608,8 +2625,341 @@ class ReaMicroSettingsHook(
         }
     }
 
-    private fun exportReaderHighlightStyle(style: ReaderHighlightStyle) {
+    /**
+     * 成书样式编辑弹窗。
+     *
+     * 与高亮样式弹窗同一套组件与顺序；差别是 CSS 按选择器分段填写，并用 WebView 做所见即所得预览。
+     */
+    private fun openOnlineEpubStyleDialog(style: OnlineEpubStyle) {
         val activity = activityProvider() ?: return
+        activity.runOnUiThread {
+            runCatching {
+                val colors = SettingsDialogColors(activity)
+                val dialog = Dialog(activity)
+                val card = settingsDialogCard(activity, colors)
+                val nameInput = settingsDialogInput(activity, "样式名称", singleLine = true, colors = colors).apply {
+                    setText(style.name)
+                }
+                var fontSelection = style.fontFamily
+                lateinit var syncFontStatus: () -> Unit
+                lateinit var syncPreview: () -> Unit
+                val fontStatus = settingsDialogFontChoiceRow(activity, "", null, fontSelection, colors) {
+                    openSettingsFontSelectionDialog(
+                        activity = activity,
+                        title = "字体",
+                        currentSelection = fontSelection,
+                        clearTitle = "跟随全局字体",
+                    ) { selection ->
+                        fontSelection = selection
+                        syncFontStatus.invoke()
+                        syncPreview.invoke()
+                    }
+                }
+                // 分段草稿：切走时写回当前段，切入时载入目标段，保证每段都能完整填写。
+                val drafts = LinkedHashMap<String, String>()
+                OnlineEpubStyleDefaults.selectors(style.kind).forEach { drafts[it] = "" }
+                OnlineEpubCssBlocks.parse(style.css.ifBlank { OnlineEpubStyleDefaults.blankCss(style.kind) })
+                    .forEach { drafts[it.selector] = it.declarations }
+                val selectors = drafts.keys.toList()
+                var activeSelector = selectors.firstOrNull().orEmpty()
+                val cssInput = settingsDialogInput(activity, "CSS 声明", singleLine = false, colors = colors).apply {
+                    minLines = 4
+                }
+                val sectionRow = LinearLayout(activity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply { bottomMargin = settingsDp(activity, 8) }
+                }
+                val preview = WebView(activity).apply {
+                    isVerticalScrollBarEnabled = false
+                    setBackgroundColor(Color.TRANSPARENT)
+                    webViewClient = WebViewClient()
+                }
+                fun composedCss(): String =
+                    OnlineEpubCssBlocks.compose(drafts.map { (selector, body) -> OnlineEpubCssBlock(selector, body) })
+                syncPreview = {
+                    preview.loadDataWithBaseURL(
+                        "file:///android_asset/",
+                        onlineEpubStylePreviewHtml(style.kind, composedCss(), fontSelection),
+                        "text/html",
+                        "utf-8",
+                        null,
+                    )
+                }
+                lateinit var syncSectionRow: () -> Unit
+                fun switchSection(selector: String) {
+                    drafts[activeSelector] = cssInput.text?.toString().orEmpty().trim()
+                    activeSelector = selector
+                    cssInput.setText(drafts[selector].orEmpty())
+                    cssInput.hint = "$selector 的 CSS 声明"
+                    syncSectionRow.invoke()
+                    syncPreview.invoke()
+                }
+                syncSectionRow = {
+                    sectionRow.removeAllViews()
+                    selectors.forEach { selector ->
+                        sectionRow.addView(
+                            onlineEpubStyleSectionChip(
+                                activity = activity,
+                                text = OnlineEpubStyleDefaults.sectionLabel(style.kind, selector),
+                                selected = selector == activeSelector,
+                                colors = colors,
+                            ) { switchSection(selector) },
+                        )
+                    }
+                }
+                syncFontStatus = {
+                    fontStatus.text = "字体：${dialogueHighlightFontSummary(fontSelection)}"
+                    fontStatus.typeface = androidTypefaceForFontSelection(fontSelection) ?: Typeface.DEFAULT
+                }
+                cssInput.addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                        drafts[activeSelector] = s?.toString().orEmpty().trim()
+                        schedulePreviewRefresh(preview) { syncPreview.invoke() }
+                    }
+                    override fun afterTextChanged(s: Editable?) = Unit
+                })
+                val applyButton = settingsDialogButton(activity, "设为当前", colors, SettingsDialogButtonRole.Neutral)
+                val finishButton = settingsDialogButton(activity, "完成", colors)
+                val deleteButton = settingsDialogButton(activity, "删除", colors, SettingsDialogButtonRole.Destructive)
+                val cancelButton = settingsDialogButton(activity, "取消", colors, SettingsDialogButtonRole.Neutral)
+                card.addView(settingsDialogTitle(activity, style.kind.title, colors))
+                card.addView(nameInput)
+                syncFontStatus.invoke()
+                card.addView(fontStatus)
+                card.addView(sectionRow)
+                card.addView(cssInput)
+                card.addView(
+                    preview,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        settingsDp(activity, 240),
+                    ).apply { bottomMargin = settingsDp(activity, 8) },
+                )
+                if (style.kind == OnlineEpubStyleKind.Header) {
+                    card.addView(
+                        settingsDialogHint(activity, "头图样式暂不写入成书，仅保存配置与预览。", colors),
+                    )
+                }
+                val buttons = if (style.builtIn) {
+                    listOf(applyButton, finishButton, cancelButton)
+                } else {
+                    listOf(deleteButton, applyButton, finishButton, cancelButton)
+                }
+                card.addView(settingsDialogButtonRow(activity, buttons))
+                switchSection(activeSelector)
+                fun edited(): OnlineEpubStyle {
+                    drafts[activeSelector] = cssInput.text?.toString().orEmpty().trim()
+                    return style.copy(
+                        name = nameInput.text?.toString()?.trim().orEmpty().ifBlank { style.name },
+                        css = composedCss(),
+                        fontFamily = fontSelection,
+                    )
+                }
+                applyButton.setOnClickListener {
+                    val next = edited()
+                    saveOnlineEpubStyle(next)
+                    OnlineEpubStyleStore.select(onlineEpubStyleContext(), next.kind, next.id)
+                    bumpOnlineEpubStyleVersion()
+                    showToast("已设为当前${next.kind.title}")
+                }
+                finishButton.setOnClickListener {
+                    saveOnlineEpubStyle(edited())
+                    bumpOnlineEpubStyleVersion()
+                    dialog.dismiss()
+                }
+                deleteButton.setOnClickListener {
+                    OnlineEpubStyleStore.remove(onlineEpubStyleContext(), style.id)
+                    bumpOnlineEpubStyleVersion()
+                    dialog.dismiss()
+                }
+                cancelButton.setOnClickListener { dialog.dismiss() }
+                showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, 0.92f)
+            }.onFailure {
+                showToast("打开样式配置失败")
+                XposedBridge.log("$LOG_PREFIX open online epub style dialog failed: ${it.stackTraceToString()}")
+            }
+        }
+    }
+
+    /** 分段切换按钮，选中态复用设置弹窗的圆角背景。 */
+    private fun onlineEpubStyleSectionChip(
+        activity: Activity,
+        text: String,
+        selected: Boolean,
+        colors: SettingsDialogColors,
+        onClick: () -> Unit,
+    ): TextView =
+        TextView(activity).apply {
+            this.text = text
+            textSize = 13f
+            setTextColor(if (selected) colors.primaryText else colors.body)
+            setSingleLine(true)
+            setPadding(
+                settingsDp(activity, 12),
+                settingsDp(activity, 6),
+                settingsDp(activity, 12),
+                settingsDp(activity, 6),
+            )
+            background = settingsRoundedRect(
+                if (selected) colors.primarySoft else Color.TRANSPARENT,
+                settingsDp(activity, 14),
+                colors.border,
+            )
+            setOnClickListener { onClick() }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { rightMargin = settingsDp(activity, 8) }
+        }
+
+    /** CSS 输入是逐字触发的，合并 250ms 内的多次输入再刷新预览。 */
+    private fun schedulePreviewRefresh(preview: WebView, refresh: () -> Unit) {
+        preview.removeCallbacks(pendingOnlineEpubPreviewRefresh)
+        pendingOnlineEpubPreviewRefresh = Runnable { runCatching(refresh) }
+        preview.postDelayed(pendingOnlineEpubPreviewRefresh, ONLINE_EPUB_PREVIEW_DEBOUNCE_MS)
+    }
+
+    /** 预览文档：与成书同样的正文结构 + 当前编辑中的 CSS，字体走 file:// 直读设备字体。 */
+    private fun onlineEpubStylePreviewHtml(
+        kind: OnlineEpubStyleKind,
+        css: String,
+        fontSelection: String,
+    ): String {
+        val fontFile = File(fontSelection)
+        val fontCss = when {
+            fontSelection.isBlank() -> ""
+            fontFile.isFile -> "@font-face{font-family:\"rm-preview-font\";src:url(\"file://${fontFile.absolutePath}\");}\n" +
+                "body{font-family:\"rm-preview-font\",serif;}"
+            else -> "body{font-family:\"$fontSelection\",serif;}"
+        }
+        return """<!DOCTYPE html><html><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<style>
+html,body{margin:0;padding:12px;background:transparent;color:#1f2937;font-size:15px;line-height:1.5;}
+p{margin:0.6em 0;text-indent:2em;}
+img{max-width:100%;height:auto;}
+$fontCss
+$css
+</style></head><body>${OnlineEpubStyleDefaults.previewBody(kind)}</body></html>"""
+    }
+
+    private fun onlineEpubStyleContext(): Context? =
+        activityProvider()?.applicationContext ?: activityProvider()
+
+    /** 触发批量重写：耗时在后台完成，结果用 toast 回报。 */
+    private fun applyOnlineEpubStylesToDownloadedBooks() {
+        showToast("正在应用到已下载图书…")
+        runCatching {
+            applyOnlineEpubStyles { message -> showToast(message) }
+        }.onFailure {
+            showToast("应用样式失败")
+            XposedBridge.log("$LOG_PREFIX apply online epub styles failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun onlineEpubStyleSettings(): OnlineEpubStyleSettings =
+        OnlineEpubStyleStore.read(onlineEpubStyleContext())
+
+    private fun saveOnlineEpubStyle(style: OnlineEpubStyle) {
+        OnlineEpubStyleStore.save(onlineEpubStyleContext(), style)
+    }
+
+    private fun newOnlineEpubStyle(kind: OnlineEpubStyleKind): OnlineEpubStyle {
+        val index = onlineEpubStyleSettings().byKind(kind).size + 1
+        return OnlineEpubStyle(
+            id = "${kind.id}-custom-${System.currentTimeMillis().toString(36)}",
+            kind = kind,
+            name = "${kind.title} $index",
+            css = OnlineEpubStyleDefaults.blankCss(kind),
+        )
+    }
+
+    private fun onlineEpubStyleSummary(style: OnlineEpubStyle): String {
+        val font = style.fontFamily.takeIf { it.isNotBlank() }?.let { "字体 ${dialogueHighlightFontSummary(it)}" }
+        val description = style.description.takeIf { it.isNotBlank() }
+            ?: "${OnlineEpubCssBlocks.parse(style.css).size} 段 CSS"
+        return listOfNotNull(description, font).joinToString(" · ")
+    }
+
+    private fun onlineEpubStyleRowSubtitle(
+        settings: OnlineEpubStyleSettings,
+        kind: OnlineEpubStyleKind,
+    ): String {
+        val name = settings.selected(kind)?.name.orEmpty().ifBlank { "未选择" }
+        return if (kind == OnlineEpubStyleKind.Header) "$name（仅保存，不写入成书）" else name
+    }
+
+    private fun onlineDownloadStyleSummary(): String {
+        val settings = onlineEpubStyleSettings()
+        return OnlineEpubStyleKind.entries.joinToString(" · ") { kind ->
+            settings.selected(kind)?.name.orEmpty().ifBlank { kind.title }
+        }
+    }
+
+    private fun exportOnlineEpubStyle(style: OnlineEpubStyle) {
+        val activity = activityProvider() ?: return
+        runCatching {
+            val fileName = "reamicro_epub_style_${safeDownloadName(style.name)}_" +
+                SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date()) + ".json"
+            writeTextToDownloads(activity, fileName, OnlineEpubStyleStore.styleJson(style).toString(2))
+            showToast("已导出到下载目录：$fileName")
+        }.onFailure {
+            showToast("导出样式失败")
+            XposedBridge.log("$LOG_PREFIX export online epub style failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun openOnlineEpubStyleImportPicker() {
+        val activity = activityProvider() ?: return
+        runCatching {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/json", "text/plain", "*/*"))
+            }
+            activity.startActivityForResult(intent, ONLINE_EPUB_STYLE_DOCUMENT_REQUEST_CODE)
+        }.onFailure {
+            showToast("打开样式导入失败")
+            XposedBridge.log("$LOG_PREFIX open online epub style import failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun importOnlineEpubStyleFromUri(activity: Activity, uri: Uri) {
+        runCatching {
+            val bytes = activity.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: error("读取样式文件失败")
+            val style = OnlineEpubStyleStore.styleFromJson(JSONObject(bytes.toString(Charsets.UTF_8)))
+                ?: error("样式文件格式不正确")
+            saveOnlineEpubStyle(style)
+            bumpOnlineEpubStyleVersion()
+            showToast("已导入样式：${style.name}")
+        }.onFailure {
+            showToast(it.message ?: "导入样式失败")
+            XposedBridge.log("$LOG_PREFIX import online epub style failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun onlineEpubStyleVersionState(): Any {
+        onlineEpubStyleVersionUiState?.let { return it }
+        return mutableState(0).also { onlineEpubStyleVersionUiState = it }
+    }
+
+    private fun onlineEpubStyleVersionValue(): Int =
+        (onlineEpubStyleVersionState().method0("getValue") as? Number)?.toInt() ?: 0
+
+    private fun bumpOnlineEpubStyleVersion() {
+        val state = onlineEpubStyleVersionState()
+        val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
+        state.javaClass.methods
+            .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+            ?.invoke(state, value + 1)
+    }
+
+    private fun exportReaderHighlightStyle(style: ReaderHighlightStyle) {        val activity = activityProvider() ?: return
         runCatching {
             val fileName = "reamicro_highlight_style_${safeDownloadName(style.name)}_" +
                 SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date()) + ".json"
@@ -4774,7 +5124,17 @@ class ReaMicroSettingsHook(
         val listContent = functionProxy("OnlineCompletionList", FUNCTION1_CLASS) { args ->
             val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
             onlineSourceVersionValue()
+            onlineEpubStyleVersionValue()
             val sources = listOnlineSources()
+            val styleRows = listOf(
+                ActionRow(
+                    key = "online_download_style",
+                    title = ONLINE_DOWNLOAD_STYLE_TITLE,
+                    subtitle = onlineDownloadStyleSummary(),
+                    singleLineSubtitle = true,
+                    onClick = { openNestedInjectedRoute(InjectedRoute.OnlineDownloadStyleSettings) },
+                ),
+            )
             val rows = buildList {
                 add(
                     ActionRow(
@@ -4810,7 +5170,91 @@ class ReaMicroSettingsHook(
                     }
                 }
             }
+            addLazyItem(lazyListScope, ONLINE_DOWNLOAD_STYLE_ENTRY_ITEM_KEY) { itemComposer ->
+                renderHostActionCard(styleRows, itemComposer)
+            }
             addLazyItem(lazyListScope, ONLINE_COMPLETION_CONTENT_ITEM_KEY) { itemComposer ->
+                renderHostActionCard(rows, itemComposer)
+            }
+            targetUnit()
+        }
+        renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    /** 「下载配置」页：五类成书样式各一行，点进去是与高亮样式一致的样式列表。 */
+    private fun renderOnlineDownloadStyleSettingsContent(innerPaddings: Any, composer: Any) {
+        val listContent = functionProxy("OnlineDownloadStyleList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            onlineEpubStyleVersionValue()
+            fontLibraryVersionValue()
+            val styleSettings = onlineEpubStyleSettings()
+            val rows = OnlineEpubStyleKind.entries.map { kind ->
+                ActionRow(
+                    key = "online_epub_style_${kind.id}",
+                    title = kind.title,
+                    subtitle = onlineEpubStyleRowSubtitle(styleSettings, kind),
+                    singleLineSubtitle = true,
+                    onClick = { openNestedInjectedRoute(InjectedRoute.OnlineEpubStyleList(kind)) },
+                )
+            }
+            val actionRows = listOf(
+                ActionRow(
+                    key = "online_epub_style_apply_all",
+                    title = "应用到已下载图书",
+                    subtitle = "把当前样式重新写入所有在线补全生成的图书",
+                    singleLineSubtitle = true,
+                    onClick = ::applyOnlineEpubStylesToDownloadedBooks,
+                ),
+            )
+            addLazyItem(lazyListScope, ONLINE_DOWNLOAD_STYLE_CONTENT_ITEM_KEY) { itemComposer ->
+                renderHostActionCard(rows, itemComposer)
+            }
+            addLazyItem(lazyListScope, ONLINE_DOWNLOAD_STYLE_ACTION_ITEM_KEY) { itemComposer ->
+                renderHostActionCard(actionRows, itemComposer)
+            }
+            targetUnit()
+        }
+        renderHostLazyColumn(innerPaddings, listContent, composer)
+    }
+
+    /** 某一类成书样式的列表页：结构与「高亮样式」页一致。 */
+    private fun renderOnlineEpubStyleListContent(
+        kind: OnlineEpubStyleKind,
+        innerPaddings: Any,
+        composer: Any,
+    ) {
+        val listContent = functionProxy("OnlineEpubStyleList", FUNCTION1_CLASS) { args ->
+            val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+            fontLibraryVersionValue()
+            onlineEpubStyleVersionValue()
+            val styleSettings = onlineEpubStyleSettings()
+            val selectedId = styleSettings.selectedId(kind)
+            val rows = buildList {
+                add(
+                    ActionRow(
+                        key = "online_epub_style_add",
+                        title = "添加配置",
+                        subtitle = "新增一组${kind.title}",
+                        singleLineSubtitle = true,
+                        onClick = { openOnlineEpubStyleDialog(newOnlineEpubStyle(kind)) },
+                        onLongClick = ::openOnlineEpubStyleImportPicker,
+                    ),
+                )
+                styleSettings.byKind(kind).forEach { style ->
+                    add(
+                        ActionRow(
+                            key = "online_epub_style_${style.id}",
+                            title = style.name,
+                            subtitle = onlineEpubStyleSummary(style),
+                            trailing = if (style.id == selectedId) "当前" else null,
+                            singleLineSubtitle = true,
+                            onClick = { openOnlineEpubStyleDialog(style) },
+                            onLongClick = { exportOnlineEpubStyle(style) },
+                        ),
+                    )
+                }
+            }
+            addLazyItem(lazyListScope, ONLINE_EPUB_STYLE_LIST_ITEM_KEY) { itemComposer ->
                 renderHostActionCard(rows, itemComposer)
             }
             targetUnit()
@@ -8032,6 +8476,7 @@ class ReaMicroSettingsHook(
                     when (requestCode) {
                         FONT_DOCUMENT_REQUEST_CODE -> copyFontUriToLibrary(activity, uri)
                         HIGHLIGHT_STYLE_DOCUMENT_REQUEST_CODE -> importReaderHighlightStyleFromUri(activity, uri)
+                        ONLINE_EPUB_STYLE_DOCUMENT_REQUEST_CODE -> importOnlineEpubStyleFromUri(activity, uri)
                         HIGHLIGHT_NINE_PATCH_DOCUMENT_REQUEST_CODE -> importHighlightNinePatchFromUri(activity, uri)
                         PROFILE_BACKGROUND_IMAGE_DOCUMENT_REQUEST_CODE -> importProfileBackgroundImageFromUri(activity, uri)
                         ACCOUNT_CREDENTIAL_DOCUMENT_REQUEST_CODE -> importCredentialFromUri(activity, uri)
@@ -9469,6 +9914,8 @@ class ReaMicroSettingsHook(
         object RotationCompletionSettings : InjectedRoute("\u65cb\u8f6c\u8865\u5168")
         object AccountSwitch : InjectedRoute(ACCOUNT_SWITCH_TITLE)
         object OnlineCompletionSettings : InjectedRoute(ONLINE_COMPLETION_TITLE)
+        object OnlineDownloadStyleSettings : InjectedRoute(ONLINE_DOWNLOAD_STYLE_TITLE)
+        data class OnlineEpubStyleList(val kind: OnlineEpubStyleKind) : InjectedRoute(kind.title)
         object AiConfigSettings : InjectedRoute(AI_CONFIG_TITLE)
         object DictionarySettings : InjectedRoute(DICTIONARY_SETTINGS_TITLE)
         object DictionaryApiPicker : InjectedRoute("\u0041\u0050\u0049 \u914d\u7f6e")
@@ -9488,6 +9935,7 @@ class ReaMicroSettingsHook(
         InjectedRoute.CloudCompletionSettings,
         InjectedRoute.RotationCompletionSettings,
         InjectedRoute.OnlineCompletionSettings,
+        InjectedRoute.OnlineDownloadStyleSettings,
         InjectedRoute.AiConfigSettings,
         InjectedRoute.FontSettings,
         InjectedRoute.AboutCompletion,
@@ -9899,6 +10347,10 @@ class ReaMicroSettingsHook(
         const val READER_SELECTION_MENU_SETTINGS_ITEM_KEY = 0x524D4681
         const val PROFILE_BACKGROUND_ENABLE_ITEM_KEY = 0x524D4682
         const val PROFILE_BACKGROUND_CONTENT_ITEM_KEY = 0x524D4683
+        const val ONLINE_DOWNLOAD_STYLE_ENTRY_ITEM_KEY = 0x524D4684
+        const val ONLINE_DOWNLOAD_STYLE_CONTENT_ITEM_KEY = 0x524D4685
+        const val ONLINE_DOWNLOAD_STYLE_ACTION_ITEM_KEY = 0x524D4686
+        const val ONLINE_EPUB_STYLE_LIST_ITEM_KEY = 0x524D4687
         const val ACCOUNT_CREDENTIAL_DOCUMENT_REQUEST_CODE = 0x524D47
         const val ACCOUNT_DATA_DOCUMENT_REQUEST_CODE = 0x524D48
         const val ONLINE_SOURCE_DOCUMENT_REQUEST_CODE = 0x524D49
@@ -9906,6 +10358,9 @@ class ReaMicroSettingsHook(
         const val HIGHLIGHT_NINE_PATCH_DOCUMENT_REQUEST_CODE = 0x524D4B
         const val PROFILE_BACKGROUND_IMAGE_DOCUMENT_REQUEST_CODE = 0x524D4C
         const val READ_ALOUD_SOURCE_DOCUMENT_REQUEST_CODE = 0x524D4D
+        const val ONLINE_EPUB_STYLE_DOCUMENT_REQUEST_CODE = 0x524D4E
+        const val ONLINE_DOWNLOAD_STYLE_TITLE = "下载配置"
+        const val ONLINE_EPUB_PREVIEW_DEBOUNCE_MS = 250L
         const val ACCOUNT_RESTART_DELAY_MS = 1_400L
         const val ACCOUNT_RESTART_KILL_DELAY_MS = 250L
         const val ACCOUNT_RESTART_COMMAND_DELAY_SECONDS = "0.8"

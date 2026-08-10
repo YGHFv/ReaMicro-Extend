@@ -1,5 +1,31 @@
 # 更新记录
 
+## 1.4.3 - 2026-08-10
+
+### 在线补全新增「下载配置」：成书样式可自定义
+- 「在线补全」设置页顶部新增独立的**下载配置**入口，点进去可分别配置**标题样式 / 头图样式 / 分割样式 / 卷标样式 / 插图样式**五类。每类的列表页与「高亮样式」页完全一致：首行「添加配置」（点击新建、长按导入 JSON），其下每条样式一行，当前选中项标「当前」，点击编辑、长按导出。
+- 配置弹窗复用高亮样式那一套组件与视觉（`SettingsDialogColors` / `settingsDialogCard` / `settingsDialogInput` / `settingsDialogButtonRow`）。**字体选择与高亮样式保持一致**，同样支持「跟随全局字体」、内置字体与字体库文件。
+- **CSS 分段填写**：弹窗内 CSS 输入框上方是一排可点击的分段切换（标题/卷标为「整体 / 序号 / 内容」，插图为「容器 / 图片 / 图注」，分割为「整体」），点击切换后输入框载入对应选择器的声明块，可分别完整填写；切换时自动保存草稿。
+- **实时预览**：弹窗内嵌 WebView，用与成书完全一致的正文结构渲染当前编辑中的 CSS，输入 250ms 防抖后刷新；选中字体文件时预览通过 `file://` 直读设备字体，与成书效果一致。
+- **内置样式移植自 TEpub-Editor**：7 头图 / 12 标题 / 4 插图 / 5 分割，另由 12 条标题样式派生出 12 条卷标样式（选择器换成卷首页接口），共 40 条。`OnlineEpubStyleLibrary.kt` 由本地脚本 `tools/gen-epub-styles.mjs`（`tools/` 不入库）从 `epubStyleLibrary.ts` 生成，样式 id 与 TEpub 保持一致便于对照。仅样板图工厂产生的头图条目（只有 base64 样板图差异、CSS 相同）未移植。
+- **头图样式只保存不写入成书**：在线补全下载的书没有章节头图来源，该类样式可配置、可预览，为后续接入头图生成预留接口，弹窗内有明确提示。
+
+### 成书标记结构对齐 TEpub 接口
+- 生成端标记全部改为 TEpub-Editor 的标准接口，内置样式因此可以原样套用：
+  - 章节标题 `div.te-chapter-heading > div.te-chapter-number + h1.te-chapter-title` → **`h1.te-chapter-title > span.te-chapter-number + span.te-chapter-name`**
+  - 卷标题 → **`h1.te-volume-title > span.te-volume-number + span.te-volume-name`**（卷首页容器与装饰符不变）
+  - 插图 `div.online-illustration > img` → **`figure.te-illustration > img.te-illustration-image`**
+  - 分割 `p.divider-line` → **`p.te-divider-line fg1`**（双 class 兼容按 `p.fg1` 编写的样式）
+  - 正文段落加上 `class="te-paragraph"`
+- **已下载的书自动迁移**：`syncOnlineCompletionDefaultStyle` 扩展了迁移链路，新增旧标题双层结构、裸 `h1`、旧插图 `div`、旧分割 `p` 四条改写，且对新结构幂等；卷首页文件按内容整份重写自动跟随。基础 CSS 保留 `.online-illustration` 与 `p.divider-line` 作为迁移前的兜底。
+- `Styles/default.css` 不再是写死常量，改由 `OnlineEpubStyleCss.build` 按选中样式拼装：基础排版 + 四类已套用样式 + `@font-face`。整本下载与增量更新两条路径都会生效。
+
+### 样式字体随书嵌入
+- 样式里选中字体库文件时，字体按内容哈希（SHA-1 前 12 位）去重后复制进 `OEBPS/Fonts/`，登记进 `content.opf` manifest，并在 CSS 里生成 `@font-face` 绑定到该类样式的主选择器。同一字体全书只嵌一份，`mimetype` 仍是包内第一个条目。选中「楷体」等内置字体时只写 `font-family` 名不嵌文件。
+
+### 应用到已下载图书
+- 「下载配置」页新增**「应用到已下载图书」**：扫描用户书库中由模块生成的在线补全 EPUB（按 `content.opf` 里的 `reamicro-online-source-id` 识别），在后台线程逐本重写 CSS 并迁移章节结构，完成后 toast 回报处理/更新/失败数量。只改 CSS 与章节正文，不动 spine 与目录，因此无需刷新目录表。不点这个的话，改完样式的书需要点一次「更新」才会生效。
+
 ## 1.4.2 - 2026-08-10
 
 ### 在线补全图书新增卷首页

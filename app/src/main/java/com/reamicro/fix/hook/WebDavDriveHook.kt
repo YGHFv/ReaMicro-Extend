@@ -129,6 +129,12 @@ import com.reamicro.fix.webdav.OnlineOnDemandMetadataStore
 import com.reamicro.fix.webdav.OnlineChapterContentValidator
 import com.reamicro.fix.webdav.OnlineChapterUpdatePlanner
 import com.reamicro.fix.webdav.OnlineChapterHeadingMarkup
+import com.reamicro.fix.webdav.OnlineBodyMarkup
+import com.reamicro.fix.webdav.OnlineEpubFontEmbedder
+import com.reamicro.fix.webdav.OnlineEpubFontFace
+import com.reamicro.fix.webdav.OnlineEpubStyleCss
+import com.reamicro.fix.settings.OnlineEpubStyleSettings
+import com.reamicro.fix.settings.OnlineEpubStyleStore
 import com.reamicro.fix.webdav.OnlineVolumeHeadingMarkup
 import com.reamicro.fix.webdav.RemoteOnlineChapter
 import com.reamicro.fix.webdav.StoredOnlineChapter
@@ -5014,6 +5020,58 @@ class WebDavDriveHook(
                     method.name == "setValue" && method.parameterTypes.size == 1
                 }.apply { isAccessible = true }.invoke(flow, emptyPagingData())
             }
+        }
+    }
+
+    /**
+     * 把当前成书样式重新写入所有由在线补全生成的图书。
+     *
+     * 只重写 Styles/default.css 并做章节结构迁移，不动 spine 与目录，因此无需刷新目录表。
+     * 遍历在后台线程完成，结果通过 [onDone] 回报。
+     */
+    fun applyOnlineEpubStylesToDownloadedBooks(onDone: (String) -> Unit) {
+        Thread {
+            val message = runCatching {
+                val dirs = onlineCompletionBookDirectories()
+                if (dirs.isEmpty()) return@runCatching "没有找到在线补全生成的图书"
+                var updated = 0
+                var failed = 0
+                dirs.forEach { dir ->
+                    runCatching { syncOnlineCompletionDefaultStyle(dir) }
+                        .onSuccess { if (it) updated += 1 }
+                        .onFailure { error ->
+                            failed += 1
+                            logWebDav("online epub style apply failed dir=${dir.absolutePath} error=${error.message.orEmpty()}")
+                        }
+                }
+                logWebDav("online epub style applied books=${dirs.size} updated=$updated failed=$failed")
+                buildString {
+                    append("已处理 ${dirs.size} 本，更新 $updated 本")
+                    if (failed > 0) append("，失败 $failed 本")
+                }
+            }.getOrElse { error ->
+                logWebDav("online epub style apply aborted: ${error.message.orEmpty()}")
+                error.message?.takeIf { it.isNotBlank() } ?: "应用样式失败"
+            }
+            onDone(message)
+        }.start()
+    }
+
+    /** 扫描阅微用户书库目录，挑出模块生成的在线补全 EPUB。 */
+    private fun onlineCompletionBookDirectories(): List<File> {
+        val context = currentApplicationContext() ?: currentContext() ?: return emptyList()
+        val roots = context.filesDir?.listFiles()
+            ?.filter { it.isDirectory }
+            ?.map { File(it, "books") }
+            ?.filter { it.isDirectory }
+            .orEmpty()
+        return roots.flatMap { booksDir ->
+            booksDir.listFiles()?.filter { it.isDirectory }.orEmpty()
+        }.filter { dir ->
+            val opf = File(dir, "OEBPS/content.opf")
+            opf.isFile && runCatching {
+                opf.readText(Charsets.UTF_8).contains("reamicro-online-source-id")
+            }.getOrDefault(false)
         }
     }
 
@@ -9967,13 +10025,20 @@ class WebDavDriveHook(
         onDemandMetadata: OnlineOnDemandMetadata? = null,
     ) {
         ZipOutputStream(file.outputStream().buffered()).use { zip ->
+            val styleSettings = OnlineEpubStyleStore.read(currentApplicationContext() ?: currentContext())
+            // mimetype 必须是 EPUB 包里的第一个条目，字体等其它条目一律排在其后。
             writeStoredTextZipEntry(zip, "mimetype", "application/epub+zip")
+            val fontFaces = writeOnlineCompletionFontEntries(zip, styleSettings)
             writeTextZipEntry(
                 zip,
                 "META-INF/container.xml",
                 """<?xml version="1.0" encoding="UTF-8"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>""",
             )
-            writeTextZipEntry(zip, ONLINE_COMPLETION_DEFAULT_STYLE_PATH, ONLINE_COMPLETION_DEFAULT_CSS)
+            writeTextZipEntry(
+                zip,
+                ONLINE_COMPLETION_DEFAULT_STYLE_PATH,
+                OnlineEpubStyleCss.build(styleSettings, fontFaces),
+            )
             val coverExt = onlineCoverExt(cover)
             cover?.let {
                 writeBytesZipEntry(zip, "OEBPS/Images/cover.$coverExt", it.bytes)
@@ -10003,7 +10068,7 @@ class WebDavDriveHook(
             writeTextZipEntry(
                 zip,
                 "OEBPS/content.opf",
-                onlineContentOpf(target, chapters, coverExt, cover != null, chapterHrefs, contentImages),
+                onlineContentOpf(target, chapters, coverExt, cover != null, chapterHrefs, contentImages, fontFaces.values),
             )
             writeTextZipEntry(
                 zip,
@@ -10608,20 +10673,110 @@ class WebDavDriveHook(
         val rootPrefix = root.path.trimEnd(File.separatorChar) + File.separator
         if (!styleFile.path.startsWith(rootPrefix)) error("EPUB style path escapes book dir")
         styleFile.parentFile?.mkdirs()
-        styleFile.writeText(ONLINE_COMPLETION_DEFAULT_CSS, Charsets.UTF_8)
+        styleFile.writeText(onlineCompletionDefaultCss(root), Charsets.UTF_8)
+    }
+
+    /**
+     * 按用户选中的成书样式拼装 default.css，并把样式选用的字体嵌入书目录。
+     *
+     * 读不到 Context 时回退到内置默认样式，保证下载流程不因设置不可用而中断。
+     */
+    private fun onlineCompletionDefaultCss(bookDir: File?): String {
+        val settings = OnlineEpubStyleStore.read(currentApplicationContext() ?: currentContext())
+        val fontFaces = bookDir?.let { embedOnlineCompletionFonts(it, settings) }.orEmpty()
+        return OnlineEpubStyleCss.build(settings, fontFaces)
+    }
+
+    /** 收集参与成书的样式所选字体，去重后写入书目录并登记到 manifest。 */
+    private fun embedOnlineCompletionFonts(
+        bookDir: File,
+        settings: OnlineEpubStyleSettings,
+    ): Map<String, OnlineEpubFontFace> {
+        val faces = onlineCompletionFontFaces(settings)
+        if (faces.isEmpty()) return emptyMap()
+        val root = bookDir.canonicalFile
+        val rootPrefix = root.path.trimEnd(File.separatorChar) + File.separator
+        val fontsDir = File(root, "OEBPS/Fonts").canonicalFile
+        if (!fontsDir.path.startsWith(rootPrefix)) error("EPUB Fonts directory escapes book dir")
+        val embedded = LinkedHashMap<String, OnlineEpubFontFace>()
+        faces.forEach { (styleId, entry) ->
+            val (face, sourceFile) = entry
+            val target = File(root, "OEBPS/" + OnlineEpubFontEmbedder.manifestHref(face))
+            val copied = runCatching {
+                if (!target.isFile || target.length() != sourceFile.length()) {
+                    fontsDir.mkdirs()
+                    sourceFile.copyTo(target, overwrite = true)
+                }
+                true
+            }.getOrElse { error ->
+                logWebDav("online completion font embed failed font=${sourceFile.name} error=${error.message.orEmpty()}")
+                false
+            }
+            if (copied) embedded[styleId] = face
+        }
+        if (embedded.isEmpty()) return emptyMap()
+        val opfFile = File(root, "OEBPS/content.opf")
+        if (opfFile.isFile) {
+            val original = opfFile.readText(Charsets.UTF_8)
+            val merged = OnlineEpubFontEmbedder.mergeManifest(original, embedded.values)
+            if (merged != original) writeOnlineCompletionTextAtomically(opfFile, merged)
+        }
+        return embedded
+    }
+
+    /** 整本下载时把样式所选字体直接写进 EPUB 包，返回样式 id 到字体的映射。 */
+    private fun writeOnlineCompletionFontEntries(
+        zip: ZipOutputStream,
+        settings: OnlineEpubStyleSettings,
+    ): Map<String, OnlineEpubFontFace> {
+        val embedded = LinkedHashMap<String, OnlineEpubFontFace>()
+        val written = HashSet<String>()
+        onlineCompletionFontFaces(settings).forEach { (styleId, entry) ->
+            val (face, sourceFile) = entry
+            val path = "OEBPS/" + OnlineEpubFontEmbedder.manifestHref(face)
+            val ok = runCatching {
+                if (written.add(path)) writeBytesZipEntry(zip, path, sourceFile.readBytes())
+                true
+            }.getOrElse { error ->
+                logWebDav("online completion font pack failed font=${sourceFile.name} error=${error.message.orEmpty()}")
+                false
+            }
+            if (ok) embedded[styleId] = face
+        }
+        return embedded
+    }
+
+    /** 参与成书的四类样式里选中的字体文件，key 为样式 id。 */
+    private fun onlineCompletionFontFaces(
+        settings: OnlineEpubStyleSettings,
+    ): Map<String, Pair<OnlineEpubFontFace, File>> {
+        val result = LinkedHashMap<String, Pair<OnlineEpubFontFace, File>>()
+        OnlineEpubStyleCss.APPLIED_KINDS.forEach { kind ->
+            val style = settings.selected(kind) ?: return@forEach
+            val path = style.fontFamily.trim()
+            if (path.isBlank() || !path.contains(File.separatorChar) && !path.contains('/')) return@forEach
+            val face = OnlineEpubFontEmbedder.faceFor(path) ?: return@forEach
+            result[style.id] = face to File(path)
+        }
+        return result
     }
 
     private fun syncOnlineCompletionDefaultStyle(bookDir: File): Boolean {
         val root = bookDir.canonicalFile
         var changed = false
+        val nextCss = onlineCompletionDefaultCss(root)
         val styleFile = File(root, ONLINE_COMPLETION_DEFAULT_STYLE_PATH)
-        if (!styleFile.isFile || styleFile.readText(Charsets.UTF_8) != ONLINE_COMPLETION_DEFAULT_CSS) {
-            writeOnlineCompletionDefaultStyle(root)
+        if (!styleFile.isFile || styleFile.readText(Charsets.UTF_8) != nextCss) {
+            styleFile.parentFile?.mkdirs()
+            styleFile.writeText(nextCss, Charsets.UTF_8)
             changed = true
         }
         val textDir = File(root, "OEBPS/Text")
         textDir.listFiles()
-            ?.filter { ONLINE_COMPLETION_CHAPTER_FILE_REGEX.matches(it.name) }
+            ?.filter {
+                ONLINE_COMPLETION_CHAPTER_FILE_REGEX.matches(it.name) ||
+                    ONLINE_COMPLETION_VOLUME_FILE_REGEX.matches(it.name)
+            }
             ?.forEach { chapterFile ->
                 val original = chapterFile.readText(Charsets.UTF_8)
                 val migrated = migrateOnlineCompletionChapterStyle(original)
@@ -10664,17 +10819,24 @@ class WebDavDriveHook(
                 "<link rel=\"stylesheet\" type=\"text/css\" href=\"../Styles/default.css\"/></head>",
             )
         }
+        // 先整体改写旧的 div.te-chapter-heading 双层结构：其序号在 h1 之外，只看 h1 内容拆不出来。
+        result = OnlineChapterHeadingMarkup.migrateLegacyHeadingBlock(result)
         result = ONLINE_COMPLETION_CHAPTER_HEADING_HTML_REGEX.replace(result) { match ->
             val attributes = match.groupValues[1]
             val content = match.groupValues[2]
+            if (content.contains("te-chapter-name") || content.contains("te-volume-name")) return@replace match.value
             OnlineChapterHeadingMarkup.migrateSplit(content)?.let { return@replace it }
+            if (attributes.contains("te-volume-title", ignoreCase = true)) {
+                return@replace "<h1$attributes><span class=\"te-volume-name\">$content</span></h1>"
+            }
             val nextAttributes = if (attributes.contains("class=", ignoreCase = true)) {
                 attributes
             } else {
                 "$attributes class=\"te-chapter-title\""
             }
-            "<h1$nextAttributes>$content</h1>"
+            "<h1$nextAttributes><span class=\"te-chapter-name\">$content</span></h1>"
         }
+        result = OnlineBodyMarkup.migrateLegacyBody(result)
         return result
     }
 
@@ -10702,10 +10864,10 @@ $paragraphs
         OnlineChapterImageMarkup.markerUrl(line)?.let { url ->
             val fileName = imageHrefs[url]
             val src = if (fileName != null) "../Images/$fileName" else url
-            return "<div class=\"online-illustration\"><img src=\"${src.xmlEscape()}\" alt=\"\"/></div>"
+            return OnlineBodyMarkup.illustration(src.xmlEscape())
         }
-        val cssClass = if (ONLINE_DIVIDER_LINE_REGEX.matches(line)) " class=\"divider-line\"" else ""
-        return "<p$cssClass>${line.xmlEscape()}</p>"
+        if (ONLINE_DIVIDER_LINE_REGEX.matches(line)) return OnlineBodyMarkup.divider(line.xmlEscape())
+        return OnlineBodyMarkup.paragraph(line.xmlEscape())
     }
 
     private fun stripDuplicatedChapterTitle(title: String, lines: List<String>): List<String> {
@@ -10971,6 +11133,7 @@ $points  </navMap>
         hasCover: Boolean,
         chapterHrefs: List<String> = defaultOnlineChapterHrefs(chapters.size),
         contentImages: List<OnlineContentImage> = emptyList(),
+        fontFaces: Collection<OnlineEpubFontFace> = emptyList(),
     ): String {
         val manifestChapters = chapters.indices.joinToString("\n") { index ->
             val order = index + 1
@@ -10992,6 +11155,9 @@ $points  </navMap>
         val imageManifest = contentImages.mapIndexed { index, image ->
             """    <item id="online-img-${index + 1}" href="Images/${image.fileName.xmlEscape()}" media-type="${image.mimeType}"/>"""
         }.joinToString("\n")
+        val fontManifest = fontFaces.distinctBy { it.family }.joinToString("\n") { face ->
+            """    <item id="${face.family}" href="${OnlineEpubFontEmbedder.manifestHref(face)}" media-type="${OnlineEpubFontEmbedder.mediaType(face)}"/>"""
+        }
         val coverManifest = if (hasCover) {
             listOf(
                 """    <item id="cover-image" href="Images/cover.$coverExt" media-type="${coverMimeType(coverExt)}" properties="cover-image"/>""",
@@ -11006,6 +11172,7 @@ $points  </navMap>
             """    <item id="source-chapter-index" href="$ONLINE_COMPLETION_CHAPTER_INDEX" media-type="application/json"/>""",
             coverManifest,
             imageManifest,
+            fontManifest,
             manifestVolumes,
             manifestChapters,
         ).filter { it.isNotBlank() }.joinToString("\n")
@@ -14139,122 +14306,6 @@ img{max-width:100%;max-height:100%;height:auto;}
         const val ONLINE_COMPLETION_CACHE_ROOT = "reamicro-online-completion"
         const val ONLINE_COMPLETION_DEFAULT_STYLE_PATH = "OEBPS/Styles/default.css"
         const val ONLINE_COMPLETION_CHAPTER_INDEX = "reamicro-online-chapters.json"
-        val ONLINE_COMPLETION_DEFAULT_CSS = """
-            /* 正文页面 */
-            body {
-                font-family: "楷体", serif;
-                line-height: 130%;
-                margin-left: 1%;
-                margin-right: 1%;
-                text-align: justify;
-                background-color: transparent;
-            }
-
-            /* 正文段落 */
-            p {
-                font-family: "楷体", serif;
-                line-height: 130%;
-                margin-left: 1%;
-                margin-right: 1%;
-                text-align: justify;
-                text-indent: 2em;
-            }
-
-            /* 正文插图 */
-            .online-illustration {
-                margin: 0.8em 0;
-                text-align: center;
-                text-indent: 0;
-            }
-            .online-illustration img {
-                max-width: 100%;
-                height: auto;
-            }
-
-            /* 章节标题 */
-            .te-chapter-heading {
-                text-align: center;
-                margin: 3em 0 2em 0;
-            }
-
-            .te-chapter-title {
-                font-family: "宋体", serif;
-                font-size: 1.2em;
-                color: #c2181e;
-                text-align: center;
-                font-weight: 900;
-                margin: 3em 0 2em 0;
-            }
-
-            .te-chapter-heading .te-chapter-title {
-                margin: 0;
-            }
-
-            /* 章节序号 */
-            .te-chapter-number {
-                font-family: "宋体", serif;
-                font-size: 0.8em;
-                color: #413245;
-                line-height: 130%;
-                font-weight: 900;
-                padding: 0;
-            }
-
-            .te-chapter-heading .te-chapter-number {
-                display: block;
-                text-align: center;
-                margin: 0;
-            }
-
-            /* 分割线 */
-            p.divider-line {
-                text-align: center;
-                text-indent: 0;
-                margin: 1em 0;
-                padding: 0;
-                line-height: 130%;
-            }
-
-            /* 卷首页 */
-            .te-volume-page {
-                text-align: center;
-                margin: 5em 0 0 0;
-            }
-
-            /* 卷首页装饰符 */
-            .te-volume-ornament {
-                text-align: center;
-                text-indent: 0;
-                font-size: 1em;
-                color: #8c7b5a;
-                line-height: 130%;
-                margin: 0 0 2em 0;
-            }
-
-            /* 卷序号 */
-            .te-volume-number {
-                font-family: "宋体", serif;
-                font-size: 0.9em;
-                color: #413245;
-                line-height: 140%;
-                font-weight: 900;
-                display: block;
-                text-align: center;
-                margin: 0 0 0.8em 0;
-                padding: 0;
-            }
-
-            /* 卷名 */
-            .te-volume-title {
-                font-family: "宋体", serif;
-                font-size: 1.5em;
-                color: #c2181e;
-                text-align: center;
-                font-weight: 900;
-                line-height: 150%;
-                margin: 0;
-            }
-        """.trimIndent()
         const val ONLINE_COMPLETION_FAILED_CHAPTER_LOG = "reamicro-online-failed-chapters.json"
         const val ONLINE_COMPLETION_NOTIFICATION_CHANNEL = "reamicro_online_completion_download"
         const val MODULE_PACKAGE_NAME = "com.reamicro.fix"

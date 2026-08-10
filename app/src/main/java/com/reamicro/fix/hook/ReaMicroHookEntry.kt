@@ -75,6 +75,9 @@ class ReaMicroHookEntry {
             settingsProvider = moduleSettings::snapshot,
             fontSettingsProvider = moduleSettings::fontSettings,
         ).install()
+        // 设置页的「下载配置 → 应用到已下载图书」要调用 WebDavDriveHook，而后者在下面才创建，
+        // 这里先留一个可变引用，等实例就绪后再回填。
+        var webDavDriveHookRef: WebDavDriveHook? = null
         ReaMicroSettingsHook(
             classLoader = classLoader,
             activityProvider = { currentActivityRef?.get() },
@@ -82,6 +85,10 @@ class ReaMicroHookEntry {
             onGlobalFontChanged = {
                 globalFontHook.invalidateGlobalFontCache()
                 refreshCurrentActivityForGlobalFont()
+            },
+            applyOnlineEpubStyles = { onDone ->
+                val hook = webDavDriveHookRef
+                if (hook == null) onDone("在线补全服务暂不可用") else hook.applyOnlineEpubStylesToDownloadedBooks(onDone)
             },
         ).install()
         AssociationSearchHook(
@@ -122,6 +129,7 @@ class ReaMicroHookEntry {
             settingsProvider = moduleSettings::snapshot,
         )
         webDavDriveHook.install()
+        webDavDriveHookRef = webDavDriveHook
         hookMainActivity(
             classLoader = classLoader,
             webDavDriveHook = webDavDriveHook,
