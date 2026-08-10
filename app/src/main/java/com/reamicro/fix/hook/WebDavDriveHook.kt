@@ -34,6 +34,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import com.reamicro.fix.hook.webdav.*
+import com.reamicro.fix.logging.logWebDav
 
 /**
  * Cloud/local-library integration hook.

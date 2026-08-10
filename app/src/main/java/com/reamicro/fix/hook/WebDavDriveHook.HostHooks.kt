@@ -20,6 +20,17 @@ import java.net.URL
 import java.util.UUID
 import kotlin.math.max
 import com.reamicro.fix.hook.webdav.*
+import com.reamicro.fix.online.search.sanitizeHostCloudSearchResults
+import com.reamicro.fix.cloud.local.localLibraryPathArg
+import com.reamicro.fix.cloud.local.syntheticLocalLibraryBookEntry
+import com.reamicro.fix.cloud.webdav.webDavDisplayDir
+import com.reamicro.fix.cloud.webdav.hasWebDavLogin
+import com.reamicro.fix.cloud.webdav.webDavPathArg
+import com.reamicro.fix.cloud.webdav.childWebDavPath
+import com.reamicro.fix.cloud.webdav.normalizeWebDavPath
+import com.reamicro.fix.cloud.webdav.parentWebDavPath
+import com.reamicro.fix.cloud.webdav.syntheticWebDavBookEntry
+import com.reamicro.fix.logging.logWebDav
 
 // WebDavDriveHook 的宿主 hook 安装簇。
 //

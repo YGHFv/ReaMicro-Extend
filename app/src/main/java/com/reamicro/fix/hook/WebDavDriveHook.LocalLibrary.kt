@@ -22,6 +22,18 @@ import java.lang.ref.WeakReference
 import java.util.Locale
 import java.util.UUID
 import com.reamicro.fix.hook.webdav.*
+import com.reamicro.fix.online.download.importCacheFile
+import com.reamicro.fix.online.download.enqueueNativeImport
+import com.reamicro.fix.cloud.local.localLibraryBookUrl
+import com.reamicro.fix.cloud.local.localDocumentUri
+import com.reamicro.fix.cloud.local.localLibraryReadablePath
+import com.reamicro.fix.cloud.local.localLibraryPathArg
+import com.reamicro.fix.cloud.local.localLibraryPrefs
+import com.reamicro.fix.cloud.local.queryDocumentName
+import com.reamicro.fix.cloud.local.encodeLocalLibraryPath
+import com.reamicro.fix.cloud.local.decodeLocalLibraryPath
+import com.reamicro.fix.cloud.local.queryDocumentEntry
+import com.reamicro.fix.logging.logWebDav
 
 // WebDavDriveHook 的本地书库簇。
 //
@@ -597,30 +609,6 @@ internal fun WebDavDriveHook.newLocalLibraryCloudBook(entry: LocalLibraryEntry):
     )
 }
 
-internal fun WebDavDriveHook.syntheticLocalLibraryBookEntry(path: String): LocalLibraryEntry =
-    LocalLibraryEntry(
-        name = path.substringAfterLast(':').decodeLocalPathPart().substringAfterLast('/').ifBlank { LOCAL_LIBRARY_TITLE },
-        path = path,
-        treeUri = "",
-        documentId = "",
-        isDirectory = false,
-        size = 0L,
-        updatedAt = System.currentTimeMillis(),
-    )
-
-internal fun WebDavDriveHook.localLibraryBookUrl(path: String): String =
-    LOCAL_LIBRARY_SOURCE_PREFIX + path
-
-internal fun WebDavDriveHook.localLibraryPrefs(context: Context?): android.content.SharedPreferences? {
-    val appContext = context ?: runCatching {
-        Class.forName("android.app.ActivityThread")
-            .getDeclaredMethod("currentApplication")
-            .apply { isAccessible = true }
-            .invoke(null) as? Context
-    }.getOrNull()?.applicationContext
-    return appContext?.getSharedPreferences(LOCAL_LIBRARY_PREFS, Context.MODE_PRIVATE)
-}
-
 internal fun WebDavDriveHook.currentLocalLibraryBrowseDir(): String =
     localLibraryPrefs(activityProvider())?.getString(KEY_LOCAL_BROWSE_DIR, LOCAL_LIBRARY_ROOT_PATH)
         ?.ifBlank { LOCAL_LIBRARY_ROOT_PATH }
@@ -661,11 +649,6 @@ internal fun WebDavDriveHook.saveLocalLibraryOrderDirection(value: String) {
         ?.putString(KEY_LOCAL_ORDER_DIRECTION, normalized)
         ?.apply()
 }
-
-internal fun WebDavDriveHook.localLibraryPathArg(path: String): String =
-    path.ifBlank { LOCAL_LIBRARY_ROOT_PATH }.let {
-        if (it == "root" || it == "/") LOCAL_LIBRARY_ROOT_PATH else it
-    }
 
 internal fun WebDavDriveHook.localLibraryFolderUris(): List<String> =
     localLibraryPrefs(activityProvider())
@@ -767,25 +750,6 @@ internal fun WebDavDriveHook.localLibraryRoots(): List<LocalLibraryEntry> {
             updatedAt = System.currentTimeMillis(),
         )
     }.sortedBy { it.name.lowercase(Locale.ROOT) }
-}
-
-internal fun WebDavDriveHook.localLibraryReadablePath(entry: LocalLibraryEntry): String =
-    localLibraryReadablePath(entry.treeUri, entry.documentId).ifBlank { entry.name }
-
-internal fun WebDavDriveHook.localLibraryReadablePath(treeUri: String, documentId: String): String {
-    val cleanId = documentId.replace('\\', '/')
-    return when {
-        cleanId.startsWith("primary:", ignoreCase = true) ->
-            "0/" + cleanId.substringAfter(':').trim('/').ifBlank { "" }
-        cleanId.startsWith("home:", ignoreCase = true) ->
-            "/Documents/" + cleanId.substringAfter(':').trim('/').ifBlank { "" }
-        cleanId.contains(':') ->
-            "/" + cleanId.substringAfter(':').trim('/').ifBlank { cleanId.substringBefore(':') }
-        cleanId.isNotBlank() -> "/$cleanId"
-        else -> Uri.parse(treeUri).lastPathSegment.orEmpty()
-    }.replace("//", "/").trimEnd('/').let { path ->
-        if (path == "0") "0/" else path.ifBlank { "/" }
-    }
 }
 
 internal fun WebDavDriveHook.sortLocalLibraryEntries(entries: List<LocalLibraryEntry>): List<LocalLibraryEntry> =
@@ -925,62 +889,6 @@ internal fun WebDavDriveHook.parentLocalLibraryPath(path: String): String {
     val parentId = decoded.documentId.substringBeforeLast('/', missingDelimiterValue = root.documentId)
     return encodeLocalLibraryPath(decoded.treeUri, parentId)
 }
-
-internal fun WebDavDriveHook.queryDocumentEntry(context: Context, documentUri: Uri, treeUri: String, documentId: String): LocalLibraryEntry? {
-    val projection = arrayOf(
-        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-        DocumentsContract.Document.COLUMN_MIME_TYPE,
-        DocumentsContract.Document.COLUMN_SIZE,
-        DocumentsContract.Document.COLUMN_LAST_MODIFIED,
-    )
-    return runCatching {
-        context.contentResolver.query(documentUri, projection, null, null, null)?.use { cursor ->
-            if (!cursor.moveToFirst()) return@use null
-            val name = cursor.stringAt(cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME))
-            val mime = cursor.stringAt(cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE))
-            LocalLibraryEntry(
-                name = name.ifBlank { LOCAL_LIBRARY_TITLE },
-                path = encodeLocalLibraryPath(treeUri, documentId),
-                treeUri = treeUri,
-                documentId = documentId,
-                isDirectory = mime == DocumentsContract.Document.MIME_TYPE_DIR,
-                size = cursor.longAt(cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)),
-                updatedAt = cursor.longAt(cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED))
-                    .takeIf { it > 0L } ?: System.currentTimeMillis(),
-            )
-        }
-    }.getOrNull()
-}
-
-internal fun WebDavDriveHook.queryDocumentName(context: Context, documentUri: Uri): String =
-    runCatching {
-        context.contentResolver.query(
-            documentUri,
-            arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
-            null,
-            null,
-            null,
-        )?.use { cursor ->
-            if (cursor.moveToFirst()) cursor.stringAt(cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)) else ""
-        }.orEmpty()
-    }.getOrDefault("")
-
-internal fun WebDavDriveHook.encodeLocalLibraryPath(treeUri: String, documentId: String): String =
-    "$LOCAL_LIBRARY_PATH_PREFIX${treeUri.localPathPart()}:${documentId.localPathPart()}"
-
-internal fun WebDavDriveHook.decodeLocalLibraryPath(path: String): LocalLibraryPath? {
-    if (!path.startsWith(LOCAL_LIBRARY_PATH_PREFIX)) return null
-    val body = path.removePrefix(LOCAL_LIBRARY_PATH_PREFIX)
-    val parts = body.split(':', limit = 2)
-    if (parts.size != 2) return null
-    return LocalLibraryPath(
-        treeUri = parts[0].decodeLocalPathPart(),
-        documentId = parts[1].decodeLocalPathPart(),
-    )
-}
-
-internal fun WebDavDriveHook.localDocumentUri(entry: LocalLibraryEntry): Uri =
-    DocumentsContract.buildDocumentUriUsingTree(Uri.parse(entry.treeUri), entry.documentId)
 
 internal fun WebDavDriveHook.pushLocalLibraryIcon() {
     localLibraryIconDepth.set((localLibraryIconDepth.get() ?: 0) + 1)

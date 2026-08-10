@@ -25,6 +25,9 @@ tools/*
 !tools/hoist-nested-types.mjs
 !tools/hoist-member-extensions.mjs
 !tools/split-webdav-drive-hook.mjs
+!tools/find-pure-functions.mjs
+!tools/extract-engine.mjs
+!tools/fix-imports.mjs
 decompiled/
 dex_tmp/
 base_decompiled/

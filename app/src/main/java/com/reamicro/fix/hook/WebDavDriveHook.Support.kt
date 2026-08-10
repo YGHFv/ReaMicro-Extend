@@ -51,6 +51,26 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import org.json.JSONObject
 import com.reamicro.fix.hook.webdav.*
+import com.reamicro.fix.online.epub.onlineImportedBookBackupId
+import com.reamicro.fix.online.search.onlineFirstJsonString
+import com.reamicro.fix.online.search.homeCloudSearchResults
+import com.reamicro.fix.online.search.onlineCompletionSearchMetaLine
+import com.reamicro.fix.online.search.sourceBaseUrl
+import com.reamicro.fix.online.search.parseOnlineJsonRoot
+import com.reamicro.fix.online.search.onlineJsonString
+import com.reamicro.fix.online.download.ensureNcxSpineToc
+import com.reamicro.fix.online.download.onlineChapterUpdatePlan
+import com.reamicro.fix.online.download.readOnlineCompletionFailedChapters
+import com.reamicro.fix.online.download.remapOnlineCompletionFailures
+import com.reamicro.fix.online.download.detectInvalidOnlineCompletionChapters
+import com.reamicro.fix.online.download.writeOnlineCompletionFailedChapters
+import com.reamicro.fix.online.download.sleepOnlineCompletionRetryDelay
+import com.reamicro.fix.online.download.onlineCompletionRetryDelayMs
+import com.reamicro.fix.online.download.onlineCompletionFailedChapter
+import com.reamicro.fix.online.download.mergeOnlineCompletionFailedChapters
+import com.reamicro.fix.cloud.webdav.normalizeWebDavPath
+import com.reamicro.fix.cloud.webdav.webDavBookUrl
+import com.reamicro.fix.logging.logWebDav
 
 // WebDavDriveHook 的宿主对象构造与杂项支撑簇。
 //
@@ -160,7 +180,7 @@ internal fun WebDavDriveHook.ensureOnlineCompletionCancelReceiver(context: Conte
 internal fun WebDavDriveHook.canUseCloudExtendedDisplay(): Boolean =
     settingsProvider().canUseCloudExtendedDisplay
 
-internal fun WebDavDriveHook.isBookLocalSheetBookContextMethod(method: Method): Boolean {
+internal fun isBookLocalSheetBookContextMethod(method: Method): Boolean {
     if (method.name == BOOK_LOCAL_SHEET_METHOD && method.parameterTypes.size == 5) return true
     // A14 moved the sheet body into a generated lambda; hook any BookLocalSheet lambda that carries Book + Composer.
     return method.name.startsWith("BookLocalSheet\$lambda\$") &&
@@ -181,7 +201,7 @@ internal fun WebDavDriveHook.simpleDividerMethod(): Method =
         }
     }
 
-internal fun WebDavDriveHook.decodeOnlineDataImage(url: String): Bitmap? {
+internal fun decodeOnlineDataImage(url: String): Bitmap? {
     if (!url.startsWith("data:image/", ignoreCase = true)) return null
     val commaIndex = url.indexOf(',')
     if (commaIndex <= 0 || commaIndex >= url.length - 1) return null
@@ -260,15 +280,15 @@ internal fun WebDavDriveHook.cancelTrackedWork(tracker: Any, id: String) {
     }
 }
 
-internal fun WebDavDriveHook.isChildPath(child: File, parent: File): Boolean {
+internal fun isChildPath(child: File, parent: File): Boolean {
     val parentPath = parent.path.trimEnd(File.separatorChar) + File.separator
     return child.path.startsWith(parentPath)
 }
 
-internal fun WebDavDriveHook.workStateStatusName(state: Any): String =
+internal fun workStateStatusName(state: Any): String =
     state.invokeNoArg("getStatus")?.toString().orEmpty()
 
-internal fun WebDavDriveHook.cloudTypeTitle(type: Int): String =
+internal fun cloudTypeTitle(type: Int): String =
     when (type) {
         BACKUP_TYPE_BAIDU -> "\u767e\u5ea6\u7f51\u76d8"
         BACKUP_TYPE_YUN115 -> "115"
@@ -318,7 +338,7 @@ internal fun WebDavDriveHook.updateLocalBook(book: Any) {
     invokeSuspendBlocking(updateMethod, bookshelf, book)
 }
 
-internal fun WebDavDriveHook.copyBookWithBackup(book: Any, backupType: Int, backupId: String, backupCode: String): Any {
+internal fun copyBookWithBackup(book: Any, backupType: Int, backupId: String, backupCode: String): Any {
     return copyBookWithBackupAndPublisher(
         book = book,
         backupType = backupType,
@@ -328,7 +348,7 @@ internal fun WebDavDriveHook.copyBookWithBackup(book: Any, backupType: Int, back
     )
 }
 
-internal fun WebDavDriveHook.copyBookWithBackupAndPublisher(
+internal fun copyBookWithBackupAndPublisher(
     book: Any,
     backupType: Int,
     backupId: String,
@@ -418,7 +438,7 @@ internal fun WebDavDriveHook.zipBookDirectory(book: Any, output: OutputStream) {
     }
 }
 
-internal fun WebDavDriveHook.addStoredFile(zip: ZipOutputStream, file: File, name: String) {
+internal fun addStoredFile(zip: ZipOutputStream, file: File, name: String) {
     val bytes = file.readBytes()
     val crc = CRC32().apply { update(bytes) }
     val entry = ZipEntry(name).apply {
@@ -432,7 +452,7 @@ internal fun WebDavDriveHook.addStoredFile(zip: ZipOutputStream, file: File, nam
     zip.closeEntry()
 }
 
-internal fun WebDavDriveHook.addDeflatedFile(zip: ZipOutputStream, file: File, name: String) {
+internal fun addDeflatedFile(zip: ZipOutputStream, file: File, name: String) {
     val patchedOpf = if (name.endsWith(".opf", ignoreCase = true)) patchedOpfBytes(file) else null
     if (patchedOpf != null) {
         addDeflatedBytes(zip, patchedOpf, name)
@@ -445,13 +465,13 @@ internal fun WebDavDriveHook.addDeflatedFile(zip: ZipOutputStream, file: File, n
     zip.closeEntry()
 }
 
-internal fun WebDavDriveHook.addDeflatedBytes(zip: ZipOutputStream, bytes: ByteArray, name: String) {
+internal fun addDeflatedBytes(zip: ZipOutputStream, bytes: ByteArray, name: String) {
     zip.putNextEntry(ZipEntry(name))
     zip.write(bytes)
     zip.closeEntry()
 }
 
-internal fun WebDavDriveHook.patchedOpfBytes(file: File): ByteArray? {
+internal fun patchedOpfBytes(file: File): ByteArray? {
     val content = runCatching { file.readText(Charsets.UTF_8) }.getOrNull() ?: return null
     val patched = ensureNcxSpineToc(content)
     return patched.takeIf { it != content }?.toByteArray(Charsets.UTF_8)
@@ -464,7 +484,7 @@ internal fun WebDavDriveHook.bookDirectory(book: Any): File {
     return File(context.filesDir, "$uid/books/$uuid")
 }
 
-internal fun WebDavDriveHook.exportFileName(book: Any): String =
+internal fun exportFileName(book: Any): String =
     "${book.callString("getTitle").safeWebDavFileName()}.epub"
 
 internal fun WebDavDriveHook.setupRouteMethods(): List<Method> {
@@ -478,7 +498,7 @@ internal fun WebDavDriveHook.setupRouteMethods(): List<Method> {
     return methods
 }
 
-internal fun WebDavDriveHook.isRouteDestination(backStackEntry: Any, routeClassName: String): Boolean {
+internal fun isRouteDestination(backStackEntry: Any, routeClassName: String): Boolean {
     val destination = runCatching {
         backStackEntry.javaClass.methods.firstOrNull {
             it.name == "getDestination" && it.parameterTypes.isEmpty()
@@ -521,7 +541,7 @@ internal fun WebDavDriveHook.navBackStackEntryToThirdAccount(backStackEntry: Any
         .invoke(null, backStackEntry, kClass)
 }
 
-internal fun WebDavDriveHook.isBaiduTitle(title: String): Boolean =
+internal fun isBaiduTitle(title: String): Boolean =
     title.contains("百度") || title.contains("Baidu")
 
 internal fun WebDavDriveHook.newThirdLoginRoute(): Any =
@@ -572,7 +592,7 @@ internal fun WebDavDriveHook.navigateHome(navGraphScope: Any): Boolean =
         XposedBridge.log("$LOG_PREFIX failed to navigate WebDAV logout home: ${it.stackTraceToString()}")
     }.getOrDefault(false)
 
-internal fun WebDavDriveHook.popBackStack(navGraphScope: Any) {
+internal fun popBackStack(navGraphScope: Any) {
     navGraphScope.javaClass.methods.firstOrNull {
         it.name == "popBackStack" && it.parameterTypes.isEmpty()
     }?.apply { isAccessible = true }?.invoke(navGraphScope)
@@ -675,7 +695,7 @@ internal fun WebDavDriveHook.createMutableStateFlow(value: Any): Any =
         it.name == "MutableStateFlow" && it.parameterTypes.size == 1
     }.apply { isAccessible = true }.invoke(null, value)
 
-internal fun WebDavDriveHook.setMutableStateFlowValue(flow: Any?, value: Any) {
+internal fun setMutableStateFlowValue(flow: Any?, value: Any) {
     flow?.javaClass?.methods?.firstOrNull {
         it.name == "setValue" && it.parameterTypes.size == 1
     }?.apply { isAccessible = true }?.invoke(flow, value)
@@ -705,13 +725,13 @@ internal fun WebDavDriveHook.refreshCloudStorageScreen(type: Int) {
     logWebDav("cloud storage screen refresh scheduled type=$type path=$path")
 }
 
-internal fun WebDavDriveHook.enabledOnlineCompletionSources(context: Context): List<OnlineSourceEntry> {
+internal fun enabledOnlineCompletionSources(context: Context): List<OnlineSourceEntry> {
     val prefs = context.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE)
     return OnlineSourceStore.list(context)
         .filter { source -> prefs.getBoolean(ModuleSettings.onlineSourceKey(source.id), false) }
 }
 
-internal fun WebDavDriveHook.logOnlineMetadataGaps(
+internal fun logOnlineMetadataGaps(
     source: OnlineSourceEntry,
     node: Any?,
     status: String,
@@ -728,7 +748,7 @@ internal fun WebDavDriveHook.logOnlineMetadataGaps(
     )
 }
 
-internal fun WebDavDriveHook.onlineCompletionPlatformName(node: Any?, kind: String): String {
+internal fun onlineCompletionPlatformName(node: Any?, kind: String): String {
     val raw = onlineFirstJsonString(
         node,
         listOf(
@@ -748,7 +768,7 @@ internal fun WebDavDriveHook.onlineCompletionPlatformName(node: Any?, kind: Stri
     return raw.normalizedAssociationPlatformName()
 }
 
-internal fun WebDavDriveHook.copyHomeUiStateWithCloudResults(state: Any, cloudResults: Map<Any?, Any?>): Any {
+internal fun copyHomeUiStateWithCloudResults(state: Any, cloudResults: Map<Any?, Any?>): Any {
     val currentCloudResults = homeCloudSearchResults(state)
     val stateClass = state.javaClass
     val copyMethods = stateClass.methods
@@ -807,7 +827,7 @@ internal fun WebDavDriveHook.copyHomeUiStateWithCloudResults(state: Any, cloudRe
     return copyHomeUiStateWithCloudResultsLegacy(state, cloudResults)
 }
 
-internal fun WebDavDriveHook.copyHomeUiStateWithCloudResultsLegacy(state: Any, cloudResults: Map<Any?, Any?>): Any {
+internal fun copyHomeUiStateWithCloudResultsLegacy(state: Any, cloudResults: Map<Any?, Any?>): Any {
     val copyMethod = state.javaClass.methods.firstOrNull {
         it.name == "copy" && it.parameterTypes.size == 13
     }?.apply { isAccessible = true } ?: return state
@@ -902,7 +922,7 @@ internal fun WebDavDriveHook.newOnlineCompletionSourceCloudBook(group: OnlineSea
     )
 }
 
-internal fun WebDavDriveHook.onlineCompletionGroupTitle(group: OnlineSearchGroup): String =
+internal fun onlineCompletionGroupTitle(group: OnlineSearchGroup): String =
     "$ONLINE_COMPLETION_TITLE-${group.source.name.ifBlank { "未知来源" }}"
 
 internal fun WebDavDriveHook.onlineCompletionTitleForType(type: Int, fallback: String = ONLINE_COMPLETION_TITLE): String =
@@ -1036,20 +1056,20 @@ internal fun WebDavDriveHook.emptyCloudBook(): Any =
                 .invoke(companion)
         }
 
-internal fun WebDavDriveHook.isSupportedBookFile(name: String): Boolean =
+internal fun isSupportedBookFile(name: String): Boolean =
     BOOK_EXTENSIONS.any { name.endsWith(it, ignoreCase = true) }
 
-internal fun WebDavDriveHook.isOnlineCompletionPath(path: String): Boolean =
+internal fun isOnlineCompletionPath(path: String): Boolean =
     path.startsWith(ONLINE_COMPLETION_SOURCE_PREFIX) || path.startsWith(ONLINE_COMPLETION_BOOK_PREFIX)
 
-internal fun WebDavDriveHook.isOnlineCompletionLocalBook(book: Any): Boolean =
+internal fun isOnlineCompletionLocalBook(book: Any): Boolean =
     isOnlineCompletionPath(bookBackupIdOf(book)) ||
         isOnlineCompletionPath(book.callString("getUri")) ||
         isOnlineCompletionUuid(book.callString("getUuid")) ||
         (bookBackupTypeOf(book) == BACKUP_TYPE_ONLINE_COMPLETION &&
             book.callString("getBackupCode").startsWith("online_"))
 
-internal fun WebDavDriveHook.isOnlineCompletionUuid(uuid: String): Boolean =
+internal fun isOnlineCompletionUuid(uuid: String): Boolean =
     uuid.startsWith(ONLINE_COMPLETION_UUID_PREFIX)
 
 internal fun WebDavDriveHook.onlineCompletionGeneratedEpubMetadata(book: Any): OnlineCompletionEpubMetadata =
@@ -1457,7 +1477,7 @@ internal fun WebDavDriveHook.replaceOnlineCompletionDaoRows(dao: Any, bookId: Lo
     logWebDav("online completion $label rows replaced bookId=$bookId count=${rows.size}")
 }
 
-internal fun WebDavDriveHook.methodCandidates(methods: List<Method>, name: String): String =
+internal fun methodCandidates(methods: List<Method>, name: String): String =
     methods.filter { it.name == name }
         .joinToString(prefix = "[", postfix = "]") { method ->
             method.parameterTypes.joinToString(
@@ -1466,7 +1486,7 @@ internal fun WebDavDriveHook.methodCandidates(methods: List<Method>, name: Strin
             ) { type -> type.name }
         }
 
-internal fun WebDavDriveHook.onlineSourceIdFromEncodedValue(value: String): String {
+internal fun onlineSourceIdFromEncodedValue(value: String): String {
     val text = value.trim()
     if (text.isBlank()) return ""
     if (text.startsWith(ONLINE_COMPLETION_BOOK_PREFIX)) {
@@ -1475,13 +1495,13 @@ internal fun WebDavDriveHook.onlineSourceIdFromEncodedValue(value: String): Stri
     return text.takeUnless { it.contains("://") }.orEmpty()
 }
 
-internal fun WebDavDriveHook.onlineCompletionQueryParameter(value: String, name: String): String =
+internal fun onlineCompletionQueryParameter(value: String, name: String): String =
     runCatching {
         if (!value.startsWith(ONLINE_COMPLETION_BOOK_PREFIX)) return@runCatching ""
         Uri.parse(value).getQueryParameter(name).orEmpty()
     }.getOrDefault("")
 
-internal fun WebDavDriveHook.isPathLikeOnlineSourceName(value: String): Boolean {
+internal fun isPathLikeOnlineSourceName(value: String): Boolean {
     val text = value.trim()
     if (text.isBlank()) return false
     if (text.contains("://")) return true
@@ -1492,7 +1512,7 @@ internal fun WebDavDriveHook.isPathLikeOnlineSourceName(value: String): Boolean 
         text.endsWith(".pdf", ignoreCase = true)
 }
 
-internal fun WebDavDriveHook.onlineCompletionDisplayProgress(progress: Int, message: String): Int {
+internal fun onlineCompletionDisplayProgress(progress: Int, message: String): Int {
     val match = ONLINE_COMPLETION_PROGRESS_CHAPTER_REGEX.find(message) ?: return progress.coerceIn(0, 100)
     val current = match.groupValues.getOrNull(1)?.toIntOrNull() ?: return progress.coerceIn(0, 100)
     val total = match.groupValues.getOrNull(2)?.toIntOrNull() ?: return progress.coerceIn(0, 100)
@@ -1500,17 +1520,17 @@ internal fun WebDavDriveHook.onlineCompletionDisplayProgress(progress: Int, mess
     return ((current.coerceAtLeast(0) * 100L) / total).toInt().coerceIn(0, 100)
 }
 
-internal fun WebDavDriveHook.onlineCompletionFailedCount(message: String): Int =
+internal fun onlineCompletionFailedCount(message: String): Int =
     ONLINE_COMPLETION_FAILED_COUNT_REGEX.find(message)
         ?.groupValues
         ?.getOrNull(1)
         ?.toIntOrNull()
         ?: 0
 
-internal fun WebDavDriveHook.onlineCompletionFailureSuffix(failedCount: Int): String =
+internal fun onlineCompletionFailureSuffix(failedCount: Int): String =
     if (failedCount > 0) " · 失败 $failedCount 章" else ""
 
-internal fun WebDavDriveHook.logOnlineCompletionFinalFailures(
+internal fun logOnlineCompletionFinalFailures(
     target: OnlineDownloadTarget,
     failures: List<OnlineFailedChapter>,
     stage: String,
@@ -1536,7 +1556,7 @@ internal fun WebDavDriveHook.onlineContentProxyTemplate(source: OnlineSourceEntr
         )
 }
 
-internal fun WebDavDriveHook.extractOnlineBacktickTemplates(rule: String): List<String> {
+internal fun extractOnlineBacktickTemplates(rule: String): List<String> {
     if (rule.isBlank()) return emptyList()
     val templates = mutableListOf<String>()
     var index = 0
@@ -1593,25 +1613,25 @@ internal fun WebDavDriveHook.evaluateOnlineContentJs(
         .ifBlank { response.body }
 }
 
-internal fun WebDavDriveHook.onlineReadTimeoutMillis(source: OnlineSourceEntry): Int =
+internal fun onlineReadTimeoutMillis(source: OnlineSourceEntry): Int =
     source.respondTime.coerceIn(15_000, 300_000)
 
-internal fun WebDavDriveHook.onlineConnectTimeoutMillis(source: OnlineSourceEntry): Int =
+internal fun onlineConnectTimeoutMillis(source: OnlineSourceEntry): Int =
     onlineReadTimeoutMillis(source).coerceAtMost(30_000).coerceAtLeast(10_000)
 
-internal fun WebDavDriveHook.onlineCompletionFailurePlaceholder(attempts: Int, message: String): String =
+internal fun onlineCompletionFailurePlaceholder(attempts: Int, message: String): String =
     if (message.contains("今日已达到章节下载限额")) {
         "本章尚未下载，当前在线源今日额度已用完。\n\n请明日点击更新继续补全。"
     } else {
         "本章下载失败，已按在线源重试 $attempts 次。\n\n$message"
     }
 
-internal fun WebDavDriveHook.bookDirectorySize(bookDir: File): Long =
+internal fun bookDirectorySize(bookDir: File): Long =
     bookDir.walkTopDown()
         .filter { it.isFile }
         .fold(0L) { total, file -> total + file.length() }
 
-internal fun WebDavDriveHook.onlineCompletionFailedLogFile(bookDir: File): File =
+internal fun onlineCompletionFailedLogFile(bookDir: File): File =
     File(bookDir, "OEBPS/$ONLINE_COMPLETION_FAILED_CHAPTER_LOG")
 
 internal fun WebDavDriveHook.findLocalBookByUrl(bookshelf: Any, url: String): Any? {
@@ -1623,7 +1643,7 @@ internal fun WebDavDriveHook.findLocalBookByUrl(bookshelf: Any, url: String): An
     return invokeSuspendBlocking(findMethod, bookshelf, url)
 }
 
-internal fun WebDavDriveHook.currentOnlineCompletionBooksDir(bookshelf: Any): Any {
+internal fun currentOnlineCompletionBooksDir(bookshelf: Any): Any {
     val userStorage = fieldValue(bookshelf, "userStorage")
         ?: bookshelf.javaClass.methods.firstOrNull { it.name == "getUserStorage" && it.parameterTypes.isEmpty() }
             ?.apply { isAccessible = true }
@@ -1647,7 +1667,7 @@ internal fun WebDavDriveHook.currentOnlineCompletionBooksDir(bookshelf: Any): An
     return method.invoke(userStorage, uid) ?: error("阅微书库目录不可用：userBooksDir 返回空")
 }
 
-internal fun WebDavDriveHook.onlineCompletionCancelPendingIntent(context: Context, id: Int, key: String): PendingIntent {
+internal fun onlineCompletionCancelPendingIntent(context: Context, id: Int, key: String): PendingIntent {
     val intent = Intent(ONLINE_COMPLETION_CANCEL_ACTION).apply {
         setPackage(context.packageName)
         addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
@@ -1659,7 +1679,7 @@ internal fun WebDavDriveHook.onlineCompletionCancelPendingIntent(context: Contex
     return PendingIntent.getBroadcast(context, id, intent, flags)
 }
 
-internal fun WebDavDriveHook.sendOnlineCompletionCancelBroadcastToModule(context: Context, id: Int, key: String): Boolean =
+internal fun sendOnlineCompletionCancelBroadcastToModule(context: Context, id: Int, key: String): Boolean =
     runCatching {
         val intent = Intent(ONLINE_COMPLETION_CANCEL_ACTION).apply {
             setClassName(MODULE_PACKAGE_NAME, ONLINE_COMPLETION_NOTIFICATION_RECEIVER_CLASS)
@@ -1830,7 +1850,7 @@ internal fun WebDavDriveHook.firstFlowValue(flow: Any): Any? {
     return invokeSuspendBlocking(firstMethod, null, flow)
 }
 
-internal fun WebDavDriveHook.fieldValue(target: Any?, vararg names: String): Any? {
+internal fun fieldValue(target: Any?, vararg names: String): Any? {
     if (target == null) return null
     for (name in names) {
         var type: Class<*>? = target.javaClass
@@ -1846,7 +1866,7 @@ internal fun WebDavDriveHook.fieldValue(target: Any?, vararg names: String): Any
     return null
 }
 
-internal fun WebDavDriveHook.bookBackupTypeOf(book: Any?): Int {
+internal fun bookBackupTypeOf(book: Any?): Int {
     if (book == null) return 0
     val methodValue = book.callInt("getBackupType")
     if (methodValue != 0) return methodValue
@@ -1854,7 +1874,7 @@ internal fun WebDavDriveHook.bookBackupTypeOf(book: Any?): Int {
     return (field as? Number)?.toInt() ?: field.toString().toIntOrNull() ?: 0
 }
 
-internal fun WebDavDriveHook.bookBackupIdOf(book: Any?): String {
+internal fun bookBackupIdOf(book: Any?): String {
     if (book == null) return ""
     val methodValue = book.callString("getBackupId")
     if (methodValue.isNotBlank()) return methodValue
@@ -1864,7 +1884,7 @@ internal fun WebDavDriveHook.bookBackupIdOf(book: Any?): String {
 internal fun WebDavDriveHook.currentContext(): Context? =
     activityProvider() ?: currentApplicationContext()
 
-internal fun WebDavDriveHook.currentApplicationContext(): Context? =
+internal fun currentApplicationContext(): Context? =
     runCatching {
         Class.forName("android.app.ActivityThread")
             .getDeclaredMethod("currentApplication")
@@ -1872,17 +1892,17 @@ internal fun WebDavDriveHook.currentApplicationContext(): Context? =
             .invoke(null) as? Context
     }.getOrNull()?.applicationContext
 
-internal fun WebDavDriveHook.isDescendingOrder(direction: String): Boolean =
+internal fun isDescendingOrder(direction: String): Boolean =
     direction == "1" || direction.equals("DESC", ignoreCase = true) || direction.equals("desc", ignoreCase = true)
 
-internal fun WebDavDriveHook.orderKind(orderBy: String): String =
+internal fun orderKind(orderBy: String): String =
     when (orderBy) {
         "size", "file_size" -> "size"
         "time", "user_utime", "updated_at", "created_at" -> "time"
         else -> "name"
     }
 
-internal fun <T> WebDavDriveHook.sortStorageEntries(
+internal fun <T> sortStorageEntries(
     entries: List<T>,
     orderBy: String,
     direction: String,
@@ -1902,7 +1922,7 @@ internal fun <T> WebDavDriveHook.sortStorageEntries(
 
 // 生成用于模糊匹配的「骨架」：Unicode NFC 后，仅保留字母/数字/汉字（Letter/Digit），
 // 丢弃所有标点、括号、空白、省略号。彻底消除请求名与服务器名之间的等价字符差异。
-internal fun WebDavDriveHook.skeletonForMatch(value: String): String {
+internal fun skeletonForMatch(value: String): String {
     val nfc = java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFC)
     val sb = StringBuilder(nfc.length)
     for (ch in nfc) {
@@ -1911,7 +1931,7 @@ internal fun WebDavDriveHook.skeletonForMatch(value: String): String {
     return sb.toString()
 }
 
-internal fun WebDavDriveHook.normalizeServerUrl(input: String): String {
+internal fun normalizeServerUrl(input: String): String {
     val trimmed = input.trim().trimEnd('/')
     if (trimmed.isBlank()) return ""
     return if (trimmed.startsWith("http://", ignoreCase = true) ||
@@ -1994,12 +2014,12 @@ internal fun WebDavDriveHook.addVectorPath(
     )
 }
 
-internal fun WebDavDriveHook.formatCloudUpdatedTime(updatedAt: Long): String =
+internal fun formatCloudUpdatedTime(updatedAt: Long): String =
     runCatching {
         SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.getDefault()).format(java.util.Date(updatedAt))
     }.getOrDefault("")
 
-internal fun WebDavDriveHook.cloudBookExtensionLabel(extension: String): String =
+internal fun cloudBookExtensionLabel(extension: String): String =
     if (extension.equals("epub", ignoreCase = true)) "ePub" else extension.uppercase(Locale.ROOT)
 
 internal fun WebDavDriveHook.method(className: String, methodName: String, parameterCount: Int): Method {
@@ -2038,7 +2058,7 @@ internal fun WebDavDriveHook.staticObject(className: String, fieldName: String):
 internal fun WebDavDriveHook.staticInt(className: String, fieldName: String): Int =
     cls(className).getDeclaredField(fieldName).apply { isAccessible = true }.getInt(null)
 
-internal fun WebDavDriveHook.invokeFunction1(function: Any, arg: Any?) {
+internal fun invokeFunction1(function: Any, arg: Any?) {
     val invoke = function.javaClass.methods.firstOrNull {
         it.name == "invoke" && it.parameterTypes.size == 1
     } ?: function.javaClass.declaredMethods.first {
@@ -2048,7 +2068,7 @@ internal fun WebDavDriveHook.invokeFunction1(function: Any, arg: Any?) {
     invoke.invoke(function, arg)
 }
 
-internal fun WebDavDriveHook.invokeFunction2(function: Any, first: Any?, second: Any?) {
+internal fun invokeFunction2(function: Any, first: Any?, second: Any?) {
     val invoke = function.javaClass.methods.firstOrNull {
         it.name == "invoke" && it.parameterTypes.size == 2
     } ?: function.javaClass.declaredMethods.first {
@@ -2058,7 +2078,7 @@ internal fun WebDavDriveHook.invokeFunction2(function: Any, first: Any?, second:
     invoke.invoke(function, first, second)
 }
 
-internal fun WebDavDriveHook.callStringPath(root: Any?, vararg methodNames: String): String {
+internal fun callStringPath(root: Any?, vararg methodNames: String): String {
     var current = root ?: return ""
     methodNames.forEach { name ->
         current = current.javaClass.methods.firstOrNull { it.name == "get${name.replaceFirstChar(Char::titlecase)}" && it.parameterTypes.isEmpty() }

@@ -16,6 +16,7 @@ import de.robv.android.xposed.XposedBridge
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import com.reamicro.fix.hook.webdav.*
+import com.reamicro.fix.logging.logWebDav
 
 // WebDavDriveHook 的宿主 UI 渲染簇。
 //
@@ -534,12 +535,12 @@ internal fun WebDavDriveHook.onlineCompletionRenderTypeForSource(source: OnlineS
 internal fun WebDavDriveHook.isOnlineCompletionRenderType(type: Int): Boolean =
     onlineCompletionRenderTitles.containsKey(type)
 
-internal fun WebDavDriveHook.cloudPathOf(value: Any?): String =
+internal fun cloudPathOf(value: Any?): String =
     value?.javaClass?.methods?.firstOrNull {
         it.name == "getPath" && it.parameterTypes.isEmpty()
     }?.apply { isAccessible = true }?.invoke(value)?.toString().orEmpty()
 
-internal fun WebDavDriveHook.setOnlineCompletionSmallIcon(builder: Notification.Builder) {
+internal fun setOnlineCompletionSmallIcon(builder: Notification.Builder) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
         runCatching {
             builder.setSmallIcon(Icon.createWithResource(MODULE_PACKAGE_NAME, R.drawable.ic_notification_reamicro))
@@ -553,7 +554,7 @@ internal fun WebDavDriveHook.setOnlineCompletionSmallIcon(builder: Notification.
     builder.setSmallIcon(android.R.drawable.stat_sys_download)
 }
 
-internal fun WebDavDriveHook.roundedDrawable(color: Int, radius: Float): GradientDrawable =
+internal fun roundedDrawable(color: Int, radius: Float): GradientDrawable =
     GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
         setColor(color)
