@@ -36,7 +36,7 @@ internal object OnlineEpubStylePreview {
 $RESET_CSS
 
 $bookCss
-</style></head><body>${OnlineEpubStyleDefaults.previewBody(draft.kind, assetUrl)}</body></html>"""
+</style></head><body>${OnlineEpubStyleDefaults.previewBody(draft.kind, assetUrl, draft.markup)}</body></html>"""
     }
 
     /**

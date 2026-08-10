@@ -36,6 +36,13 @@ data class OnlineEpubStyle(
     val embedFont: Boolean = false,
     /** 样式关联的本地图片：分割样式的装饰图、头图样式的原图。 */
     val assetPath: String = "",
+    /**
+     * 这条样式需要的正文结构。
+     *
+     * 菱形转场、文字转场、图片转场的 CSS 挂在各自的修饰类上，只换 CSS 不换结构选了也不生效，
+     * 所以成书与预览都按它渲染；为空时用该类别的默认结构。
+     */
+    val markup: String = "",
     /** 头图样式的蒙版 asset 名与样板尺寸，随内置样式生成，用户样式为空。 */
     val maskAsset: String = "",
     val sampleWidth: Int = 0,
@@ -115,9 +122,11 @@ object OnlineEpubStyleDefaults {
      * 弹窗预览用的正文片段，结构与成书完全一致，便于所见即所得。
      *
      * @param assetUrl 分割图 / 头图的实际地址，为空时用内置占位图。
+     * @param markup 该样式自带的正文结构；为空时用该类别的默认结构。
      */
-    fun previewBody(kind: OnlineEpubStyleKind, assetUrl: String = ""): String {
+    fun previewBody(kind: OnlineEpubStyleKind, assetUrl: String = "", markup: String = ""): String {
         val image = assetUrl.takeIf { it.isNotBlank() } ?: PREVIEW_IMAGE
+        val custom = markup.trim().takeIf { it.isNotBlank() }?.let { bindMarkupImage(it, image) }
         return when (kind) {
             OnlineEpubStyleKind.Title ->
                 """<h1 class="te-chapter-title"><span class="te-chapter-number">第三章</span>""" +
@@ -128,20 +137,28 @@ object OnlineEpubStyleDefaults {
                     """<span class="te-volume-name">直至时间的尽头</span></h1></div>"""
             OnlineEpubStyleKind.Illustration ->
                 """<p class="te-paragraph">她合上手中的书，抬头看见远处灯塔亮起。</p>""" +
-                    """<figure class="te-illustration"><img class="te-illustration-image" src="$PREVIEW_IMAGE" alt=""/>""" +
-                    """<figcaption class="te-illustration-caption">图 1　旧站台的最后一班列车</figcaption></figure>""" +
+                    (custom ?: defaultIllustration(image)) +
                     PREVIEW_PARAGRAPHS
             OnlineEpubStyleKind.Transition ->
                 """<p class="te-paragraph">夜色沉入城市边缘，风从旧站台吹过。</p>""" +
-                    transitionPreviewMark(assetUrl) +
+                    (custom ?: transitionPreviewMark(assetUrl)) +
                     PREVIEW_PARAGRAPHS
             OnlineEpubStyleKind.Header ->
-                """<figure class="te-header-figure"><img class="te-header-image" src="$image" alt=""/>""" +
-                    """<figcaption class="te-header-caption">章节头图</figcaption></figure>""" +
+                """<figure class="te-header-figure"><img class="te-header-image" src="$image" alt=""/></figure>""" +
                     """<h1 class="te-chapter-title"><span class="te-chapter-name">计划不如变化</span></h1>""" +
                     PREVIEW_PARAGRAPHS
         }
     }
+
+    /** 把 markup 里指向 EPUB 内部的图片路径换成预览可加载的地址。 */
+    fun bindMarkupImage(markup: String, imageUrl: String): String =
+        markup.replace(MARKUP_IMAGE_SRC) { match -> """src="$imageUrl"""" }
+
+    private fun defaultIllustration(image: String): String =
+        """<figure class="te-illustration"><img class="te-illustration-image" src="$image" alt=""/>""" +
+            """<figcaption class="te-illustration-caption">图 1　旧站台的最后一班列车</figcaption></figure>"""
+
+    private val MARKUP_IMAGE_SRC = Regex("""src="[^"]*"""")
 
     /** 选了装饰图就预览图片转场，否则预览文字转场。 */
     private fun transitionPreviewMark(assetUrl: String): String =

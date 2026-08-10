@@ -81,6 +81,7 @@ import com.reamicro.fix.settings.OnlineEpubStyleLibrary
 import com.reamicro.fix.settings.OnlineEpubStyleSettings
 import com.reamicro.fix.settings.OnlineEpubStyleStore
 import com.reamicro.fix.webdav.OnlineEpubStylePreview
+import com.reamicro.fix.webdav.OnlineHeaderImageComposer
 import com.reamicro.fix.settings.ReaderHighlightBookContext
 import com.reamicro.fix.settings.ReaderHighlightSettingsSnapshot
 import com.reamicro.fix.settings.ReaderHighlightRule
@@ -116,8 +117,6 @@ class ReaMicroSettingsHook(
     private val activityProvider: () -> Activity?,
     private val settings: XposedModuleSettings,
     private val onGlobalFontChanged: () -> Unit = {},
-    /** 把当前成书样式重新写入所有在线补全图书；由 WebDavDriveHook 提供实现。 */
-    private val applyOnlineEpubStyles: (onDone: (String) -> Unit) -> Unit = { it("在线补全服务暂不可用") },
 ) {
     private val accountController = AccountCompletionController(classLoader, activityProvider)
     private val settingsBuildDepth = ThreadLocal.withInitial { 0 }
@@ -150,6 +149,8 @@ class ReaMicroSettingsHook(
     @Volatile private var pendingOnlineEpubPreviewRefresh: Runnable = Runnable {}
     // 样式关联图片选择的回调，选图 Activity 返回后回填到弹窗。
     @Volatile private var pendingOnlineEpubStyleImagePick: ((File) -> Unit)? = null
+    // 头图蒙版合成结果缓存，key 为样式 + 原图，避免每次输入 CSS 都重算上百万像素。
+    private val onlineEpubHeaderPreviewCache = java.util.concurrent.ConcurrentHashMap<String, String>()
     // 阅读页高亮规则 sheet 内的子页面导航状态：0=规则列表，1=高亮样式列表。
     // 借用 mutableState 让 sheet 的 content lambda 读取后可随点击重组，实现 sheet 内翻页而非弹窗。
     @Volatile private var readerHighlightSheetSubPageUiState: Any? = null
@@ -2946,29 +2947,52 @@ class ReaMicroSettingsHook(
     /** 预览文档：与成书完全一致的 CSS，外加一层模拟阅读页的纸张外观。 */
     private fun onlineEpubStylePreviewHtml(draft: OnlineEpubStyle): String {
         val fontFile = File(draft.fontFamily)
+        val assetUrl = if (draft.kind == OnlineEpubStyleKind.Header) {
+            onlineEpubHeaderPreviewUrl(draft)
+        } else {
+            draft.assetPath.takeIf { it.isNotBlank() && File(it).isFile }?.let { "file://$it" }.orEmpty()
+        }
         return OnlineEpubStylePreview.html(
             settings = onlineEpubStyleSettings(),
             draft = draft,
-            assetUrl = draft.assetPath.takeIf { it.isNotBlank() && File(it).isFile }
-                ?.let { "file://$it" }
-                .orEmpty(),
-            fontUrl = if (fontFile.isFile) "file://${fontFile.absolutePath}" else "",
+            assetUrl = assetUrl,
+            fontUrl = if (draft.supportsFont && fontFile.isFile) "file://${fontFile.absolutePath}" else "",
         )
+    }
+
+    /**
+     * 头图预览：先按该样式的蒙版把原图合成一遍，预览看到的就是成书里的样子。
+     *
+     * 还没选原图时用示意色块合成，至少能看清蒙版裁出的形状。合成结果按样式与原图缓存，
+     * 避免每次输入 CSS 都重算一遍上百万像素。
+     */
+    private fun onlineEpubHeaderPreviewUrl(draft: OnlineEpubStyle): String {
+        val activity = activityProvider() ?: return ""
+        val source = File(draft.assetPath.trim()).takeIf { it.isFile }
+        val cacheKey = "${draft.id}|${draft.maskAsset}|${source?.absolutePath.orEmpty()}|${source?.lastModified() ?: 0L}"
+        onlineEpubHeaderPreviewCache[cacheKey]?.let { return it }
+        val mask = draft.maskAsset.takeIf { it.isNotBlank() }?.let { asset ->
+            ReaderHighlightImageAssets.decodeBitmap("asset://$asset", activity, LOG_PREFIX)
+        }
+        val bytes = runCatching {
+            if (source != null) {
+                OnlineHeaderImageComposer.compose(source, mask, draft.sampleWidth, draft.sampleHeight)
+            } else {
+                OnlineHeaderImageComposer.composePlaceholder(mask, draft.sampleWidth, draft.sampleHeight)
+            }
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX header preview compose failed: ${it.stackTraceToString()}")
+        }.getOrNull().also { mask?.recycle() } ?: return ""
+        return runCatching {
+            val target = File(activity.cacheDir, "rm_header_preview_${cacheKey.hashCode()}.png")
+            target.writeBytes(bytes)
+            "file://${target.absolutePath}".also { onlineEpubHeaderPreviewCache[cacheKey] = it }
+        }.getOrDefault("")
     }
 
     private fun onlineEpubStyleContext(): Context? =
         activityProvider()?.applicationContext ?: activityProvider()
 
-    /** 触发批量重写：耗时在后台完成，结果用 toast 回报。 */
-    private fun applyOnlineEpubStylesToDownloadedBooks() {
-        showToast("正在应用到已下载图书…")
-        runCatching {
-            applyOnlineEpubStyles { message -> showToast(message) }
-        }.onFailure {
-            showToast("应用样式失败")
-            XposedBridge.log("$LOG_PREFIX apply online epub styles failed: ${it.stackTraceToString()}")
-        }
-    }
 
     private fun onlineEpubStyleSettings(): OnlineEpubStyleSettings =
         OnlineEpubStyleStore.read(onlineEpubStyleContext())
@@ -5353,20 +5377,8 @@ class ReaMicroSettingsHook(
                     onClick = { openNestedInjectedRoute(InjectedRoute.OnlineEpubStyleList(kind)) },
                 )
             }
-            val actionRows = listOf(
-                ActionRow(
-                    key = "online_epub_style_apply_all",
-                    title = "应用到已下载图书",
-                    subtitle = "把当前样式重新写入所有在线补全生成的图书",
-                    singleLineSubtitle = true,
-                    onClick = ::applyOnlineEpubStylesToDownloadedBooks,
-                ),
-            )
             addLazyItem(lazyListScope, ONLINE_DOWNLOAD_STYLE_CONTENT_ITEM_KEY) { itemComposer ->
                 renderHostActionCard(rows, itemComposer)
-            }
-            addLazyItem(lazyListScope, ONLINE_DOWNLOAD_STYLE_ACTION_ITEM_KEY) { itemComposer ->
-                renderHostActionCard(actionRows, itemComposer)
             }
             targetUnit()
         }
@@ -10506,7 +10518,6 @@ class ReaMicroSettingsHook(
         const val PROFILE_BACKGROUND_CONTENT_ITEM_KEY = 0x524D4683
         const val ONLINE_DOWNLOAD_STYLE_ENTRY_ITEM_KEY = 0x524D4684
         const val ONLINE_DOWNLOAD_STYLE_CONTENT_ITEM_KEY = 0x524D4685
-        const val ONLINE_DOWNLOAD_STYLE_ACTION_ITEM_KEY = 0x524D4686
         const val ONLINE_EPUB_STYLE_LIST_ITEM_KEY = 0x524D4687
         const val ACCOUNT_CREDENTIAL_DOCUMENT_REQUEST_CODE = 0x524D47
         const val ACCOUNT_DATA_DOCUMENT_REQUEST_CODE = 0x524D48

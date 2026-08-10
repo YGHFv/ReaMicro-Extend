@@ -12,6 +12,21 @@ internal object OnlineBodyMarkup {
 
     fun divider(textHtml: String): String = "<p class=\"te-divider-line fg1\">$textHtml</p>"
 
+    /**
+     * 按分割样式自带的结构渲染转场。
+     *
+     * 菱形、渐隐线等样式把效果挂在 `te-transition--*` 修饰类上，只输出默认的 `p.te-divider-line`
+     * 会让样式完全不生效；图片转场则要把 markup 里的 src 换成书内实际路径。
+     */
+    fun transition(markup: String, textHtml: String, imageHref: String?): String {
+        val clean = markup.trim()
+        if (clean.isBlank()) {
+            return if (imageHref != null) dividerImage(imageHref) else divider(textHtml)
+        }
+        val bound = if (imageHref != null) clean.replace(MARKUP_IMAGE_SRC, "src=\"$imageHref\"") else clean
+        return bound.lineSequence().joinToString("") { it.trim() }
+    }
+
     /** 选了装饰图的分割样式：用图片替换原来的省略号/符号行。 */
     fun dividerImage(srcHtml: String): String =
         "<div class=\"te-divider-image\"><img class=\"te-divider-img\" src=\"$srcHtml\" alt=\"\"/></div>"
@@ -46,4 +61,5 @@ internal object OnlineBodyMarkup {
         """<p[^>]*class=["'][^"']*(?<![-\w])divider-line\b[^"']*["'][^>]*>([\s\S]*?)</p>""",
         RegexOption.IGNORE_CASE,
     )
+    private val MARKUP_IMAGE_SRC = Regex("""src="[^"]*"""")
 }

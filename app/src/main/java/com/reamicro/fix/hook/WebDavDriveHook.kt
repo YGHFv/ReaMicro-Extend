@@ -5026,58 +5026,6 @@ class WebDavDriveHook(
         }
     }
 
-    /**
-     * 把当前成书样式重新写入所有由在线补全生成的图书。
-     *
-     * 只重写 Styles/default.css 并做章节结构迁移，不动 spine 与目录，因此无需刷新目录表。
-     * 遍历在后台线程完成，结果通过 [onDone] 回报。
-     */
-    fun applyOnlineEpubStylesToDownloadedBooks(onDone: (String) -> Unit) {
-        Thread {
-            val message = runCatching {
-                val dirs = onlineCompletionBookDirectories()
-                if (dirs.isEmpty()) return@runCatching "没有找到在线补全生成的图书"
-                var updated = 0
-                var failed = 0
-                dirs.forEach { dir ->
-                    runCatching { syncOnlineCompletionDefaultStyle(dir) }
-                        .onSuccess { if (it) updated += 1 }
-                        .onFailure { error ->
-                            failed += 1
-                            logWebDav("online epub style apply failed dir=${dir.absolutePath} error=${error.message.orEmpty()}")
-                        }
-                }
-                logWebDav("online epub style applied books=${dirs.size} updated=$updated failed=$failed")
-                buildString {
-                    append("已处理 ${dirs.size} 本，更新 $updated 本")
-                    if (failed > 0) append("，失败 $failed 本")
-                }
-            }.getOrElse { error ->
-                logWebDav("online epub style apply aborted: ${error.message.orEmpty()}")
-                error.message?.takeIf { it.isNotBlank() } ?: "应用样式失败"
-            }
-            onDone(message)
-        }.start()
-    }
-
-    /** 扫描阅微用户书库目录，挑出模块生成的在线补全 EPUB。 */
-    private fun onlineCompletionBookDirectories(): List<File> {
-        val context = currentApplicationContext() ?: currentContext() ?: return emptyList()
-        val roots = context.filesDir?.listFiles()
-            ?.filter { it.isDirectory }
-            ?.map { File(it, "books") }
-            ?.filter { it.isDirectory }
-            .orEmpty()
-        return roots.flatMap { booksDir ->
-            booksDir.listFiles()?.filter { it.isDirectory }.orEmpty()
-        }.filter { dir ->
-            val opf = File(dir, "OEBPS/content.opf")
-            opf.isFile && runCatching {
-                opf.readText(Charsets.UTF_8).contains("reamicro-online-source-id")
-            }.getOrDefault(false)
-        }
-    }
-
     private fun refreshWebDavLibraryAsync(path: String = currentWebDavBrowseDir()) {
         Thread {
             refreshWebDavLibrary(path)
@@ -10862,6 +10810,7 @@ class WebDavDriveHook(
             dividerImageHref = dividerHref,
             headerImageHref = headerHref,
             headerScope = settings.headerScope,
+            transitionMarkup = settings.selected(OnlineEpubStyleKind.Transition)?.markup.orEmpty(),
         )
     }
 
@@ -11006,8 +10955,11 @@ $paragraphs
             return OnlineBodyMarkup.illustration(src.xmlEscape())
         }
         if (ONLINE_DIVIDER_LINE_REGEX.matches(line)) {
-            decor.dividerImageHref?.let { return OnlineBodyMarkup.dividerImage(it.xmlEscape()) }
-            return OnlineBodyMarkup.divider(line.xmlEscape())
+            return OnlineBodyMarkup.transition(
+                markup = decor.transitionMarkup,
+                textHtml = line.xmlEscape(),
+                imageHref = decor.dividerImageHref,
+            )
         }
         return OnlineBodyMarkup.paragraph(line.xmlEscape())
     }
@@ -13795,6 +13747,8 @@ img{max-width:100%;max-height:100%;height:auto;}
         val dividerImageHref: String? = null,
         val headerImageHref: String? = null,
         val headerScope: OnlineEpubHeaderScope = OnlineEpubHeaderScope.Off,
+        /** 选中分割样式自带的正文结构，为空时用默认的 `p.te-divider-line`。 */
+        val transitionMarkup: String = "",
     ) {
         fun headerHtml(isVolumePage: Boolean, isVolumeFirstChapter: Boolean): String {
             val href = headerImageHref ?: return ""

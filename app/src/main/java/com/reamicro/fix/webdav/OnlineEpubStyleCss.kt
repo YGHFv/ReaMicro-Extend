@@ -140,6 +140,18 @@ internal object OnlineEpubStyleCss {
             margin: 0 0 1.6em 0;
         }
 
+        /*
+         * 标题容器基准字号。
+         *
+         * 内置样式移植自 TEpub，那边标题是 h3；这里用 h1，浏览器/阅读器默认 2em 会和样式里
+         * .te-chapter-name 的 1.2em 相乘，标题大到换行。对齐成 h3 的 1.17em，没写 font-size
+         * 的样式才是设计时的大小；样式自己声明了 font-size 的照常覆盖。
+         */
+        h1.te-chapter-title, h1.te-volume-title {
+            font-size: 1.17em;
+            font-weight: bold;
+        }
+
         .te-chapter-number, .te-chapter-name,
         .te-volume-number, .te-volume-name {
             display: block;

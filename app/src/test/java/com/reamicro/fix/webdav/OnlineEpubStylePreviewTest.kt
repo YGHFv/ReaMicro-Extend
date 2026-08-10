@@ -60,12 +60,26 @@ class OnlineEpubStylePreviewTest {
     }
 
     @Test
-    fun `transition preview falls back to the text divider without an image`() {
+    fun `transition preview uses the style's own markup`() {
         val draft = requireNotNull(OnlineEpubStyleLibrary.byId("transition-fg1-stars"))
 
         val html = OnlineEpubStylePreview.html(settings, draft)
 
-        assertTrue(html.contains("""<p class="te-divider-line fg1">"""))
+        assertTrue(html.contains("""<p class="fg1">※※※</p>"""))
+    }
+
+    /** 用户报过「除第一个以外的分割样式预览都还是 ※※※」，这里守住每条各自的结构。 */
+    @Test
+    fun `every transition style previews its own structure`() {
+        val bodies = OnlineEpubStyleLibrary.byKind(OnlineEpubStyleKind.Transition).map { style ->
+            style.id to OnlineEpubStylePreview.html(settings, style).substringAfter("<body>").substringBefore("</body>")
+        }
+
+        assertEquals("分割样式预览出现重复", bodies.size, bodies.map { it.second }.toSet().size)
+        assertTrue(bodies.first { it.first == "transition-css-diamond" }.second.contains("te-transition--diamond"))
+        assertTrue(bodies.first { it.first == "transition-text-label" }.second.contains("te-transition-text"))
+        assertTrue(bodies.first { it.first == "transition-css-fade-line" }.second.contains("te-transition--fade-line"))
+        assertTrue(bodies.first { it.first == "transition-image-divider" }.second.contains("te-divider-img"))
     }
 
     @Test

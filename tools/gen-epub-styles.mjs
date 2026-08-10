@@ -138,6 +138,9 @@ for (const group of GROUPS) {
       name,
       description: readField(entry, "description") ?? "",
       css: stripFontFamily(String(css)),
+      // markup 决定这条样式需要什么正文结构：菱形转场、文字转场、图片转场各不相同，
+      // 只换 CSS 不换结构的话选了也不生效。
+      markup: (readField(entry, "markup") ?? "").trim(),
     });
   }
 }
@@ -181,6 +184,7 @@ const volumeStyles = styles
       name: style.name.replace(/章题$/, "卷题").replace(/章$/, "卷"),
       description: style.description.replace(/章节/g, "卷"),
       css,
+      markup: "",
     };
   });
 
@@ -197,6 +201,7 @@ const entriesSource = all
     if (style.maskAsset) extras.push(`            maskAsset = "${style.maskAsset}",`);
     if (style.sampleWidth) extras.push(`            sampleWidth = ${style.sampleWidth},`);
     if (style.sampleHeight) extras.push(`            sampleHeight = ${style.sampleHeight},`);
+    if (style.markup) extras.push(`            markup = """${kotlinRawString(style.markup)}""",`);
     return `        OnlineEpubStyle(
             id = "${style.id}",
             kind = OnlineEpubStyleKind.${style.kind},

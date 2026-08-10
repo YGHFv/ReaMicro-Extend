@@ -3,11 +3,14 @@ package com.reamicro.fix.webdav
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.Shader
 import java.io.ByteArrayOutputStream
 import java.io.File
 
@@ -47,6 +50,65 @@ internal object OnlineHeaderImageComposer {
             output.recycle()
             source.recycle()
         }
+    }
+
+    /**
+     * 没选原图时的预览底图：画一张示意色块再套蒙版，让用户先看清蒙版裁出的形状。
+     */
+    fun composePlaceholder(
+        maskBitmap: Bitmap?,
+        sampleWidth: Int,
+        sampleHeight: Int,
+    ): ByteArray? {
+        val width = (if (sampleWidth > 0) sampleWidth else 1080).coerceAtLeast(320)
+        val height = (if (sampleHeight > 0) sampleHeight else 608).coerceAtLeast(180)
+        val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        return try {
+            val canvas = Canvas(output)
+            drawPlaceholder(canvas, width, height)
+            maskBitmap?.takeIf { hasTransparency(it) }?.let { mask ->
+                applyMask(canvas, mask, width, height)
+            }
+            ByteArrayOutputStream().use { stream ->
+                output.compress(Bitmap.CompressFormat.PNG, 100, stream)
+                stream.toByteArray()
+            }
+        } finally {
+            output.recycle()
+        }
+    }
+
+    /** 斜向渐变加一道地平线，形状简单但足以看出蒙版边缘。 */
+    private fun drawPlaceholder(canvas: Canvas, width: Int, height: Int) {
+        val background = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = LinearGradient(
+                0f,
+                0f,
+                width.toFloat(),
+                height.toFloat(),
+                intArrayOf(0xFFB9AE95.toInt(), 0xFF8C8676.toInt(), 0xFF5C5B52.toInt()),
+                null,
+                Shader.TileMode.CLAMP,
+            )
+        }
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), background)
+        val ridge = Path().apply {
+            moveTo(0f, height * 0.78f)
+            lineTo(width * 0.28f, height * 0.42f)
+            lineTo(width * 0.47f, height * 0.66f)
+            lineTo(width * 0.66f, height * 0.34f)
+            lineTo(width.toFloat(), height * 0.72f)
+            lineTo(width.toFloat(), height.toFloat())
+            lineTo(0f, height.toFloat())
+            close()
+        }
+        canvas.drawPath(ridge, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF6E6A5C.toInt() })
+        canvas.drawCircle(
+            width * 0.78f,
+            height * 0.24f,
+            minOf(width, height) * 0.09f,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFEDE6D6.toInt() },
+        )
     }
 
     /** 按 max(w/iw, h/ih) 缩放并居中，等价于 CSS 的 object-fit: cover。 */

@@ -640,6 +640,10 @@ internal object OnlineEpubStyleLibrary {
             name = "居中图注插图",
             description = "常见的正文居中插图，限制宽度并在下方显示简洁图注。",
             builtIn = true,
+            markup = """<figure class="te-illustration">
+  <img class="te-illustration-image" src="../Images/illustration-01.jpg" alt="旧站台夜景" />
+  <figcaption class="te-illustration-caption">图 1　旧站台的最后一班列车</figcaption>
+</figure>""",
             css = """.te-illustration {
   width: 86%;
   margin: 1.6em auto;
@@ -674,6 +678,10 @@ internal object OnlineEpubStyleLibrary {
             name = "纸张卡片插图",
             description = "带留白、细边框和轻阴影的卡片式插图，适合信件、档案和回忆画面。",
             builtIn = true,
+            markup = """<figure class="te-illustration">
+  <img class="te-illustration-image" src="../Images/archive-photo.jpg" alt="档案照片" />
+  <figcaption class="te-illustration-caption">档案编号 A-17</figcaption>
+</figure>""",
             css = """.te-illustration {
   width: 82%;
   margin: 1.8em auto;
@@ -708,6 +716,9 @@ internal object OnlineEpubStyleLibrary {
             name = "通栏出血插图",
             description = "横向铺满版心并向两侧出血，适合章节中段的大场景和地图。",
             builtIn = true,
+            markup = """<figure class="te-illustration">
+  <img class="te-illustration-image" src="../Images/panorama-01.jpg" alt="城市全景" />
+</figure>""",
             css = """.te-illustration {
   margin: 1.8em -1.5em;
   padding: 0;
@@ -734,6 +745,17 @@ internal object OnlineEpubStyleLibrary {
             name = "注释点击弹图",
             description = "点击正文词语或注释链接，以无脚本弹层显示对应插图。",
             builtIn = true,
+            markup = """<input id="te-annotation-toggle-1" class="te-annotation-toggle" type="checkbox" />
+<p class="te-paragraph">她在<label class="te-annotation-trigger" for="te-annotation-toggle-1">旧站台<a id="te-annotation-ref-1" class="duokan-footnote" href="#te-annotation-note-1" epub:type="noteref" role="doc-noteref" aria-controls="te-annotation-note-1">〔查看插图〕</a></label>旁停下脚步。</p>
+<aside id="te-annotation-note-1" class="te-annotation-popup duokan-footnote-item" epub:type="footnote" role="doc-footnote">
+  <label class="te-annotation-backdrop" for="te-annotation-toggle-1" aria-label="关闭插图"></label>
+  <figure class="te-annotation-figure">
+    <label class="te-annotation-close" for="te-annotation-toggle-1" aria-label="关闭">×</label>
+    <img class="te-annotation-image" src="../Images/note-station.jpg" alt="旧站台" />
+    <figcaption class="te-annotation-caption">旧站台改造前的资料照片</figcaption>
+    <a class="duokan-footnote-back" href="#te-annotation-ref-1">返回</a>
+  </figure>
+</aside>""",
             css = """.te-annotation-trigger {
   color: #17699a;
   text-decoration: none;
@@ -829,6 +851,7 @@ internal object OnlineEpubStyleLibrary {
             name = "居中三星转场",
             description = "制作功能内置的经典居中 ※※※，兼容旧 class fg1 与标准 te-divider-line。",
             builtIn = true,
+            markup = """<p class="fg1">※※※</p>""",
             css = """p.fg1,
 p.te-divider-line {
   margin: 1.4em 0;
@@ -848,6 +871,7 @@ p.te-divider-line {
             name = "CSS 菱形转场",
             description = "不使用文字和图片，仅用伪元素绘制三枚渐次菱形。",
             builtIn = true,
+            markup = """<p class="te-transition te-transition--diamond" aria-label="场景转换"></p>""",
             css = """.te-transition--diamond {
   margin: 1.7em 0;
   padding: 0;
@@ -870,6 +894,7 @@ p.te-divider-line {
             name = "文字线条转场",
             description = "在左右细线之间显示“与此同时”等短文本。",
             builtIn = true,
+            markup = """<p class="te-transition te-transition--text"><span class="te-transition-text">与此同时</span></p>""",
             css = """.te-transition--text {
   display: flex;
   align-items: center;
@@ -900,6 +925,7 @@ p.te-divider-line {
             name = "CSS 渐隐短线",
             description = "无文本的轻量渐隐横线，适合现代、日常和长篇阅读。",
             builtIn = true,
+            markup = """<p class="te-transition te-transition--fade-line" aria-label="场景转换"></p>""",
             css = """.te-transition--fade-line {
   width: 58%;
   height: 1px;
@@ -916,6 +942,9 @@ p.te-divider-line {
             name = "图片装饰转场",
             description = "使用独立 PNG、JPG 或 SVG 小图替代孤立省略号。",
             builtIn = true,
+            markup = """<div class="te-divider-image">
+  <img class="te-divider-img" src="../Images/divider.png" alt="场景转换" />
+</div>""",
             css = """.te-divider-image {
   margin: 1.6em 0;
   padding: 0;

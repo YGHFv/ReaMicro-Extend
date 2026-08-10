@@ -1,6 +1,7 @@
 package com.reamicro.fix.webdav
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -45,6 +46,39 @@ class OnlineBodyMarkupTest {
                 "<img class=\"te-header-image\" src=\"../Images/header.png\" alt=\"\"/>" +
                 "</figure>",
             OnlineBodyMarkup.header("../Images/header.png"),
+        )
+    }
+
+    @Test
+    fun `transition renders the style's own markup`() {
+        assertEquals(
+            """<p class="te-transition te-transition--diamond" aria-label="场景转换"></p>""",
+            OnlineBodyMarkup.transition(
+                """<p class="te-transition te-transition--diamond" aria-label="场景转换"></p>""",
+                "※※※",
+                null,
+            ),
+        )
+    }
+
+    @Test
+    fun `transition binds the divider image into the markup`() {
+        val html = OnlineBodyMarkup.transition(
+            "<div class=\"te-divider-image\">\n  <img class=\"te-divider-img\" src=\"../Images/divider.png\" alt=\"\" />\n</div>",
+            "※※※",
+            "../Images/divider.jpg",
+        )
+
+        assertTrue(html.contains("""src="../Images/divider.jpg""""))
+        assertFalse(html.contains("divider.png"))
+    }
+
+    @Test
+    fun `transition without markup falls back to the default divider`() {
+        assertEquals(OnlineBodyMarkup.divider("※※※"), OnlineBodyMarkup.transition("", "※※※", null))
+        assertEquals(
+            OnlineBodyMarkup.dividerImage("../Images/divider.png"),
+            OnlineBodyMarkup.transition("", "※※※", "../Images/divider.png"),
         )
     }
 
