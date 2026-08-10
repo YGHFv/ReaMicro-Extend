@@ -77,6 +77,7 @@ import com.reamicro.fix.settings.OnlineEpubHeaderScope
 import com.reamicro.fix.settings.OnlineEpubStyle
 import com.reamicro.fix.settings.OnlineEpubStyleDefaults
 import com.reamicro.fix.settings.OnlineEpubStyleKind
+import com.reamicro.fix.settings.OnlineEpubStyleLibrary
 import com.reamicro.fix.settings.OnlineEpubStyleSettings
 import com.reamicro.fix.settings.OnlineEpubStyleStore
 import com.reamicro.fix.webdav.OnlineEpubStylePreview
@@ -2746,13 +2747,18 @@ class ReaMicroSettingsHook(
                     }
                 }
                 lateinit var syncSectionRow: () -> Unit
-                fun switchSection(selector: String) {
-                    drafts[activeSelector] = cssInput.text?.toString().orEmpty().trim()
+                /** 载入某一段到输入框；不回写，供首次进入使用。 */
+                fun loadSection(selector: String) {
                     activeSelector = selector
                     cssInput.setText(drafts[selector].orEmpty())
                     cssInput.hint = "$selector 的 CSS 声明"
                     syncSectionRow.invoke()
                     syncPreview.invoke()
+                }
+                /** 切段：先把输入框内容回写到旧段，再载入新段。 */
+                fun switchSection(selector: String) {
+                    drafts[activeSelector] = cssInput.text?.toString().orEmpty().trim()
+                    loadSection(selector)
                 }
                 syncSectionRow = {
                     sectionRow.removeAllViews()
@@ -2780,6 +2786,7 @@ class ReaMicroSettingsHook(
                     override fun afterTextChanged(s: Editable?) = Unit
                 })
                 val exportButton = settingsDialogButton(activity, "导出", colors, SettingsDialogButtonRole.Neutral)
+                val resetButton = settingsDialogButton(activity, "重置为内置", colors, SettingsDialogButtonRole.Neutral)
                 val applyButton = settingsDialogButton(activity, "设为当前", colors, SettingsDialogButtonRole.Neutral)
                 val finishButton = settingsDialogButton(activity, "完成", colors)
                 val deleteButton = settingsDialogButton(activity, "删除", colors, SettingsDialogButtonRole.Destructive)
@@ -2819,18 +2826,35 @@ class ReaMicroSettingsHook(
                         settingsDialogHint(activity, "头图会按该样式的蒙版自动裁切后写入成书。", colors),
                     )
                 }
+                val builtInSource = OnlineEpubStyleLibrary.byId(style.id)?.takeIf { it.kind == style.kind }
+                card.addView(
+                    settingsDialogButtonRow(
+                        activity,
+                        listOfNotNull(exportButton, resetButton.takeIf { builtInSource != null }),
+                    ),
+                )
                 val buttons = if (style.builtIn) {
-                    listOf(exportButton, applyButton, finishButton, cancelButton)
+                    listOf(applyButton, finishButton, cancelButton)
                 } else {
-                    listOf(deleteButton, exportButton, applyButton, finishButton, cancelButton)
+                    listOf(deleteButton, applyButton, finishButton, cancelButton)
                 }
                 card.addView(settingsDialogButtonRow(activity, buttons))
-                switchSection(activeSelector)
+                // 首次进入必须用 loadSection：switchSection 会先把此刻还空着的输入框回写到首段，
+                // 那会把解析出来的第一段 CSS 抹掉。
+                loadSection(activeSelector)
                 fun edited(): OnlineEpubStyle {
                     drafts[activeSelector] = cssInput.text?.toString().orEmpty().trim()
                     return draftStyle()
                 }
                 exportButton.setOnClickListener { exportOnlineEpubStyle(edited()) }
+                resetButton.setOnClickListener {
+                    val source = builtInSource ?: return@setOnClickListener
+                    // 丢掉这条内置样式的全部改写记录，重新打开时读回内置库的原始 CSS。
+                    OnlineEpubStyleStore.resetToBuiltIn(onlineEpubStyleContext(), source.id)
+                    bumpOnlineEpubStyleVersion()
+                    dialog.dismiss()
+                    showToast("已重置为内置：${source.name}")
+                }
                 applyButton.setOnClickListener {
                     val next = edited()
                     saveOnlineEpubStyle(next)

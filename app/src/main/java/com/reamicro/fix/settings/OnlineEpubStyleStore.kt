@@ -108,8 +108,20 @@ object OnlineEpubStyleStore {
             .commit()
     }
 
-    fun select(context: Context?, kind: OnlineEpubStyleKind, styleId: String) {
+    /** 丢弃某条内置样式的改写记录与删除标记，恢复内置库里的原样。 */
+    fun resetToBuiltIn(context: Context?, styleId: String) {
         context ?: return
+        val prefs = context.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE)
+        val overrides = decodeStyles(prefs.getString(ModuleSettings.KEY_ONLINE_EPUB_STYLES, "").orEmpty())
+            .filterNot { it.id == styleId }
+        val removed = decodeIds(prefs.getString(ModuleSettings.KEY_ONLINE_EPUB_STYLES_REMOVED, "").orEmpty()) - styleId
+        prefs.edit()
+            .putString(ModuleSettings.KEY_ONLINE_EPUB_STYLES, encodeStyles(overrides))
+            .putString(ModuleSettings.KEY_ONLINE_EPUB_STYLES_REMOVED, encodeIds(removed))
+            .commit()
+    }
+
+    fun select(context: Context?, kind: OnlineEpubStyleKind, styleId: String) {        context ?: return
         val prefs = context.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE)
         val selection = decodeSelection(
             prefs.getString(ModuleSettings.KEY_ONLINE_EPUB_STYLE_SELECTION, "").orEmpty(),

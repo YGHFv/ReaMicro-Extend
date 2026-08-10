@@ -87,6 +87,44 @@ class OnlineEpubStyleLibraryTest {
         assertFalse(textDivider.needsAsset)
         assertTrue(header.needsAsset)
     }
+
+    /**
+     * 配置弹窗把 CSS 拆成若干段分别编辑，保存时再拼回去。
+     *
+     * 曾经有个 bug：首次进入就把还空着的输入框回写到第一段，`.te-chapter-title` 的
+     * text-align/font-size/margin 被整段抹掉，标题变成左对齐超大字。这里守住往返不丢内容。
+     */
+    @Test
+    fun `section round trip keeps every declaration`() {
+        OnlineEpubStyleLibrary.BUILT_INS.forEach { style ->
+            val drafts = LinkedHashMap<String, String>()
+            OnlineEpubStyleDefaults.selectors(style.kind).forEach { drafts[it] = "" }
+            OnlineEpubCssBlocks.parse(style.css).forEach { drafts[it.selector] = it.declarations }
+
+            val rebuilt = OnlineEpubCssBlocks.compose(
+                drafts.map { (selector, body) -> OnlineEpubCssBlock(selector, body) },
+            )
+
+            val rebuiltBlocks = OnlineEpubCssBlocks.parse(rebuilt).associate { it.selector to it.declarations }
+            OnlineEpubCssBlocks.parse(style.css).forEach { block ->
+                assertEquals(
+                    "${style.id} 的 ${block.selector} 往返后变了",
+                    block.declarations,
+                    rebuiltBlocks[block.selector],
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `built-in title style keeps its centering declaration`() {
+        val style = requireNotNull(OnlineEpubStyleLibrary.byId("title-classic-red"))
+        val blocks = OnlineEpubCssBlocks.parse(style.css)
+
+        val title = requireNotNull(blocks.firstOrNull { it.selector == ".te-chapter-title" })
+        assertTrue(title.declarations.contains("text-align: center;"))
+        assertTrue(title.declarations.contains("font-size: 1.2em;"))
+    }
 }
 
 class OnlineEpubCssBlocksTest {
