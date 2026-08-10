@@ -1,0 +1,96 @@
+{
+  "hookPath": "app/src/main/java/com/reamicro/fix/hook/ReaderHook.kt",
+  "className": "ReaderHook",
+  "subPackage": "com.reamicro.fix.hook.reader",
+  "keepInClass": [
+    "install",
+    "onHostActivityDestroyed",
+    "onTrimMemory",
+    "onLowMemory"
+  ],
+  "commonFooter": [
+    "//",
+    "// 从 ReaderHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新",
+    "// 缩进回去与原文逐字节比对，不一致直接中止（tools/extract-hook-cluster.mjs）。"
+  ],
+  "clusters": [
+    {
+      "id": "HostHooks",
+      "match": "^hook[A-Z]|^installNative",
+      "header": [
+        "// ReaderHook 的宿主 hook 安装簇。",
+        "//",
+        "// 所有 hookXxx()：挂到阅读页的 ViewModel、目录、底栏、选择控制器等宿主方法上。"
+      ]
+    },
+    {
+      "id": "Search",
+      "match": "search",
+      "header": [
+        "// 阅读页全文搜索簇。",
+        "//",
+        "// 本地索引构建、结果列表页、跳转定位、高亮注入，以及跳转后高亮未渲染时的",
+        "// 翻页纠错。"
+      ]
+    },
+    {
+      "id": "ReadAloud",
+      "match": "readaloud|tts|lyricon",
+      "header": [
+        "// 阅读页朗读簇。",
+        "//",
+        "// 朗读入口与控制条、分句推送、朗读高亮跟随、翻页重启、Lyricon 歌词卡片。"
+      ]
+    },
+    {
+      "id": "OnDemand",
+      "match": "ondemand|prefetch|spine|virtualwindow",
+      "header": [
+        "// 在线补全的按需下载簇。",
+        "//",
+        "// 章节预取与重试、按需跳转拦截、spine 缓存就绪后的重放与可见页刷新。"
+      ]
+    },
+    {
+      "id": "Highlight",
+      "match": "highlight|marks?$",
+      "header": [
+        "// 阅读页高亮簇。",
+        "//",
+        "// 向宿主 Mark 体系注入模块高亮、刷新高亮窗口。"
+      ]
+    },
+    {
+      "id": "Selection",
+      "match": "selection|menu|dictionary|translate|ai",
+      "header": [
+        "// 阅读页划词菜单簇。",
+        "//",
+        "// 精简选择菜单、词典与 AI 释义、划词朗读。"
+      ]
+    },
+    {
+      "id": "Catalog",
+      "match": "catalog|chapter|epub|page|cfi|scroll|flip",
+      "header": [
+        "// 阅读页目录与翻页簇。",
+        "//",
+        "// 目录数据读取、cfi 定位、翻页样式、ScrollPager 崩溃兜底、正文渲染宽度兜底。"
+      ]
+    },
+    {
+      "id": "Support",
+      "match": "*",
+      "header": [
+        "// ReaderHook 的支撑簇。",
+        "//",
+        "// 反射调用宿主 Compose 构件与协程、取当前书籍与页面、内存回收、各类小工具。"
+      ]
+    }
+  ],
+  "pureHelpers": [
+    "sameSearchContentPath",
+    "relativePath",
+    "normalizePath"
+  ]
+}

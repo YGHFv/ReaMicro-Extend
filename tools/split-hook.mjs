@@ -24,12 +24,25 @@ if (!configPath) {
   process.exit(1)
 }
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
-const { hookPath, className, subPackage, clusters, commonFooter, keepInClass = [] } = config
+const { hookPath, className, subPackage, clusters, commonFooter, keepInClass = [], pureHelpers = [] } = config
 const subDir = `app/src/main/java/${subPackage.replace(/\./g, '/')}`
 const hookDir = path.dirname(hookPath)
 const hookPackage = fs.readFileSync(hookPath, 'utf8').match(/^package (.+)$/m)[1]
 
 const read = () => fs.readFileSync(hookPath, 'utf8').split('\n')
+
+/**
+ * 去掉一行里的字符串与字符字面量，只留代码骨架。
+ *
+ * 用于花括号配对计数：常量表里有 '{'、'}' 这样的字符字面量（例如朗读的包裹符集合），
+ * 直接数括号会把 companion 的结束位置算错，进而把常量表拦腰截断。
+ */
+function codeOnly(line) {
+  return line
+    .replace(/\\./g, '')
+    .replace(/'[^']*'/g, "''")
+    .replace(/"[^"]*"/g, '""')
+}
 
 function classStartIndex(lines) {
   const i = lines.findIndex((l) => l.startsWith(`class ${className}(`))
@@ -55,35 +68,49 @@ function hoistCompanionConstants() {
   let end = start + 1
   let depth = 1
   for (; end < lines.length; end++) {
-    depth += (lines[end].match(/\{/g) || []).length - (lines[end].match(/\}/g) || []).length
+    const code = codeOnly(lines[end])
+    depth += (code.match(/\{/g) || []).length - (code.match(/\}/g) || []).length
     if (depth === 0) break
   }
 
   // 只提升 const val / val：companion 里的 var 是类级可变状态（如 activeInstance），
   // 留在原处更贴近它的语义，而且它常常以宿主类或本类为类型，搬走还要额外补 import。
-  const CONST_RE = /^ {8}(@Volatile )?(private |internal )?(const )?val ([A-Za-z0-9_]+)/
-  const MEMBER_RE = /^ {8}(?:@\w+(?:\([^)]*\))? )*(?:private |internal |public )?(?:const )?(?:data |inner |sealed |enum |abstract |open |inline |suspend |tailrec |lateinit |operator |override )*(?:class|object|interface|val|var|fun)\b/
+  // companion 体按「成员声明」切块：8 空格缩进 + 成员关键字才算一个块的开始，
+  // 紧贴其上的注释归属下一个成员，块一直延续到下一个成员声明之前（多行字面量、
+  // charArrayOf(...) 这种跨行初始化因此能完整跟着走）。
+  const DECL_RE = /^ {8}(?:@\w+(?:\([^)]*\))? )*(?:private |internal |public )*(?:const )?(?:val|var|fun|class|object|interface) /
+  // 提升 const val / val / var；但类型是 hook 类自身的 var（如 activeInstance）留在原处：
+  // 它是「当前活跃实例」这种与类绑定的状态，搬到子包既不贴切又要额外补类型 import。
+  const HOISTABLE_RE = /^ {8}(?:@\w+(?:\([^)]*\))? )*(?:private |internal |public )*(?:const )?(?:val|var) /
+  const isHoistable = (line) => HOISTABLE_RE.test(line) && !new RegExp(`:\\s*${className}\\b`).test(line)
+
+  const body = lines.slice(start + 1, end)
+  const declIndexes = []
+  body.forEach((line, i) => {
+    if (DECL_RE.test(line)) declIndexes.push(i)
+  })
+  /** 把紧贴声明之上的注释行一起算进块里。 */
+  const blockStart = (i) => {
+    let s = i
+    while (s > 0 && /^ {8}(\/\/|\*|\/\*)/.test(body[s - 1])) s--
+    return s
+  }
   const hoisted = []
   const kept = []
-  let i = start + 1
-  while (i < end) {
-    let declStart = i
-    while (declStart < end && /^ {8}(\/\/|\*|\/\*|@Volatile)/.test(lines[declStart]) === false && !MEMBER_RE.test(lines[declStart])) {
-      kept.push(lines[declStart])
-      declStart++
-    }
-    if (declStart >= end) break
-    // 收拢紧贴其上的注释
-    const commentStart = declStart
-    let blockEnd = declStart + 1
-    while (blockEnd < end && !MEMBER_RE.test(lines[blockEnd]) && !/^ {8}(\/\/|\/\*)/.test(lines[blockEnd])) blockEnd++
-    // 注释块归属下一个成员，回退
-    while (blockEnd - 1 > declStart && /^ {8}\/\//.test(lines[blockEnd - 1])) blockEnd--
-    const block = lines.slice(commentStart, blockEnd)
-    if (CONST_RE.test(lines[declStart])) hoisted.push(block)
+  let cursor = 0
+  for (let d = 0; d < declIndexes.length; d++) {
+    const declLine = declIndexes[d]
+    const from = blockStart(declLine)
+    const to = d + 1 < declIndexes.length ? blockStart(declIndexes[d + 1]) : body.length
+    // 声明之前的游离行（空行等）原样保留
+    if (from > cursor) kept.push(...body.slice(cursor, from))
+    const block = body.slice(from, to)
+    if (isHoistable(body[declLine])) hoisted.push(block)
     else kept.push(...block)
-    i = blockEnd
+    cursor = to
   }
+  if (cursor < body.length) kept.push(...body.slice(cursor))
+
   if (!hoisted.length) {
     console.log('1/6 companion 内无可提升常量，跳过')
     return
@@ -143,6 +170,31 @@ function hoistMemberExtensions() {
 }
 
 // ---- 4. private -> internal ----
+// ---- 3.5 纯工具函数 -> 子包顶层 ----
+//
+// 提升出去的成员扩展函数会调用一些不依赖 hook 状态的小工具（路径归一化之类）。
+// 那些工具留在类里就调不到，因此按配置把它们一并提升为子包顶层函数。
+// 若某个函数其实用到了 hook 状态，提升后编译会失败——由编译器兜底。
+function hoistPureHelpers() {
+  if (!pureHelpers.length) return
+  const listFile = '.tmp-pure-helpers.txt'
+  fs.writeFileSync(listFile, pureHelpers.join('\n'), 'utf8')
+  runTool('tools/extract-hook-cluster.mjs', [
+    hookPath,
+    `${subDir}/${className}PureHelpers.kt`,
+    className,
+    listFile,
+    [
+      `// 从 ${className} 提升出来的纯工具函数。`,
+      '//',
+      '// 它们不依赖 hook 状态，但被同样提升到本子包的成员扩展函数调用，留在类里就调不到。',
+    ].join('\\n'),
+    subPackage,
+    '--no-receiver',
+  ])
+  fs.unlinkSync(listFile)
+}
+
 function widenVisibility() {
   const lines = read()
   const start = classStartIndex(lines)
@@ -291,10 +343,58 @@ function importInnerClasses() {
   console.log(`5/6 补 inner class 类型导入 ${added} 个`)
 }
 
+// ---- 4.5 文件级 private 顶层声明 -> 子包 internal ----
+//
+// hook 文件里常有 `private fun dp(context, value)` 这类文件级私有顶层工具。
+// 文件私有意味着搬出去的簇文件看不到它；而直接改成同包 internal 会与其它 hook
+// 文件里的同名文件私有声明冲突（本包里 dp 就有三份各自私有的实现）。
+// 因此挪到子包，由各簇文件通过包级 star import 引用。
+function hoistFilePrivateTopLevel() {
+  const lines = read()
+  const TOP_PRIVATE = /^private (?:inline |suspend |tailrec )*(?:fun|val|var|const val|class|object) ([A-Za-z0-9_]+)/
+  const NEXT_TOP = /^(?:@\w+|private |internal |public |fun |val |var |const |class |object |interface |import |package )/
+  const blocks = []
+  for (let i = 0; i < lines.length; i++) {
+    if (!TOP_PRIVATE.test(lines[i])) continue
+    let start = i
+    while (start > 0 && /^(\/\/|\*|\/\*|@)/.test(lines[start - 1])) start--
+    let end = i + 1
+    while (end < lines.length && !NEXT_TOP.test(lines[end])) end++
+    blocks.push({ start, end, name: lines[i].match(TOP_PRIVATE)[1] })
+  }
+  if (!blocks.length) return
+  const moved = blocks.map((b) =>
+    lines.slice(b.start, b.end)
+      .join('\n')
+      .replace(/^private /m, 'internal ')
+      .replace(/\n+$/, ''),
+  )
+  const header = [
+    `package ${subPackage}`,
+    '',
+    ...importsOf(lines),
+    '',
+    `// 原先是 ${path.basename(hookPath)} 里的文件级 private 顶层工具函数。`,
+    '//',
+    '// 功能簇拆成同包扩展函数后这些工具不可见；改成同包 internal 又会与其它 hook 文件里',
+    '// 各自的同名文件私有实现冲突，因此挪到子包由包级 star import 引用。',
+    '',
+  ]
+  const target = `${subDir}/${className}FileHelpers.kt`
+  fs.mkdirSync(subDir, { recursive: true })
+  fs.writeFileSync(target, header.join('\n') + moved.join('\n\n') + '\n', 'utf8')
+  const removal = new Set()
+  for (const b of blocks) for (let i = b.start; i < b.end; i++) removal.add(i)
+  fs.writeFileSync(hookPath, lines.filter((_, i) => !removal.has(i)).join('\n'), 'utf8')
+  console.log(`4/6 文件级 private 顶层声明提升 ${blocks.length} 个 -> ${path.basename(target)}`)
+}
+
 hoistCompanionConstants()
 hoistTypes()
 hoistMemberExtensions()
+hoistPureHelpers()
 widenVisibility()
+hoistFilePrivateTopLevel()
 extractClusters()
 qualifyCompanionDelegates()
 importInnerClasses()

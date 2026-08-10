@@ -5,11 +5,14 @@
 //   2. 函数体整体反缩进 4 空格，但三引号原始字符串内部一行不动——那里的空格是内容；
 //   3. 搬完后把新文件里的函数体重新缩进回去，与原文逐字节比对，不一致就中止。
 //
-// 用法：node tools/extract-hook-cluster.mjs <源文件> <目标文件> <类名> <函数名清单文件> <文件头注释> [包名]
+// 用法：node tools/extract-hook-cluster.mjs <源文件> <目标文件> <类名> <函数名清单文件> <文件头注释> [包名] [--no-receiver]
+//
+// --no-receiver：搬成不带接收者的顶层函数（用于确实不依赖 hook 状态的纯工具）。
 
 import fs from 'node:fs'
 
-const [, , sourcePath, targetPath, className, namesPath, headerComment, packageName] = process.argv
+const [, , sourcePath, targetPath, className, namesPath, headerComment, packageName, receiverFlag] = process.argv
+const noReceiver = receiverFlag === '--no-receiver'
 if (!sourcePath || !targetPath || !className || !namesPath) {
   console.error('参数不足')
   process.exit(1)
@@ -117,7 +120,7 @@ for (const m of moved) {
   const decl = dedented[declIndex]
   const rewritten = decl.replace(
     /^(?:private |internal |public )?((?:inline |suspend |tailrec )*)fun (<[^>]+> )?/,
-    `internal $1fun $2${className}.`,
+    noReceiver ? `internal $1fun $2` : `internal $1fun $2${className}.`,
   )
   if (rewritten === decl) throw new Error('声明行重写失败: ' + decl)
   dedented[declIndex] = rewritten
