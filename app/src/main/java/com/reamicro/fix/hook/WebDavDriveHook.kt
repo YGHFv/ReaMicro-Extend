@@ -129,6 +129,7 @@ import com.reamicro.fix.webdav.OnlineOnDemandMetadataStore
 import com.reamicro.fix.webdav.OnlineChapterContentValidator
 import com.reamicro.fix.webdav.OnlineChapterUpdatePlanner
 import com.reamicro.fix.webdav.OnlineChapterHeadingMarkup
+import com.reamicro.fix.webdav.OnlineVolumeHeadingMarkup
 import com.reamicro.fix.webdav.RemoteOnlineChapter
 import com.reamicro.fix.webdav.StoredOnlineChapter
 import com.reamicro.fix.webdav.SyncAuthCardRenderContext
@@ -9474,6 +9475,7 @@ class WebDavDriveHook(
             )
         }
         val coverExt = onlineCompletionExistingCoverExt(root)
+        if (writeOnlineCompletionVolumePages(root, tocChapters)) changed = true
         val tocFile = File(root, "OEBPS/toc.ncx")
         val nextToc = onlineTocNcx(target, tocChapters, chapterHrefs)
         if (!tocFile.isFile || tocFile.readText(Charsets.UTF_8) != nextToc) {
@@ -9987,6 +9989,13 @@ class WebDavDriveHook(
                     zip,
                     "OEBPS/Text/chapter_${(index + 1).toString().padStart(4, '0')}.xhtml",
                     chapterXhtml(chapter.title, chapter.content, imageHrefs),
+                )
+            }
+            onlineVolumeSegments(chapters).forEach { segment ->
+                writeTextZipEntry(
+                    zip,
+                    "OEBPS/${onlineVolumeHref(segment.order)}",
+                    volumeXhtml(segment.title),
                 )
             }
             val chapterHrefs = defaultOnlineChapterHrefs(chapters.size)
@@ -10819,6 +10828,81 @@ $paragraphs
     private fun defaultOnlineChapterHrefs(count: Int): List<String> =
         (1..count).map { order -> "Text/chapter_${order.toString().padStart(4, '0')}.xhtml" }
 
+    /** 目录里连续同卷名的章节归为一卷，用于生成卷首页。 */
+    private fun onlineVolumeSegments(chapters: List<OnlineDownloadedChapter>): List<OnlineVolumeSegment> {
+        val segments = ArrayList<OnlineVolumeSegment>()
+        var index = 0
+        while (index < chapters.size) {
+            val volumeTitle = chapters[index].volumeTitle.trim()
+            if (volumeTitle.isBlank()) {
+                index += 1
+                continue
+            }
+            segments += OnlineVolumeSegment(
+                order = segments.size + 1,
+                title = volumeTitle,
+                startIndex = index,
+            )
+            while (index < chapters.size && chapters[index].volumeTitle.trim() == volumeTitle) {
+                index += 1
+            }
+        }
+        return segments
+    }
+
+    private fun onlineVolumeHref(order: Int): String =
+        "Text/volume_${order.toString().padStart(4, '0')}.xhtml"
+
+    /** 卷首页文档：仿起点单独成页，序号与卷名自动分行。 */
+    private fun volumeXhtml(volumeTitle: String): String {
+        val heading = OnlineVolumeHeadingMarkup.parse(volumeTitle)
+        val body = if (heading.number.isNotBlank() && heading.title.isNotBlank()) {
+            OnlineVolumeHeadingMarkup.split(heading.number.xmlEscape(), heading.title.xmlEscape())
+        } else {
+            OnlineVolumeHeadingMarkup.single(heading.title.ifBlank { heading.number }.xmlEscape())
+        }
+        val documentTitle = volumeTitle.trim().ifBlank { "卷首页" }
+        return """<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>${documentTitle.xmlEscape()}</title><link rel="stylesheet" type="text/css" href="../Styles/default.css"/></head>
+<body>$body
+</body>
+</html>"""
+    }
+
+    /** 把卷首页写入已导入的书目录，并清理卷数变少后残留的旧卷首页。 */
+    private fun writeOnlineCompletionVolumePages(
+        bookDir: File,
+        chapters: List<OnlineDownloadedChapter>,
+    ): Boolean {
+        val root = bookDir.canonicalFile
+        File(root, "OEBPS/Text").mkdirs()
+        var changed = false
+        val expectedNames = HashSet<String>()
+        onlineVolumeSegments(chapters).forEach { segment ->
+            val file = onlineCompletionChapterFile(root, onlineVolumeHref(segment.order))
+            expectedNames += file.name
+            val next = volumeXhtml(segment.title)
+            if (!file.isFile || file.readText(Charsets.UTF_8) != next) {
+                writeOnlineCompletionTextAtomically(file, next)
+                changed = true
+            }
+        }
+        File(root, "OEBPS/Text").listFiles()
+            ?.filter { file ->
+                file.isFile &&
+                    ONLINE_COMPLETION_VOLUME_FILE_REGEX.matches(file.name) &&
+                    file.name !in expectedNames
+            }
+            ?.forEach { stale ->
+                if (stale.delete()) {
+                    changed = true
+                    logWebDav("online completion stale volume page removed path=${stale.absolutePath}")
+                }
+            }
+        return changed
+    }
+
     private fun onlineTocNcx(
         target: OnlineDownloadTarget,
         chapters: List<OnlineDownloadedChapter>,
@@ -10843,6 +10927,7 @@ $paragraphs
         }
         val points = StringBuilder()
         var index = 0
+        var volumeSequence = 0
         while (index < chapters.size) {
             val volumeTitle = chapters[index].volumeTitle.trim()
             if (volumeTitle.isBlank()) {
@@ -10850,15 +10935,14 @@ $paragraphs
                 index += 1
                 continue
             }
-            val startIndex = index
             val volumeOrder = playOrder++
+            volumeSequence += 1
             val children = StringBuilder()
             while (index < chapters.size && chapters[index].volumeTitle.trim() == volumeTitle) {
                 children.append(chapterPoint(index, chapters[index], "      "))
                 index += 1
             }
-            val href = chapterHrefs.getOrNull(startIndex)
-                ?: "Text/chapter_${(startIndex + 1).toString().padStart(4, '0')}.xhtml"
+            val href = onlineVolumeHref(volumeSequence)
             points.appendLine("""    <navPoint id="volume$volumeOrder" playOrder="$volumeOrder">""")
             points.appendLine("      <navLabel>")
             points.appendLine("        <text>${volumeTitle.xmlEscape()}</text>")
@@ -10894,7 +10978,17 @@ $points  </navMap>
                 ?: "Text/chapter_${order.toString().padStart(4, '0')}.xhtml"
             """    <item id="chapter$order" href="${href.xmlEscape()}" media-type="application/xhtml+xml"/>"""
         }
-        val spine = chapters.indices.joinToString("\n") { index -> """    <itemref idref="chapter${index + 1}"/>""" }
+        val volumeSegments = onlineVolumeSegments(chapters)
+        val volumeStarts = volumeSegments.associateBy { it.startIndex }
+        val manifestVolumes = volumeSegments.joinToString("\n") { segment ->
+            """    <item id="volume${segment.order}" href="${onlineVolumeHref(segment.order).xmlEscape()}" media-type="application/xhtml+xml"/>"""
+        }
+        val spine = chapters.indices.flatMap { index ->
+            val chapterRef = """    <itemref idref="chapter${index + 1}"/>"""
+            volumeStarts[index]
+                ?.let { listOf("""    <itemref idref="volume${it.order}"/>""", chapterRef) }
+                ?: listOf(chapterRef)
+        }.joinToString("\n")
         val imageManifest = contentImages.mapIndexed { index, image ->
             """    <item id="online-img-${index + 1}" href="Images/${image.fileName.xmlEscape()}" media-type="${image.mimeType}"/>"""
         }.joinToString("\n")
@@ -10912,6 +11006,7 @@ $points  </navMap>
             """    <item id="source-chapter-index" href="$ONLINE_COMPLETION_CHAPTER_INDEX" media-type="application/json"/>""",
             coverManifest,
             imageManifest,
+            manifestVolumes,
             manifestChapters,
         ).filter { it.isNotBlank() }.joinToString("\n")
         val coverMeta = if (hasCover) """    <meta name="cover" content="cover-image"/>""" else ""
@@ -13368,6 +13463,13 @@ img{max-width:100%;max-height:100%;height:auto;}
         val bookDir: File?,
     )
 
+    /** 一卷在目录中的位置：order 用于卷首页文件名，startIndex 为该卷首章下标。 */
+    private data class OnlineVolumeSegment(
+        val order: Int,
+        val title: String,
+        val startIndex: Int,
+    )
+
     private data class OnlineChapter(
         val title: String,
         val url: String,
@@ -14112,6 +14214,46 @@ img{max-width:100%;max-height:100%;height:auto;}
                 padding: 0;
                 line-height: 130%;
             }
+
+            /* 卷首页 */
+            .te-volume-page {
+                text-align: center;
+                margin: 5em 0 0 0;
+            }
+
+            /* 卷首页装饰符 */
+            .te-volume-ornament {
+                text-align: center;
+                text-indent: 0;
+                font-size: 1em;
+                color: #8c7b5a;
+                line-height: 130%;
+                margin: 0 0 2em 0;
+            }
+
+            /* 卷序号 */
+            .te-volume-number {
+                font-family: "宋体", serif;
+                font-size: 0.9em;
+                color: #413245;
+                line-height: 140%;
+                font-weight: 900;
+                display: block;
+                text-align: center;
+                margin: 0 0 0.8em 0;
+                padding: 0;
+            }
+
+            /* 卷名 */
+            .te-volume-title {
+                font-family: "宋体", serif;
+                font-size: 1.5em;
+                color: #c2181e;
+                text-align: center;
+                font-weight: 900;
+                line-height: 150%;
+                margin: 0;
+            }
         """.trimIndent()
         const val ONLINE_COMPLETION_FAILED_CHAPTER_LOG = "reamicro-online-failed-chapters.json"
         const val ONLINE_COMPLETION_NOTIFICATION_CHANNEL = "reamicro_online_completion_download"
@@ -14267,6 +14409,7 @@ img{max-width:100%;max-height:100%;height:auto;}
             Regex("(?:下载|重试)?章节\\s*(\\d+)\\s*/\\s*(\\d+)")
         val ONLINE_COMPLETION_FAILED_COUNT_REGEX = Regex("失败\\s*(\\d+)\\s*章")
         val ONLINE_COMPLETION_CHAPTER_FILE_REGEX = Regex("""chapter_(\d+)\.xhtml""", RegexOption.IGNORE_CASE)
+        val ONLINE_COMPLETION_VOLUME_FILE_REGEX = Regex("""volume_(\d+)\.xhtml""", RegexOption.IGNORE_CASE)
         val ONLINE_DIVIDER_LINE_REGEX = Regex("""^[=_~*·•…⋯・◆◇■□●○※＊\-‐‑‒–—―]{2,}$""")
         val ONLINE_COMPLETION_INLINE_STYLE_REGEX =
             Regex("""<style\s+type=["']text/css["']>[\s\S]*?</style>""", RegexOption.IGNORE_CASE)

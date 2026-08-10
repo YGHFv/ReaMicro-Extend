@@ -1,5 +1,15 @@
 # 更新记录
 
+## 1.4.2 - 2026-08-10
+
+### 在线补全图书新增卷首页
+- 在线补全下载/更新的 EPUB 此前只有章节标题页、没有卷首页，多卷书在阅读时看不到分卷。现仿起点为**每一卷**生成独立的卷首页文档，卷名与正文分开成页。
+- **卷的来源仍是在线源的多级目录**：沿用既有的 `OnlineChapter.volumeTitle` 提取链路（`isVolume` 规则 → 节点 `type/kind` → 无正文 URL 的层级节点 → `volume_name/part_name/section_name/group_name` 等字段），目录中连续同卷名的章节归为一卷，未分卷的章节不生成卷首页。**未改动目录解析逻辑**，避免带正文 URL 的章节被误判成卷而丢失正文。
+- 卷标格式识别只用于**卷首页的换行排版**：新增 `OnlineVolumeHeadingMarkup.parse`，把卷名拆成「卷序号 + 卷名」两行（序号小字在上、卷名大字在下，与章节标题页一致），支持带/不带分隔符的 `第x卷`、`第x节`、`第x小节`、`第x章/部/篇/册/季/回/集/辑/幕`、`序 / 序章 / 序言 / 序幕 / 序曲 / 楔子 / 前言 / 引子 / 番外 / 外传 / 后记 / 终章 / 尾声`，以及 `Volume 2 / Part 3` 等拉丁写法；`第 十 卷` 这类夹空白的序号会压缩成 `第十卷`。**只有序号没有卷名时只显示序号**；识别不出卷标时整串当作卷名单行显示。卷名过长由样式自动换行。
+- EPUB 结构：卷首页写为 `OEBPS/Text/volume_XXXX.xhtml`，登记进 `content.opf` manifest，并在 spine 中插到该卷首章之前；`toc.ncx` 的卷 `navPoint` 由原来指向「该卷第一章」改为指向卷首页，点击目录里的卷名即可跳到卷首页。章节文件名与 href 分配规则不变（`chapter_XXXX.xhtml`），因此按需下载、增量更新的 href 匹配、失败章节重试均不受影响。
+- 覆盖整本下载（`writeOnlineCompletionEpub`）与增量更新（`appendOnlineCompletionChapters`）两条路径；增量更新时按内容比对增量重写卷首页，并清理卷数变少后残留的旧 `volume_XXXX.xhtml`。已下载的旧书在下次「更新」后即可获得卷首页。
+- 新增 `.te-volume-page / .te-volume-ornament / .te-volume-number / .te-volume-title` 样式（装饰符用 `※` 以保证 CJK 字体下必定有字形）。新增 `OnlineVolumeHeadingMarkupTest` 覆盖上述各类卷标写法。
+
 ## 1.4.1 - 2026-08-09
 
 ### 在线源图书长按菜单顶部「网址链接」标签改显源名
