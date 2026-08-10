@@ -58,6 +58,22 @@ class OnlineEpubStyleCssTest {
     }
 
     @Test
+    fun `kinds without font support never get a font declaration`() {
+        listOf(OnlineEpubStyleKind.Header, OnlineEpubStyleKind.Transition, OnlineEpubStyleKind.Illustration)
+            .forEach { kind ->
+                val style = OnlineEpubStyle(
+                    id = "custom-$kind",
+                    kind = kind,
+                    name = "自定义",
+                    css = OnlineEpubStyleDefaults.blankCss(kind),
+                    fontFamily = "楷体",
+                )
+
+                assertFalse("$kind 不该注入字体", OnlineEpubStyleCss.styleCss(style, null).contains("font-family"))
+            }
+    }
+
+    @Test
     fun `draft overrides the selected style for preview`() {
         val draft = OnlineEpubStyle(
             id = "draft-title",
@@ -111,15 +127,17 @@ class OnlineEpubStyleCssTest {
     }
 
     @Test
-    fun `font path without embedding is not written as a family name`() {
+    fun `embed mode without a successful embed writes no family`() {
         val style = OnlineEpubStyle(
             id = "custom-title",
             kind = OnlineEpubStyleKind.Title,
             name = "自定义",
             css = OnlineEpubStyleDefaults.blankCss(OnlineEpubStyleKind.Title),
             fontFamily = "/sdcard/Fonts/custom.ttf",
+            embedFont = true,
         )
 
+        // 选了嵌入却没拿到 fontFace（文件读不到），此时写字体名只会指向一个不存在的族。
         assertFalse(OnlineEpubStyleCss.styleCss(style, null).contains("font-family"))
     }
 }

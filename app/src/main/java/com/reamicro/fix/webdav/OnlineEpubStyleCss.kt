@@ -85,9 +85,12 @@ internal object OnlineEpubStyleCss {
 
     /**
      * 选中字体文件时：嵌入模式用 `@font-face` 的族名，仅声明模式用文件名（去扩展名）当族名，
-     * 由阅读器自行解析同名字体。选内置字体名时直接写名字。
+     * 由阅读器自行解析同名的本机字体。选内置字体名时直接写名字。
+     *
+     * 只有标题与卷标提供字体设置，其余类别即使历史配置里带了字体也不注入。
      */
     private fun fontStack(style: OnlineEpubStyle, fontFace: OnlineEpubFontFace?): String {
+        if (!style.supportsFont) return ""
         if (fontFace != null) return "\"${fontFace.family}\", serif"
         val selection = style.fontFamily.trim()
         if (selection.isBlank()) return ""

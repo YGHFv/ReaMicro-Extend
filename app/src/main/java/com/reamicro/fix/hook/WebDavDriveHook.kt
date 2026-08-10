@@ -10794,7 +10794,7 @@ class WebDavDriveHook(
         val result = LinkedHashMap<String, Pair<OnlineEpubFontFace, File>>()
         OnlineEpubStyleCss.appliedKinds(settings).forEach { kind ->
             val style = settings.selected(kind) ?: return@forEach
-            if (!style.embedFont) return@forEach
+            if (!style.supportsFont || !style.embedFont) return@forEach
             val path = style.fontFamily.trim()
             if (path.isBlank() || !path.contains(File.separatorChar) && !path.contains('/')) return@forEach
             val face = OnlineEpubFontEmbedder.faceFor(path) ?: return@forEach

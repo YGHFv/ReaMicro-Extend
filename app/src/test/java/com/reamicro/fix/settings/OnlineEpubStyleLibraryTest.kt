@@ -125,6 +125,39 @@ class OnlineEpubStyleLibraryTest {
         assertTrue(title.declarations.contains("text-align: center;"))
         assertTrue(title.declarations.contains("font-size: 1.2em;"))
     }
+
+    /** 字体统一由样式面板的字体选择控制，内置 CSS 里再写一份只会互相打架。 */
+    @Test
+    fun `built-in css never declares a font family`() {
+        OnlineEpubStyleLibrary.BUILT_INS.forEach { style ->
+            assertFalse("${style.id} 的 CSS 仍写了 font-family", style.css.contains("font-family"))
+        }
+    }
+
+    @Test
+    fun `only title and volume styles offer font settings`() {
+        OnlineEpubStyleLibrary.BUILT_INS.forEach { style ->
+            val expected = style.kind == OnlineEpubStyleKind.Title || style.kind == OnlineEpubStyleKind.Volume
+            assertEquals("${style.id} 的字体开关不对", expected, style.supportsFont)
+        }
+    }
+
+    @Test
+    fun `fonts are declared by name instead of embedded by default`() {
+        assertFalse(
+            OnlineEpubStyle(id = "x", kind = OnlineEpubStyleKind.Title, name = "x").embedFont,
+        )
+    }
+
+    @Test
+    fun `section labels map to the right part of the heading`() {
+        // 序号 = 「第三章」，内容 = 标题正文，整体 = 外层容器。
+        assertEquals("序号", OnlineEpubStyleDefaults.sectionLabel(OnlineEpubStyleKind.Title, ".te-chapter-number"))
+        assertEquals("内容", OnlineEpubStyleDefaults.sectionLabel(OnlineEpubStyleKind.Title, ".te-chapter-name"))
+        assertEquals("整体", OnlineEpubStyleDefaults.sectionLabel(OnlineEpubStyleKind.Title, ".te-chapter-title"))
+        assertEquals("序号", OnlineEpubStyleDefaults.sectionLabel(OnlineEpubStyleKind.Volume, ".te-volume-number"))
+        assertEquals("内容", OnlineEpubStyleDefaults.sectionLabel(OnlineEpubStyleKind.Volume, ".te-volume-name"))
+    }
 }
 
 class OnlineEpubCssBlocksTest {

@@ -2684,9 +2684,11 @@ class ReaMicroSettingsHook(
                 OnlineEpubCssBlocks.parse(style.css.ifBlank { OnlineEpubStyleDefaults.blankCss(style.kind) })
                     .forEach { drafts[it.selector] = it.declarations }
                 val selectors = drafts.keys.toList()
-                var activeSelector = selectors.firstOrNull().orEmpty()
+                // 分段默认全不选中：点击某段才展开编辑框，再点一次收起。
+                var activeSelector = ""
                 val cssInput = settingsDialogInput(activity, "CSS 声明", singleLine = false, colors = colors).apply {
                     minLines = 4
+                    visibility = View.GONE
                 }
                 val sectionRow = onlineEpubStyleChipRow(activity)
                 val preview = WebView(activity).apply {
@@ -2747,18 +2749,25 @@ class ReaMicroSettingsHook(
                     }
                 }
                 lateinit var syncSectionRow: () -> Unit
-                /** 载入某一段到输入框；不回写，供首次进入使用。 */
+                /** 展开某一段：只载入不回写，供首次进入与切段复用。 */
                 fun loadSection(selector: String) {
                     activeSelector = selector
-                    cssInput.setText(drafts[selector].orEmpty())
-                    cssInput.hint = "$selector 的 CSS 声明"
+                    if (selector.isBlank()) {
+                        cssInput.visibility = View.GONE
+                    } else {
+                        cssInput.visibility = View.VISIBLE
+                        cssInput.setText(drafts[selector].orEmpty())
+                        cssInput.hint = "$selector 的 CSS 声明"
+                    }
                     syncSectionRow.invoke()
                     syncPreview.invoke()
                 }
-                /** 切段：先把输入框内容回写到旧段，再载入新段。 */
-                fun switchSection(selector: String) {
-                    drafts[activeSelector] = cssInput.text?.toString().orEmpty().trim()
-                    loadSection(selector)
+                /** 点分段：先把编辑框内容回写到当前段，再展开目标段；点已展开的段则收起。 */
+                fun toggleSection(selector: String) {
+                    if (activeSelector.isNotBlank()) {
+                        drafts[activeSelector] = cssInput.text?.toString().orEmpty().trim()
+                    }
+                    loadSection(if (activeSelector == selector) "" else selector)
                 }
                 syncSectionRow = {
                     sectionRow.removeAllViews()
@@ -2769,7 +2778,7 @@ class ReaMicroSettingsHook(
                                 text = OnlineEpubStyleDefaults.sectionLabel(style.kind, selector),
                                 selected = selector == activeSelector,
                                 colors = colors,
-                            ) { switchSection(selector) },
+                            ) { toggleSection(selector) },
                         )
                     }
                 }
@@ -2780,6 +2789,7 @@ class ReaMicroSettingsHook(
                 cssInput.addTextChangedListener(object : TextWatcher {
                     override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
                     override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                        if (activeSelector.isBlank()) return
                         drafts[activeSelector] = s?.toString().orEmpty().trim()
                         schedulePreviewRefresh(preview) { syncPreview.invoke() }
                     }
@@ -2793,10 +2803,13 @@ class ReaMicroSettingsHook(
                 val cancelButton = settingsDialogButton(activity, "取消", colors, SettingsDialogButtonRole.Neutral)
                 card.addView(settingsDialogTitle(activity, style.kind.title, colors))
                 card.addView(nameInput)
-                syncFontStatus.invoke()
-                card.addView(fontStatus)
-                syncFontModeRow.invoke()
-                card.addView(fontModeRow)
+                // 只有标题与卷标承载成段文字，其余类别不给字体设置。
+                if (style.supportsFont) {
+                    syncFontStatus.invoke()
+                    card.addView(fontStatus)
+                    syncFontModeRow.invoke()
+                    card.addView(fontModeRow)
+                }
                 if (style.kind == OnlineEpubStyleKind.Header) {
                     card.addView(settingsDialogHint(activity, "头图套用范围", colors))
                     syncHeaderScopeRow.invoke()
@@ -2839,11 +2852,12 @@ class ReaMicroSettingsHook(
                     listOf(deleteButton, applyButton, finishButton, cancelButton)
                 }
                 card.addView(settingsDialogButtonRow(activity, buttons))
-                // 首次进入必须用 loadSection：switchSection 会先把此刻还空着的输入框回写到首段，
-                // 那会把解析出来的第一段 CSS 抹掉。
-                loadSection(activeSelector)
+                // 分段一律以收起状态进入，用户点哪段才展开哪段。
+                loadSection("")
                 fun edited(): OnlineEpubStyle {
-                    drafts[activeSelector] = cssInput.text?.toString().orEmpty().trim()
+                    if (activeSelector.isNotBlank()) {
+                        drafts[activeSelector] = cssInput.text?.toString().orEmpty().trim()
+                    }
                     return draftStyle()
                 }
                 exportButton.setOnClickListener { exportOnlineEpubStyle(edited()) }

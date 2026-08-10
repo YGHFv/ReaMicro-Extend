@@ -263,7 +263,6 @@ internal object OnlineEpubStyleLibrary {
             description = "居中双行标题，章节序号偏暗，章节名使用红色强调。",
             builtIn = true,
             css = """.te-chapter-title {
-  font-family: "Microsoft YaHei", sans-serif;
   text-align: center;
   margin: 2em 0 3em;
   font-size: 1.2em;
@@ -296,7 +295,6 @@ internal object OnlineEpubStyleLibrary {
   border-top: 1px solid #1f2937;
   border-bottom: 1px solid #1f2937;
   color: #111827;
-  font-family: "Title", "Microsoft YaHei", sans-serif;
   text-align: center;
   text-indent: 0;
 }
@@ -321,7 +319,6 @@ internal object OnlineEpubStyleLibrary {
             description = "居中双行标题，章节序号用暗紫色，章节名用红色强调。",
             builtIn = true,
             css = """.te-chapter-title {
-  font-family: "llf", "黑体", sans-serif;
   text-align: center;
   font-weight: 900;
   font-size: 0.8em;
@@ -339,7 +336,6 @@ internal object OnlineEpubStyleLibrary {
 
 .te-chapter-name {
   display: block;
-  font-family: "llf", "黑体", sans-serif;
   font-size: 1.2em;
   font-weight: 900;
   color: #c2181e;
@@ -356,7 +352,6 @@ internal object OnlineEpubStyleLibrary {
   line-height: 1.2;
   font-weight: bold;
   text-align: left;
-  font-family: "st", "黑体", "ht", sans-serif;
   margin: 1em 0;
   padding-bottom: 1em;
   text-indent: 0;
@@ -367,7 +362,6 @@ internal object OnlineEpubStyleLibrary {
 .te-chapter-number {
   display: block;
   margin-bottom: 0.35em;
-  font-family: "st", "黑体", "ht", sans-serif;
   font-size: 0.8em;
   color: #000;
   font-weight: bold;
@@ -392,7 +386,6 @@ internal object OnlineEpubStyleLibrary {
   font-size: 1.2em;
   line-height: 1.3;
   text-align: center;
-  font-family: "zdy1";
   text-indent: 0;
   duokan-text-indent: 0;
 }
@@ -401,14 +394,12 @@ internal object OnlineEpubStyleLibrary {
   display: block;
   font-size: 0.7em;
   color: #ab1d22;
-  font-family: "zdy3";
   font-weight: 500;
 }
 
 .te-chapter-name {
   display: block;
   color: #ab1d22;
-  font-family: "zdy1";
 }""",
         ),
         OnlineEpubStyle(
@@ -424,7 +415,6 @@ internal object OnlineEpubStyleLibrary {
   line-height: 1.3;
   padding: 0 4px;
   margin: 0 0 2em;
-  font-family: "zdy5";
   text-indent: 0;
   duokan-text-indent: 0;
 }
@@ -432,7 +422,6 @@ internal object OnlineEpubStyleLibrary {
 .te-chapter-number {
   display: inline-block;
   margin-bottom: 0.6em;
-  font-family: "zdy5";
   padding: 0.5px 2px;
   color: #ffffff;
   font-size: x-small;
@@ -444,7 +433,6 @@ internal object OnlineEpubStyleLibrary {
 .te-chapter-name {
   display: block;
   color: #0d335d;
-  font-family: "zdy5";
 }""",
         ),
         OnlineEpubStyle(
@@ -460,7 +448,6 @@ internal object OnlineEpubStyleLibrary {
   border-top: 2px solid #1f2937;
   border-bottom: 1px solid #c8a65a;
   color: #172033;
-  font-family: "Title", "Microsoft YaHei", sans-serif;
   text-align: center;
   text-indent: 0;
   line-height: 1.25;
@@ -495,7 +482,6 @@ internal object OnlineEpubStyleLibrary {
   border-bottom: 1px solid #b58b52;
   background: #fffaf0;
   color: #2b2118;
-  font-family: "Title", "Microsoft YaHei", serif;
   text-align: center;
   text-indent: 0;
   line-height: 1.28;
@@ -526,7 +512,6 @@ internal object OnlineEpubStyleLibrary {
   margin: 1.6em 0 2.4em;
   padding-left: 0.3em;
   color: #222222;
-  font-family: "Title", "Microsoft YaHei", sans-serif;
   text-align: left;
   text-indent: 0;
   line-height: 1.35;
@@ -564,7 +549,6 @@ internal object OnlineEpubStyleLibrary {
   padding: 0 0 0.9em;
   border-bottom: 3px double #8bc5c1;
   color: #165a64;
-  font-family: "Title", "Microsoft YaHei", sans-serif;
   text-align: center;
   text-indent: 0;
   line-height: 1.32;
@@ -598,7 +582,6 @@ internal object OnlineEpubStyleLibrary {
   box-sizing: border-box;
   background: #172033;
   color: #f8fafc;
-  font-family: "Title", "Microsoft YaHei", sans-serif;
   text-align: left;
   text-indent: 0;
   line-height: 1.35;
@@ -631,7 +614,6 @@ internal object OnlineEpubStyleLibrary {
   width: 70%;
   border-bottom: 1px solid #d0d7de;
   color: #1f2937;
-  font-family: "Title", "Microsoft YaHei", sans-serif;
   text-align: center;
   text-indent: 0;
   line-height: 1.32;
@@ -1191,7 +1173,6 @@ p.te-divider-line {
             description = "居中双行标题，卷序号偏暗，卷名使用红色强调。",
             builtIn = true,
             css = """.te-volume-title {
-  font-family: "Microsoft YaHei", sans-serif;
   text-align: center;
   margin: 2em 0 3em;
   font-size: 1.2em;
@@ -1224,7 +1205,6 @@ p.te-divider-line {
   border-top: 1px solid #1f2937;
   border-bottom: 1px solid #1f2937;
   color: #111827;
-  font-family: "Title", "Microsoft YaHei", sans-serif;
   text-align: center;
   text-indent: 0;
 }
@@ -1249,7 +1229,6 @@ p.te-divider-line {
             description = "居中双行标题，卷序号用暗紫色，卷名用红色强调。",
             builtIn = true,
             css = """.te-volume-title {
-  font-family: "llf", "黑体", sans-serif;
   text-align: center;
   font-weight: 900;
   font-size: 0.8em;
@@ -1267,7 +1246,6 @@ p.te-divider-line {
 
 .te-volume-name {
   display: block;
-  font-family: "llf", "黑体", sans-serif;
   font-size: 1.2em;
   font-weight: 900;
   color: #c2181e;
@@ -1284,7 +1262,6 @@ p.te-divider-line {
   line-height: 1.2;
   font-weight: bold;
   text-align: left;
-  font-family: "st", "黑体", "ht", sans-serif;
   margin: 1em 0;
   padding-bottom: 1em;
   text-indent: 0;
@@ -1295,7 +1272,6 @@ p.te-divider-line {
 .te-volume-number {
   display: block;
   margin-bottom: 0.35em;
-  font-family: "st", "黑体", "ht", sans-serif;
   font-size: 0.8em;
   color: #000;
   font-weight: bold;
@@ -1320,7 +1296,6 @@ p.te-divider-line {
   font-size: 1.2em;
   line-height: 1.3;
   text-align: center;
-  font-family: "zdy1";
   text-indent: 0;
   duokan-text-indent: 0;
 }
@@ -1329,14 +1304,12 @@ p.te-divider-line {
   display: block;
   font-size: 0.7em;
   color: #ab1d22;
-  font-family: "zdy3";
   font-weight: 500;
 }
 
 .te-volume-name {
   display: block;
   color: #ab1d22;
-  font-family: "zdy1";
 }""",
         ),
         OnlineEpubStyle(
@@ -1352,7 +1325,6 @@ p.te-divider-line {
   line-height: 1.3;
   padding: 0 4px;
   margin: 0 0 2em;
-  font-family: "zdy5";
   text-indent: 0;
   duokan-text-indent: 0;
 }
@@ -1360,7 +1332,6 @@ p.te-divider-line {
 .te-volume-number {
   display: inline-block;
   margin-bottom: 0.6em;
-  font-family: "zdy5";
   padding: 0.5px 2px;
   color: #ffffff;
   font-size: x-small;
@@ -1372,7 +1343,6 @@ p.te-divider-line {
 .te-volume-name {
   display: block;
   color: #0d335d;
-  font-family: "zdy5";
 }""",
         ),
         OnlineEpubStyle(
@@ -1388,7 +1358,6 @@ p.te-divider-line {
   border-top: 2px solid #1f2937;
   border-bottom: 1px solid #c8a65a;
   color: #172033;
-  font-family: "Title", "Microsoft YaHei", sans-serif;
   text-align: center;
   text-indent: 0;
   line-height: 1.25;
@@ -1423,7 +1392,6 @@ p.te-divider-line {
   border-bottom: 1px solid #b58b52;
   background: #fffaf0;
   color: #2b2118;
-  font-family: "Title", "Microsoft YaHei", serif;
   text-align: center;
   text-indent: 0;
   line-height: 1.28;
@@ -1454,7 +1422,6 @@ p.te-divider-line {
   margin: 1.6em 0 2.4em;
   padding-left: 0.3em;
   color: #222222;
-  font-family: "Title", "Microsoft YaHei", sans-serif;
   text-align: left;
   text-indent: 0;
   line-height: 1.35;
@@ -1492,7 +1459,6 @@ p.te-divider-line {
   padding: 0 0 0.9em;
   border-bottom: 3px double #8bc5c1;
   color: #165a64;
-  font-family: "Title", "Microsoft YaHei", sans-serif;
   text-align: center;
   text-indent: 0;
   line-height: 1.32;
@@ -1526,7 +1492,6 @@ p.te-divider-line {
   box-sizing: border-box;
   background: #172033;
   color: #f8fafc;
-  font-family: "Title", "Microsoft YaHei", sans-serif;
   text-align: left;
   text-indent: 0;
   line-height: 1.35;
@@ -1559,7 +1524,6 @@ p.te-divider-line {
   width: 70%;
   border-bottom: 1px solid #d0d7de;
   color: #1f2937;
-  font-family: "Title", "Microsoft YaHei", sans-serif;
   text-align: center;
   text-indent: 0;
   line-height: 1.32;

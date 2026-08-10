@@ -103,6 +103,17 @@ function readField(entry, key) {
   return /^[A-Za-z_$][\w$]*$/.test(raw) ? resolveConst(raw) : null;
 }
 
+// 内置样式 CSS 里的 font-family 一律清洗掉：字体由样式面板的字体选择单独控制，
+// CSS 里再写一份只会互相打架，而且样板里的 "zdy1"/"llf" 这类字体名在设备上根本不存在。
+function stripFontFamily(css) {
+  return css
+    .split("\n")
+    .filter((line) => !/^\s*font-family\s*:/i.test(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 const GROUPS = [
   { constName: "EPUB_HEADER_STYLES", kind: "Header" },
   { constName: "EPUB_TITLE_STYLES", kind: "Title" },
@@ -126,7 +137,7 @@ for (const group of GROUPS) {
       kind: group.kind,
       name,
       description: readField(entry, "description") ?? "",
-      css: String(css).trim(),
+      css: stripFontFamily(String(css)),
     });
   }
 }
@@ -139,7 +150,7 @@ if (headerEdgeCss) {
   for (const match of source.matchAll(HEADER_TEMPLATE_CALL)) {
     const [, id, name, description] = match;
     if (styles.some((style) => style.id === id)) continue;
-    styles.push({ id, kind: "Header", name, description, css: String(headerEdgeCss).trim() });
+    styles.push({ id, kind: "Header", name, description, css: stripFontFamily(String(headerEdgeCss)) });
   }
 }
 

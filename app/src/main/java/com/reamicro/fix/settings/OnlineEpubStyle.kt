@@ -28,8 +28,12 @@ data class OnlineEpubStyle(
     val css: String = "",
     /** 字体文件绝对路径 / 内置 family 名 / 空串表示跟随全局。 */
     val fontFamily: String = "",
-    /** 字体文件是否随书嵌入；false 时只在 CSS 里声明字体名，交给阅读器自行解析。 */
-    val embedFont: Boolean = true,
+    /**
+     * 字体文件是否随书嵌入。
+     *
+     * 默认只声明字体名、调用设备本地字体：嵌入会让每本书大出几 MB，而多数场景阅微本机就有该字体。
+     */
+    val embedFont: Boolean = false,
     /** 样式关联的本地图片：分割样式的装饰图、头图样式的原图。 */
     val assetPath: String = "",
     /** 头图样式的蒙版 asset 名与样板尺寸，随内置样式生成，用户样式为空。 */
@@ -42,6 +46,10 @@ data class OnlineEpubStyle(
     val needsAsset: Boolean
         get() = kind == OnlineEpubStyleKind.Header ||
             (kind == OnlineEpubStyleKind.Transition && css.contains(".te-divider-img"))
+
+    /** 只有标题与卷标承载正文之外的成段文字，其余类别不提供字体设置。 */
+    val supportsFont: Boolean
+        get() = kind == OnlineEpubStyleKind.Title || kind == OnlineEpubStyleKind.Volume
 }
 
 /** 头图套用范围。 */
