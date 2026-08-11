@@ -1,5 +1,8 @@
 # 阅微 RM2.0.A4 接口扫描
 
+> **已过期**：本文基于 RM2.0.A4 的反编译结果，宿主当前已到 2.3.0，类名与方法签名多处变化。
+> 现行的宿主类名以 app/src/main/java/com/reamicro/fix/core/HostClasses.kt 为准。
+
 > 基于 `RM2.0.A4.APK` 反编译结果整理。JADX 输出目录：`decompiled/reamicro-rm2-a4/`。
 
 ## APK 基本信息

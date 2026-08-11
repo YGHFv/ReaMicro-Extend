@@ -56,6 +56,9 @@ __pycache__/
 /outputs/
 
 # Local verification leftovers
+.rm_sheet.png
+.window-check.xml
+device-*.txt
 logcat.txt
 window.xml
 reamicro_*.png

@@ -107,6 +107,12 @@
 ./gradlew :app:testDebugUnitTest
 ```
 
+体积与复杂度度量（只报数，不阻断构建）：
+
+```bash
+./gradlew :app:detekt
+```
+
 构建调试版：
 
 ```bash
@@ -133,6 +139,17 @@ RELEASE_KEY_PASSWORD=...
 ```properties
 sdk.dir=C:/Users/<name>/AppData/Local/Android/Sdk
 ```
+
+## 代码结构
+
+包划分、分层约定与重构工具见 [docs/architecture.md](docs/architecture.md)。
+
+改动前值得知道的两条：
+
+- 宿主类名只在 `app/src/main/java/com/reamicro/fix/core/HostClasses.kt` 里出现，
+  宿主升级时改这一个文件。
+- 模块启动会打印 `hook installed N/M, failed: [...]`，设置页「关于 → 模块自检」
+  能看到明细。宿主升级后先看这一行定位掉线的 hook。
 
 ## 注意事项
 
