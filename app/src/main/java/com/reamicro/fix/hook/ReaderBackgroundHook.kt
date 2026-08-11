@@ -3,6 +3,7 @@ package com.reamicro.fix.hook
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.net.Uri
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -36,6 +37,7 @@ import java.util.Collections
 import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import com.reamicro.fix.reader.ReaderBackgroundValueResolver
 
@@ -62,21 +64,43 @@ class ReaderBackgroundHook(
     )
 
     private val thumbCache = ConcurrentHashMap<String, Bitmap>()
-    private val backgroundStateThemes = Collections.synchronizedMap(WeakHashMap<Any, Boolean>())
     private val backgroundStateHostValues = Collections.synchronizedMap(WeakHashMap<Any, String>())
     private val backgroundExecutor = Executors.newSingleThreadScheduledExecutor { task ->
         Thread(task, "ReaMicroReaderBackground").apply { isDaemon = true }
     }
+    @Volatile private var lightHostBackgroundState: Any? = null
+    @Volatile private var darkHostBackgroundState: Any? = null
     @Volatile private var currentReaderDark: Boolean = false
     @Volatile private var pendingPickDark: Boolean = false
     @Volatile private var activityResultHooked: Boolean = false
     @Volatile private var renderingDarkThemeContent: Boolean = false
-    @Volatile private var renderingEpubBackground: Boolean = false
-    @Volatile private var activeBackgroundBranchDark: Boolean? = null
+
+    /**
+     * 「当前正在 EpubBackground 的组合过程中」的嵌套深度，按线程独立。
+     *
+     * 原先这里是一个 @Volatile 全局布尔：进入置 true、退出置 false。翻页模式下 SwipePager
+     * 会同时组合前后相邻页，多个 EpubBackground 交错执行时这个标志会错乱——内层退出把它清成
+     * false，外层其实还在渲染；或者别的页把它置成 true，让不属于背景渲染的 ThemeToggleContent
+     * 也被改写参数与默认掩码。给错误的组合位置注入 darkContent 会让 Compose slot table 与实际
+     * 写入的槽位错位，下一次重组就崩在 collectAsState（cannot be cast to MutableState）。
+     *
+     * 用 ThreadLocal 计数器同时解决重入与跨线程串味：只有同一线程、真正处于 EpubBackground
+     * 调用栈内时才算命中。
+     */
+    private val epubBackgroundRenderDepth = ThreadLocal.withInitial { 0 }
+
+    /**
+     * 本次背景组合开始时读到的开关值，整次组合内保持不变。
+     *
+     * 不能在组合内每次现读：settings 有 200ms 缓存窗口，同一个组合位置前后两次重组可能
+     * 读到不同值，于是一次接管、一次不接管，宿主分支跟着换 key。
+     */
+    private val epubBackgroundRenderEnabled = ThreadLocal.withInitial { false }
+
+    private val renderingEpubBackground: Boolean
+        get() = (epubBackgroundRenderDepth.get() ?: 0) > 0 && epubBackgroundRenderEnabled.get() == true
     @Volatile private var visibleArea: WeakReference<LinearLayout>? = null
     @Volatile private var selectionVersionState: Any? = null
-    @Volatile private var lightHostBackgroundState: Any? = null
-    @Volatile private var darkHostBackgroundState: Any? = null
     @Volatile private var lightContainerRecomposeScope: Any? = null
     @Volatile private var darkContainerRecomposeScope: Any? = null
     @Volatile private var lightBackgroundRecomposeScope: Any? = null
@@ -89,6 +113,7 @@ class ReaderBackgroundHook(
     @Volatile private var backgroundHostContext: Context? = null
     @Volatile private var showNativeBackgrounds: Boolean = true
     @Volatile private var currentSession: Any? = null
+    @Volatile private var cachedDarkModeStateMethod: Method? = null
     @Volatile private var panelRootRecomposeScope: WeakReference<Any>? = null
     @Volatile private var backgroundPreferenceKey: Any? = null
     @Volatile private var themePreferenceKey: Any? = null
@@ -99,11 +124,17 @@ class ReaderBackgroundHook(
     @Volatile private var lightThemePrimaryColor: Int = DEFAULT_THEME_PRIMARY_COLOR
     @Volatile private var darkThemePrimaryColor: Int = DEFAULT_THEME_PRIMARY_COLOR
     private val renderingReaderThemesContent = ThreadLocal.withInitial { 0 }
-    private val moduleSessionUpdate = ThreadLocal.withInitial { false }
+    /**
+     * 模块自己发起、尚未完成的 Session.update 计数（按偏好 key 记）。
+     *
+     * 不能用 ThreadLocal：Session.update 是 suspend 函数，挂起后真正的写入在协程调度到的
+     * **另一个线程**上继续，那个线程的 ThreadLocal 是初始值 false。于是模块为了独占背景而
+     * 写的 THEME=""/MIPMAP="" 会被自己的 update hook 当成「用户选了阅微颜色/材质」，
+     * 走进清空分支把刚设好的图删掉——表现为深色换背景后直接变纯黑，返回书架重进才对
+     * （重进不走这条 update 链）。改成按 key 计数，跨线程有效。
+     */
+    private val pendingModuleUpdates = Collections.synchronizedMap(HashMap<Any, Int>())
     private val imagePickInProgress = AtomicBoolean(false)
-    // 分支包装的固定实例（0=浅色 1=深色），宿主每次传来的绘制内容存进 hosts 供其调用。
-    private val backgroundBranchLambdas = arrayOfNulls<Any>(2)
-    private val backgroundBranchHosts = arrayOfNulls<Any>(2)
     private val darkThemeContentHitLogged = AtomicBoolean(false)
     private val darkEpubBackgroundHitLogged = AtomicBoolean(false)
 
@@ -196,22 +227,25 @@ class ReaderBackgroundHook(
             XposedBridge.hookMethod(updateMethod, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     currentSession = param.thisObject
-                    if (moduleSessionUpdate.get() == true) return
                     val key = param.args?.getOrNull(0) ?: return
+                    // 模块自己发起的写入直接放过，否则会把自己刚设的背景清掉（见 pendingModuleUpdates）。
+                    if (isModuleOriginatedUpdate(key)) return
                     val value = param.args?.getOrNull(1)
                     if (key === backgroundPreferenceKey) {
                         currentHostBackgroundValue = value as? String ?: ""
                         clearSelectionOverrides()
-                        refreshVisibleArea(currentReaderDark)
+                        refreshVisibleArea()
                     } else if (key === themePreferenceKey || key === mipmapPreferenceKey) {
                         // 具体选择阅微颜色/材质时才退出侧载来源，并清除模块历史勾选。
                         clearSelectionOverrides()
                         backgroundExecutor.execute {
                             runCatching {
-                                settings.setReaderBgCurrent(dark = currentReaderDark, path = "")
+                                // 主题现读：用 currentReaderDark 会把「清空」写到另一个主题的键上，
+                                // 表现为切回浅色时浅色仍挂着刚才深色选的图。
+                                settings.setReaderBgCurrent(dark = readerDarkNow(), path = "")
                                 updateHostPreference(backgroundPreferenceKey, "")
                                 currentHostBackgroundValue = ""
-                                refreshVisibleArea(currentReaderDark)
+                                refreshVisibleArea()
                             }.onFailure {
                                 XposedBridge.log("$LOG_PREFIX clear side-loaded selection failed: ${it.stackTraceToString()}")
                             }
@@ -235,20 +269,32 @@ class ReaderBackgroundHook(
         val session = currentSession ?: error("Session 尚未捕获")
         val resolvedKey = key ?: error("宿主设置 key 尚未捕获")
         val method = sessionUpdateMethod ?: error("Session.update 尚未捕获")
-        moduleSessionUpdate.set(true)
+        // 同 updateHostPreferenceAsync：标记要覆盖整个 suspend 生命周期，
+        // 由 continuation 的 resumeWith 释放，不能就地 finally 清除。
+        val release = beginModuleUpdate(resolvedKey)
         try {
-            invokeSuspendMethod(method, session, resolvedKey, value)
-        } finally {
-            moduleSessionUpdate.set(false)
+            val result = invokeSuspendMethod(method, session, resolvedKey, value, onResume = release)
+            if (!isCoroutineSuspended(result)) release()
+        } catch (error: Throwable) {
+            release()
+            throw error
         }
     }
 
-    private fun invokeSuspendMethod(method: Method, target: Any, vararg args: Any?): Any? {
+    private fun invokeSuspendMethod(
+        method: Method,
+        target: Any,
+        vararg args: Any?,
+        onResume: () -> Unit = {},
+    ): Any? {
         val continuationClass = cls(KOTLIN_CONTINUATION_CLASS)
         val continuation = Proxy.newProxyInstance(classLoader, arrayOf(continuationClass)) { proxy, proxyMethod, proxyArgs ->
             when (proxyMethod.name) {
                 "getContext" -> cls(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS).getDeclaredField("INSTANCE").get(null)
-                "resumeWith" -> targetUnit()
+                "resumeWith" -> {
+                    onResume()
+                    targetUnit()
+                }
                 "toString" -> "ReaMicroReaderBackgroundContinuation"
                 "hashCode" -> System.identityHashCode(proxy)
                 "equals" -> proxy === proxyArgs?.getOrNull(0)
@@ -292,9 +338,13 @@ class ReaderBackgroundHook(
             onFailure(IllegalStateException("宿主背景状态尚未初始化"))
             return
         }
+        // 标记必须覆盖整个 suspend 生命周期：挂起后写入在别的线程继续，
+        // 直到 finish() 真正完成才能撤销。
+        val releaseModuleMark = beginModuleUpdate(resolvedKey)
         val completed = AtomicBoolean(false)
         fun finish(result: Any?) {
             if (!completed.compareAndSet(false, true)) return
+            releaseModuleMark()
             val error = kotlinResultFailure(result)
             if (error == null) onSuccess() else onFailure(error)
         }
@@ -312,18 +362,45 @@ class ReaderBackgroundHook(
                 else -> null
             }
         }
-        moduleSessionUpdate.set(true)
         try {
             val result = method.invoke(session, resolvedKey, value, continuation)
             if (!isCoroutineSuspended(result)) finish(result)
         } catch (error: Throwable) {
+            releaseModuleMark()
             if (completed.compareAndSet(false, true)) {
                 onFailure((error as? InvocationTargetException)?.targetException ?: error)
             }
-        } finally {
-            moduleSessionUpdate.set(false)
         }
     }
+
+    /**
+     * 开一个「模块发起的写入」标记，返回的 releaser 幂等且只能释放本次。
+     *
+     * 带超时兜底：万一宿主的 continuation 永不 resume，标记会永久留着，之后用户真去选
+     * 阅微颜色/材质就不再被响应。超时释放与正常释放共用同一个 AtomicBoolean，
+     * 所以不会重复减一去误放别人的标记。
+     */
+    private fun beginModuleUpdate(key: Any): () -> Unit {
+        synchronized(pendingModuleUpdates) {
+            pendingModuleUpdates[key] = (pendingModuleUpdates[key] ?: 0) + 1
+        }
+        val released = AtomicBoolean(false)
+        val release: () -> Unit = {
+            if (released.compareAndSet(false, true)) endModuleUpdate(key)
+        }
+        backgroundExecutor.schedule(release, MODULE_UPDATE_MARK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        return release
+    }
+
+    private fun endModuleUpdate(key: Any) {
+        synchronized(pendingModuleUpdates) {
+            val next = (pendingModuleUpdates[key] ?: 0) - 1
+            if (next > 0) pendingModuleUpdates[key] = next else pendingModuleUpdates.remove(key)
+        }
+    }
+
+    private fun isModuleOriginatedUpdate(key: Any): Boolean =
+        synchronized(pendingModuleUpdates) { (pendingModuleUpdates[key] ?: 0) > 0 }
 
     private fun isCoroutineSuspended(result: Any?): Boolean =
         result?.javaClass?.name == KOTLIN_COROUTINE_SINGLETONS_CLASS &&
@@ -489,10 +566,6 @@ class ReaderBackgroundHook(
                     it.parameterTypes.getOrNull(0)?.name == COMPOSER_CLASS
             }?.apply { isAccessible = true }
                 ?: error("阅读主题状态方法未找到")
-            val themeToggleMethod = cls(DYNAMIC_THEME_CONTENT_KT_CLASS).declaredMethods.firstOrNull {
-                it.name == THEME_TOGGLE_CONTENT_METHOD && it.parameterTypes.size == 5
-            }?.apply { isAccessible = true }
-                ?: error("ThemeToggleContent 方法未找到")
             // 背景值以前从 ComposableSingletons 的 lambda 里读，新版改由 EpubBackgroundState 承载。
             // 两条路径都尝试挂上，谁在就用谁。
             val backgroundValueMethod = backgroundStateValueMethod() ?: legacyBackgroundValueMethod()
@@ -502,57 +575,85 @@ class ReaderBackgroundHook(
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!settingsProvider().canUseReaderBackground) return
                     param.args?.getOrNull(epubContainerComposerIndex)?.let { composer ->
-                        captureContainerRecomposeScope(composer, currentReaderDark)
+                        // 主题现读：按陈旧的 currentReaderDark 归档，会把浅色的 scope 记到深色名下，
+                        // 之后 invalidateBackgroundComposition 失效的就是另一个主题的 composition。
+                        captureContainerRecomposeScope(composer, readerDarkNow())
                     }
                 }
             })
             XposedBridge.hookMethod(epubBackgroundMethod, object : XC_MethodHook() {
+                // 开关只在这里、每次背景组合开始时判定一次，判定结果通过计数器贯穿整次组合。
+                // 这样单次组合内「要不要接管深色分支」的决策是恒定的；而进出一律配对地加减，
+                // 不会像原先那样 before 提前返回、after 仍无条件清零，导致计数漂移。
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!settingsProvider().canUseReaderBackground) return
-                    renderingEpubBackground = true
+                    // 无条件加深度、无条件减深度，保证严格配对（嵌套与交错都不会漂移）。
+                    // 开关判断放在 enteredEnabled 里：只有最外层那次进入时读一次开关，
+                    // 整次背景组合都沿用这个判定，单次组合内的注入决策因此是恒定的。
+                    val depth = epubBackgroundRenderDepth.get() ?: 0
+                    if (depth == 0) {
+                        epubBackgroundRenderEnabled.set(
+                            runCatching { settingsProvider().canUseReaderBackground }.getOrDefault(false),
+                        )
+                    }
+                    epubBackgroundRenderDepth.set(depth + 1)
                 }
 
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    renderingEpubBackground = false
+                    val next = (epubBackgroundRenderDepth.get() ?: 0) - 1
+                    epubBackgroundRenderDepth.set(if (next < 0) 0 else next)
                 }
             })
             XposedBridge.hookMethod(darkThemeMethod, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     if (!settingsProvider().canUseReaderBackground) return
                     val dark = param.result as? Boolean ?: return
+                    // 先记录真实主题：这是阅读页当前主题的唯一来源，背景值解析全靠它。
+                    // 记录必须在改写之前，且改写后的返回值不能回写进来，否则会自己污染自己。
                     val changed = currentReaderDark != dark
                     currentReaderDark = dark
                     if (changed) onReaderThemeChanged(dark)
-                }
-            })
-            XposedBridge.hookMethod(themeToggleMethod, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!renderingEpubBackground || !settingsProvider().canUseReaderBackground) return
-                    // 宿主只给浅色分支传了绘制背景的内容，深色分支为空（走月亮动画）。
-                    // 两个分支都包上同一份内容：深色因此也能画背景，包装同时记录当前渲染的是哪个分支，
-                    // 供背景值读取点按主题返回对应的图。实例固定，避免 changedInstance 触发重组风暴。
-                    val lightContent = param.args?.getOrNull(1) ?: return
-                    param.args[0] = backgroundBranchLambda(lightContent, dark = true)
-                    param.args[1] = backgroundBranchLambda(lightContent, dark = false)
-                    // 宿主原调用使用默认参数 darkContent=null（掩码 bit 0）。只改 args[0] 会在函数体内再次被清空。
-                    val defaultMask = param.args?.getOrNull(THEME_TOGGLE_DEFAULT_MASK_ARG_INDEX) as? Int ?: 0
-                    param.args[THEME_TOGGLE_DEFAULT_MASK_ARG_INDEX] =
-                        defaultMask and THEME_TOGGLE_DARK_CONTENT_DEFAULT_MASK.inv()
-                    if (darkEpubBackgroundHitLogged.compareAndSet(false, true)) {
+                    // 正文背景组合内：宿主深色分支 darkContent=null，画的是空组（纯色背景）。
+                    // 骗它「当前是浅色」，它就会走 content() 去画背景——深色因此也能有背景图。
+                    //
+                    // 为什么改这里而不是改 ThemeToggleContent 的 args + 默认掩码：
+                    // 宿主 ThemeToggleContent 在默认掩码 bit0=0 时会调用 changedInstance(darkContent)，
+                    // 那是一次**消耗 slot** 的调用。把 args[0] 从 null 换成 lambda 实例并清掉 bit0，
+                    // 首次组合与后续重组消耗的 slot 数就不一致，slot table 读写指针错位，
+                    // 下一次重组 collectAsState 会从错位的槽里读出 produceState 对象，崩在
+                    // SnapshotFlowKt$collectAsState$1$1 cannot be cast to MutableState。
+                    // 而这里只改返回值，宿主两个分支都是 startReplaceGroup（可替换组），
+                    // 同一位置换 key 是 Compose 支持的操作：丢弃旧组、重建新组，slot 记账自洽。
+                    if (!renderingEpubBackground) return
+                    // 这两件事以前在分支包装 lambda 里做，包装拆掉后挪到这里——同样处在正文背景的
+                    // 组合过程中，效果等价。observeSelectionVersion 必须在下面的 return 之前：
+                    // 深色当前没选背景时也要订阅，否则之后选了深色背景这处组合不会被失效。
+                    observeSelectionVersion()
+                    param.args?.getOrNull(0)?.let { captureBackgroundRecomposeScope(it, dark) }
+                    // 深色下没选中任何背景时不接管，让宿主继续画它的纯色。
+                    //
+                    // 模块内置了深浅各一张背景并默认选中，所以正常情况下深色总能命中；
+                    // 但内置图落盘发生在首次打开主题面板时（ensureBuiltInBackgrounds），
+                    // 在那之前这里会短暂地不接管。这个条件翻转是安全的：宿主两个分支都是
+                    // startReplaceGroup，换 key 只是丢弃旧组重建新组，不会像改默认掩码那样
+                    // 让 changedInstance 的 slot 记账错位。用户选/清背景时同样会翻转。
+                    if (dark && !hasSelectedSideLoadedBackground(dark)) return
+                    param.result = false
+                    if (dark && darkEpubBackgroundHitLogged.compareAndSet(false, true)) {
                         XposedBridge.log("$LOG_PREFIX enabled reader background drawing for dark theme")
                     }
                 }
             })
             XposedBridge.hookMethod(backgroundValueMethod, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
+                    // 不能用 renderingEpubBackground 守卫：这条链路属于
+                    // rememberEpubBackgroundState，而它是在 SwipePagerContent /
+                    // StaticPagerContent / OverlayPagerContent 里调用的，**不在 EpubBackground
+                    // 内部**（已用 dex xref 确认）。加那个守卫等于让替换永不生效。
                     if (!settingsProvider().canUseReaderBackground) return
-                    // 新版是 EpubBackgroundState.getBackground()（无参实例方法），旧版是 singleton lambda(State)。
+                    // 主题现读 Session 的 StateFlow：currentReaderDark 只在 ThemeToggleContent
+                    // 组合时写入，这里常先于它执行，用它会让背景慢一步（画上一次主题的图）。
+                    val dark = readerDarkNow()
                     val state = param.args?.getOrNull(0) ?: param.thisObject ?: return
-                    val dark = activeBackgroundBranchDark ?: backgroundStateThemes[state] ?: currentReaderDark
-                    backgroundStateThemes[state] = dark
-                    // invalidateHostBackgroundState 会先写入一次性令牌再写回原值，用来精确失效当前
-                    // composition。如果有一帧正好落在这两次写入之间，令牌会被当成背景地址交给宿主，
-                    // 宿主加载不到就画出纯白/纯黑的一帧——这正是切换主题时闪一下没有背景的来源。
                     val resolution = ReaderBackgroundValueResolver.resolve(
                         rawValue = (param.result as? String).orEmpty(),
                         rememberedHostValue = backgroundStateHostValues[state].orEmpty(),
@@ -576,13 +677,11 @@ class ReaderBackgroundHook(
     private fun Method.composerParameterIndex(): Int =
         parameterTypes.indexOfFirst { it.name == COMPOSER_CLASS }
 
-    /** 2.3.0 beta 新构建：正文背景值改由 EpubBackgroundState.getBackground() 提供。 */
     /**
      * 正文背景值的读取点。
      *
      * A13 及更早：`ComposableSingletons$EpubContainerKt.lambda_1672513034$lambda$0$0(State) -> String`。
-     * 新构建把背景搬进 EpubBackgroundState，等价物是 `rememberEpubBackgroundState__93gMUo$lambda$1`——
-     * 它的返回值是位图加载 LaunchedEffect 的 key，改它才会真正重新加载背景图。
+     * 新构建把背景搬进 EpubBackgroundState，等价物是 `rememberEpubBackgroundState__93gMUo$lambda$1`。
      * 注意不能改成 `EpubBackgroundState.getBackground()`：那只是普通 getter，绘制时只用于判空，
      * 到处都会被调用，既拿不到主题分支，也不驱动重新加载。
      */
@@ -714,7 +813,16 @@ class ReaderBackgroundHook(
         )
     }
 
-    private fun refreshVisibleArea(dark: Boolean) {
+    /**
+     * 刷新可见的背景区域。主题在 post 里现读，不由调用方传入。
+     *
+     * 这里之前接一个 dark 参数，调用方一律传 currentReaderDark（组合时才写入，常是上一次的值），
+     * 而且 root.post 是延迟执行的——等真正渲染时那个值更旧了。守卫
+     * `currentReaderDark == dark` 在这些调用点恒为真，拦不住任何东西。
+     * 症状就是：换背景只画出纯黑（宿主深色默认），返回书架重进才对，因为重进走的是
+     * 完整重组而不是这条刷新路径。
+     */
+    private fun refreshVisibleArea() {
         val activity = activityProvider()
         if (activity == null) {
             bumpSelectionVersion()
@@ -725,8 +833,81 @@ class ReaderBackgroundHook(
         }
         val root = visibleArea?.get() ?: return
         root.post {
-            if (currentReaderDark == dark) renderBackgroundArea(root, dark)
+            renderBackgroundArea(root, readerDarkNow())
         }
+    }
+
+    /**
+     * 直接从宿主 Session 读当前是否深色，读不到时回落到 [currentReaderDark]。
+     *
+     * 宿主 rememberReaderShouldUseDarkTheme 的真实来源是 `Session.darkModeState`
+     * （StateFlow<Integer>，三态）与系统深色的组合，字节码里的判定是：
+     * 1=强制深色，2=强制浅色，其它=跟随 isSystemInDarkTheme()。
+     *
+     * 而 currentReaderDark 只在 ThemeToggleContent 组合时由 hook 写入，getBackground()
+     * 常先于它执行，读到的就是**上一次**的主题——表现为背景慢一步：选中纯黑却画着上次的
+     * 浅色纹理，切到浅色却画着深色的星空图。StateFlow 随时可读，不受组合顺序影响。
+     */
+    private fun readerDarkNow(): Boolean {
+        val session = resolveSession() ?: return currentReaderDark
+        return runCatching {
+            val flow = darkModeStateMethod(session)?.invoke(session) ?: return currentReaderDark
+            val raw = flow.javaClass.methods
+                .firstOrNull { it.name == "getValue" && it.parameterTypes.isEmpty() }
+                ?.apply { isAccessible = true }
+                ?.invoke(flow)
+            when ((raw as? Number)?.toInt()) {
+                DARK_MODE_FORCED_DARK -> true
+                DARK_MODE_FORCED_LIGHT -> false
+                else -> systemDarkTheme() ?: currentReaderDark
+            }
+        }.getOrElse { currentReaderDark }
+    }
+
+    /**
+     * 拿宿主 Session 实例。
+     *
+     * currentSession 只在 ReaderBackground（打开主题面板）或 Session.update（改设置）被 hook
+     * 到时才赋值，而 getBackground() 在阅读页从一进来就在跑。首次进入、用户还没碰过面板时
+     * 它是 null，主题判定只能回落到陈旧的 currentReaderDark——这正是「深色直接打开阅微
+     * 有概率不显示深色背景，手动换一次背景后才正常」的原因：换背景触发了 update，
+     * 顺手把 Session 填上了。这里补一条 Koin 兜底，不依赖用户操作。
+     */
+    private fun resolveSession(): Any? {
+        currentSession?.let { return it }
+        val activity = activityProvider() ?: return null
+        return sessionFromKoin(activity)?.also { currentSession = it }
+    }
+
+    private fun sessionFromKoin(activity: Activity): Any? =
+        runCatching {
+            val scopeProvider = cls(ANDROID_KOIN_SCOPE_EXT_CLASS)
+            val getScope = scopeProvider.methods.firstOrNull {
+                it.name == "getKoinScope" && it.parameterTypes.size == 1
+            } ?: return@runCatching null
+            val scope = getScope.invoke(null, activity) ?: return@runCatching null
+            val reflection = cls(KOTLIN_REFLECTION_CLASS)
+            val getKClass = reflection.methods.firstOrNull {
+                it.name == "getOrCreateKotlinClass" && it.parameterTypes.size == 1
+            } ?: return@runCatching null
+            val kClass = getKClass.invoke(null, cls(SESSION_CLASS))
+            scope.javaClass.methods.firstOrNull {
+                it.name == "get" && it.parameterTypes.size == 3
+            }?.invoke(scope, kClass, null, null)
+        }.getOrNull()
+
+    private fun darkModeStateMethod(session: Any): Method? {
+        cachedDarkModeStateMethod?.let { return it }
+        return session.javaClass.methods.firstOrNull {
+            it.name == "getDarkModeState" && it.parameterTypes.isEmpty()
+        }?.apply { isAccessible = true }?.also { cachedDarkModeStateMethod = it }
+    }
+
+    /** 宿主在 darkModeState 为「跟随系统」时用 isSystemInDarkTheme()，这里等价地查一次配置。 */
+    private fun systemDarkTheme(): Boolean? {
+        val ctx = backgroundHostContext ?: return null
+        val mode = ctx.resources?.configuration?.uiMode ?: return null
+        return (mode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
     }
 
     private fun captureContainerRecomposeScope(composer: Any, dark: Boolean) {
@@ -795,7 +976,7 @@ class ReaderBackgroundHook(
                 it.name == "setValue" && it.parameterTypes.size == 1
             } ?: error("宿主背景 State 不可写")
             // 用一次性令牌触发当前 composition 精确失效，再恢复此前捕获的宿主原值；
-            // afterHookedMethod 仍只替换 getter 返回值，模块 URI不会残留进宿主 State。
+            // afterHookedMethod 仍只替换 getter 返回值，模块 URI 不会残留进宿主 State。
             val hostValue = backgroundStateHostValues[state].orEmpty()
             val refreshToken = "$HOST_REFRESH_TOKEN_PREFIX${System.nanoTime()}"
             setter.invoke(state, refreshToken)
@@ -1052,7 +1233,7 @@ class ReaderBackgroundHook(
         val previousHostBackgroundValue = currentHostBackgroundValue
         setSelectionOverride(dark, path)
         currentHostBackgroundValue = uri
-        refreshVisibleArea(dark)
+        refreshVisibleArea()
         backgroundExecutor.execute {
             // 侧载图片独占正文背景：按宿主异步完成顺序清空颜色、材质，再写入图片 URI。
             updateHostPreferencesInOrder(
@@ -1064,13 +1245,13 @@ class ReaderBackgroundHook(
                 onSuccess = {
                     settings.setReaderBgCurrent(dark, path)
                     currentHostBackgroundValue = uri
-                    refreshVisibleArea(dark)
+                    refreshVisibleArea()
                     XposedBridge.log("$LOG_PREFIX selected reader background via host state dark=$dark path=$path")
                 },
                 onFailure = { error ->
                     currentHostBackgroundValue = previousHostBackgroundValue
                     clearSelectionOverride(dark, path)
-                    refreshVisibleArea(dark)
+                    refreshVisibleArea()
                     showToast("应用阅读背景失败")
                     XposedBridge.log("$LOG_PREFIX apply background failed: ${error.stackTraceToString()}")
                 },
@@ -1081,7 +1262,7 @@ class ReaderBackgroundHook(
     private fun clearBackground(dark: Boolean) {
         val defaultPath = builtInBackgroundPath(dark)
         setSelectionOverride(dark, defaultPath)
-        refreshVisibleArea(dark)
+        refreshVisibleArea()
         backgroundExecutor.execute {
             runCatching {
                 settings.setReaderBgCurrent(dark, defaultPath)
@@ -1090,11 +1271,11 @@ class ReaderBackgroundHook(
                         ?.let { Uri.fromFile(File(it)).toString() }
                         .orEmpty(),
                 )
-                refreshVisibleArea(dark)
+                refreshVisibleArea()
                 XposedBridge.log("$LOG_PREFIX restored built-in reader background dark=$dark path=$defaultPath")
             }.onFailure {
                 clearSelectionOverride(dark, defaultPath)
-                refreshVisibleArea(dark)
+                refreshVisibleArea()
                 showToast("恢复默认背景失败")
                 XposedBridge.log("$LOG_PREFIX clear background failed: ${it.stackTraceToString()}")
             }
@@ -1118,7 +1299,7 @@ class ReaderBackgroundHook(
                     updateHostBackground("")
                 }
                 thumbCache.remove(path)
-                refreshVisibleArea(dark)
+                refreshVisibleArea()
                 deleteModuleBackgroundFile(path)
                 showToast(if (selected) "已移除并恢复默认背景" else "已移除背景图片")
                 XposedBridge.log("$LOG_PREFIX removed reader background dark=$dark selected=$selected path=$path")
@@ -1173,7 +1354,7 @@ class ReaderBackgroundHook(
             list.removeAll { sameFileContent(File(it), target) }
             list.add(target.absolutePath)
             settings.setReaderBgImages(dark, list)
-            refreshVisibleArea(dark)
+            refreshVisibleArea()
             applyBackground(dark, target.absolutePath)
             XposedBridge.log("$LOG_PREFIX reader bg added dark=$dark path=${target.absolutePath}")
         }.onFailure { XposedBridge.log("$LOG_PREFIX import reader bg failed: ${it.stackTraceToString()}") }
@@ -1260,55 +1441,6 @@ class ReaderBackgroundHook(
                 "invoke" -> runCatching { block(args) }.getOrElse { targetUnit() }
                 "toString" -> "ReaderBgViewFactory"
                 "hashCode" -> 0
-                "equals" -> false
-                else -> null
-            }
-        }
-    }
-
-    /**
-     * 取得包住宿主背景绘制内容的分支 lambda，深浅各一个且**实例固定**。
-     *
-     * `ThemeToggleContent` 用 `Composer.changedInstance(darkContent)` 判断参数是否变化，
-     * 每次 hook 新建代理会被判定为「变了」而不断重组。实例只建一次，宿主每次传来的内容存进可变引用。
-     */
-    private fun backgroundBranchLambda(hostLambda: Any, dark: Boolean): Any {
-        val index = if (dark) 1 else 0
-        backgroundBranchHosts[index] = hostLambda
-        backgroundBranchLambdas[index]?.let { return it }
-        return backgroundComposableLambda({ backgroundBranchHosts[index] }, dark)
-            .also { backgroundBranchLambdas[index] = it }
-    }
-
-    /** 把宿主的背景绘制内容包一层，记录当前正在渲染的是哪个主题分支。 */
-    private fun backgroundComposableLambda(hostProvider: () -> Any?, dark: Boolean): Any {
-        val fnClass = cls(FUNCTION2_CLASS)
-        return Proxy.newProxyInstance(classLoader, arrayOf(fnClass)) { _, method, args ->
-            when (method.name) {
-                "invoke" -> runCatching {
-                    val hostLambda = hostProvider() ?: return@runCatching targetUnit()
-                    // 深色下宿主会把两个分支都跑一遍，浅色分支在这里若改写 currentReaderDark，
-                    // 跑完也没人还原，之后所有不在分支内的读取都会按浅色解析——表现为翻页时
-                    // 在两套背景之间来回闪。当前阅读主题只由 rememberReaderDark 一处维护，
-                    // 分支只负责声明"此刻正在渲染哪个分支"，并在退出时还原成进入前的值。
-                    val previousBranch = activeBackgroundBranchDark
-                    activeBackgroundBranchDark = dark
-                    val composer = args?.getOrNull(0)
-                    observeSelectionVersion()
-                    composer?.let { captureBackgroundRecomposeScope(it, dark) }
-                    try {
-                        hostLambda.javaClass.methods.first {
-                            it.name == "invoke" && it.parameterTypes.size == 2
-                        }.invoke(hostLambda, args?.getOrNull(0), Integer.valueOf(0))
-                    } finally {
-                        activeBackgroundBranchDark = previousBranch
-                    }
-                }.getOrElse {
-                    activeBackgroundBranchDark = null
-                    targetUnit()
-                }
-                "toString" -> "ReaderBgComposable(dark=$dark)"
-                "hashCode" -> if (dark) 0x5245414D else 0x5245414C
                 "equals" -> false
                 else -> null
             }
@@ -1412,11 +1544,6 @@ class ReaderBackgroundHook(
     private fun onReaderThemeChanged(dark: Boolean) {
         val selectedUri = selectedSideLoadedBackgroundUri(dark)
         showNativeBackgrounds = !dark && selectedUri.isBlank()
-        // 宿主两个主题共用同一个 EpubBackgroundState 实例时，这张表里记的是切换前的主题。
-        // 主题刚翻转、我们的分支 lambda 还没跑到时，宿主会先读一次 getBackground()，
-        // 此时若照着旧记录解析，返回的就是另一个主题的自定义背景——表现为切到深色时
-        // 先闪一下浅色的图。切换瞬间丢弃记录，让这次读取回落到刚更新好的 currentReaderDark。
-        backgroundStateThemes.clear()
         invalidateHostBackgroundState(dark)
         invalidateBackgroundComposition(dark)
         recomposePanel(dark)
@@ -1499,6 +1626,17 @@ class ReaderBackgroundHook(
         const val KOTLIN_COROUTINE_SUSPENDED_NAME = "COROUTINE_SUSPENDED"
         const val KOTLIN_RESULT_FAILURE_CLASS = "kotlin.Result\$Failure"
         const val SESSION_CLASS = HostClasses.Host.SESSION
+
+        /** 「模块发起的写入」标记的兜底超时，防止宿主永不 resume 时标记永久残留。 */
+        const val MODULE_UPDATE_MARK_TIMEOUT_MS = 5_000L
+
+        // Session.darkModeState 的三态取值，取自 rememberReaderShouldUseDarkTheme 的字节码分支。
+        const val DARK_MODE_FORCED_DARK = 1
+        const val DARK_MODE_FORCED_LIGHT = 2
+
+        // 从 Koin 取 Session 用；AccountCompletionController 里也有同名的 file-private 常量。
+        const val ANDROID_KOIN_SCOPE_EXT_CLASS = "org.koin.android.ext.android.AndroidKoinScopeExtKt"
+        const val KOTLIN_REFLECTION_CLASS = HostClasses.Kotlin.KOTLIN_REFLECTION
         const val USER_STORAGE_CLASS = HostClasses.Host.USER_STORAGE
         const val EPUB_CONTAINER_KT_CLASS = HostClasses.Host.EPUB_CONTAINER_KT
         const val EPUB_CONTAINER_SINGLETONS_CLASS =
@@ -1506,15 +1644,13 @@ class ReaderBackgroundHook(
         const val EPUB_CONTAINER_METHOD = "EpubContainer"
         const val EPUB_BACKGROUND_METHOD = "EpubBackground"
         const val EPUB_BACKGROUND_STATE_VALUE_METHOD = "rememberEpubBackgroundState"
+
         const val COMPOSE_STATE_CLASS = HostClasses.Compose.COMPOSE_STATE
         const val EPUB_DRAW_BACKGROUND_ARG_INDEX = 3
         const val EPUB_BACKGROUND_VALUE_METHOD = "lambda_1672513034\$lambda\$0\$0"
         const val DYNAMIC_THEME_CONTENT_KT_CLASS =
             HostClasses.Host.DYNAMIC_THEME_CONTENT_KT
         const val REMEMBER_READER_DARK_METHOD = "rememberReaderShouldUseDarkTheme"
-        const val THEME_TOGGLE_CONTENT_METHOD = "ThemeToggleContent"
-        const val THEME_TOGGLE_DEFAULT_MASK_ARG_INDEX = 4
-        const val THEME_TOGGLE_DARK_CONTENT_DEFAULT_MASK = 0x1
         const val ANDROID_VIEW_KT_CLASS = HostClasses.Compose.ANDROID_VIEW_KT
         const val ANDROID_VIEW_METHOD = "AndroidView"
         const val FUNCTION1_CLASS = HostClasses.Kotlin.FUNCTION1
