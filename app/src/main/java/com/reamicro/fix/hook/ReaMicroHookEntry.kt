@@ -170,11 +170,16 @@ class ReaMicroHookEntry {
         HookInstallReport.install(ENTRY_FEATURE_ID, feature, block)
     }
 
-    /** 打印 hook 安装汇总。宿主升级后对比这一行即可定位掉线的 hook。 */
+    /**
+     * 打印 hook 安装汇总。宿主升级后对比这一行即可定位掉线的 hook。
+     *
+     * 用 logAlways 而不是普通 log：这里还在 handleLoadedPackage 里，设置尚未 attach，
+     * 「简洁日志」标志仍是默认的 true，普通 INFO 日志会被整条吞掉。
+     */
     private fun logHookInstallReport() {
-        XposedBridge.log("$LOG_PREFIX ${HookInstallReport.summaryLine()}")
+        XposedBridge.logAlways("$LOG_PREFIX ${HookInstallReport.summaryLine()}")
         HookInstallReport.failureDetails().forEach { detail ->
-            XposedBridge.log("$LOG_PREFIX hook install failure: $detail")
+            XposedBridge.logError("$LOG_PREFIX hook install failure: $detail")
         }
     }
 

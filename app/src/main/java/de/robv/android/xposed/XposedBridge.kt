@@ -32,6 +32,22 @@ object XposedBridge {
         log(Log.ERROR, text, throwable)
     }
 
+    /**
+     * 不受「简洁日志」开关影响的日志。
+     *
+     * 只给启动自检汇总这一类「必须能看到」的单行输出用。它在 handleLoadedPackage
+     * 里打印，那时设置还没 attach，[ModuleLogState.conciseLogEnabled] 仍是默认的
+     * true，走普通 log 会被整条吞掉——而这行的用途恰恰是宿主升级后第一眼要看的东西。
+     */
+    fun logAlways(text: String) {
+        val framework = frameworkRef.get()
+        if (framework != null) {
+            framework.log(Log.INFO, LOG_TAG, text)
+        } else {
+            Log.println(Log.INFO, LOG_TAG, text)
+        }
+    }
+
     fun log(throwable: Throwable) {
         log(Log.ERROR, Log.getStackTraceString(throwable), throwable)
     }

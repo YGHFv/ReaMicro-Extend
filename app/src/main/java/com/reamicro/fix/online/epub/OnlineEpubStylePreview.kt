@@ -30,10 +30,13 @@ internal object OnlineEpubStylePreview {
             if (draft.kind == OnlineEpubStyleKind.Header) it.copy(headerScope = HEADER_PREVIEW_SCOPE) else it
         }
         val bookCss = OnlineEpubStyleCss.build(previewSettings, previewFontFaces(draft, fontUrl))
+        val headerCss = previewSettings.selected(OnlineEpubStyleKind.Header)?.css.orEmpty()
+        val bleedReset = if (OnlineEpubStyleCss.headerSitsFlushToTop(headerCss)) BLEED_HEADER_RESET_CSS else ""
         return """<!DOCTYPE html><html><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <style>
 $RESET_CSS
+$bleedReset
 
 $bookCss
 </style></head><body>${OnlineEpubStyleDefaults.previewBody(draft.kind, assetUrl, draft.markup)}</body></html>"""
@@ -67,10 +70,16 @@ $bookCss
             max-width: 100%;
             height: auto;
         }
-        /*
-         * 贴边头图靠 duokan-bleed 出血到页顶，WebView 不认这个指令，预览里就会在头图上方留一条纸色。
-         * 这里把 body 的上内边距抵消掉，让预览的贴边效果与成书一致。
-         */
+    """.trimIndent()
+
+    /**
+     * 贴边头图靠 duokan-bleed 出血到页顶，WebView 不认这个指令，预览里就会在头图上方留一条纸色。
+     * 这里把 body 的上内边距抵消掉，让预览的贴边效果与成书一致。
+     *
+     * 只对贴边头图注入。这条选择器的优先级高于样式自己的 `.te-header-figure`，此前无条件注入，
+     * 把卡片头图、浮印留白头图这些本该在上方留白的样式也一并拽到了页顶。
+     */
+    private val BLEED_HEADER_RESET_CSS = """
         body > .te-header-figure:first-child {
             margin-top: -20px;
         }

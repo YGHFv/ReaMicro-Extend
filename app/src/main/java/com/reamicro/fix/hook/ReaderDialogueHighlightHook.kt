@@ -83,7 +83,7 @@ class ReaderDialogueHighlightHook(
         synchronized(fontFamilyCache) { fontFamilyCache.clear() }
         synchronized(failedFontFamilyLogKeys) { failedFontFamilyLogKeys.clear() }
         synchronized(onlineParagraphCommentDebugKeys) { onlineParagraphCommentDebugKeys.clear() }
-        XposedBridge.log("$LOG_PREFIX dialogue highlight memory released: $reason")
+        logHighlightInfo("dialogue highlight memory released: $reason")
     }
 
     private fun hookContentDom(className: String) {
@@ -98,7 +98,7 @@ class ReaderDialogueHighlightHook(
                     }
                 })
             }
-            XposedBridge.log("$LOG_PREFIX dialogue highlight hook installed: $className count=${methods.size}")
+            logHighlightInfo("dialogue highlight hook installed: $className count=${methods.size}")
         }.onFailure {
             if (it is ClassNotFoundException) return@onFailure
             XposedBridge.log("$LOG_PREFIX dialogue highlight hook failed: $className ${it.stackTraceToString()}")
@@ -898,7 +898,7 @@ class ReaderDialogueHighlightHook(
                 })
             }
             ninePatchDrawHookInstalled = methods.isNotEmpty()
-            XposedBridge.log("$LOG_PREFIX nine-patch draw hook installed count=${methods.size}")
+            logHighlightInfo("nine-patch draw hook installed count=${methods.size}")
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX nine-patch draw hook failed: ${it.stackTraceToString()}")
         }
@@ -926,7 +926,7 @@ class ReaderDialogueHighlightHook(
                 }
             })
             activityConfigurationHookInstalled = true
-            XposedBridge.log("$LOG_PREFIX reader night-mode refresh hook installed")
+            logHighlightInfo("reader night-mode refresh hook installed")
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX reader night-mode refresh hook failed: ${it.stackTraceToString()}")
         }
@@ -942,7 +942,7 @@ class ReaderDialogueHighlightHook(
         if (!settings.snapshot().canHighlightReaderDialogue) return
         ReaderHighlightBookContext.bumpVersion("night-mode")
         checkHighlightRuntimeVersion()
-        XposedBridge.log("$LOG_PREFIX reader night-mode highlight refresh requested dark=$current")
+        logHighlightInfo("reader night-mode highlight refresh requested dark=$current")
     }
 
     private fun checkHighlightRuntimeVersion() {
@@ -981,7 +981,7 @@ class ReaderDialogueHighlightHook(
                 })
             }
             basicTextDrawHookInstalled = methods.isNotEmpty()
-            XposedBridge.log("$LOG_PREFIX basic text nine-patch draw hook installed count=${methods.size}")
+            logHighlightInfo("basic text nine-patch draw hook installed count=${methods.size}")
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX basic text nine-patch draw hook failed: ${it.stackTraceToString()}")
         }
@@ -1771,21 +1771,21 @@ class ReaderDialogueHighlightHook(
         synchronized(onlineParagraphCommentDebugKeys) {
             if (!onlineParagraphCommentDebugKeys.add(message)) return
         }
-        XposedBridge.log("$LOG_PREFIX online paragraph comments $message")
+        logHighlightInfo("online paragraph comments $message")
     }
 
     private fun logApplied(text: String, count: Int) {
         val key = "${text.length}|$count|${text.take(24)}"
         if (key == lastAppliedLogKey) return
         lastAppliedLogKey = key
-        XposedBridge.log("$LOG_PREFIX dialogue highlight applied ranges=$count text=${text.take(24)}")
+        logHighlightInfo("dialogue highlight applied ranges=$count text=${text.take(24)}")
     }
 
     private fun logProtectedRangeMismatch(mappedLength: Int, renderedLength: Int) {
         val key = "protected-range-mismatch|$mappedLength|$renderedLength"
         if (key == lastAppliedLogKey) return
         lastAppliedLogKey = key
-        XposedBridge.log("$LOG_PREFIX dialogue highlight protected ranges skipped mapped=$mappedLength rendered=$renderedLength")
+        logHighlightInfo("dialogue highlight protected ranges skipped mapped=$mappedLength rendered=$renderedLength")
     }
 
     private inline fun logHighlightPerformance(message: () -> String) {
@@ -1794,6 +1794,18 @@ class ReaderDialogueHighlightHook(
         if (now - lastHighlightPerformanceLogAtMs < HIGHLIGHT_PERFORMANCE_LOG_INTERVAL_MS) return
         lastHighlightPerformanceLogAtMs = now
         XposedBridge.log("$LOG_PREFIX highlight-perf ${message()}")
+    }
+
+    /**
+     * 高亮相关的非错误日志。
+     *
+     * 设置页的「高亮日志」开关关闭时一律不打印——正文每渲染一段就会产生一条
+     * "dialogue highlight applied"，关掉开关的用途正是让它们消失。错误日志不走这里，
+     * 任何时候都要能看到。
+     */
+    private fun logHighlightInfo(message: String) {
+        if (!settings.snapshot().canLogReaderHighlightPerformance) return
+        XposedBridge.log("$LOG_PREFIX $message")
     }
 
     private fun cls(className: String): Class<*> =

@@ -58,7 +58,58 @@ internal object OnlineEpubStyleCss {
             sections += "/* ${kind.title}：${style.name} */"
             sections += styleCss(style, fontFaces[style.id])
         }
+        val header = settings.selected(OnlineEpubStyleKind.Header)
+            ?.takeIf { OnlineEpubStyleKind.Header in appliedKinds(settings) }
+        if (header != null && !headerSitsFlushToTop(header.css)) {
+            sections += KEEP_HEADER_TOP_MARGIN_CSS
+        }
         return sections.filter { it.isNotBlank() }.joinToString("\n\n") + "\n"
+    }
+
+    /**
+     * 头图是否设计成贴住页面上边缘。
+     *
+     * 判据是 `.te-header-figure` 的上外边距是否为 0：贴边样式一律写 `margin-top: 0`，
+     * 卡片、浮印这类要在上方留白的写正值。
+     *
+     * 不看 `duokan-bleed`：电影裁幅头图只声明了 `leftright`、细线装帧头图干脆没声明，
+     * 但它们的上外边距都是 0，同样应该贴住页顶。按外边距判断才和样式作者的意图一致。
+     */
+    fun headerSitsFlushToTop(css: String): Boolean = headerFigureTopMargin(css) <= 0.0
+
+    /**
+     * 解析 `.te-header-figure` 的上外边距，单位按 em 归一（无法识别时按 0 处理）。
+     *
+     * 同一块里出现多次时后写的生效，与 CSS 一致。
+     */
+    private fun headerFigureTopMargin(css: String): Double {
+        val block = OnlineEpubCssBlocks.parse(css)
+            .lastOrNull { it.selector == HEADER_FIGURE_SELECTOR }
+            ?: return 0.0
+        var top = 0.0
+        // 按分号切而不是按行切：同一行写多条声明也要认。
+        block.declarations.split(';').forEach { declaration ->
+            val (property, rawValue) = declaration.split(':', limit = 2)
+                .takeIf { it.size == 2 }
+                ?.let { it[0].trim().lowercase() to it[1].trim() }
+                ?: return@forEach
+            when (property) {
+                "margin" -> rawValue.split(Regex("\\s+")).firstOrNull()?.let { top = cssLengthToEm(it) }
+                "margin-top" -> top = cssLengthToEm(rawValue)
+            }
+        }
+        return top
+    }
+
+    /** 只需要区分「零/负」与「正」，因此按 1em = 16px 粗略折算即可。 */
+    private fun cssLengthToEm(value: String): Double {
+        val text = value.trim().lowercase()
+        val number = Regex("^-?\\d*\\.?\\d+").find(text)?.value?.toDoubleOrNull() ?: return 0.0
+        return when {
+            text.endsWith("px") -> number / 16.0
+            text.endsWith("%") -> number
+            else -> number
+        }
     }
 
     /** 把样式的字体选择注入主选择器；主选择器缺失时补一段。 */
@@ -99,6 +150,22 @@ internal object OnlineEpubStyleCss {
         val declaredName = selection.substringAfterLast('/').substringAfterLast('\\').substringBeforeLast('.')
         return if (declaredName.isBlank()) "" else "\"$declaredName\", serif"
     }
+
+    private const val HEADER_FIGURE_SELECTOR = ".te-header-figure"
+
+    /**
+     * 非贴边头图保住上方留白。
+     *
+     * 头图 figure 是 body 的第一个子元素，而 body 没有上内边距／上边框，按 CSS 规则
+     * 它的上外边距会折叠到 body 外面——结果就是本该留白的卡片头图也贴在了页顶。
+     * 让 body 建立独立的格式化上下文即可把外边距关在里面。贴边样式的上外边距本来就是 0，
+     * 因此这段只在非贴边头图时才写入。
+     */
+    private val KEEP_HEADER_TOP_MARGIN_CSS = """
+        body {
+            display: flow-root;
+        }
+    """.trimIndent()
 
     /** 与样式无关的基础排版：正文、卷首页容器和旧书兜底。 */
     private val BASE_CSS = """

@@ -37,6 +37,7 @@ import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import com.reamicro.fix.reader.ReaderBackgroundValueResolver
 
 /**
  * 改造阅微阅读页「主题」面板的完整混搭背景区：
@@ -543,17 +544,20 @@ class ReaderBackgroundHook(
                     val state = param.args?.getOrNull(0) ?: param.thisObject ?: return
                     val dark = activeBackgroundBranchDark ?: backgroundStateThemes[state] ?: currentReaderDark
                     backgroundStateThemes[state] = dark
-                    val hostValue = (param.result as? String).orEmpty()
-                    backgroundStateHostValues[state] = hostValue
-                    currentHostBackgroundValue = hostValue
+                    // invalidateHostBackgroundState 会先写入一次性令牌再写回原值，用来精确失效当前
+                    // composition。如果有一帧正好落在这两次写入之间，令牌会被当成背景地址交给宿主，
+                    // 宿主加载不到就画出纯白/纯黑的一帧——这正是切换主题时闪一下没有背景的来源。
+                    val resolution = ReaderBackgroundValueResolver.resolve(
+                        rawValue = (param.result as? String).orEmpty(),
+                        rememberedHostValue = backgroundStateHostValues[state].orEmpty(),
+                        selectedUri = selectedSideLoadedBackgroundUri(dark),
+                        refreshTokenPrefix = HOST_REFRESH_TOKEN_PREFIX,
+                        isSideLoaded = ::isSideLoadedBackgroundUri,
+                    )
+                    backgroundStateHostValues[state] = resolution.hostValue
+                    currentHostBackgroundValue = resolution.hostValue
                     if (dark) darkHostBackgroundState = state else lightHostBackgroundState = state
-                    val selectedUri = selectedSideLoadedBackgroundUri(dark)
-                    if (selectedUri.isNotBlank()) {
-                        param.result = selectedUri
-                    } else if (isSideLoadedBackgroundUri(hostValue)) {
-                        // 宿主 BACKGROUND 是全局单值；目标主题没有侧载选中时，不能继承另一主题的图片。
-                        param.result = ""
-                    }
+                    resolution.result?.let { param.result = it }
                 }
             })
             XposedBridge.log("$LOG_PREFIX epub background theme isolation hooks installed")
@@ -1398,6 +1402,11 @@ class ReaderBackgroundHook(
     private fun onReaderThemeChanged(dark: Boolean) {
         val selectedUri = selectedSideLoadedBackgroundUri(dark)
         showNativeBackgrounds = !dark && selectedUri.isBlank()
+        // 宿主两个主题共用同一个 EpubBackgroundState 实例时，这张表里记的是切换前的主题。
+        // 主题刚翻转、我们的分支 lambda 还没跑到时，宿主会先读一次 getBackground()，
+        // 此时若照着旧记录解析，返回的就是另一个主题的自定义背景——表现为切到深色时
+        // 先闪一下浅色的图。切换瞬间丢弃记录，让这次读取回落到刚更新好的 currentReaderDark。
+        backgroundStateThemes.clear()
         invalidateHostBackgroundState(dark)
         invalidateBackgroundComposition(dark)
         recomposePanel(dark)
