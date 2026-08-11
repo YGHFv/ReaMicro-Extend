@@ -129,7 +129,9 @@ class ReaderBackgroundHook(
                     args.getOrNull(1) ?: return
                     val composer = args.getOrNull(composerIdx) ?: return
                     val dark = renderingDarkThemeContent
-                    currentReaderDark = dark
+                    // renderingDarkThemeContent 表示主题面板正在渲染哪一段，不是阅读页当前主题；
+                    // 以前这里会用它改写 currentReaderDark，面板一渲染就把阅读页的主题带偏。
+                    // 当前阅读主题只由 rememberReaderDark 一处维护。
                     cacheThemePrimaryColor(composer, dark)
                     observeSelectionVersion()
                     capturePanelRecomposeScope(composer, dark)
@@ -362,7 +364,9 @@ class ReaderBackgroundHook(
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!settingsProvider().canUseReaderBackground) return
                     val dark = renderingDarkThemeContent
-                    currentReaderDark = dark
+                    // renderingDarkThemeContent 表示主题面板正在渲染哪一段，不是阅读页当前主题；
+                    // 以前这里会用它改写 currentReaderDark，面板一渲染就把阅读页的主题带偏。
+                    // 当前阅读主题只由 rememberReaderDark 一处维护。
                     val composer = param.args?.getOrNull(0)
                     val rootScope = composer?.let(::currentRecomposeScope)
                     val previousRootScope = panelRootRecomposeScope?.get()
@@ -394,7 +398,9 @@ class ReaderBackgroundHook(
                     if (!settingsProvider().canUseReaderBackground) return
                     val composer = param.args?.getOrNull(3) ?: return
                     val dark = renderingDarkThemeContent
-                    currentReaderDark = dark
+                    // renderingDarkThemeContent 表示主题面板正在渲染哪一段，不是阅读页当前主题；
+                    // 以前这里会用它改写 currentReaderDark，面板一渲染就把阅读页的主题带偏。
+                    // 当前阅读主题只由 rememberReaderDark 一处维护。
                     if (dark) showNativeBackgrounds = false
                     observeSelectionVersion()
                     capturePanelRecomposeScope(composer, dark)
@@ -1281,7 +1287,11 @@ class ReaderBackgroundHook(
             when (method.name) {
                 "invoke" -> runCatching {
                     val hostLambda = hostProvider() ?: return@runCatching targetUnit()
-                    currentReaderDark = dark
+                    // 深色下宿主会把两个分支都跑一遍，浅色分支在这里若改写 currentReaderDark，
+                    // 跑完也没人还原，之后所有不在分支内的读取都会按浅色解析——表现为翻页时
+                    // 在两套背景之间来回闪。当前阅读主题只由 rememberReaderDark 一处维护，
+                    // 分支只负责声明"此刻正在渲染哪个分支"，并在退出时还原成进入前的值。
+                    val previousBranch = activeBackgroundBranchDark
                     activeBackgroundBranchDark = dark
                     val composer = args?.getOrNull(0)
                     observeSelectionVersion()
@@ -1291,7 +1301,7 @@ class ReaderBackgroundHook(
                             it.name == "invoke" && it.parameterTypes.size == 2
                         }.invoke(hostLambda, args?.getOrNull(0), Integer.valueOf(0))
                     } finally {
-                        activeBackgroundBranchDark = null
+                        activeBackgroundBranchDark = previousBranch
                     }
                 }.getOrElse {
                     activeBackgroundBranchDark = null
