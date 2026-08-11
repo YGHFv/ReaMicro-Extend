@@ -156,6 +156,12 @@ object ModuleSettings {
     const val DEFAULT_READER_DOUBLE_QUOTE_RULE_ID = "double_quote_dialogue"
     const val DEFAULT_READER_SINGLE_QUOTE_RULE_ID = "single_quote_phrase"
 
+    /**
+     * 「允许跨段」时最多跨几段，与双引号对话规则同一个值（见
+     * ReaderDialogueHighlightHook.MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS）。
+     */
+    const val READER_HIGHLIGHT_CROSS_PARAGRAPH_LIMIT = 7
+
     const val WANFENGLI_SOURCE_GROUP_ID = "wanfengli"
     const val KEY_WANFENGLI_HIDDEN_MIGRATED = "wanfengli_hidden_source_migrated"
     val DEFAULT_SEARCH_SOURCE_GROUP_IDS = setOf("fanqie")
@@ -549,7 +555,21 @@ data class ReaderHighlightRule(
     val pattern: String = "",
     val bookKey: String = "",
     val bookTitle: String = "",
+    /**
+     * 正则与区间匹配是否允许跨段。开启时按双引号对话那套规则做：把当前段前后共
+     * [ModuleSettings.READER_HIGHLIGHT_CROSS_PARAGRAPH_LIMIT] 段拼起来匹配再裁回当前段。
+     * 关闭时只在当前段内匹配。固定文本与内置引号规则不看这个字段。
+     */
+    val allowCrossParagraph: Boolean = false,
 ) {
+    /** 该类型是否需要用户填匹配内容。 */
+    val needsPattern: Boolean
+        get() = type in READER_HIGHLIGHT_PATTERN_TYPES
+
+    /** 该类型是否支持「允许跨段」开关。固定文本按字面量匹配，跨段没有意义。 */
+    val supportsCrossParagraph: Boolean
+        get() = type in READER_HIGHLIGHT_CROSS_PARAGRAPH_TYPES
+
     fun styleIdForTheme(dark: Boolean): String =
         if (dark) {
             darkStyleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID }
@@ -587,7 +607,30 @@ enum class ReaderHighlightRuleType {
     SingleQuotePhrase,
     FixedText,
     Regex,
+
+    /** 区间匹配：填「【】」高亮以【开头、以】结尾的片段，含界定符本身。 */
+    Range,
 }
+
+/** 用户可以在规则弹窗里选的类型，顺序即 UI 上 chip 的顺序。 */
+val READER_HIGHLIGHT_SELECTABLE_TYPES: List<ReaderHighlightRuleType> = listOf(
+    ReaderHighlightRuleType.FixedText,
+    ReaderHighlightRuleType.Regex,
+    ReaderHighlightRuleType.Range,
+)
+
+/** 需要填匹配内容的类型。 */
+val READER_HIGHLIGHT_PATTERN_TYPES: Set<ReaderHighlightRuleType> = setOf(
+    ReaderHighlightRuleType.FixedText,
+    ReaderHighlightRuleType.Regex,
+    ReaderHighlightRuleType.Range,
+)
+
+/** 支持「允许跨段」的类型。 */
+val READER_HIGHLIGHT_CROSS_PARAGRAPH_TYPES: Set<ReaderHighlightRuleType> = setOf(
+    ReaderHighlightRuleType.Regex,
+    ReaderHighlightRuleType.Range,
+)
 
 object ReaderHighlightBookContext {
     @Volatile var bookKey: String = ""

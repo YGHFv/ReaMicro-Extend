@@ -660,7 +660,7 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
         val toggleRows = listOf(
             ToggleRow(
                 key = ModuleSettings.KEY_CONCISE_LOG_ENABLED,
-                title = "\u7b80\u6d01\u65e5\u5fd7\uff08\u4ec5\u9519\u8bef\uff09",
+                title = "\u7b80\u6d01\u65e5\u5fd7",
                 checked = snapshot.conciseLogEnabled,
                 onChanged = { checked, _ ->
                     settings.setConciseLogEnabled(checked)
@@ -673,6 +673,15 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
                 checked = snapshot.readerHighlightPerformanceLogEnabled,
                 onChanged = { checked, _ ->
                     settings.setReaderHighlightPerformanceLogEnabled(checked)
+                    checked
+                },
+            ),
+            ToggleRow(
+                key = ModuleSettings.KEY_ACCOUNT_CACHE_CLEANUP_ENABLED,
+                title = "\u7f13\u5b58\u6e05\u7406",
+                checked = snapshot.accountCacheCleanupEnabled,
+                onChanged = { checked, _ ->
+                    settings.setAccountCacheCleanupEnabled(checked)
                     checked
                 },
             ),
@@ -691,11 +700,24 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
                 onClick = { exportModuleLog() },
             ),
         )
+        // \u9879\u76ee\u5730\u5740\u5355\u72ec\u4e00\u5f20\u5361\u7247\u653e\u5728\u6700\u4e0b\u9762\uff0c\u526f\u6807\u9898\u76f4\u63a5\u662f\u94fe\u63a5\u672c\u8eab\uff0c\u70b9\u51fb\u8df3\u6d4f\u89c8\u5668\u3002
+        val projectRows = listOf(
+            ActionRow(
+                key = "about_completion_project_url",
+                title = "\u9879\u76ee\u5730\u5740",
+                subtitle = PROJECT_URL,
+                singleLineSubtitle = true,
+                onClick = { openProjectUrl() },
+            ),
+        )
         addLazyItem(lazyListScope, ABOUT_COMPLETION_CONTENT_ITEM_KEY) { itemComposer ->
             renderHostSettingsCard(toggleRows, itemComposer)
         }
         addLazyItem(lazyListScope, ABOUT_COMPLETION_ENTRY_ITEM_KEY) { itemComposer ->
             renderHostActionCard(actionRows, itemComposer)
+        }
+        addLazyItem(lazyListScope, ABOUT_COMPLETION_PROJECT_ITEM_KEY) { itemComposer ->
+            renderHostActionCard(projectRows, itemComposer)
         }
         targetUnit()
     }
@@ -927,15 +949,6 @@ internal fun ReaMicroSettingsHook.renderCloudCompletionSettingsContent(innerPadd
                 checked = snapshot.accountExportEnabled,
                 onChanged = { checked, _ ->
                     settings.setAccountExportEnabled(checked)
-                    checked
-                },
-            ),
-            ToggleRow(
-                key = ModuleSettings.KEY_ACCOUNT_CACHE_CLEANUP_ENABLED,
-                title = "\u7f13\u5b58\u6e05\u7406",
-                checked = snapshot.accountCacheCleanupEnabled,
-                onChanged = { checked, _ ->
-                    settings.setAccountCacheCleanupEnabled(checked)
                     checked
                 },
             ),

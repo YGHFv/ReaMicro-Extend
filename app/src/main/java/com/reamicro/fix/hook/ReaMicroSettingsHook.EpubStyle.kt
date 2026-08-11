@@ -70,13 +70,13 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
                 }
             }
             // 字体两种模式：嵌入会把字体文件复制进 EPUB，仅声明只写 font-family 名。
-            val fontModeRow = onlineEpubStyleChipRow(activity)
+            val fontModeRow = settingsDialogChipRow(activity)
             lateinit var syncFontModeRow: () -> Unit
             syncFontModeRow = {
                 fontModeRow.removeAllViews()
                 listOf(true to "嵌入 EPUB", false to "仅声明字体名").forEach { (mode, label) ->
                     fontModeRow.addView(
-                        onlineEpubStyleSectionChip(activity, label, embedFont == mode, colors) {
+                        settingsDialogChip(activity, label, embedFont == mode, colors) {
                             embedFont = mode
                             syncFontModeRow.invoke()
                             syncPreview.invoke()
@@ -96,7 +96,7 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
                 minLines = 4
                 visibility = View.GONE
             }
-            val sectionRow = onlineEpubStyleChipRow(activity)
+            val sectionRow = settingsDialogChipRow(activity)
             val preview = WebView(activity).apply {
                 setBackgroundColor(Color.TRANSPARENT)
                 webViewClient = WebViewClient()
@@ -144,13 +144,13 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
                 }
             }
             // 头图套用范围，仅头图样式可见。
-            val headerScopeRow = onlineEpubStyleChipRow(activity)
+            val headerScopeRow = settingsDialogChipRow(activity)
             lateinit var syncHeaderScopeRow: () -> Unit
             syncHeaderScopeRow = {
                 headerScopeRow.removeAllViews()
                 OnlineEpubHeaderScope.entries.forEach { scope ->
                     headerScopeRow.addView(
-                        onlineEpubStyleSectionChip(activity, scope.title, headerScope == scope, colors) {
+                        settingsDialogChip(activity, scope.title, headerScope == scope, colors) {
                             headerScope = scope
                             OnlineEpubStyleStore.setHeaderScope(onlineEpubStyleContext(), scope)
                             syncHeaderScopeRow.invoke()
@@ -184,7 +184,7 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
                 sectionRow.removeAllViews()
                 selectors.forEach { selector ->
                     sectionRow.addView(
-                        onlineEpubStyleSectionChip(
+                        settingsDialogChip(
                             activity = activity,
                             text = OnlineEpubStyleDefaults.sectionLabel(style.kind, selector),
                             selected = selector == activeSelector,
@@ -306,8 +306,13 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
     }
 }
 
-/** 弹窗内横排 chip 的容器。 */
-internal fun ReaMicroSettingsHook.onlineEpubStyleChipRow(activity: Activity): LinearLayout =
+/**
+ * 弹窗内横排 chip 的容器。
+ *
+ * 定义留在本簇（最早为标题样式的分段切换写的），但高亮规则弹窗的类型选择也用它，
+ * 属于通用弹窗构件，不要再各处另写一份。
+ */
+internal fun ReaMicroSettingsHook.settingsDialogChipRow(activity: Activity): LinearLayout =
     LinearLayout(activity).apply {
         orientation = LinearLayout.HORIZONTAL
         layoutParams = LinearLayout.LayoutParams(
@@ -317,7 +322,7 @@ internal fun ReaMicroSettingsHook.onlineEpubStyleChipRow(activity: Activity): Li
     }
 
 /** 分段切换按钮，选中态复用设置弹窗的圆角背景。 */
-internal fun ReaMicroSettingsHook.onlineEpubStyleSectionChip(
+internal fun ReaMicroSettingsHook.settingsDialogChip(
     activity: Activity,
     text: String,
     selected: Boolean,

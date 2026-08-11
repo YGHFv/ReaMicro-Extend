@@ -22,6 +22,7 @@ import com.reamicro.fix.settings.ReaderHighlightSettingsSnapshot
 import com.reamicro.fix.settings.ReaderHighlightRule
 import com.reamicro.fix.settings.ReaderHighlightRuleType
 import com.reamicro.fix.settings.ReaderHighlightStyle
+import com.reamicro.fix.settings.READER_HIGHLIGHT_SELECTABLE_TYPES
 import de.robv.android.xposed.XposedBridge
 import java.io.File
 import java.util.zip.GZIPInputStream
@@ -1407,11 +1408,8 @@ internal fun ReaMicroSettingsHook.openReaderHighlightRuleDialog(rule: ReaderHigh
             var selectedType = if (builtInRule) {
                 rule.type
             } else {
-                when (rule.type) {
-                    ReaderHighlightRuleType.FixedText,
-                    ReaderHighlightRuleType.Regex -> rule.type
-                    else -> ReaderHighlightRuleType.FixedText
-                }
+                // 自建规则只能是可选类型之一；万一存进来别的（旧数据、导入的文件）就退回固定文本。
+                rule.type.takeIf { it in READER_HIGHLIGHT_SELECTABLE_TYPES } ?: ReaderHighlightRuleType.FixedText
             }
             var selectedStyleId = rule.styleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID }
             var selectedDarkStyleId = rule.darkStyleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID }
@@ -1460,16 +1458,41 @@ internal fun ReaMicroSettingsHook.openReaderHighlightRuleDialog(rule: ReaderHigh
             val finishButton = settingsDialogButton(activity, "\u5b8c\u6210", colors)
             val deleteButton = settingsDialogButton(activity, "\u5220\u9664", colors, SettingsDialogButtonRole.Destructive)
             val cancelButton = settingsDialogButton(activity, "\u53d6\u6d88", colors, SettingsDialogButtonRole.Neutral)
-            fun syncTypeSelection() {
-                typeStatus.text = "\u7c7b\u578b\uff1a${highlightRuleTypeTitle(rule.copy(type = selectedType))}"
-                val needsPattern = selectedType == ReaderHighlightRuleType.FixedText ||
-                    selectedType == ReaderHighlightRuleType.Regex
-                patternInput.visibility = if (needsPattern) View.VISIBLE else View.GONE
+            // \u7c7b\u578b\u4e09\u9009\u4e00\u6324\u5728\u4e00\u884c chip \u91cc\uff0c\u6bd4\u539f\u5148\u6bcf\u79cd\u7c7b\u578b\u5360\u4e00\u6574\u884c\u7701\u4e0d\u5c11\u9ad8\u5ea6\u3002
+            val typeChipRow = settingsDialogChipRow(activity)
+            val crossParagraphSwitch = settingsDialogSwitchRow(
+                activity,
+                "\u5141\u8bb8\u8de8\u6bb5",
+                rule.allowCrossParagraph,
+                colors,
+            )
+            lateinit var syncTypeSelection: () -> Unit
+            syncTypeSelection = {
+                val draft = rule.copy(type = selectedType)
+                typeStatus.text = "\u7c7b\u578b\uff1a${highlightRuleTypeTitle(draft)}"
+                typeChipRow.removeAllViews()
+                READER_HIGHLIGHT_SELECTABLE_TYPES.forEach { type ->
+                    typeChipRow.addView(
+                        settingsDialogChip(
+                            activity,
+                            highlightRuleTypeTitle(rule.copy(type = type)),
+                            selectedType == type,
+                            colors,
+                        ) {
+                            selectedType = type
+                            syncTypeSelection.invoke()
+                        },
+                    )
+                }
+                patternInput.visibility = if (draft.needsPattern) View.VISIBLE else View.GONE
                 patternInput.hint = when (selectedType) {
                     ReaderHighlightRuleType.FixedText -> "\u56fa\u5b9a\u6587\u672c\uff0c\u4f8b\u5982\uff1a\u91cd\u8981"
                     ReaderHighlightRuleType.Regex -> "\u6b63\u5219\u8868\u8fbe\u5f0f\uff0c\u4f8b\u5982\uff1a\\d{4}-\\d{2}-\\d{2}"
+                    ReaderHighlightRuleType.Range -> "\u533a\u95f4\u754c\u5b9a\u7b26\uff0c\u4f8b\u5982\uff1a\u3010\u3011"
                     else -> "\u5339\u914d\u5185\u5bb9"
                 }
+                // \u56fa\u5b9a\u6587\u672c\u6309\u5b57\u9762\u91cf\u5339\u914d\uff0c\u8de8\u6bb5\u65e0\u610f\u4e49\uff0c\u5f00\u5173\u53ea\u5728\u6b63\u5219\u4e0e\u533a\u95f4\u4e0b\u51fa\u73b0\u3002
+                crossParagraphSwitch.visibility = if (draft.supportsCrossParagraph) View.VISIBLE else View.GONE
             }
             syncStyleSelection = {
                 lightStyleStatus.text = "\u6d45\u8272\u6837\u5f0f\uff1a${readerHighlightLightStyleLabel(highlight, selectedStyleId)}"
@@ -1482,20 +1505,10 @@ internal fun ReaMicroSettingsHook.openReaderHighlightRuleDialog(rule: ReaderHigh
             } else {
                 card.addView(nameInput)
                 card.addView(typeStatus)
-                card.addView(
-                    settingsDialogChoiceRow(activity, "\u56fa\u5b9a\u6587\u672c", colors) {
-                        selectedType = ReaderHighlightRuleType.FixedText
-                        syncTypeSelection()
-                    },
-                )
-                card.addView(
-                    settingsDialogChoiceRow(activity, "\u6b63\u5219", colors) {
-                        selectedType = ReaderHighlightRuleType.Regex
-                        syncTypeSelection()
-                    },
-                )
+                card.addView(typeChipRow)
                 card.addView(patternInput)
-                syncTypeSelection()
+                card.addView(crossParagraphSwitch)
+                syncTypeSelection.invoke()
             }
             syncStyleSelection.invoke()
             card.addView(lightStyleStatus)
@@ -1507,6 +1520,7 @@ internal fun ReaMicroSettingsHook.openReaderHighlightRuleDialog(rule: ReaderHigh
             }
             card.addView(settingsDialogButtonRow(activity, buttons))
             finishButton.setOnClickListener {
+                val draft = rule.copy(type = selectedType)
                 settings.setReaderHighlightRule(
                     rule.copy(
                         name = if (builtInRule) {
@@ -1517,14 +1531,13 @@ internal fun ReaMicroSettingsHook.openReaderHighlightRuleDialog(rule: ReaderHigh
                         type = selectedType,
                         styleId = selectedStyleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID },
                         darkStyleId = selectedDarkStyleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_DARK_DEFAULT_REFERENCE_ID },
-                        pattern = if (
-                            selectedType == ReaderHighlightRuleType.FixedText ||
-                            selectedType == ReaderHighlightRuleType.Regex
-                        ) {
+                        pattern = if (draft.needsPattern) {
                             patternInput.text?.toString()?.trim().orEmpty()
                         } else {
                             ""
                         },
+                        // 不支持跨段的类型强制存 false，免得切换类型后留下无效的旧值。
+                        allowCrossParagraph = draft.supportsCrossParagraph && crossParagraphSwitch.isChecked,
                     ),
                 )
                 bumpReaderHighlightVersion()
@@ -1640,6 +1653,7 @@ internal fun ReaMicroSettingsHook.highlightRuleTypeTitle(rule: ReaderHighlightRu
         ReaderHighlightRuleType.SingleQuotePhrase -> "\u5355\u5f15\u53f7\u8bcd\u7ec4"
         ReaderHighlightRuleType.FixedText -> "\u56fa\u5b9a\u6587\u672c"
         ReaderHighlightRuleType.Regex -> "\u6b63\u5219"
+        ReaderHighlightRuleType.Range -> "\u533a\u95f4"
     }
 
 internal fun ReaMicroSettingsHook.highlightRuleDescription(rule: ReaderHighlightRule): String =
@@ -1648,13 +1662,12 @@ internal fun ReaMicroSettingsHook.highlightRuleDescription(rule: ReaderHighlight
         ReaderHighlightRuleType.SingleQuotePhrase -> "\u5339\u914d\u540c\u6bb5\u5185\u7684\u2018\u2026\u2019 \u548c '...'"
         ReaderHighlightRuleType.FixedText -> "\u6309\u5b57\u9762\u91cf\u5339\u914d\u56fa\u5b9a\u6587\u672c"
         ReaderHighlightRuleType.Regex -> "\u6309\u6b63\u5219\u8868\u8fbe\u5f0f\u5339\u914d\u6587\u672c"
+        ReaderHighlightRuleType.Range -> "\u586b\u3010\u3011\u9ad8\u4eae\u4ee5\u3010\u5f00\u5934\u3001\u4ee5\u3011\u7ed3\u5c3e\u7684\u90e8\u5206\uff0c\u542b\u754c\u5b9a\u7b26"
     }
 
 internal fun ReaMicroSettingsHook.highlightRuleSummary(rule: ReaderHighlightRule): String {
     val base = highlightRuleTypeTitle(rule)
-    val pattern = rule.pattern.takeIf {
-        rule.type == ReaderHighlightRuleType.FixedText || rule.type == ReaderHighlightRuleType.Regex
-    }?.compactOnlineSourceLine()
+    val pattern = rule.pattern.takeIf { rule.needsPattern }?.compactOnlineSourceLine()
     return if (pattern.isNullOrBlank()) base else "$base: $pattern"
 }
 

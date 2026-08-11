@@ -63,9 +63,7 @@ internal fun ReaMicroSettingsHook.onlineSourceSubtitle(source: OnlineSourceEntry
         tags += "今日 $used/$limit 章"
     }
     tags += if (source.preferOnDemandLoading) "逐章加载" else "整本下载"
-    if (source.supportsParagraphComments) {
-        tags += if (source.paragraphCommentsEnabled) "段评已开" else "段评已关"
-    }
+    // 段评功能暂停，不再展示「段评已开/已关」标签。
     return tags.joinToString(" · ")
 }
 
@@ -90,7 +88,7 @@ internal fun ReaMicroSettingsHook.openOnlineSourceDownloadConfigDialog(source: O
             val dialog = Dialog(activity)
             val card = settingsDialogCard(activity, colors)
             card.addView(settingsDialogTitle(activity, "${source.name} 配置", colors))
-            card.addView(settingsDialogHint(activity, "下载方式和段评设置按书源独立保存。", colors))
+            card.addView(settingsDialogHint(activity, "下载方式按书源独立保存。", colors))
             val inputs = addOnlineSourceDownloadPolicyInputs(activity, source, card, colors)
             val saveButton = settingsDialogButton(activity, "保存", colors)
             val deleteButton = settingsDialogButton(
@@ -866,23 +864,16 @@ internal fun ReaMicroSettingsHook.addOnlineSourceDownloadPolicyInputs(
         "逐章加载（首次下载前 3 章）",
         source.preferOnDemandLoading,
     )
-    val paragraphCommentsEnabled = if (source.supportsParagraphComments) {
-        policySwitch(
-            "启用段评（下载时获取段评数据）",
-            source.paragraphCommentsEnabled,
-        )
-    } else {
-        null
-    }
     container.addView(requestsPerSecondInput)
     container.addView(dailyChapterLimitInput)
     container.addView(preferOnDemandLoading)
-    paragraphCommentsEnabled?.let(container::addView)
+    // 段评功能没做完，先不给开关。paragraphCommentsEnabled 传 null，保存时按关处理
+    // （saveOnlineSourceDownloadPolicy 里 ?: false），解析与注入代码保持原样等后续继续做。
     return OnlineSourcePolicyInputs(
         requestsPerSecond = requestsPerSecondInput,
         dailyChapterLimit = dailyChapterLimitInput,
         preferOnDemandLoading = preferOnDemandLoading,
-        paragraphCommentsEnabled = paragraphCommentsEnabled,
+        paragraphCommentsEnabled = null,
     )
 }
 

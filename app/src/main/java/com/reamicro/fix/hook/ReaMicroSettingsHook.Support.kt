@@ -174,6 +174,17 @@ internal fun ReaMicroSettingsHook.exportModuleLog() {
     }
 }
 
+internal fun ReaMicroSettingsHook.openProjectUrl() {
+    val activity = activityProvider() ?: return
+    runCatching {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(PROJECT_URL))
+        activity.startActivity(intent)
+    }.onFailure {
+        showToast("\u65e0\u6cd5\u6253\u5f00\u9879\u76ee\u5730\u5740")
+        XposedBridge.log("$LOG_PREFIX open project url failed: ${it.stackTraceToString()}")
+    }
+}
+
 internal fun ReaMicroSettingsHook.collectModuleLog(): String {
     val builder = StringBuilder()
     runCatching {

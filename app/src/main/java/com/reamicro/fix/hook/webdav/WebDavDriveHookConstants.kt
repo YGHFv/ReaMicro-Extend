@@ -331,6 +331,11 @@ internal const val HOME_SEARCH_DEBOUNCE_MS = 250L
 internal const val DOWNLOAD_CANCEL_CONFIRM_WINDOW_MS = 2_500L
 internal const val STARTUP_CACHE_CLEANUP_DELAY_MS = 1_500L
 internal const val STALE_IMPORT_CACHE_MIN_AGE_MS = 60 * 60_000L
+
+// 启动清理会碰到的模块自建临时目录名。都在宿主 cacheDir/filesDir 下、由本模块创建，
+// 删掉只会让下一次操作重新生成，不影响已入库的书、封面与阅读数据。
+internal const val COVER_STAGE_CACHE_DIR = "reamicro_cover_stage"
+internal const val PROFILE_BACKGROUND_FILES_DIR = "profile_background"
 internal const val REQUEST_LOCAL_LIBRARY_DIR = 8931
 internal val startupCacheCleanupStarted = AtomicBoolean(false)
 internal val NATIVE_CLOUD_DOWNLOAD_TYPES = setOf(BACKUP_TYPE_BAIDU, BACKUP_TYPE_YUN115, BACKUP_TYPE_ALIYUN)

@@ -20,7 +20,10 @@ import com.reamicro.fix.online.OnlineParagraphCommentRuntimePayload
 import com.reamicro.fix.online.OnlineParagraphCommentRuntimePayloadCodec
 import com.reamicro.fix.online.OnlineReaderContextBridge
 import com.reamicro.fix.online.OnlineSourceDownloadPolicyStore
+import com.reamicro.fix.reader.CrossParagraphRangeMapper
 import com.reamicro.fix.reader.DialogueHighlightRangeFinder
+import com.reamicro.fix.reader.HighlightDelimiterRangeFinder
+import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ReaderHighlightRule
 import com.reamicro.fix.online.download.OnlineOnDemandMetadataStore
 import com.reamicro.fix.settings.ReaderHighlightBookContext
@@ -484,6 +487,7 @@ class ReaderDialogueHighlightHook(
                     protectedRanges = protectedRanges,
                     singleQuoteRanges = singleQuoteRanges,
                     doubleQuoteRanges = doubleQuoteRanges,
+                    contentDom = contentDom,
                 )
                 if (ranges.isEmpty()) return@flatMap emptyList()
                 val highlightStyle = highlight.styleById(rule.styleIdForTheme(dark))
@@ -518,6 +522,7 @@ class ReaderDialogueHighlightHook(
             ReaderHighlightRuleType.DoubleQuoteDialogue -> 0
             ReaderHighlightRuleType.FixedText -> 1
             ReaderHighlightRuleType.Regex -> 1
+            ReaderHighlightRuleType.Range -> 1
             ReaderHighlightRuleType.SingleQuotePhrase -> 2
         }
 
@@ -527,6 +532,7 @@ class ReaderDialogueHighlightHook(
         protectedRanges: List<IntRange>,
         singleQuoteRanges: List<IntRange>,
         doubleQuoteRanges: List<IntRange>,
+        contentDom: Any?,
     ): List<IntRange> =
         when (rule.type) {
             ReaderHighlightRuleType.DoubleQuoteDialogue -> {
@@ -535,7 +541,48 @@ class ReaderDialogueHighlightHook(
             }
             ReaderHighlightRuleType.SingleQuotePhrase -> DialogueHighlightRangeFinder.findQuoteRanges(text, SINGLE_QUOTES)
             ReaderHighlightRuleType.FixedText -> findFixedTextRanges(text, rule.pattern)
-            ReaderHighlightRuleType.Regex -> findRegexRanges(text, rule.pattern)
+            ReaderHighlightRuleType.Regex -> withCrossParagraph(rule, text, contentDom) { target ->
+                findRegexRanges(
+                    text = target,
+                    pattern = rule.pattern,
+                    dotMatchesNewline = rule.allowCrossParagraph,
+                )
+            }
+            ReaderHighlightRuleType.Range -> withCrossParagraph(rule, text, contentDom) { target ->
+                HighlightDelimiterRangeFinder.findRanges(
+                    text = target,
+                    pattern = rule.pattern,
+                    maxParagraphs = crossParagraphLimit(rule),
+                )
+            }
+        }
+
+    /**
+     * 规则关了「允许跨段」就只在当前段 [text] 上匹配；开了则借用双引号对话那套上下文：
+     * 前后各取几段拼成一串跑 [find]，再把结果裁回当前段。
+     *
+     * 取不到段落上下文（拿不到 DOM 或结构不符预期）时退回单段匹配，宁可少高亮也不错位。
+     */
+    private fun withCrossParagraph(
+        rule: ReaderHighlightRule,
+        text: String,
+        contentDom: Any?,
+        find: (String) -> List<IntRange>,
+    ): List<IntRange> {
+        if (!rule.allowCrossParagraph || !rule.supportsCrossParagraph) return find(text)
+        val context = contentDom?.let { dialogueParagraphContext(it, text) } ?: return find(text)
+        return CrossParagraphRangeMapper.mapToCurrentSegment(
+            segments = context.segments,
+            currentSegmentIndex = context.currentIndex,
+            find = find,
+        )
+    }
+
+    private fun crossParagraphLimit(rule: ReaderHighlightRule): Int =
+        if (rule.allowCrossParagraph && rule.supportsCrossParagraph) {
+            ModuleSettings.READER_HIGHLIGHT_CROSS_PARAGRAPH_LIMIT
+        } else {
+            1
         }
 
     private fun findDoubleQuoteDialogueRanges(
@@ -654,10 +701,16 @@ class ReaderDialogueHighlightHook(
         return ranges
     }
 
-    private fun findRegexRanges(text: String, pattern: String): List<IntRange> {
+    /**
+     * [dotMatchesNewline] 只在「允许跨段」时打开：跨段是把段落用 '\n' 拼成一串来匹配的，
+     * 默认的 `.` 不吃换行会在段界处断掉，用户写的 `.*` 就跨不过去。不跨段时保持原样，
+     * 单段文本里本来也没有换行。
+     */
+    private fun findRegexRanges(text: String, pattern: String, dotMatchesNewline: Boolean = false): List<IntRange> {
         if (pattern.isBlank()) return emptyList()
         return runCatching {
-            Regex(pattern).findAll(text)
+            val options = if (dotMatchesNewline) setOf(RegexOption.DOT_MATCHES_ALL) else emptySet()
+            Regex(pattern, options).findAll(text)
                 .mapNotNull { match ->
                     val start = match.range.first
                     val end = match.range.last + 1
@@ -1884,7 +1937,8 @@ class ReaderDialogueHighlightHook(
         const val MAX_REMEMBERED_HIGHLIGHT_SPAN_STYLES = 64
         const val HIGHLIGHT_PERFORMANCE_LOG_INTERVAL_MS = 1500L
         const val REEDEN_BOX_EDGE_SCALE = 0.78f
-        const val MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS = 7
+        // 正则/区间的「允许跨段」用同一个值，改这里就一起改。
+        const val MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS = ModuleSettings.READER_HIGHLIGHT_CROSS_PARAGRAPH_LIMIT
         const val HIGHLIGHT_ANNOTATION_TAG = "reamicro.highlight.span"
         const val NINE_PATCH_ANNOTATION_TAG = "reamicro.highlight.ninepatch"
         const val COMMENT_ANNOTATION_TAG = "#comment"

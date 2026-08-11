@@ -89,6 +89,8 @@ import com.reamicro.fix.online.epub.existingOnlineChapterImageHrefs
 import com.reamicro.fix.online.epub.chapterXhtml
 import com.reamicro.fix.online.epub.onlineBookUuid
 import com.reamicro.fix.online.epub.onlineImportedBookBackupId
+import com.reamicro.fix.online.download.orphanProfileBackgroundFiles
+import com.reamicro.fix.online.download.paragraphCommentCacheDir
 import com.reamicro.fix.online.download.staleTopLevelImportCacheDirs
 import com.reamicro.fix.online.download.deleteCachePath
 import com.reamicro.fix.online.download.nativeCloudDownloadKey
@@ -125,14 +127,22 @@ internal fun WebDavDriveHook.cleanupStartupCacheIfNeeded(context: Context) {
     Handler(Looper.getMainLooper()).postDelayed({
         Thread({
             runCatching {
-                val cacheDir = context.applicationContext?.cacheDir ?: context.cacheDir
+                val appContext = context.applicationContext ?: context
+                val cacheDir = appContext.cacheDir
+                val filesDir = appContext.filesDir
                 val targets = listOf(
                     File(cacheDir, "downloads"),
                     File(cacheDir, "reamicro-webdav"),
                     File(cacheDir, "reamicro-local-library"),
                     File(cacheDir, "reamicro-webdav-backup"),
                     File(cacheDir, ONLINE_COMPLETION_CACHE_ROOT),
-                ) + staleTopLevelImportCacheDirs(cacheDir)
+                    // 选封面时复制到暂存目录的图片。封面一旦写回 EPUB 就用不上了，
+                    // 保存流程正常结束会自己删；这里兜住中途退出留下的那些。
+                    File(cacheDir, COVER_STAGE_CACHE_DIR),
+                    // 段评功能已暂停，历史抓取的 JSON 缓存直接清掉。
+                    paragraphCommentCacheDir(filesDir),
+                ) + staleTopLevelImportCacheDirs(cacheDir) +
+                    orphanProfileBackgroundFiles(filesDir, settingsProvider().profileBackgroundImage)
                 var deletedFiles = 0
                 var deletedBytes = 0L
                 targets.forEach { target ->

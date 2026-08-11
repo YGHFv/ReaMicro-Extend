@@ -26,7 +26,7 @@ class HookInstallReportTest {
 
         assertTrue(ran)
         assertTrue(ok)
-        assertEquals("hook installed 1/1, all ok", HookInstallReport.summaryLine())
+        assertEquals("hook installed 1/1", HookInstallReport.summaryLine())
         assertTrue(HookInstallReport.failures().isEmpty())
     }
 
@@ -62,7 +62,7 @@ class HookInstallReportTest {
         HookInstallReport.record("Demo", "alpha", ok = true)
 
         assertEquals(1, HookInstallReport.snapshot().size)
-        assertEquals("hook installed 1/1, all ok", HookInstallReport.summaryLine())
+        assertEquals("hook installed 1/1", HookInstallReport.summaryLine())
     }
 
     @Test

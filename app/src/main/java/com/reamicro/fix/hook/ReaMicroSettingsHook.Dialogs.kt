@@ -18,6 +18,7 @@ import android.view.WindowManager
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import com.reamicro.fix.ai.AiApiStore
@@ -447,6 +448,37 @@ internal fun ReaMicroSettingsHook.settingsDialogHint(
     colors: SettingsDialogColors,
 ): TextView =
     settingsDialogStatus(context, message, colors)
+
+/** 弹窗内的开关行，外观与在线源配置弹窗里的策略开关一致。 */
+internal fun ReaMicroSettingsHook.settingsDialogSwitchRow(
+    context: Context,
+    title: String,
+    checked: Boolean,
+    colors: SettingsDialogColors,
+): Switch =
+    Switch(context).apply {
+        text = title
+        textSize = 14f
+        setTextColor(colors.title)
+        isChecked = checked
+        showText = false
+        gravity = Gravity.CENTER_VERTICAL
+        minHeight = settingsDp(context, 48)
+        setPadding(
+            settingsDp(context, 12),
+            settingsDp(context, 6),
+            settingsDp(context, 8),
+            settingsDp(context, 6),
+        )
+        background = settingsRoundedRect(colors.field, settingsDp(context, 8), colors.border)
+        // 配色复用书源配置弹窗的策略开关，两处观感保持一致。
+        thumbTintList = onlineSourcePolicySwitchThumbColors(colors)
+        trackTintList = onlineSourcePolicySwitchTrackColors(colors)
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { bottomMargin = settingsDp(context, 8) }
+    }
 
 internal fun ReaMicroSettingsHook.settingsDialogProgressParams(context: Context): LinearLayout.LayoutParams =
     LinearLayout.LayoutParams(

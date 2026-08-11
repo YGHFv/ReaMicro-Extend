@@ -1281,6 +1281,8 @@ class XposedModuleSettings(
                             pattern = item.optString("pattern"),
                             bookKey = item.optString("bookKey"),
                             bookTitle = item.optString("bookTitle"),
+                            // 老数据没有这个字段，缺省不跨段，与本次改动前的行为一致。
+                            allowCrossParagraph = item.optBoolean("allowCrossParagraph", false),
                         ),
                     )
                 }
@@ -1350,7 +1352,8 @@ class XposedModuleSettings(
                         .put("enabled", rule.enabled)
                         .put("pattern", rule.pattern)
                         .put("bookKey", rule.bookKey)
-                        .put("bookTitle", rule.bookTitle),
+                        .put("bookTitle", rule.bookTitle)
+                        .put("allowCrossParagraph", rule.allowCrossParagraph),
                 )
             }
         }.toString()

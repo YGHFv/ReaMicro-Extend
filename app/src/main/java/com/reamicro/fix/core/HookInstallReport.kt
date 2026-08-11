@@ -69,11 +69,9 @@ object HookInstallReport {
         val all = snapshot()
         val ok = all.count { it.ok }
         val failed = all.filterNot { it.ok }
-        return if (failed.isEmpty()) {
-            "hook installed $ok/${all.size}, all ok"
-        } else {
-            "hook installed $ok/${all.size}, failed: ${failed.joinToString(", ") { it.id }}"
-        }
+        return "hook installed $ok/${all.size}" + if (failed.isNotEmpty()) {
+            ", failed: ${failed.joinToString(", ") { it.id }}"
+        } else ""
     }
 
     /** 每个失败条目一行的明细，用于需要看原因时输出。 */

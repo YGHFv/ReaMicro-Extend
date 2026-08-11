@@ -149,6 +149,38 @@ internal fun staleTopLevelImportCacheDirs(cacheDir: File): List<File> {
         .orEmpty()
 }
 
+/**
+ * 头图目录里当前设置没有引用的残留文件。
+ *
+ * 「本地背景图片」每次导入都会写一份新文件到 filesDir/profile_background 并把绝对路径存进
+ * KEY_PROFILE_BACKGROUND_IMAGE。用户在设置里重置头图（把该 key 清空）后，磁盘上的文件不会
+ * 跟着删除，于是一份份堆在那儿。这里只挑「不是当前设置所指向的那一份」，正在用的头图不会被动。
+ *
+ * [activeImagePath] 传 snapshot.profileBackgroundImage：为空表示当前没有启用本地头图，
+ * 整个目录都是残留。
+ */
+internal fun orphanProfileBackgroundFiles(filesDir: File, activeImagePath: String): List<File> {
+    val dir = File(filesDir, PROFILE_BACKGROUND_FILES_DIR)
+    if (!dir.isDirectory) return emptyList()
+    val active = activeImagePath.trim()
+        .takeIf { it.isNotBlank() }
+        ?.let { path -> runCatching { File(path).canonicalPath }.getOrElse { path } }
+    return dir.listFiles()
+        ?.filter { it.isFile }
+        ?.filterNot { file ->
+            active != null && runCatching { file.canonicalPath }.getOrElse { file.path } == active
+        }
+        .orEmpty()
+}
+
+/**
+ * 段评缓存目录。段评功能已暂停，这些 JSON 只是历史抓取结果，删掉不影响正文与阅读进度。
+ *
+ * 注意写入方用的是 filesDir 而不是 cacheDir（见 OnlineParagraphCommentCacheStore 的调用点）。
+ */
+internal fun paragraphCommentCacheDir(filesDir: File): File =
+    File(filesDir, OnlineParagraphCommentCacheStore.DIRECTORY_NAME)
+
 internal fun cancelExistingBackupTasks(tracker: Any, bookId: Long) {
     runCatching {
         val worksFlow = tracker.javaClass.methods.first {
