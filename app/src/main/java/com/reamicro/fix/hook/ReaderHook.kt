@@ -92,6 +92,10 @@ class ReaderHook(
     // 再打开阅读页底部的高亮规则 sheet，避免 sheet 被高亮页盖住。
     @Volatile internal var readerHighlightScreenBackRef: WeakReference<Any>? = null
     internal val composeMethodCache = HashMap<String, Method>()
+    /** dp→px 换算结果缓存，见 cachedUdp。进程内 density 不变，值不会过期。 */
+    internal val udpValueCache = HashMap<Int, Float>()
+    /** callNoArg 的无参方法缓存，key 为「类名#方法名」，null 值表示该类没有这个方法。 */
+    internal val noArgMethodCache = HashMap<String, Method?>()
     internal val renderingHighlightScreenEntry = ThreadLocal.withInitial { false }
     internal val highlightScreenEntryInjected = ThreadLocal.withInitial { false }
 

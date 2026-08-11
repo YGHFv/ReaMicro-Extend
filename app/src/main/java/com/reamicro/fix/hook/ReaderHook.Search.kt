@@ -1430,6 +1430,13 @@ internal fun ReaderHook.clearSearchResultHighlight(viewModel: Any? = currentView
 
 internal fun ReaderHook.appendActiveSearchHighlightMark(original: List<*>, label: String? = null): List<Any>? {
     val activeMarks = activeTransientHighlightMarks()
+    // 常态阅读（没在搜索、没在朗读、没有划词注入）时既没有要加的标记，原有列表里也不会有
+    // 我们注入过的标记，直接返回 null 表示「不用改」。这个函数挂在 resolveMarksForPage /
+    // resolveMarksForElement 上，按页、按元素调用，原先无条件走完 4 次链式 filterNot
+    // 外加一次 filterNotNull，每次分配五个临时 List。
+    if (activeMarks.isEmpty() && original.none { it != null && isInjectedTransientHighlightMark(it) }) {
+        return null
+    }
     val cleanMarks = original
         .filterNotNull()
         .filterNot(::isSearchResultHighlightMark)
@@ -1790,6 +1797,26 @@ internal fun ReaderHook.updateSearchMarks(viewModel: Any?, label: String, transf
 internal fun ReaderHook.isSearchResultHighlightMark(mark: Any): Boolean {
     val id = searchResultHighlightMarkId(mark) ?: return false
     return SearchHighlightPlanner.isHighlightId(id, SEARCH_HIGHLIGHT_MARK_ID_BASE, SEARCH_HIGHLIGHT_MARK_ID_RANGE)
+}
+
+/**
+ * 这条标记是不是模块注入的临时标记（搜索结果 / 朗读 / 划词）。
+ *
+ * 三种判断都是「取 id 再比一段区间」，分开调用要取 id 三次。这里只取一次，
+ * 供 appendActiveSearchHighlightMark 的快速路径用——它按页、按元素被调用。
+ */
+internal fun ReaderHook.isInjectedTransientHighlightMark(mark: Any): Boolean {
+    val id = (callNoArg(mark, "getId") as? Number)?.toLong() ?: return false
+    if (SearchHighlightPlanner.isHighlightId(id, SEARCH_HIGHLIGHT_MARK_ID_BASE, SEARCH_HIGHLIGHT_MARK_ID_RANGE)) {
+        return true
+    }
+    if (id >= READ_ALOUD_HIGHLIGHT_MARK_ID_BASE &&
+        id < READ_ALOUD_HIGHLIGHT_MARK_ID_BASE + READ_ALOUD_HIGHLIGHT_MARK_ID_RANGE
+    ) {
+        return true
+    }
+    return id >= SELECTION_HIGHLIGHT_MARK_ID_BASE &&
+        id < SELECTION_HIGHLIGHT_MARK_ID_BASE + SELECTION_HIGHLIGHT_MARK_ID_RANGE
 }
 
 internal fun ReaderHook.searchResultHighlightMarkId(mark: Any): Long? {

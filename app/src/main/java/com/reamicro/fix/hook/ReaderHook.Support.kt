@@ -273,9 +273,34 @@ internal fun ReaderHook.modifierInstance(): Any =
     staticObject(MODIFIER_CLASS, "INSTANCE")
 
 internal fun ReaderHook.udp(value: Int): Float =
-    classLoader.loadClass(UNIT_EXT_KT_CLASS).declaredMethods.first {
-        it.name == UDP_METHOD && it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
-    }.apply { isAccessible = true }.invoke(null, value) as Float
+    udpMethod().invoke(null, value) as Float
+
+/** dp→px 换算方法。每次 loadClass + declaredMethods 全扫太贵，解析一次存下来。 */
+private fun ReaderHook.udpMethod(): Method =
+    synchronized(composeMethodCache) {
+        composeMethodCache.getOrPut("$UNIT_EXT_KT_CLASS#$UDP_METHOD/int") {
+            classLoader.loadClass(UNIT_EXT_KT_CLASS).declaredMethods.first {
+                it.name == UDP_METHOD && it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
+            }.apply { isAccessible = true }
+        }
+    }
+
+/**
+ * 换算结果按 dp 值缓存，失败返回 null。
+ *
+ * 供每帧级别的热路径使用（例如挂在 Modifier.height() 上的 hook）：那里连一次反射调用
+ * 都不该有。换算结果只取决于 dp 值，进程内不变。
+ */
+internal fun ReaderHook.cachedUdp(value: Int): Float? {
+    synchronized(udpValueCache) {
+        udpValueCache[value]?.let { return it }
+    }
+    val resolved = runCatching { udp(value) }.getOrNull() ?: return null
+    synchronized(udpValueCache) {
+        udpValueCache[value] = resolved
+    }
+    return resolved
+}
 
 internal fun ReaderHook.functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any =
     composeInterop.functionProxy(name, functionClassName, block)
@@ -1152,12 +1177,34 @@ internal fun ReaderHook.targetUnit(): Any? = runCatching {
         .get(null)
 }.getOrNull()
 
-internal fun ReaderHook.callNoArg(target: Any?, name: String): Any? =
-    runCatching {
-        target?.javaClass?.methods?.firstOrNull {
+/**
+ * 无参方法调用。方法查找按「类名#方法名」缓存，包括查不到的负结果。
+ *
+ * ReaderHook 簇有一百多个调用点，其中不少在排版/绘制路径上。原先每次调用都要
+ * javaClass.methods 全量扫一遍（ART 每次返回新的 Method[] 副本），是热路径上的
+ * 固定税，也是 GC 的持续来源。
+ */
+internal fun ReaderHook.callNoArg(target: Any?, name: String): Any? {
+    target ?: return null
+    val method = noArgMethod(target, name) ?: return null
+    return runCatching { method.invoke(target) }.getOrNull()
+}
+
+private fun ReaderHook.noArgMethod(target: Any, name: String): Method? {
+    val cacheKey = "${target.javaClass.name}#$name"
+    synchronized(noArgMethodCache) {
+        if (noArgMethodCache.containsKey(cacheKey)) return noArgMethodCache[cacheKey]
+    }
+    val found = runCatching {
+        target.javaClass.methods.firstOrNull {
             it.parameterTypes.isEmpty() && it.name == name
-        }?.invoke(target)
+        }?.apply { isAccessible = true }
     }.getOrNull()
+    synchronized(noArgMethodCache) {
+        noArgMethodCache[cacheKey] = found
+    }
+    return found
+}
 
 internal fun ReaderHook.callString(target: Any?, name: String): String =
     callNoArg(target, name)?.toString().orEmpty()

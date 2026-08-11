@@ -54,6 +54,11 @@ class ReaderDialogueHighlightHook(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, NineSlice?>?): Boolean =
             size > MAX_CACHED_NINE_SLICES
     }
+    /** 编译好的正则，key 为「跨段标记 + pattern」。null 表示该 pattern 编译失败，别再试。 */
+    private val compiledRegexCache = object : LinkedHashMap<String, Regex?>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Regex?>?): Boolean =
+            size > MAX_CACHED_COMPILED_REGEX
+    }
     private val injectedHighlightSpanStyles = object : LinkedHashMap<Any, Unit>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Any, Unit>?): Boolean =
             size > MAX_REMEMBERED_HIGHLIGHT_SPAN_STYLES
@@ -468,9 +473,14 @@ class ReaderDialogueHighlightHook(
         if (enabledRules.isEmpty()) return null
         val dark = isNightMode()
         val protectedRanges = contentDom?.let { protectedStyledElementRanges(it, text) }.orEmpty()
-        val singleQuoteRanges = enabledRules
-            .filter { it.type == ReaderHighlightRuleType.SingleQuotePhrase }
-            .flatMap { DialogueHighlightRangeFinder.findQuoteRanges(text, SINGLE_QUOTES) }
+        // 单引号范围与规则条数无关，只跟文本有关：原先 flatMap 的 lambda 没有用到 it，
+        // 等于同一次全文扫描按 SingleQuotePhrase 规则条数重复了几遍。这里只扫一次，
+        // 写法与下面双引号那段对齐。
+        val singleQuoteRanges = if (enabledRules.any { it.type == ReaderHighlightRuleType.SingleQuotePhrase }) {
+            DialogueHighlightRangeFinder.findQuoteRanges(text, SINGLE_QUOTES)
+        } else {
+            emptyList()
+        }
         val doubleQuoteRanges = if (enabledRules.any { it.type == ReaderHighlightRuleType.DoubleQuoteDialogue }) {
             findDoubleQuoteDialogueRanges(text, contentDom)
         } else {
@@ -539,7 +549,8 @@ class ReaderDialogueHighlightHook(
                 val excluded = protectedRanges + singleQuoteRanges
                 doubleQuoteRanges.flatMap { range -> subtractRanges(range, excluded) }
             }
-            ReaderHighlightRuleType.SingleQuotePhrase -> DialogueHighlightRangeFinder.findQuoteRanges(text, SINGLE_QUOTES)
+            // 复用调用方已经算好的结果，别再扫一遍全文。
+            ReaderHighlightRuleType.SingleQuotePhrase -> singleQuoteRanges
             ReaderHighlightRuleType.FixedText -> findFixedTextRanges(text, rule.pattern)
             ReaderHighlightRuleType.Regex -> withCrossParagraph(rule, text, contentDom) { target ->
                 findRegexRanges(
@@ -656,10 +667,9 @@ class ReaderDialogueHighlightHook(
 
     private fun shouldProtectStyledElement(node: Any, tag: String): Boolean {
         if (tag.isBlank() || tag == MARKUP_TEXT) return false
+        // 整棵 DOM 递归时每个节点都会走这里，用按类缓存避免逐节点复制 Method[]。
         val isNonStyleSpan = runCatching {
-            node.javaClass.methods.firstOrNull {
-                it.name == "isNonStyleSpan" && it.parameterTypes.isEmpty()
-            }?.invoke(node) as? Boolean
+            instanceMethod(node, "isNonStyleSpan", 0)?.invoke(node) as? Boolean
         }.getOrNull() == true
         if (isNonStyleSpan) return false
         if (tag in UNPROTECTED_INLINE_TAGS) return false
@@ -708,9 +718,9 @@ class ReaderDialogueHighlightHook(
      */
     private fun findRegexRanges(text: String, pattern: String, dotMatchesNewline: Boolean = false): List<IntRange> {
         if (pattern.isBlank()) return emptyList()
+        val regex = compiledRegex(pattern, dotMatchesNewline) ?: return emptyList()
         return runCatching {
-            val options = if (dotMatchesNewline) setOf(RegexOption.DOT_MATCHES_ALL) else emptySet()
-            Regex(pattern, options).findAll(text)
+            regex.findAll(text)
                 .mapNotNull { match ->
                     val start = match.range.first
                     val end = match.range.last + 1
@@ -718,6 +728,26 @@ class ReaderDialogueHighlightHook(
                 }
                 .toList()
         }.getOrDefault(emptyList())
+    }
+
+    /**
+     * 编译好的正则按 (pattern, 是否跨段) 缓存。
+     *
+     * 原先每条正则规则、每段正文都要 Pattern.compile 一次：一次翻页 20 段 × 若干规则
+     * 就是上百次编译，编译产物随即变垃圾。缓存上界是用户配置的规则数，很小。
+     * 编译失败（用户写了非法正则）也记下来，避免每段重复尝试并重复抛异常。
+     */
+    private fun compiledRegex(pattern: String, dotMatchesNewline: Boolean): Regex? {
+        val key = if (dotMatchesNewline) "s $pattern" else "n $pattern"
+        synchronized(compiledRegexCache) {
+            if (compiledRegexCache.containsKey(key)) return compiledRegexCache[key]
+        }
+        val options = if (dotMatchesNewline) setOf(RegexOption.DOT_MATCHES_ALL) else emptySet()
+        val compiled = runCatching { Regex(pattern, options) }.getOrNull()
+        synchronized(compiledRegexCache) {
+            compiledRegexCache[key] = compiled
+        }
+        return compiled
     }
 
     private fun createHighlightSpanStyle(style: ReaderHighlightStyle, dark: Boolean): Any? {
@@ -1080,8 +1110,9 @@ class ReaderDialogueHighlightHook(
         if (ranges.isEmpty()) return
         val key = annotatedStringTextKey(annotatedString)
         if (key.isBlank()) return
+        val normalized = normalizedTextWithSourceMap(key)
         synchronized(rememberedNinePatchRanges) {
-            rememberedNinePatchRanges[key] = RememberedNinePatchText(key, ranges)
+            rememberedNinePatchRanges[key] = RememberedNinePatchText(key, ranges, normalized)
         }
     }
 
@@ -1093,13 +1124,14 @@ class ReaderDialogueHighlightHook(
             rememberedNinePatchRanges[key]?.ranges?.let { return it }
         }
         synchronized(derivedNinePatchRanges) {
-            derivedNinePatchRanges[key]?.let { return it }
+            if (derivedNinePatchRanges.containsKey(key)) return derivedNinePatchRanges[key].orEmpty()
         }
         val derived = deriveRememberedNinePatchRanges(key)
-        if (derived.isNotEmpty()) {
-            synchronized(derivedNinePatchRanges) {
-                derivedNinePatchRanges[key] = derived
-            }
+        // 空结果也要缓存：正文里绝大多数段落映射不到任何九宫格范围，原先只存非空结果，
+        // 于是这些段落每次重组都要把整张记忆表重新扫一遍，成本随读过的页数线性上涨——
+        // 这正是「读久了越来越卡」的主因。derivedNinePatchRanges 本身是 LRU 128，有界。
+        synchronized(derivedNinePatchRanges) {
+            derivedNinePatchRanges[key] = derived
         }
         return derived
     }
@@ -1137,9 +1169,10 @@ class ReaderDialogueHighlightHook(
             ?: callNoArg(annotatedString, "getLength") as? Int
             ?: callNoArg(annotatedString, "getText")?.toString()?.length
             ?: 0
-        return annotatedString.javaClass.methods.firstOrNull {
-            it.name == "getStringAnnotations" && it.parameterTypes.size == 3
-        }?.invoke(annotatedString, tag, 0, length) as? List<*> ?: emptyList<Any>()
+        // 走 HostReflect 的按类缓存：这里每次 composition 都会被调用数次，
+        // 而 javaClass.methods 每次都复制一份完整 Method[]（AnnotatedString 方法数不少）。
+        return instanceMethod(annotatedString, "getStringAnnotations", 3)
+            ?.invoke(annotatedString, tag, 0, length) as? List<*> ?: emptyList<Any>()
     }
 
     private fun refreshedStaleNinePatchAnnotatedString(annotatedString: Any): Any? {
@@ -1205,11 +1238,13 @@ class ReaderDialogueHighlightHook(
 
     private fun deriveRememberedNinePatchRanges(currentText: String): List<NinePatchRange> {
         if (currentText.isBlank()) return emptyList()
-        val current = normalizedTextWithSourceMap(currentText)
-        if (current.text.isBlank()) return emptyList()
+        // 先看有没有可映射的记忆条目，再归一化当前文本：记忆表为空时归一化是纯浪费。
         val remembered = synchronized(rememberedNinePatchRanges) {
+            if (rememberedNinePatchRanges.isEmpty()) return emptyList()
             rememberedNinePatchRanges.values.toList().asReversed()
         }
+        val current = normalizedTextWithSourceMap(currentText)
+        if (current.text.isBlank()) return emptyList()
         remembered.forEach { source ->
             val mapped = mapRememberedRangesToCurrentPage(source, current)
             if (mapped.isNotEmpty()) return mapped
@@ -1221,38 +1256,47 @@ class ReaderDialogueHighlightHook(
         source: RememberedNinePatchText,
         current: NormalizedText,
     ): List<NinePatchRange> {
-        val original = normalizedTextWithSourceMap(source.text)
+        val original = source.normalized
         if (original.text.isBlank()) return emptyList()
         val currentStartInOriginal = original.text.indexOf(current.text)
         if (currentStartInOriginal < 0) return emptyList()
         val currentEndInOriginal = currentStartInOriginal + current.text.length
         val mapped = source.ranges.mapNotNull { range ->
-            val normalizedStart = original.sourceIndices.indexOfFirst { it >= range.start }
-            val normalizedEnd = original.sourceIndices.indexOfLast { it < range.end } + 1
-            if (normalizedStart < 0 || normalizedEnd <= normalizedStart) return@mapNotNull null
+            val normalizedStart = original.firstAtOrAfter(range.start)
+            val lastBefore = original.lastBefore(range.end)
+            if (normalizedStart < 0 || lastBefore < 0) return@mapNotNull null
+            val normalizedEnd = lastBefore + 1
+            if (normalizedEnd <= normalizedStart) return@mapNotNull null
             val overlapStart = maxOf(normalizedStart, currentStartInOriginal)
             val overlapEnd = minOf(normalizedEnd, currentEndInOriginal)
             if (overlapEnd <= overlapStart) return@mapNotNull null
             val localStart = overlapStart - currentStartInOriginal
             val localEnd = overlapEnd - currentStartInOriginal
             range.copy(
-                start = current.sourceIndices.getOrNull(localStart) ?: return@mapNotNull null,
-                end = (current.sourceIndices.getOrNull(localEnd - 1) ?: return@mapNotNull null) + 1,
+                start = current.sourceAt(localStart) ?: return@mapNotNull null,
+                end = (current.sourceAt(localEnd - 1) ?: return@mapNotNull null) + 1,
             )
         }
         return mapped
     }
 
+    /**
+     * \u4E0B\u6807\u8868\u7528 IntArray \u800C\u975E ArrayList<Int>\uFF1A\u540E\u8005\u6BCF\u4E2A\u4E0B\u6807\u90FD\u8981\u88C5\u7BB1\u6210 Integer\uFF0C
+     * \u800C Integer \u53EA\u7F13\u5B58 -128..127\uFF0C\u6B63\u6587\u957F\u5EA6\u4E0B\u51E0\u4E4E\u6BCF\u4E2A\u4E0B\u6807\u90FD\u662F\u4E00\u4E2A\u65B0\u5BF9\u8C61\u3002
+     * \u4E00\u5C4F\u6B63\u6587\u5C31\u662F\u5341\u4E07\u7EA7\u4E34\u65F6\u5BF9\u8C61\uFF0C\u662F GC \u538B\u529B\u7684\u4E3B\u8981\u6765\u6E90\u4E4B\u4E00\u3002
+     */
     private fun normalizedTextWithSourceMap(value: String): NormalizedText {
         val builder = StringBuilder(value.length)
-        val indices = ArrayList<Int>(value.length)
+        val indices = IntArray(value.length)
+        var count = 0
         value.forEachIndexed { index, char ->
             if (!char.isWhitespace() && char != '\u200B' && char != '\u200C' && char != '\u200D' && char != '\uFEFF') {
                 builder.append(char)
-                indices.add(index)
+                indices[count] = index
+                count++
             }
         }
-        return NormalizedText(builder.toString(), indices)
+        return NormalizedText(builder.toString(), indices, count)
     }
 
     private fun ninePatchRanges(annotatedString: Any): List<NinePatchRange> {
@@ -1260,9 +1304,8 @@ class ReaderDialogueHighlightHook(
             ?: callNoArg(annotatedString, "getLength") as? Int
             ?: callNoArg(annotatedString, "getText")?.toString()?.length
             ?: 0
-        val annotations = annotatedString.javaClass.methods.firstOrNull {
-            it.name == "getStringAnnotations" && it.parameterTypes.size == 3
-        }?.invoke(annotatedString, NINE_PATCH_ANNOTATION_TAG, 0, length) as? List<*>
+        val annotations = instanceMethod(annotatedString, "getStringAnnotations", 3)
+            ?.invoke(annotatedString, NINE_PATCH_ANNOTATION_TAG, 0, length) as? List<*>
             ?: return emptyList()
         return annotations.mapNotNull { range ->
             range ?: return@mapNotNull null
@@ -1280,9 +1323,7 @@ class ReaderDialogueHighlightHook(
     private fun drawBehindModifier(baseModifier: Any?, state: NinePatchDrawState): Any? =
         runCatching {
             val modifier = baseModifier ?: modifierInstance()
-            cls(DRAW_MODIFIER_KT_CLASS).methods.firstOrNull {
-                it.name == "drawBehind" && it.parameterTypes.size == 2
-            }?.invoke(null, modifier, function1Proxy("NinePatchDraw") {
+            method(DRAW_MODIFIER_KT_CLASS, "drawBehind", 2).invoke(null, modifier, function1Proxy("NinePatchDraw") {
                 drawNinePatchBackgrounds(it?.getOrNull(0), state)
                 targetUnit()
             })
@@ -1304,11 +1345,12 @@ class ReaderDialogueHighlightHook(
             val rects = rectsByRange.getOrNull(index).orEmpty()
             rects.forEach { rect ->
                 val saveCount = if (box.radiusPx > 0f) {
-                    val path = Path().apply {
-                        addRoundRect(RectF(rect), box.radiusPx, box.radiusPx, Path.Direction.CW)
-                    }
+                    // 复用 state 上的 Path/RectF，rewind 保留已分配的内部缓冲。
+                    state.clipRectF.set(rect)
+                    state.clipPath.rewind()
+                    state.clipPath.addRoundRect(state.clipRectF, box.radiusPx, box.radiusPx, Path.Direction.CW)
                     val count = canvas.save()
-                    canvas.clipPath(path)
+                    canvas.clipPath(state.clipPath)
                     count
                 } else {
                     -1
@@ -1354,9 +1396,8 @@ class ReaderDialogueHighlightHook(
     }
 
     private fun lineRects(layout: Any, start: Int, end: Int, box: ReedenBoxStyle): List<Rect> {
-        val lineForOffset = layout.javaClass.methods.firstOrNull {
-            it.name == "getLineForOffset" && it.parameterTypes.size == 1
-        } ?: return emptyList()
+        // 每帧每个高亮范围都会走这里，改用按类缓存的 instanceMethod。
+        val lineForOffset = instanceMethod(layout, "getLineForOffset", 1) ?: return emptyList()
         val startLine = runCatching { lineForOffset.invoke(layout, start) as? Int }.getOrNull()
             ?: return emptyList()
         val endLine = runCatching { lineForOffset.invoke(layout, (end - 1).coerceAtLeast(start)) as? Int }.getOrNull()
@@ -1409,19 +1450,41 @@ class ReaderDialogueHighlightHook(
     private fun nativeCanvas(drawScope: Any?): android.graphics.Canvas? {
         val drawContext = callNoArg(drawScope, "getDrawContext") ?: return null
         val composeCanvas = callNoArg(drawContext, "getCanvas") ?: return null
-        val canvasKt = cls(ANDROID_CANVAS_KT_CLASS)
-        return canvasKt.methods.firstOrNull {
-            it.name == "getNativeCanvas" && it.parameterTypes.size == 1
-        }?.invoke(null, composeCanvas) as? android.graphics.Canvas
+        // 每帧都会走这里，方法查找必须缓存（method() 走 HostReflect 的按名缓存）。
+        return runCatching { method(ANDROID_CANVAS_KT_CLASS, "getNativeCanvas", 1) }
+            .getOrNull()
+            ?.invoke(null, composeCanvas) as? android.graphics.Canvas
     }
 
+    /**
+     * 九宫格图缓存。这个函数在绘制路径上按「每帧 × 每个高亮范围」被调用，
+     * 所以 mtime 校验（File.isFile + lastModified 两次 syscall）要节流：
+     * 命中缓存且刚查过就直接返回，只有超过 [NINE_PATCH_STAT_INTERVAL_MS] 才重新 stat。
+     * 用户换图后最迟一个间隔内生效，切主题/改样式仍会走 clearHighlightRuntimeCaches 立即失效。
+     */
     private fun imageForNinePatch(path: String): CachedImage? {
         val assetName = path.removePrefix("asset://").takeIf { it != path }
         val file = assetName?.let { null } ?: File(path)
         val cacheKey = assetName?.let { "asset://$it" } ?: file!!.absolutePath
+        // 模块内置图（asset://）打包在模块里，运行期不可能变，命中即返回，不需要任何校验。
+        // 内置的「彩色玻璃·紫」就走这条路径。
+        if (assetName != null) {
+            synchronized(ninePatchDrawableCache) {
+                ninePatchDrawableCache[cacheKey]?.let { return it }
+            }
+        }
+        val now = System.currentTimeMillis()
+        synchronized(ninePatchDrawableCache) {
+            ninePatchDrawableCache[cacheKey]?.let { cached ->
+                if (now - cached.checkedAtMs < NINE_PATCH_STAT_INTERVAL_MS) return cached
+            }
+        }
         val modified = assetName?.hashCode()?.toLong() ?: file!!.takeIf { it.isFile }?.lastModified() ?: -1L
         synchronized(ninePatchDrawableCache) {
-            ninePatchDrawableCache[cacheKey]?.takeIf { it.modified == modified }?.let { return it }
+            ninePatchDrawableCache[cacheKey]?.takeIf { it.modified == modified }?.let { cached ->
+                cached.checkedAtMs = now
+                return cached
+            }
         }
         val bitmap = ReaderHighlightImageAssets.decodeBitmap(path, activityProvider(), LOG_PREFIX) ?: return null
         val drawable = if (bitmap.ninePatchChunk != null) {
@@ -1429,7 +1492,7 @@ class ReaderDialogueHighlightHook(
         } else {
             BitmapDrawable(activityProvider()?.resources, bitmap)
         }
-        val cached = CachedImage(modified, bitmap, drawable)
+        val cached = CachedImage(modified, bitmap, drawable, now)
         synchronized(ninePatchDrawableCache) {
             ninePatchDrawableCache[cacheKey] = cached
         }
@@ -1693,9 +1756,8 @@ class ReaderDialogueHighlightHook(
 
     private fun invokeFunction1(function: Any?, value: Any?) {
         if (function == null) return
-        function.javaClass.methods.firstOrNull {
-            it.name == "invoke" && it.parameterTypes.size == 1
-        }?.invoke(function, value)
+        // 每次 onTextLayout 回调都会走这里。
+        instanceMethod(function, "invoke", 1)?.invoke(function, value)
     }
 
     private fun callInt(target: Any, name: String, value: Int): Int? =
@@ -1841,10 +1903,17 @@ class ReaderDialogueHighlightHook(
         logHighlightInfo("dialogue highlight protected ranges skipped mapped=$mappedLength rendered=$renderedLength")
     }
 
+    /**
+     * 时间节流放在读设置之前。
+     *
+     * 这个函数在绘制路径上每帧都会被调用，而 settings.snapshot() 的缓存窗口只有 200ms，
+     * 过期后要重新把整份 SharedPreferences 读一遍。原先先问开关再判间隔，等于把 1500ms
+     * 的节流完全绕过：即使日志关着，也在每秒若干次重读设置。
+     */
     private inline fun logHighlightPerformance(message: () -> String) {
-        if (!settings.snapshot().canLogReaderHighlightPerformance) return
         val now = System.currentTimeMillis()
         if (now - lastHighlightPerformanceLogAtMs < HIGHLIGHT_PERFORMANCE_LOG_INTERVAL_MS) return
+        if (!settings.snapshot().canLogReaderHighlightPerformance) return
         lastHighlightPerformanceLogAtMs = now
         XposedBridge.log("$LOG_PREFIX highlight-perf ${message()}")
     }
@@ -1935,6 +2004,10 @@ class ReaderDialogueHighlightHook(
         const val MAX_CACHED_REEDEN_STYLES = 64
         const val MAX_CACHED_NINE_SLICES = 64
         const val MAX_REMEMBERED_HIGHLIGHT_SPAN_STYLES = 64
+        const val MAX_CACHED_COMPILED_REGEX = 64
+
+        /** 绘制路径上重新 stat 九宫格图文件的最小间隔。 */
+        const val NINE_PATCH_STAT_INTERVAL_MS = 5_000L
         const val HIGHLIGHT_PERFORMANCE_LOG_INTERVAL_MS = 1500L
         const val REEDEN_BOX_EDGE_SCALE = 0.78f
         // 正则/区间的「允许跨段」用同一个值，改这里就一起改。
@@ -1987,21 +2060,40 @@ class ReaderDialogueHighlightHook(
         val css: String,
     )
 
-    private data class NinePatchDrawState(
+    /**
+     * 一个文本节点的九宫格绘制状态。
+     *
+     * 纯可变容器，不参与比较，所以是普通 class 而非 data class——把可变的 Path/RectF
+     * 放进 data class 的 equals/hashCode 里没有意义且容易埋坑。
+     */
+    private class NinePatchDrawState(
         val ranges: List<NinePatchRange>,
         val token: String,
-        @Volatile var textLayoutResult: Any? = null,
-        @Volatile var cachedLayoutResult: Any? = null,
-        @Volatile var cachedDensityBits: Int = 0,
-        @Volatile var cachedLineRects: List<List<Rect>>? = null,
-        var rectCacheHits: Int = 0,
-        var rectCacheBuilds: Int = 0,
-        var rectLineCalculations: Int = 0,
-    )
+    ) {
+        @Volatile var textLayoutResult: Any? = null
+        @Volatile var cachedLayoutResult: Any? = null
+        @Volatile var cachedDensityBits: Int = 0
+        @Volatile var cachedLineRects: List<List<Rect>>? = null
+        var rectCacheHits: Int = 0
+        var rectCacheBuilds: Int = 0
+        var rectLineCalculations: Int = 0
 
+        /**
+         * 圆角裁剪用的临时对象，每个 state 一份、跨帧复用，省掉每帧每矩形两次分配。
+         * 同一个 state 绑定单个文本节点的 modifier，绘制在渲染线程串行发生。
+         */
+        val clipPath: Path = Path()
+        val clipRectF: RectF = RectF()
+    }
+
+    /**
+     * [normalized] 在记入时就算好。原先每次查询都要对每个记忆条目重新归一化一遍全文，
+     * 条目越多越贵；归一化结果只取决于 text，缓存起来即可。
+     */
     private data class RememberedNinePatchText(
         val text: String,
         val ranges: List<NinePatchRange>,
+        val normalized: NormalizedText,
     )
 
     private data class RefreshedNinePatchRange(
@@ -2010,10 +2102,59 @@ class ReaderDialogueHighlightHook(
         val markerRange: IntRange,
     )
 
+    /**
+     * 归一化后的文本与「归一化下标 → 原文下标」映射。
+     *
+     * [sourceIndices] 只有前 [size] 项有效（数组按原文长度预分配，避免逐次扩容），
+     * 且严格单调递增，所以查找用二分而不是线性扫描。
+     */
     private data class NormalizedText(
         val text: String,
-        val sourceIndices: List<Int>,
-    )
+        val sourceIndices: IntArray,
+        val size: Int,
+    ) {
+        /** 原文下标不小于 [sourceIndex] 的第一个归一化下标；没有则 -1。 */
+        fun firstAtOrAfter(sourceIndex: Int): Int {
+            var low = 0
+            var high = size - 1
+            var found = -1
+            while (low <= high) {
+                val mid = (low + high) ushr 1
+                if (sourceIndices[mid] >= sourceIndex) {
+                    found = mid
+                    high = mid - 1
+                } else {
+                    low = mid + 1
+                }
+            }
+            return found
+        }
+
+        /** 原文下标小于 [sourceIndexExclusive] 的最后一个归一化下标；没有则 -1。 */
+        fun lastBefore(sourceIndexExclusive: Int): Int {
+            var low = 0
+            var high = size - 1
+            var found = -1
+            while (low <= high) {
+                val mid = (low + high) ushr 1
+                if (sourceIndices[mid] < sourceIndexExclusive) {
+                    found = mid
+                    low = mid + 1
+                } else {
+                    high = mid - 1
+                }
+            }
+            return found
+        }
+
+        fun sourceAt(normalizedIndex: Int): Int? =
+            if (normalizedIndex in 0 until size) sourceIndices[normalizedIndex] else null
+
+        // data class + IntArray：equals/hashCode 按引用没有意义，这里也不需要比较，显式禁掉以免误用。
+        override fun equals(other: Any?): Boolean = this === other
+
+        override fun hashCode(): Int = System.identityHashCode(this)
+    }
 
     private data class DialogueParagraphContext(
         val segments: List<String>,
@@ -2068,5 +2209,7 @@ class ReaderDialogueHighlightHook(
         val modified: Long,
         val bitmap: android.graphics.Bitmap,
         val drawable: Drawable,
+        /** 上次校验 mtime 的时刻，用于把绘制路径上的 stat 节流。 */
+        var checkedAtMs: Long,
     )
 }

@@ -511,9 +511,10 @@ internal fun ReaderHook.hookReaderHighlightRuleSheet() {
             XposedBridge.hookMethod(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val request = pendingReaderHighlightSheet
-                    val status = param.args?.getOrNull(0)
-                    XposedBridge.log("$LOG_PREFIX family epub content pending=${request != null} status=$status match=${isReaderSheetStatus(status, "EpubFamily")}")
+                    // 原先这里无条件打日志，字符串拼接 + isReaderSheetStatus 反射每次组合都要跑一遍。
+                    // 只在真的要接管渲染时才记录。
                     if (request == null) return
+                    val status = param.args?.getOrNull(0)
                     if (!isReaderSheetStatus(status, "EpubFamily")) return
                     val receiver = param.args?.getOrNull(1) ?: return
                     val composer = param.args?.getOrNull(4) ?: return
@@ -545,11 +546,17 @@ internal fun ReaderHook.hookReaderFamilySheetHeight() {
         val heightMethod = composeMethod(SIZE_KT_CLASS, HEIGHT_METHOD, 2)
         XposedBridge.hookMethod(heightMethod, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                if (!isInReaderFamilySheetCompose()) return
+                // Modifier.height() 是 Compose 基础修饰符，全进程每次组合都会被调用几十上百次，
+                // 所以判断顺序很关键：先做纯浮点比较，只有高度恰好等于宿主那个特定 sheet 高度时，
+                // 才去做昂贵的调用栈检查。原先反过来，每次 height() 调用都要抓一整条 Compose
+                // 调用栈并分配 StackTraceElement[]，是主要的 GC 来源之一。
+                // 两个 dp 值都走 cachedUdp 缓存——udp() 本身是 loadClass + declaredMethods 全扫，
+                // 放在这条热路径上比栈遍历还贵。
                 val currentHeight = param.args?.getOrNull(1) as? Float ?: return
-                val hostHeight = udp(HOST_READER_FAMILY_SHEET_HEIGHT_DP)
+                val hostHeight = cachedUdp(HOST_READER_FAMILY_SHEET_HEIGHT_DP) ?: return
                 if (currentHeight - hostHeight > 0.01f || hostHeight - currentHeight > 0.01f) return
-                param.args[1] = udp(READER_RULE_SHEET_HEIGHT_DP)
+                if (!isInReaderFamilySheetCompose()) return
+                param.args[1] = cachedUdp(READER_RULE_SHEET_HEIGHT_DP) ?: return
             }
         })
         XposedBridge.log("$LOG_PREFIX reader family sheet height hook installed")

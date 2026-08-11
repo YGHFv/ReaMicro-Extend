@@ -18,7 +18,15 @@ import com.reamicro.fix.hook.reader.*
 internal fun ReaderHook.currentReaderPage(): Any? =
     currentPageStrong ?: currentPageRef?.get()
 
+/**
+ * 标记「ScrollPager 正在进入渲染」，供进程被杀后下次启动时回退翻页方式。
+ *
+ * 这个函数挂在 ScrollPager 的组合路径上，滚动模式下等于每帧调用一次。标记本身是
+ * 进程级的一次性状态，写一次就够了——所以已经是本进程写的就直接返回，别再碰磁盘。
+ * 原先每次都 getSharedPreferences + edit + apply，滚动阅读时是持续的主线程 IO。
+ */
 internal fun ReaderHook.markScrollCrashPending() {
+    if (scrollCrashMarkerOwnedByThisProcess) return
     val context = activityProvider()?.applicationContext ?: return
     context.getSharedPreferences(SCROLL_CRASH_PREFS, Context.MODE_PRIVATE)
         .edit()
@@ -42,8 +50,14 @@ internal fun ReaderHook.isScrollCrashPending(): Boolean =
         ?.getBoolean(SCROLL_CRASH_PENDING_KEY, false)
         ?: false
 
+/**
+ * 「上一个进程」留下的标记才算。
+ *
+ * 先判内存里的归属标志再读 prefs：一旦本进程已经写过标记，后面就不必再碰磁盘。
+ * 这个判断同样在 ScrollPager 的每帧路径上，顺序反过来就是每帧一次 SharedPreferences 读取。
+ */
 internal fun ReaderHook.isPreviousScrollCrashPending(): Boolean =
-    isScrollCrashPending() && !scrollCrashMarkerOwnedByThisProcess
+    !scrollCrashMarkerOwnedByThisProcess && isScrollCrashPending()
 
 // 从阅微原生高亮页点击"补全计划"：通过宿主 NavHost 导航到完整聚合页（复用宿主页面框架与返回）。
 // navGraphScope 优先用阅读页底栏捕获到的实例，拿不到时由 ReaMicroSettingsHook 用全局单例兜底。
