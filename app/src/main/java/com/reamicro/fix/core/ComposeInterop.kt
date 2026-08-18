@@ -80,9 +80,49 @@ class ComposeInterop(
                 method.parameterTypes.size == parameterCount
         }?.apply { isAccessible = true }
 
+    /**
+     * 按「基础名 + Composable 尾参形状」定位宿主 @Composable 方法，不写死参数个数与 mangling 后缀。
+     *
+     * 两件事都会随宿主版本变化，写死任何一个都会在升级后静默失效：
+     * - **参数个数**：新增一个可选参数就变。
+     * - **方法名**：函数签名里出现 inline value class（`Color`/`Dp`/`TextUnit`）时 Kotlin 会给
+     *   JVM 方法名追加 mangling 后缀，形如 `AppTopBar-cd68TDI`。宿主 2.3.1 给 `AppTopBar`
+     *   加了 `contentColor: Color` 参数，方法名就从裸 `AppTopBar` 变成了带后缀的形式。
+     *
+     * 因此按 `name == baseName || name.startsWith("$baseName-")` 匹配：连字符是关键，它接受
+     * mangling 后缀，同时排除 `AppTopBarPreview` 这类同前缀的不同函数，以及 `AppTopBar$lambda$0`
+     * 这类合成方法。再要求末三参为 `(Composer, int, int)`——Compose 编译器给每个 @Composable
+     * 追加的 `$composer`/`$changed`/`$default`，这一条同时排除了 `$default` 桥接方法（其末三参
+     * 是三个 int）。命中多个时取参数最多者：宿主同时留有新旧重载时，参数多的那个是当前版本。
+     *
+     * 刻意不复用 [findMangledMethod]：那里用 `contains` + 固定参数个数，既会命中合成 lambda，
+     * 又在参数个数变化时失配，正是这里要避免的两种失效。
+     */
+    fun findComposableMethod(
+        candidates: Array<Method>,
+        baseName: String,
+        composerClassName: String,
+        firstParameterType: Class<*>? = null,
+    ): Method? =
+        candidates
+            .filter { method ->
+                val types = method.parameterTypes
+                (method.name == baseName || method.name.startsWith("$baseName-")) &&
+                    types.size >= COMPOSABLE_MIN_PARAMETER_COUNT &&
+                    (firstParameterType == null || types.first() == firstParameterType) &&
+                    types[types.size - 3].name == composerClassName &&
+                    types[types.size - 2] == Integer.TYPE &&
+                    types[types.size - 1] == Integer.TYPE
+            }
+            .maxByOrNull { it.parameterTypes.size }
+            ?.apply { isAccessible = true }
+
     private companion object {
         /** Compose Color 低 6 位是色彩空间编号，0 表示 sRGB。 */
         const val COLOR_SPACE_MASK = 0x3fL
         const val COLOR_ARGB_SHIFT = 32
+
+        /** @Composable 至少有 Composer/$changed/$default 三个尾参，加上一个业务参数。 */
+        const val COMPOSABLE_MIN_PARAMETER_COUNT = 4
     }
 }

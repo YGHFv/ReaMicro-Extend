@@ -1,5 +1,24 @@
 # 更新记录
 
+## 2.3.1 beta 适配 - 2026-08-19
+
+### 所有模块设置页顶部的返回导航栏消失
+
+- 修复升级到阅微 **2.3.1 beta（versionCode 2310）** 后，模块所有补全设置页顶部的返回栏（返回箭头 + 页面标题）整条不见的问题。页面正文照常渲染，也不崩溃，所以从表现上看不出是 hook 挂了。
+- 根因是宿主 `AppTopBar` 在 `onNavigationBack` 之后新增了一个 `contentColor: Color` 参数，连带产生两个独立的失效点：
+  - **方法名变了。** `Color` 是 inline value class，Kotlin 会给带这类参数的 JVM 方法名追加 mangling 后缀，`AppTopBar` 因此变成 `AppTopBar-cd68TDI`。模块按 `name == "AppTopBar"` 精确匹配，直接落空。异常被 Compose 函数代理的 `runCatching` 吞掉降级为空内容——这就是为什么顶栏静默消失而不是崩溃，只在 LSPosed 日志留一行 `AppTopBar not found`。
+  - **基元形参不能传 null。** 该参数在 JVM 上是 `long`，而模块对所有「交给宿主默认值」的参数一律填 `null`。即使 `$default` 掩码已置位、宿主会忽略实参，`Method.invoke` 仍要先过一遍形参类型校验，给基元 `long` 传 `null` 会抛 `IllegalArgumentException`。这一点在修好方法名之后才会暴露，属于同一次升级的第二层。
+- 修复方式：
+  - 新增 `ComposeInterop.findComposableMethod`，按「基础名（`name == base` 或 `name.startsWith("base-")`）+ 末三参 `(Composer, int, int)` + 可选首参类型」定位宿主 @Composable，取参数最多者。连字符和尾参形状这两条都不可省：`AppTopBar_cd68TDI$lambda$3` 恰好也是 11 参、首参 `String`，只靠名字前缀加「取参数最多」会误选到它。
+  - 顶栏实参铺设抽成 `core/AppTopBarArguments`，未覆盖的基元形参按类型填零值（`long`→`0L`、`float`→`0f`…）而不是 `null`，取值仍由宿主默认值决定。逐类型列全而不只处理 `long`，是因为 `Dp`/`TextUnit` 这类 inline class 同样落到基元上，下次宿主再加可选参数不该再断一次。
+- 同一次升级还静默打坏了 **WebDAV / 本地书库账号页的标题改写**（`hookWebDavAccountTopBarTitle` 用的是同一个精确名字匹配），一并修掉。这处只在日志留一行、UI 上完全看不出，容易漏。
+- 顺带做了一次全量核对：把模块里 255 个宿主方法名常量与 2.3.1 宿主 228 个类的 4285 个方法名逐一比对，确认本次只有 `AppTopBar` 这两处是真实失配，其余写死 mangling 后缀的常量（`Scaffold-TvnljyQ`、`ListItem-HXNGIdc` 等）在 2.3.1 下仍然成立。
+
+### 顶栏参数铺设补测试
+
+- 这处下标映射在 2.2.0 → 2.3.0 → 2.3.1 三次升级里连续断了三次，而三次的表现都是「顶栏静默消失」：编译器不报错、真机不崩、单测也覆盖不到（此前只有类名字符串的锁定测试，不校验方法签名）。
+- 现在 2.2.0 的 8 参、2.3.0 的 9 参、2.3.1 的 10 参三代签名都钉在 `AppTopBarArgumentsTest` 里，逐一断言各参数落位与 `$default` 掩码取值。其中一条用等价形状的静态方法真的走一次 `Method.invoke`，直接复现「基元传 null」会抛的那个异常，而不只是断言数组内容。
+
 ## 2.0.0 - 2026-08-11
 
 主版本号变更的原因是代码结构整体重排：功能与行为没有变动，但源码的组织方式和以前完全不同了。

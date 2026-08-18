@@ -2240,13 +2240,19 @@ internal fun WebDavDriveHook.hookWebDavAccountAuthFlow() {
 
 internal fun WebDavDriveHook.hookWebDavAccountTopBarTitle() {
     runCatching {
-        // 2.3.0 beta 起 AppTopBar 参数重排并新增 Function3 尾随槽（8→9 参），旧的固定 8 参定位会失败。
-        // 按名字 + 首参 String 匹配、取参数最多者，兼容签名变化；hook 仅改 args[0]（title 仍是首个 String 参）。
-        val method = cls(APP_TOP_BAR_CLASS).declaredMethods
-            .filter { it.name == APP_TOP_BAR_METHOD && it.parameterTypes.firstOrNull() == String::class.java }
-            .maxByOrNull { it.parameterTypes.size }
-            ?.apply { isAccessible = true }
-            ?: error("$APP_TOP_BAR_CLASS.$APP_TOP_BAR_METHOD not found")
+        // AppTopBar 的签名与方法名都随宿主版本变：2.3.0 beta 参数重排 + 新增 Function3 尾随槽（8→9 参），
+        // 2.3.1 beta 又加了 contentColor: Color，使 JVM 方法名 mangling 成 AppTopBar-cd68TDI。
+        // 因此按基础名（容忍后缀）+ 首参 String + Composable 尾参形状定位，hook 仅改 args[0]（title 仍是首个 String 参）。
+        val candidates = cls(APP_TOP_BAR_CLASS).declaredMethods
+        val method = composeInterop.findComposableMethod(
+            candidates = candidates,
+            baseName = APP_TOP_BAR_METHOD,
+            composerClassName = COMPOSER_CLASS,
+            firstParameterType = String::class.java,
+        ) ?: error(
+            "$APP_TOP_BAR_CLASS.$APP_TOP_BAR_METHOD not found; candidates=" +
+                candidates.joinToString { "${it.name}/${it.parameterTypes.size}" },
+        )
         XposedBridge.hookMethod(method, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 val title = param.args?.getOrNull(0)?.toString().orEmpty()

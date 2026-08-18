@@ -2,6 +2,7 @@ package com.reamicro.fix.hook
 
 import android.widget.Switch
 import com.reamicro.fix.ai.AiApiStore
+import com.reamicro.fix.core.AppTopBarArguments
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.ai.AiImagePresetTarget
 import com.reamicro.fix.settings.ModuleSettings
@@ -295,15 +296,12 @@ internal fun ReaMicroSettingsHook.renderReaderSheetTopBar(title: String, compose
 }
 
 /**
- * 调用宿主 AppTopBar 渲染顶栏标题，按“参数类型”映射，兼容签名随版本变化。
- * 2.2.0：AppTopBar(String, WindowInsets?, ImageVector?, Function0?, Function2?, Composer, I, I) 8 参。
- * 2.3.0 beta：参数重排并新增尾随内容槽 Function3 →
- *   AppTopBar(String title, Function2, WindowInsets, ImageVector navIcon, Function0 onBack, Function3, Composer, I $changed, I $default) 9 参。
- * 旧代码按固定 8 参 + 固定顺序传值，2.3.0 下既找不到方法又参数错位 → 顶栏渲染崩溃、标题消失。
- * 这里：title 填首个 String 参；onBack 填 Function0 参；可选的 navIcon/windowInsets 按类型填，
- * 其余业务参数一律传 null 并在 $default 掩码里置位（走宿主默认值），末三参为 Composer/$changed/$default。
+ * 调用宿主 AppTopBar 渲染顶栏标题。
+ *
+ * 签名随宿主版本变化（2.2.0 的 8 参 → 2.3.0 beta 的 9 参 → 2.3.1 beta 的 10 参 + 方法名
+ * mangling），所以定位与实参铺设都不写死：方法由 [appTopBarMethod] 按 Composable 尾参形状找，
+ * 实参由 [AppTopBarArguments.plan] 按参数类型铺。两处的版本沿革与失效方式见各自注释。
  */
-
 internal fun ReaMicroSettingsHook.invokeAppTopBar(
     title: String,
     composer: Any,
@@ -312,64 +310,46 @@ internal fun ReaMicroSettingsHook.invokeAppTopBar(
     windowInsets: Any? = null,
 ) {
     val m = appTopBarMethod()
-    val types = m.parameterTypes
-    val n = types.size
-    val composerIdx = n - 3
-    val args = arrayOfNulls<Any?>(n)
-    var defaultMask = 0
     val backProxy = onBack?.let { cb ->
         functionProxy("ModuleSettingsBack", FUNCTION0_CLASS) {
             cb()
             targetUnit()
         }
     }
-    var backUsed = false
-    var navUsed = false
-    var insetsUsed = false
-    for (i in 0 until composerIdx) {
-        val t = types[i]
-        when {
-            i == 0 && t == String::class.java -> args[i] = title
-            !backUsed && backProxy != null && t.name == FUNCTION0_CLASS -> {
-                args[i] = backProxy
-                backUsed = true
-            }
-            !navUsed && navIcon != null && t.name == IMAGE_VECTOR_CLASS -> {
-                args[i] = navIcon
-                navUsed = true
-            }
-            !insetsUsed && windowInsets != null && t.name == WINDOW_INSETS_CLASS -> {
-                args[i] = windowInsets
-                insetsUsed = true
-            }
-            else -> {
-                args[i] = null
-                defaultMask = defaultMask or (1 shl i)
-            }
-        }
-    }
-    args[composerIdx] = composer
-    args[composerIdx + 1] = 0
-    args[composerIdx + 2] = defaultMask
+    val args = AppTopBarArguments.plan(
+        parameterTypes = m.parameterTypes,
+        composer = composer,
+        title = title,
+        onBack = backProxy,
+        navIcon = navIcon,
+        windowInsets = windowInsets,
+        function0ClassName = FUNCTION0_CLASS,
+        imageVectorClassName = IMAGE_VECTOR_CLASS,
+        windowInsetsClassName = WINDOW_INSETS_CLASS,
+    )
     m.invoke(null, *args)
 }
 
-/** 按名字 + 首参 String + 末三参(Composer,int,int) 定位 AppTopBar，取参数最多者，兼容参数个数变化。 */
+/**
+ * 定位宿主 `AppTopBar`：按基础名（容忍 inline class mangling 后缀）+ 首参 String +
+ * 末三参 `(Composer,int,int)`，取参数最多者，兼容参数个数与方法名的版本变化。
+ *
+ * 2.3.1 beta 新增 `contentColor: Color` 参数后 JVM 方法名变成 `AppTopBar-cd68TDI`，
+ * 原先的 `name == "AppTopBar"` 精确匹配落空 → 顶栏整条静默消失（异常被 Compose 代理吞掉）。
+ */
 internal fun ReaMicroSettingsHook.appTopBarMethod(): Method =
     synchronized(methodCache) {
         methodCache.getOrPut("$APP_TOP_BAR_CLASS#$APP_TOP_BAR_METHOD/*") {
-            cls(APP_TOP_BAR_CLASS).declaredMethods
-                .filter { m ->
-                    m.name == APP_TOP_BAR_METHOD &&
-                        m.parameterTypes.size >= 4 &&
-                        m.parameterTypes.first() == String::class.java &&
-                        m.parameterTypes[m.parameterTypes.size - 3].name == COMPOSER_CLASS &&
-                        m.parameterTypes[m.parameterTypes.size - 2] == Integer.TYPE &&
-                        m.parameterTypes[m.parameterTypes.size - 1] == Integer.TYPE
-                }
-                .maxByOrNull { it.parameterTypes.size }
-                ?.apply { isAccessible = true }
-                ?: error("$APP_TOP_BAR_CLASS.$APP_TOP_BAR_METHOD not found")
+            val candidates = cls(APP_TOP_BAR_CLASS).declaredMethods
+            composeInterop.findComposableMethod(
+                candidates = candidates,
+                baseName = APP_TOP_BAR_METHOD,
+                composerClassName = COMPOSER_CLASS,
+                firstParameterType = String::class.java,
+            ) ?: error(
+                "$APP_TOP_BAR_CLASS.$APP_TOP_BAR_METHOD not found; candidates=" +
+                    candidates.joinToString { "${it.name}/${it.parameterTypes.size}" },
+            )
         }
     }
 
