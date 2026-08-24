@@ -39,6 +39,7 @@ DEFAULT_FEATURES = {
 PACKAGE_ROOT = Path(os.getenv("REAMICRO_PACKAGE_ROOT", "/data/packages"))
 RELEASE_ROOT = Path(os.getenv("REAMICRO_RELEASE_ROOT", "/data/releases/module"))
 BACKUP_ROOT = Path(os.getenv("REAMICRO_BACKUP_ROOT", "/data/backups"))
+SECRET_BACKUP_ROOT = Path(os.getenv("REAMICRO_SECRET_BACKUP_ROOT", "/data/backups/secrets"))
 TASK_ROOT = Path(os.getenv("REAMICRO_TASK_ROOT", "/data/tasks"))
 TASKS_PATH = TASK_ROOT / "tasks.json"
 TASK_LOG_ROOT = TASK_ROOT / "logs"
@@ -1025,6 +1026,44 @@ async def download_module_backup(owner: str = Depends(backup_owner)) -> FileResp
     if target.parent != owner_dir.resolve() or not target.is_file():
         raise HTTPException(status_code=404, detail=response(code="BACKUP_NOT_FOUND", message="备份文件不存在"))
     return FileResponse(target, media_type="application/zip", filename="reamicro-module-backup.zip")
+
+
+@app.post("/v1/backups/credentials")
+async def upload_credentials_backup(request: Request, owner: str = Depends(backup_owner)) -> dict[str, Any]:
+    body = await request.body()
+    if not body or len(body) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="密钥备份为空或超过 10 MB"))
+    if not body.startswith(b"RCRED1\n"):
+        raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="密钥备份格式无效"))
+    owner_dir = SECRET_BACKUP_ROOT / owner
+    owner_dir.mkdir(parents=True, exist_ok=True)
+    created_at = int(datetime.now(timezone.utc).timestamp() * 1000)
+    target = owner_dir / f"{created_at}.bin"
+    temp = owner_dir / f".{created_at}.tmp"
+    temp.write_bytes(body)
+    temp.replace(target)
+    (owner_dir / "latest.json").write_text(json.dumps({
+        "createdAt": created_at,
+        "file": target.name,
+        "size": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    for expired in sorted(owner_dir.glob("*.bin"), reverse=True)[10:]:
+        expired.unlink(missing_ok=True)
+    return response({"createdAt": created_at, "size": len(body), "encrypted": True})
+
+
+@app.get("/v1/backups/credentials/latest")
+async def download_credentials_backup(owner: str = Depends(backup_owner)) -> FileResponse:
+    owner_dir = SECRET_BACKUP_ROOT / owner
+    metadata_path = owner_dir / "latest.json"
+    if not metadata_path.is_file():
+        raise HTTPException(status_code=404, detail=response(code="BACKUP_NOT_FOUND", message="没有账号密钥备份"))
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    target = (owner_dir / str(metadata.get("file", ""))).resolve()
+    if target.parent != owner_dir.resolve() or not target.is_file():
+        raise HTTPException(status_code=404, detail=response(code="BACKUP_NOT_FOUND", message="密钥备份文件不存在"))
+    return FileResponse(target, media_type="application/octet-stream", filename="reamicro-credentials.rcbak")
 
 
 def credential_public(value: dict[str, Any]) -> dict[str, Any]:

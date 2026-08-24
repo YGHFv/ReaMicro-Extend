@@ -176,6 +176,31 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
         )
     }
 
+    fun uploadCredentialsBackup(bytes: ByteArray): String {
+        val settings = settingsStore.get()
+        val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
+        return HttpClient.postBytes(
+            "$baseUrl/v1/backups/credentials",
+            bytes,
+            contentType = "application/octet-stream",
+            headers = authHeaders(settings),
+            connectTimeoutMs = settings.timeoutSeconds * 1_000,
+            readTimeoutMs = 60_000,
+        )
+    }
+
+    fun downloadCredentialsBackup(): ByteArray {
+        val settings = settingsStore.get()
+        val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
+        return HttpClient.getBytes(
+            "$baseUrl/v1/backups/credentials/latest",
+            headers = authHeaders(settings),
+            connectTimeoutMs = settings.timeoutSeconds * 1_000,
+            readTimeoutMs = 60_000,
+            followRedirects = false,
+        )
+    }
+
     fun createTask(body: JSONObject): JSONObject = taskRequest("POST", "/v1/tasks", body)
     fun listTasks(): JSONObject = taskRequest("GET", "/v1/tasks", null)
     fun taskAction(taskId: String, action: String): JSONObject = taskRequest("POST", "/v1/tasks/${java.net.URLEncoder.encode(taskId, "UTF-8")}/$action", JSONObject())

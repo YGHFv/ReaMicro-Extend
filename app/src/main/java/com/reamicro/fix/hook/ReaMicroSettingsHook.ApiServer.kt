@@ -19,6 +19,7 @@ import com.reamicro.fix.cloud.api.ModuleApkInstaller
 import com.reamicro.fix.cloud.api.ModuleSettingsBackup
 import com.reamicro.fix.cloud.api.CloudTaskManager
 import com.reamicro.fix.cloud.api.ApiThemeStore
+import com.reamicro.fix.cloud.api.CredentialBackupCrypto
 import com.reamicro.fix.cloud.api.normalizeApiBaseUrl
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 import com.reamicro.fix.hook.settings.*
@@ -440,6 +441,55 @@ internal fun ReaMicroSettingsHook.restoreApiModuleSettings() {
             activity.runOnUiThread { showToast(it.message ?: "恢复备份失败") }
         }
     }.start()
+}
+
+internal fun ReaMicroSettingsHook.openCredentialBackupDialog() {
+    val activity = activityProvider() ?: return
+    activity.runOnUiThread {
+        val store = ApiServerSettingsStore { activity.applicationContext }
+        val colors = SettingsDialogColors(activity)
+        val dialog = Dialog(activity)
+        val card = settingsDialogCard(activity, colors)
+        card.addView(settingsDialogTitle(activity, "账号密钥备份", colors))
+        card.addView(TextView(activity).apply {
+            setTextColor(colors.body)
+            text = "备份在本机用口令派生密钥加密，服务器只保存密文。模块设置备份不会包含账号密钥。"
+        }, apiServerRowParams(activity))
+        val password = apiServerEdit(activity, "备份口令（至少 8 位）", "").apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val status = TextView(activity).apply { setTextColor(colors.body) }
+        card.addView(password, apiServerRowParams(activity))
+        card.addView(status, apiServerRowParams(activity))
+        val actions = settingsDialogActions(activity)
+        actions.addView(settingsDialogButton(activity, "加密并上传", colors, SettingsDialogButtonRole.Primary).apply {
+            setOnClickListener {
+                status.text = "正在加密账号密钥……"
+                Thread {
+                    runCatching {
+                        val bytes = CredentialBackupCrypto.create(activity.applicationContext, password.text.toString().toCharArray())
+                        ApiServerClient(store).uploadCredentialsBackup(bytes)
+                    }.onSuccess { activity.runOnUiThread { status.text = "账号密钥密文已上传" } }
+                        .onFailure { error -> activity.runOnUiThread { status.text = error.message ?: "上传失败" } }
+                }.start()
+            }
+        }, settingsDialogButtonParams(activity))
+        actions.addView(settingsDialogButton(activity, "下载并恢复", colors, SettingsDialogButtonRole.Neutral).apply {
+            setOnClickListener {
+                status.text = "正在下载密钥密文……"
+                Thread {
+                    runCatching {
+                        val bytes = ApiServerClient(store).downloadCredentialsBackup()
+                        CredentialBackupCrypto.restore(activity.applicationContext, password.text.toString().toCharArray(), bytes)
+                    }.onSuccess { count -> activity.runOnUiThread { status.text = "已恢复 $count 项账号密钥" } }
+                        .onFailure { error -> activity.runOnUiThread { status.text = error.message ?: "恢复失败" } }
+                }.start()
+            }
+        }, settingsDialogButtonParams(activity))
+        actions.addView(settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply { setOnClickListener { dialog.dismiss() } }, settingsDialogButtonParams(activity))
+        card.addView(actions)
+        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
+    }
 }
 
 private fun apiServerEdit(activity: android.app.Activity, hint: String, value: String): EditText =

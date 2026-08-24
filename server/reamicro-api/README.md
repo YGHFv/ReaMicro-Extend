@@ -25,8 +25,16 @@ X-ReaMicro-Api-Key: <key>
 - `/v1/releases/module/latest`
 - `/v1/packages?kind=online_source|epub_style|highlight_style|association_source|theme`
 - `/v1/packages/{kind}/{packageId}/download`
+- `/v1/backups/module` 与 `/v1/backups/module/latest`
+- `/v1/backups/credentials` 与 `/v1/backups/credentials/latest`
+- `/v1/credentials/reamicro`
+- `/v1/tasks` 以及暂停、恢复、立即执行、配置、删除和日志接口
 
-内容包、备份、任务和多用户账号将在后续版本加入 PostgreSQL、Redis、对象存储及 Worker。
+阅微登录密钥使用 `REAMICRO_SECRET_KEY` 派生的 AES-GCM 密钥保存。生产环境必须设置随机长值并持久化；丢失或修改该值后既有凭据无法解密。账号密钥备份由 Android 客户端使用用户口令加密，服务器只保存 `RCRED1` 密文。
+
+云任务支持 `yeshe_checkin`、`yeshe_draw_card` 和 `cloud_auto_read`。自动阅读可指定图书，未指定时读取阅微最近阅读记录；服务器按配置上报阅读进度和时长。
+
+当前版本使用 Docker 数据卷内的 JSON 与文件存储，适合个人或小规模部署。多实例部署前应迁移到共享数据库、对象存储和独立 Worker，避免多个调度器同时执行同一任务。
 
 ## 内容包目录
 

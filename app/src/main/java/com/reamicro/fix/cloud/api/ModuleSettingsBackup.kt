@@ -23,7 +23,8 @@ object ModuleSettingsBackup {
             zip.writeEntry("manifest.json", manifest.toString(2).toByteArray(Charsets.UTF_8))
             val prefs = context.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE)
             val settings = JSONObject()
-            prefs.all.forEach { (key, value) -> settings.put(key, encodePreference(value)) }
+            prefs.all.filterKeys { !isSensitivePreference(it) }
+                .forEach { (key, value) -> settings.put(key, encodePreference(value)) }
             zip.writeEntry("module-settings.json", settings.toString(2).toByteArray(Charsets.UTF_8))
             File(context.filesDir, "reamicro_online_sources").listFiles()?.filter(File::isFile)?.forEach { file ->
                 zip.writeEntry("online-sources/${file.name}", file.readBytes())
@@ -40,6 +41,7 @@ object ModuleSettingsBackup {
         val editor = context.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE).edit()
         var restored = 0
         settingsJson.keys().forEach { key ->
+            if (isSensitivePreference(key)) return@forEach
             val item = settingsJson.optJSONObject(key) ?: return@forEach
             when (item.optString("type")) {
                 "boolean" -> editor.putBoolean(key, item.optBoolean("value"))
@@ -96,6 +98,9 @@ object ModuleSettingsBackup {
         closeEntry()
     }
 }
+
+internal fun isSensitivePreference(key: String): Boolean =
+    key.startsWith("online_login_") || key.startsWith("online_source_variable_")
 
 private fun JSONArray?.toStringSet(): Set<String> = buildSet {
     val array = this@toStringSet ?: return@buildSet

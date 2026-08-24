@@ -932,6 +932,12 @@ internal fun ReaMicroSettingsHook.renderCloudCompletionSettingsContent(innerPadd
                 onClick = { restoreApiModuleSettings() },
             ),
             ActionRow(
+                key = "api_credentials_backup",
+                title = "账号密钥加密备份",
+                subtitle = "客户端口令加密，服务器只保存密文",
+                onClick = { openCredentialBackupDialog() },
+            ),
+            ActionRow(
                 key = "api_cloud_automation",
                 title = "云端签到、抽卡与自动阅读",
                 subtitle = "上传阅微登录密钥后由服务器执行，可选择最近阅读或自定义图书",
