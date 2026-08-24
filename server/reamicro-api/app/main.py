@@ -682,10 +682,17 @@ def admin_page(config: dict[str, Any], message: str = "") -> str:
             f"<td>{esc(task.get('lastMessage', ''))}</td><td>{esc(task.get('nextRunAt', ''))}</td></tr>"
         )
     task_table = "".join(task_rows) or "<tr><td colspan='4'>暂无云任务</td></tr>"
+    credential_rows = []
+    for credential in load_credentials().values():
+        credential_rows.append(
+            f"<tr><td>{esc(credential.get('id', ''))}</td><td>{esc(credential.get('owner', ''))}</td>"
+            f"<td>{esc(credential.get('label', ''))}</td><td>{esc(credential.get('lastVerifyMessage', ''))}</td></tr>"
+        )
+    credential_table = "".join(credential_rows) or "<tr><td colspan='4'>暂无阅微凭据，请由模块客户端上传</td></tr>"
     return f"""<!doctype html>
 <html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>ReaMicro API 管理后台</title>
-<style>body{{font-family:system-ui,-apple-system,sans-serif;max-width:860px;margin:32px auto;padding:0 18px;background:#f5f7fb;color:#182230}}main{{background:white;border-radius:14px;padding:24px;box-shadow:0 5px 24px #0001}}label{{display:block;margin:14px 0 5px;font-weight:600}}input,textarea{{box-sizing:border-box;width:100%;padding:10px;border:1px solid #ccd4df;border-radius:8px;font:inherit}}textarea{{min-height:72px}}.row{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}button{{margin-top:20px;padding:10px 16px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-weight:600;cursor:pointer}}.secondary{{background:#475569;margin-left:8px}}.msg{{padding:10px;background:#ecfdf5;color:#166534;border-radius:8px}}small{{color:#64748b}}table{{width:100%;border-collapse:collapse;margin-top:12px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}</style></head>
+<style>body{{font-family:system-ui,-apple-system,sans-serif;max-width:860px;margin:32px auto;padding:0 18px;background:#f5f7fb;color:#182230}}main{{background:white;border-radius:14px;padding:24px;box-shadow:0 5px 24px #0001}}label{{display:block;margin:14px 0 5px;font-weight:600}}input,textarea,select{{box-sizing:border-box;width:100%;padding:10px;border:1px solid #ccd4df;border-radius:8px;font:inherit;background:white}}textarea{{min-height:72px}}.row{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}button{{margin-top:20px;padding:10px 16px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-weight:600;cursor:pointer}}.secondary{{background:#475569;margin-left:8px}}.msg{{padding:10px;background:#ecfdf5;color:#166534;border-radius:8px}}small{{color:#64748b}}table{{width:100%;border-collapse:collapse;margin-top:12px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}details{{margin-top:18px;padding:12px;border:1px solid #e2e8f0;border-radius:8px}}</style></head>
 <body><main><h1>ReaMicro API 管理后台</h1><p><small>默认端口：5222 · 配置保存到 Docker 数据卷 /data/config/server.json</small></p>
 {f"<p class='msg'>{esc(message)}</p>" if message else ""}
 <form method='post' action='/admin/settings'>
@@ -712,6 +719,7 @@ def admin_page(config: dict[str, Any], message: str = "") -> str:
 <label>内容文件</label><input type='file' name='payload' required>
 <button type='submit'>上传并发布</button></form><h3>已发布内容包</h3><table><thead><tr><th>类型</th><th>包 ID</th><th>版本</th><th>构建时间</th></tr></thead><tbody>{package_table}</tbody></table>
 <hr><h2>云任务</h2><form method='post' action='/admin/tasks/create'>
+<h3>已上传阅微凭据</h3><table><thead><tr><th>凭据 ID</th><th>所有者</th><th>名称</th><th>验证状态</th></tr></thead><tbody>{credential_table}</tbody></table>
 <div class='row'><div><label>任务类型</label><select name='task_type'><option value='yeshe_checkin'>野社零点签到</option><option value='yeshe_draw_card'>野社自动抽卡</option><option value='cloud_auto_read'>云端自动阅读</option><option value='http'>通用 HTTPS 请求</option></select></div><div><label>每日执行时间</label><input name='time_of_day' value='00:05' placeholder='HH:MM'></div></div>
 <div class='row'><div><label>阅微凭据 ID</label><input name='credential_id' placeholder='上传凭据接口返回的 id'></div><div><label>任务所有者标识</label><input name='owner' value='admin'></div></div>
 <div class='row'><div><label>阅读时长（分钟）</label><input name='duration_minutes' type='number' min='1' max='720' value='30'></div><div><label>最近阅读数量</label><input name='recent_limit' type='number' min='1' max='20' value='1'></div></div>
@@ -901,6 +909,10 @@ async def admin_create_task(
 ) -> HTMLResponse:
     require_admin(credentials)
     try:
+        task_type = task_type.strip()
+        if task_type not in {"http", "yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"}:
+            raise ValueError("不支持的任务类型")
+        owner = owner.strip() or "admin"
         headers = json.loads(request_headers or "{}")
         if not isinstance(headers, dict):
             raise ValueError("headers must be object")
@@ -919,16 +931,21 @@ async def admin_create_task(
             if not isinstance(decoded_body, list):
                 raise ValueError("自定义图书必须是 JSON 数组")
             request_value["books"] = decoded_body
+        if task_type != "http":
+            credential = load_credentials().get(credential_id.strip())
+            if not credential or credential.get("owner") != owner:
+                raise ValueError("阅微凭据不存在或不属于任务所有者")
         task_id = "task_" + secrets.token_hex(10)
         now = int(datetime.now(timezone.utc).timestamp() * 1000)
         tasks = load_tasks()
         tasks[task_id] = {
             "id": task_id,
-            "owner": owner.strip() or "admin",
-            "taskType": task_type.strip(),
+            "owner": owner,
+            "taskType": task_type,
+            "credentialId": credential_id.strip(),
             "schedule": {
                 "intervalSeconds": max(interval_seconds, 60),
-                "timeOfDay": time_of_day.strip() if task_type.strip() in {"yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"} else "",
+                "timeOfDay": normalized_time_of_day(time_of_day) if task_type in {"yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"} else "",
                 "timezoneOffsetMinutes": 480,
             },
             "requestEncrypted": encrypt_secret(request_value),

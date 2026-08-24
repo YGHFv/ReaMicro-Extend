@@ -37,6 +37,11 @@ object ExternalSourceLoader {
         loadEntries(context).filterIsInstance<ExternalFeatureProvider>()
             .distinctBy { it.id }
 
+    fun invalidate() {
+        cachedKey = ""
+        cachedEntries = emptyList()
+    }
+
     private fun loadEntries(context: Context?): List<Any> {
         context ?: return emptyList()
         val sourceDir = File(context.filesDir, SOURCE_DIR)

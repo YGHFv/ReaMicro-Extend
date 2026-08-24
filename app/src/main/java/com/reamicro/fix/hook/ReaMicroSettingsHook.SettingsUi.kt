@@ -898,8 +898,14 @@ internal fun ReaMicroSettingsHook.renderCloudCompletionSettingsContent(innerPadd
             ActionRow(
                 key = "api_package_updates",
                 title = "检查内容库更新",
-                subtitle = "书源、成书样式和高亮样式",
+                subtitle = "书源、关联源、主题、成书样式和高亮样式",
                 onClick = { checkApiPackageUpdates() },
+            ),
+            ActionRow(
+                key = "api_package_management",
+                title = "已安装内容包",
+                subtitle = "查看版本、启用主题、回滚或卸载",
+                onClick = { openApiPackageManagementDialog() },
             ),
             ActionRow(
                 key = "api_module_update",

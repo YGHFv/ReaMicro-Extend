@@ -10,6 +10,7 @@ import android.os.Build
 import android.util.TypedValue
 import android.view.View
 import android.widget.ProgressBar
+import com.reamicro.fix.cloud.api.ApiThemeStore
 
 internal object ModuleDialogTheme {
     @Volatile private var cachedPalette: Palette? = null
@@ -20,6 +21,23 @@ internal object ModuleDialogTheme {
 
     fun palette(context: Context): Palette {
         val darkHint = inferDarkMode(context)
+        runCatching {
+            ApiThemeStore.palette(context, darkHint)?.let { theme ->
+                return Palette(
+                    pageBackground = theme.pageBackground,
+                    rowBackground = theme.rowBackground,
+                    border = theme.border,
+                    title = theme.title,
+                    body = theme.body,
+                    primary = theme.primary,
+                    primarySoft = theme.primarySoft,
+                    primaryText = theme.primaryText,
+                    neutralText = theme.neutralText,
+                    destructiveText = theme.destructiveText,
+                    dynamic = true,
+                )
+            }
+        }
         cachedPalette?.let { cached ->
             if (cached.matches(darkHint)) {
                 return cached

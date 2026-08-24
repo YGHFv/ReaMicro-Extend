@@ -20,10 +20,12 @@ class ApiContentPackageTest {
             put("kind", "online_source")
             put("version", "1.4.0")
             put("sha256", "abc")
+            put("payload", "source.example.json")
             put("downloadUrl", "/v1/packages/online_source/source.example/download")
         })
         assertEquals(ApiPackageKind.ONLINE_SOURCE, item?.kind)
         assertEquals("1.4.0", item?.version)
+        assertEquals("source.example.json", item?.payloadName)
         assertEquals(
             "source.example\nonline_source\nsource.example\n1.4.0\n0\nabc",
             item?.signedMessage()?.toString(Charsets.UTF_8),

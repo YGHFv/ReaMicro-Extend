@@ -29,6 +29,7 @@ data class ApiContentPackage(
     val contentId: String = "",
     val aliases: Set<String> = emptySet(),
     val buildTime: Long = 0L,
+    val payloadName: String = "payload.bin",
 ) {
     fun signedMessage(): ByteArray =
         "$packageId\n${kind.wireValue}\n${contentId.ifBlank { packageId }}\n$version\n$buildTime\n$sha256".toByteArray(Charsets.UTF_8)
@@ -55,6 +56,7 @@ data class ApiContentPackage(
                     for (index in 0 until array.length()) array.optString(index).takeIf(String::isNotBlank)?.let(::add)
                 },
                 buildTime = json.optLong("buildTime", 0L),
+                payloadName = json.optString("payload").ifBlank { "payload.bin" },
             )
         }
     }

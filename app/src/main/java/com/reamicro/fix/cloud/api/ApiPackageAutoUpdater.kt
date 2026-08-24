@@ -23,6 +23,8 @@ object ApiPackageAutoUpdater {
                     ApiPackageKind.ONLINE_SOURCE,
                     ApiPackageKind.EPUB_STYLE,
                     ApiPackageKind.HIGHLIGHT_STYLE,
+                    ApiPackageKind.ASSOCIATION_SOURCE,
+                    ApiPackageKind.THEME,
                 ).flatMap(manager::check).map(manager::install)
                 val moduleUpdate = checkModuleUpdate(context.applicationContext, ApiServerClient(store))
                 prefs.edit().putLong(KEY_LAST_CHECK, now).apply()

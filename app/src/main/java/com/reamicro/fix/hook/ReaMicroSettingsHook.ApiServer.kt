@@ -18,6 +18,7 @@ import com.reamicro.fix.cloud.api.checkModuleUpdate
 import com.reamicro.fix.cloud.api.ModuleApkInstaller
 import com.reamicro.fix.cloud.api.ModuleSettingsBackup
 import com.reamicro.fix.cloud.api.CloudTaskManager
+import com.reamicro.fix.cloud.api.ApiThemeStore
 import com.reamicro.fix.cloud.api.normalizeApiBaseUrl
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 import com.reamicro.fix.hook.settings.*
@@ -282,6 +283,69 @@ private fun parseCloudReadingBooks(raw: String): org.json.JSONArray {
     }
 }
 
+internal fun ReaMicroSettingsHook.openApiPackageManagementDialog() {
+    val activity = activityProvider() ?: return
+    activity.runOnUiThread {
+        val store = ApiServerSettingsStore { activity.applicationContext }
+        val colors = SettingsDialogColors(activity)
+        val dialog = Dialog(activity)
+        val card = settingsDialogCard(activity, colors)
+        card.addView(settingsDialogTitle(activity, "已安装内容包", colors))
+        val list = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+        val status = TextView(activity).apply { setTextColor(colors.body) }
+        card.addView(status, apiServerRowParams(activity))
+        card.addView(list, apiServerRowParams(activity))
+
+        fun reload() {
+            val manager = ApiPackageManager(activity.applicationContext, ApiServerClient(store), settings)
+            val packages = manager.installed().sortedWith(compareBy({ it.kind.wireValue }, { it.packageId }))
+            list.removeAllViews()
+            status.text = if (packages.isEmpty()) "暂无由 API 服务器安装的内容包" else "共 ${packages.size} 个内容包"
+            packages.forEach { item ->
+                val title = TextView(activity).apply {
+                    setTextColor(colors.title)
+                    text = "${item.kind.wireValue} · ${item.packageId}\n${item.version} · ${item.buildTime}"
+                }
+                list.addView(title, apiServerRowParams(activity))
+                val actions = settingsDialogActions(activity)
+                if (item.kind == ApiPackageKind.THEME) {
+                    actions.addView(settingsDialogButton(activity, "使用", colors, SettingsDialogButtonRole.Neutral).apply {
+                        setOnClickListener {
+                            runCatching { ApiThemeStore.activate(activity.applicationContext, item.contentId) }
+                                .onSuccess { status.text = "已启用主题 ${item.packageId}，重新打开弹窗后生效" }
+                                .onFailure { status.text = it.message ?: "主题启用失败" }
+                        }
+                    }, settingsDialogButtonParams(activity))
+                }
+                actions.addView(settingsDialogButton(activity, "回滚", colors, SettingsDialogButtonRole.Neutral).apply {
+                    setOnClickListener {
+                        status.text = "正在回滚 ${item.packageId}……"
+                        Thread {
+                            val result = manager.rollback(item.kind, item.packageId)
+                            activity.runOnUiThread { status.text = result.message; reload() }
+                        }.start()
+                    }
+                }, settingsDialogButtonParams(activity))
+                actions.addView(settingsDialogButton(activity, "卸载", colors, SettingsDialogButtonRole.Neutral).apply {
+                    setOnClickListener {
+                        val removed = manager.uninstall(item.kind, item.packageId)
+                        status.text = if (removed) "已卸载 ${item.packageId}" else "卸载失败"
+                        reload()
+                    }
+                }, settingsDialogButtonParams(activity))
+                list.addView(actions)
+            }
+        }
+        reload()
+        val actions = settingsDialogActions(activity)
+        actions.addView(settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Primary).apply {
+            setOnClickListener { dialog.dismiss() }
+        }, settingsDialogButtonParams(activity))
+        card.addView(actions)
+        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
+    }
+}
+
 internal fun ReaMicroSettingsHook.checkApiPackageUpdates() {
     val activity = activityProvider() ?: return
     val store = ApiServerSettingsStore { activity.applicationContext }
@@ -297,6 +361,8 @@ internal fun ReaMicroSettingsHook.checkApiPackageUpdates() {
                 ApiPackageKind.ONLINE_SOURCE,
                 ApiPackageKind.EPUB_STYLE,
                 ApiPackageKind.HIGHLIGHT_STYLE,
+                ApiPackageKind.ASSOCIATION_SOURCE,
+                ApiPackageKind.THEME,
             ).flatMap(manager::check)
             candidates.map(manager::install)
         }
