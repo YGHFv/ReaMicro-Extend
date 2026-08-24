@@ -36,6 +36,7 @@ DEFAULT_FEATURES = {
 }
 PACKAGE_ROOT = Path(os.getenv("REAMICRO_PACKAGE_ROOT", "/data/packages"))
 RELEASE_ROOT = Path(os.getenv("REAMICRO_RELEASE_ROOT", "/data/releases/module"))
+BACKUP_ROOT = Path(os.getenv("REAMICRO_BACKUP_ROOT", "/data/backups"))
 ADMIN_USERNAME = os.getenv("REAMICRO_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("REAMICRO_ADMIN_PASSWORD", "")
 SIGNING_PRIVATE_KEY_FILE = os.getenv("REAMICRO_SIGNING_PRIVATE_KEY_FILE", "")
@@ -206,6 +207,14 @@ def check_api_key(value: str | None) -> None:
 
 async def authenticated(x_reamicro_api_key: str | None = Header(default=None)) -> None:
     check_api_key(x_reamicro_api_key)
+
+
+async def backup_owner(x_reamicro_api_key: str | None = Header(default=None)) -> str:
+    config = load_config()
+    api_key = str(config.get("apiKey", ""))
+    if not api_key or not x_reamicro_api_key or not hmac.compare_digest(api_key, x_reamicro_api_key):
+        raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="备份功能需要 API Key"))
+    return hashlib.sha256(x_reamicro_api_key.encode("utf-8")).hexdigest()[:32]
 
 
 @app.exception_handler(HTTPException)
@@ -456,6 +465,45 @@ async def latest_release(_: None = Depends(authenticated)) -> dict[str, Any]:
     if not metadata_path.is_file():
         return response(None, code="NOT_CONFIGURED", message="GitHub Release 中没有 APK")
     return response(json.loads(metadata_path.read_text(encoding="utf-8")))
+
+
+@app.post("/v1/backups/module")
+async def upload_module_backup(request: Request, owner: str = Depends(backup_owner)) -> dict[str, Any]:
+    body = await request.body()
+    if not body or len(body) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="备份为空或超过 20 MB"))
+    if not body.startswith(b"PK"):
+        raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="备份不是 ZIP 文件"))
+    owner_dir = BACKUP_ROOT / owner / "module"
+    owner_dir.mkdir(parents=True, exist_ok=True)
+    created_at = int(datetime.now(timezone.utc).timestamp() * 1000)
+    target = owner_dir / f"{created_at}.zip"
+    temp = owner_dir / f".{created_at}.tmp"
+    temp.write_bytes(body)
+    temp.replace(target)
+    (owner_dir / "latest.json").write_text(json.dumps({
+        "createdAt": created_at,
+        "file": target.name,
+        "size": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    backups = sorted(owner_dir.glob("*.zip"), reverse=True)
+    for expired in backups[20:]:
+        expired.unlink(missing_ok=True)
+    return response({"createdAt": created_at, "size": len(body)})
+
+
+@app.get("/v1/backups/module/latest")
+async def download_module_backup(owner: str = Depends(backup_owner)) -> FileResponse:
+    owner_dir = BACKUP_ROOT / owner / "module"
+    metadata_path = owner_dir / "latest.json"
+    if not metadata_path.is_file():
+        raise HTTPException(status_code=404, detail=response(code="BACKUP_NOT_FOUND", message="没有模块设置备份"))
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    target = (owner_dir / str(metadata.get("file", ""))).resolve()
+    if target.parent != owner_dir.resolve() or not target.is_file():
+        raise HTTPException(status_code=404, detail=response(code="BACKUP_NOT_FOUND", message="备份文件不存在"))
+    return FileResponse(target, media_type="application/zip", filename="reamicro-module-backup.zip")
 
 
 @app.get("/v1/releases/module/download")

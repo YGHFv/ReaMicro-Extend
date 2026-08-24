@@ -150,4 +150,29 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
         require(temp.renameTo(target)) { "模块 APK 缓存写入失败" }
         return target
     }
+
+    fun uploadModuleBackup(bytes: ByteArray): String {
+        val settings = settingsStore.get()
+        val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
+        return HttpClient.postBytes(
+            "$baseUrl/v1/backups/module",
+            bytes,
+            contentType = "application/zip",
+            headers = authHeaders(settings),
+            connectTimeoutMs = settings.timeoutSeconds * 1_000,
+            readTimeoutMs = 60_000,
+        )
+    }
+
+    fun downloadModuleBackup(): ByteArray {
+        val settings = settingsStore.get()
+        val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
+        return HttpClient.getBytes(
+            "$baseUrl/v1/backups/module/latest",
+            headers = authHeaders(settings),
+            connectTimeoutMs = settings.timeoutSeconds * 1_000,
+            readTimeoutMs = 60_000,
+            followRedirects = false,
+        )
+    }
 }

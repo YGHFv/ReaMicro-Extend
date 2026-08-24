@@ -68,6 +68,30 @@ internal object HttpClient {
         return connection.readTextAndClose()
     }
 
+    fun postBytes(
+        url: String,
+        body: ByteArray,
+        contentType: String = "application/octet-stream",
+        headers: Map<String, String> = emptyMap(),
+        connectTimeoutMs: Int = 8_000,
+        readTimeoutMs: Int = 30_000,
+    ): String {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            doOutput = true
+            connectTimeout = connectTimeoutMs
+            readTimeout = readTimeoutMs
+            instanceFollowRedirects = false
+            setRequestProperty("User-Agent", DEFAULT_USER_AGENT)
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Content-Type", contentType)
+            setFixedLengthStreamingMode(body.size)
+            headers.forEach { (key, value) -> setRequestProperty(key, value) }
+        }
+        connection.outputStream.use { it.write(body) }
+        return connection.readTextAndClose()
+    }
+
     fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
 
     private fun Map<String, String>.toQueryString(): String = entries.joinToString("&") { (key, value) ->

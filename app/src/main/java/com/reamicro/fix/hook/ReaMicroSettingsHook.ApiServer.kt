@@ -15,6 +15,7 @@ import com.reamicro.fix.cloud.api.ApiPackageKind
 import com.reamicro.fix.cloud.api.ApiPackageManager
 import com.reamicro.fix.cloud.api.checkModuleUpdate
 import com.reamicro.fix.cloud.api.ModuleApkInstaller
+import com.reamicro.fix.cloud.api.ModuleSettingsBackup
 import com.reamicro.fix.cloud.api.normalizeApiBaseUrl
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 import com.reamicro.fix.hook.settings.*
@@ -206,6 +207,38 @@ internal fun ReaMicroSettingsHook.downloadApiModuleUpdate() {
             }
         }.onFailure {
             activity.runOnUiThread { showToast(it.message ?: "模块更新下载失败") }
+        }
+    }.start()
+}
+
+internal fun ReaMicroSettingsHook.backupApiModuleSettings() {
+    val activity = activityProvider() ?: return
+    val store = ApiServerSettingsStore { activity.applicationContext }
+    showToast("正在上传模块设置备份")
+    Thread {
+        runCatching {
+            val bytes = ModuleSettingsBackup.create(activity.applicationContext)
+            ApiServerClient(store).uploadModuleBackup(bytes)
+        }.onSuccess {
+            activity.runOnUiThread { showToast("模块设置备份已上传") }
+        }.onFailure {
+            activity.runOnUiThread { showToast(it.message ?: "上传备份失败") }
+        }
+    }.start()
+}
+
+internal fun ReaMicroSettingsHook.restoreApiModuleSettings() {
+    val activity = activityProvider() ?: return
+    val store = ApiServerSettingsStore { activity.applicationContext }
+    showToast("正在下载模块设置备份")
+    Thread {
+        runCatching {
+            val bytes = ApiServerClient(store).downloadModuleBackup()
+            ModuleSettingsBackup.restore(activity.applicationContext, bytes)
+        }.onSuccess { count ->
+            activity.runOnUiThread { showToast("已恢复 $count 项模块设置，请重新打开设置页") }
+        }.onFailure {
+            activity.runOnUiThread { showToast(it.message ?: "恢复备份失败") }
         }
     }.start()
 }

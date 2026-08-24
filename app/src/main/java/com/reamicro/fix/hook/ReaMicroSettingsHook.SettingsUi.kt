@@ -913,6 +913,18 @@ internal fun ReaMicroSettingsHook.renderCloudCompletionSettingsContent(innerPadd
                 subtitle = "下载后交由 Android 安装器确认",
                 onClick = { downloadApiModuleUpdate() },
             ),
+            ActionRow(
+                key = "api_backup_upload",
+                title = "备份模块设置到服务器",
+                subtitle = "不包含 API Key、账号密码等敏感凭据",
+                onClick = { backupApiModuleSettings() },
+            ),
+            ActionRow(
+                key = "api_backup_restore",
+                title = "从服务器恢复模块设置",
+                subtitle = "恢复前请确认会覆盖本机模块设置",
+                onClick = { restoreApiModuleSettings() },
+            ),
         )
         val rows = listOf(
             ToggleRow(
