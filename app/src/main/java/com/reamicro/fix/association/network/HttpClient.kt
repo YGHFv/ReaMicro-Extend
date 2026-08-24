@@ -92,6 +92,24 @@ internal object HttpClient {
         return connection.readTextAndClose()
     }
 
+    fun delete(
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        connectTimeoutMs: Int = 8_000,
+        readTimeoutMs: Int = 8_000,
+    ): String {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "DELETE"
+            connectTimeout = connectTimeoutMs
+            readTimeout = readTimeoutMs
+            instanceFollowRedirects = false
+            setRequestProperty("User-Agent", DEFAULT_USER_AGENT)
+            setRequestProperty("Accept", "application/json")
+            headers.forEach { (key, value) -> setRequestProperty(key, value) }
+        }
+        return connection.readTextAndClose()
+    }
+
     fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
 
     private fun Map<String, String>.toQueryString(): String = entries.joinToString("&") { (key, value) ->

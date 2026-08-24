@@ -175,4 +175,35 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
             followRedirects = false,
         )
     }
+
+    fun createTask(body: JSONObject): JSONObject = taskRequest("POST", "/v1/tasks", body)
+    fun listTasks(): JSONObject = taskRequest("GET", "/v1/tasks", null)
+    fun taskAction(taskId: String, action: String): JSONObject = taskRequest("POST", "/v1/tasks/${java.net.URLEncoder.encode(taskId, "UTF-8")}/$action", JSONObject())
+    fun configureTask(taskId: String, body: JSONObject): JSONObject = taskRequest("POST", "/v1/tasks/${java.net.URLEncoder.encode(taskId, "UTF-8")}/configure", body)
+
+    fun listReaMicroCredentials(): JSONObject = taskRequest("GET", "/v1/credentials/reamicro", null)
+
+    fun saveReaMicroCredential(body: JSONObject): JSONObject = taskRequest("POST", "/v1/credentials/reamicro", body)
+
+    fun deleteReaMicroCredential(id: String): JSONObject {
+        val settings = settingsStore.get()
+        val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
+        return JSONObject(HttpClient.delete(
+            "$baseUrl/v1/credentials/reamicro/${java.net.URLEncoder.encode(id, "UTF-8")}",
+            authHeaders(settings),
+            settings.timeoutSeconds * 1_000,
+            settings.timeoutSeconds * 1_000,
+        ))
+    }
+
+    private fun taskRequest(method: String, path: String, body: JSONObject?): JSONObject {
+        val settings = settingsStore.get()
+        val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
+        val response = if (method == "GET") {
+            HttpClient.get("$baseUrl$path", authHeaders(settings), settings.timeoutSeconds * 1_000, settings.timeoutSeconds * 1_000, false)
+        } else {
+            HttpClient.postBytes("$baseUrl$path", body?.toString()?.toByteArray(Charsets.UTF_8) ?: ByteArray(0), "application/json", authHeaders(settings), settings.timeoutSeconds * 1_000, settings.timeoutSeconds * 1_000)
+        }
+        return JSONObject(response)
+    }
 }

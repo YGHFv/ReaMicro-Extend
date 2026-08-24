@@ -2,6 +2,7 @@ package com.reamicro.fix.hook
 
 import android.app.Dialog
 import android.text.InputType
+import android.view.View
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -16,6 +17,7 @@ import com.reamicro.fix.cloud.api.ApiPackageManager
 import com.reamicro.fix.cloud.api.checkModuleUpdate
 import com.reamicro.fix.cloud.api.ModuleApkInstaller
 import com.reamicro.fix.cloud.api.ModuleSettingsBackup
+import com.reamicro.fix.cloud.api.CloudTaskManager
 import com.reamicro.fix.cloud.api.normalizeApiBaseUrl
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 import com.reamicro.fix.hook.settings.*
@@ -145,6 +147,137 @@ internal fun ReaMicroSettingsHook.openApiServerSettingsDialog() {
             showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX api server settings dialog failed: ${it.stackTraceToString()}")
+        }
+    }
+}
+
+internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
+    val activity = activityProvider() ?: return
+    activity.runOnUiThread {
+        val store = ApiServerSettingsStore { activity.applicationContext }
+        val client = ApiServerClient(store)
+        val colors = SettingsDialogColors(activity)
+        val dialog = Dialog(activity)
+        val card = settingsDialogCard(activity, colors)
+        card.addView(settingsDialogTitle(activity, "云端任务", colors))
+        val credentialIds = mutableListOf<String>()
+        val loadedTasks = mutableListOf<com.reamicro.fix.cloud.api.CloudTask>()
+        val credentialSpinner = Spinner(activity).apply {
+            adapter = ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, listOf("正在读取已有凭据……"))
+        }
+        card.addView(credentialSpinner, apiServerRowParams(activity))
+        val token = apiServerEdit(activity, "阅微登录密钥（只传输 HTTPS）", "").apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val label = apiServerEdit(activity, "凭据名称", "阅微账号")
+        val accountId = apiServerEdit(activity, "阅微账号 ID（可选）", "")
+        val time = apiServerEdit(activity, "每日执行时间，例如 00:05", "00:05")
+        val duration = apiServerEdit(activity, "云端阅读时长（分钟）", "30")
+        val customBook = apiServerEdit(activity, "自定义图书：每行 cloudBookId|书名；留空读取最近阅读", "").apply {
+            minLines = 3
+            setSingleLine(false)
+        }
+        val checkin = android.widget.Switch(activity).apply { text = "野社零点云端签到"; setTextColor(colors.title) }
+        val draw = android.widget.Switch(activity).apply { text = "野社自动抽卡"; setTextColor(colors.title) }
+        val read = android.widget.Switch(activity).apply { text = "云端自动阅读"; setTextColor(colors.title) }
+        listOf(token, label, accountId, time, duration, customBook, checkin, draw, read).forEach { view -> card.addView(view, apiServerRowParams(activity)) }
+        val status = TextView(activity).apply { setTextColor(colors.body); text = "凭据将在服务器端加密保存，模块设置备份不包含该密钥。" }
+        card.addView(status, apiServerRowParams(activity))
+        Thread {
+            runCatching {
+                val manager = CloudTaskManager(client)
+                manager.credentials() to manager.list()
+            }.onSuccess { (credentials, tasks) ->
+                activity.runOnUiThread {
+                    credentialIds.clear()
+                    credentialIds.addAll(credentials.map { it.id })
+                    loadedTasks.clear()
+                    loadedTasks.addAll(tasks)
+                    credentialSpinner.adapter = ArrayAdapter(
+                        activity,
+                        android.R.layout.simple_spinner_dropdown_item,
+                        credentials.map { "${it.label}${it.accountId.takeIf(String::isNotBlank)?.let { id -> " · $id" }.orEmpty()}" }
+                            .ifEmpty { listOf("没有已上传凭据，请填写登录密钥") },
+                    )
+                    fun applyCredentialTasks(position: Int) {
+                        val selectedId = credentialIds.getOrNull(position).orEmpty()
+                        checkin.isChecked = tasks.firstOrNull { it.taskType == "yeshe_checkin" && it.credentialId == selectedId }?.enabled == true
+                        draw.isChecked = tasks.firstOrNull { it.taskType == "yeshe_draw_card" && it.credentialId == selectedId }?.enabled == true
+                        read.isChecked = tasks.firstOrNull { it.taskType == "cloud_auto_read" && it.credentialId == selectedId }?.enabled == true
+                    }
+                    credentialSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                        override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) = applyCredentialTasks(position)
+                        override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+                    }
+                    applyCredentialTasks(credentialSpinner.selectedItemPosition)
+                    status.text = "已读取 ${credentials.size} 个凭据、${tasks.size} 个任务；留空登录密钥可复用已选凭据。"
+                }
+            }.onFailure { error -> activity.runOnUiThread { status.text = error.message ?: "读取云端配置失败" } }
+        }.start()
+        val actions = settingsDialogActions(activity)
+        actions.addView(settingsDialogButton(activity, "保存并验证", colors, SettingsDialogButtonRole.Primary).apply {
+            setOnClickListener {
+                status.text = "正在验证阅微登录密钥……"
+                Thread {
+                    runCatching {
+                        val manager = CloudTaskManager(client)
+                        val enteredToken = token.text.toString().trim()
+                        val credentialId = if (enteredToken.isNotBlank()) {
+                            manager.uploadCredential(enteredToken, label.text.toString(), accountId.text.toString()).id
+                        } else {
+                            credentialIds.getOrNull(credentialSpinner.selectedItemPosition) ?: error("请先上传或选择阅微凭据")
+                        }
+                        val selectedBooks = parseCloudReadingBooks(customBook.text.toString())
+                        val readRequest = org.json.JSONObject().put("durationMinutes", duration.text.toString().toIntOrNull()?.coerceIn(1, 720) ?: 30)
+                        if (selectedBooks.length() > 0) readRequest.put("books", selectedBooks)
+                        manager.saveAutomation("yeshe_checkin", checkin.isChecked, credentialId, time.text.toString())
+                        manager.saveAutomation("yeshe_draw_card", draw.isChecked, credentialId, time.text.toString())
+                        manager.saveAutomation("cloud_auto_read", read.isChecked, credentialId, time.text.toString(), readRequest)
+                    }.onSuccess {
+                        activity.runOnUiThread { status.text = "阅微凭据与任务配置已同步" }
+                    }.onFailure { error ->
+                        activity.runOnUiThread { status.text = error.message ?: "云端任务配置失败" }
+                    }
+                }.start()
+            }
+        }, settingsDialogButtonParams(activity))
+        actions.addView(settingsDialogButton(activity, "立即执行", colors, SettingsDialogButtonRole.Neutral).apply {
+            setOnClickListener {
+                val credentialId = credentialIds.getOrNull(credentialSpinner.selectedItemPosition)
+                if (credentialId == null) {
+                    status.text = "请先上传或选择阅微凭据"
+                    return@setOnClickListener
+                }
+                status.text = "正在安排已启用任务立即执行……"
+                Thread {
+                    runCatching {
+                        val manager = CloudTaskManager(client)
+                        val runnable = manager.list().filter { it.credentialId == credentialId && it.enabled }
+                        runnable.forEach { manager.runNow(it.id) }
+                        runnable.size
+                    }.onSuccess { count -> activity.runOnUiThread { status.text = "已安排 $count 个任务立即执行" } }
+                        .onFailure { error -> activity.runOnUiThread { status.text = error.message ?: "立即执行失败" } }
+                }.start()
+            }
+        }, settingsDialogButtonParams(activity))
+        actions.addView(settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply { setOnClickListener { dialog.dismiss() } }, settingsDialogButtonParams(activity))
+        card.addView(actions)
+        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
+    }
+}
+
+private fun parseCloudReadingBooks(raw: String): org.json.JSONArray {
+    val text = raw.trim()
+    if (text.isBlank()) return org.json.JSONArray()
+    if (text.startsWith("[")) return org.json.JSONArray(text)
+    return org.json.JSONArray().apply {
+        text.lineSequence().map(String::trim).filter(String::isNotBlank).forEach { line ->
+            val parts = line.split('|', limit = 2)
+            val id = parts.first().trim().toLongOrNull() ?: error("自定义图书 ID 无效：${parts.first()}")
+            put(org.json.JSONObject()
+                .put("cloudBookId", id)
+                .put("bookId", id)
+                .put("name", parts.getOrNull(1)?.trim().orEmpty()))
         }
     }
 }

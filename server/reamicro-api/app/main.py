@@ -17,7 +17,7 @@ import base64
 import hashlib as _hashlib
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Query, Form, status, UploadFile, File
@@ -39,6 +39,12 @@ DEFAULT_FEATURES = {
 PACKAGE_ROOT = Path(os.getenv("REAMICRO_PACKAGE_ROOT", "/data/packages"))
 RELEASE_ROOT = Path(os.getenv("REAMICRO_RELEASE_ROOT", "/data/releases/module"))
 BACKUP_ROOT = Path(os.getenv("REAMICRO_BACKUP_ROOT", "/data/backups"))
+TASK_ROOT = Path(os.getenv("REAMICRO_TASK_ROOT", "/data/tasks"))
+TASKS_PATH = TASK_ROOT / "tasks.json"
+TASK_LOG_ROOT = TASK_ROOT / "logs"
+ACCOUNT_ROOT = Path(os.getenv("REAMICRO_ACCOUNT_ROOT", "/data/accounts"))
+ACCOUNT_PATH = ACCOUNT_ROOT / "credentials.json"
+SECRET_KEY = os.getenv("REAMICRO_SECRET_KEY", "")
 ADMIN_USERNAME = os.getenv("REAMICRO_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("REAMICRO_ADMIN_PASSWORD", "")
 SIGNING_PRIVATE_KEY_FILE = os.getenv("REAMICRO_SIGNING_PRIVATE_KEY_FILE", "")
@@ -96,6 +102,329 @@ def save_config(next_config: dict[str, Any]) -> dict[str, Any]:
         temp.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
         temp.replace(CONFIG_PATH)
         return safe
+
+
+def load_tasks() -> dict[str, dict[str, Any]]:
+    TASK_ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        value = json.loads(TASKS_PATH.read_text(encoding="utf-8")) if TASKS_PATH.is_file() else {}
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_tasks(tasks: dict[str, dict[str, Any]]) -> None:
+    TASK_ROOT.mkdir(parents=True, exist_ok=True)
+    temp = TASKS_PATH.with_suffix(".tmp")
+    temp.write_text(json.dumps(tasks, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(TASKS_PATH)
+
+
+def load_credentials() -> dict[str, dict[str, Any]]:
+    ACCOUNT_ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        value = json.loads(ACCOUNT_PATH.read_text(encoding="utf-8")) if ACCOUNT_PATH.is_file() else {}
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_credentials(credentials: dict[str, dict[str, Any]]) -> None:
+    ACCOUNT_ROOT.mkdir(parents=True, exist_ok=True)
+    temp = ACCOUNT_PATH.with_suffix(".tmp")
+    temp.write_text(json.dumps(credentials, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(ACCOUNT_PATH)
+
+
+def task_log(task_id: str, message: str, level: str = "INFO") -> None:
+    TASK_LOG_ROOT.mkdir(parents=True, exist_ok=True)
+    path = TASK_LOG_ROOT / f"{task_id}.log"
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({
+            "at": int(datetime.now(timezone.utc).timestamp() * 1000),
+            "level": level,
+            "message": message,
+        }, ensure_ascii=False) + "\n")
+
+
+def secret_cipher_key() -> bytes:
+    material = SECRET_KEY or ADMIN_PASSWORD
+    if not material:
+        raise ValueError("未配置 REAMICRO_SECRET_KEY 或管理密码")
+    return hashlib.sha256(material.encode("utf-8")).digest()
+
+
+def encrypt_secret(value: Any) -> str:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    nonce = secrets.token_bytes(12)
+    body = json.dumps(value, ensure_ascii=False).encode("utf-8")
+    encrypted = AESGCM(secret_cipher_key()).encrypt(nonce, body, b"reamicro-task-v1")
+    return base64.urlsafe_b64encode(nonce + encrypted).decode("ascii")
+
+
+def decrypt_secret(value: str) -> Any:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    raw = base64.urlsafe_b64decode(value.encode("ascii"))
+    body = AESGCM(secret_cipher_key()).decrypt(raw[:12], raw[12:], b"reamicro-task-v1")
+    return json.loads(body.decode("utf-8"))
+
+
+def task_interval(task: dict[str, Any]) -> int:
+    schedule = task.get("schedule", {})
+    if isinstance(schedule, dict):
+        return max(int(schedule.get("intervalSeconds", 86_400)), 60)
+    if schedule == "@hourly":
+        return 3_600
+    if schedule == "@daily":
+        return 86_400
+    return 86_400
+
+
+def next_task_run(task: dict[str, Any], now_ms: int | None = None) -> int:
+    now_ms = now_ms or int(datetime.now(timezone.utc).timestamp() * 1000)
+    schedule = task.get("schedule", {})
+    if not isinstance(schedule, dict) or not schedule.get("timeOfDay"):
+        return now_ms + task_interval(task) * 1000
+    try:
+        hour_text, minute_text = str(schedule.get("timeOfDay")).split(":", 1)
+        offset = int(schedule.get("timezoneOffsetMinutes", 480))
+        local_zone = timezone(timedelta(minutes=max(-720, min(offset, 840))))
+        local_now = datetime.fromtimestamp(now_ms / 1000, local_zone)
+        candidate = local_now.replace(hour=int(hour_text), minute=int(minute_text), second=0, microsecond=0)
+        if candidate <= local_now:
+            candidate += timedelta(days=1)
+        return int(candidate.timestamp() * 1000)
+    except (ValueError, TypeError):
+        return now_ms + task_interval(task) * 1000
+
+
+def normalized_time_of_day(value: Any) -> str:
+    text = str(value or "").strip()
+    try:
+        hour_text, minute_text = text.split(":", 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+        if hour not in range(24) or minute not in range(60):
+            raise ValueError
+        return f"{hour:02d}:{minute:02d}"
+    except (ValueError, TypeError):
+        raise ValueError("每日执行时间必须使用 HH:MM 格式")
+
+
+def task_credential_id(task: dict[str, Any]) -> str:
+    if task.get("credentialId"):
+        return str(task.get("credentialId"))
+    if not task.get("requestEncrypted"):
+        return ""
+    try:
+        request = decrypt_secret(str(task["requestEncrypted"]))
+        return str(request.get("credentialId", "")) if isinstance(request, dict) else ""
+    except Exception:
+        return ""
+
+
+def execute_http_task(task: dict[str, Any]) -> tuple[str, str]:
+    request = decrypt_secret(str(task.get("requestEncrypted", ""))) if task.get("requestEncrypted") else {}
+    url = str(request.get("url", "")).strip()
+    if not url.startswith(("https://", "http://")):
+        return "failed", "任务 URL 无效"
+    method = str(request.get("method", "GET")).upper()
+    body = request.get("body", "")
+    if isinstance(body, str):
+        body_bytes = body.encode("utf-8")
+    else:
+        body_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    request_obj = urllib.request.Request(url, data=body_bytes if method != "GET" else None, method=method)
+    for key, value in dict(request.get("headers", {})).items():
+        request_obj.add_header(str(key), str(value))
+    try:
+        with urllib.request.urlopen(request_obj, timeout=30) as stream:
+            response_body = stream.read(4_096).decode("utf-8", errors="replace")
+            if any(word in response_body.lower() for word in ("captcha", "验证码", "risk-control", "风控")):
+                return "paused", "检测到验证码或风控响应，任务已暂停"
+            return "success", f"HTTP {stream.status}: {response_body[:300]}"
+    except urllib.error.HTTPError as error:
+        body_text = error.read(2_000).decode("utf-8", errors="replace")
+        if error.code in (401, 403, 429) or any(word in body_text.lower() for word in ("captcha", "验证码", "风控")):
+            return "paused", f"HTTP {error.code} 触发认证/风控，任务已暂停"
+        return "failed", f"HTTP {error.code}: {body_text[:300]}"
+    except Exception as error:
+        return "failed", str(error)
+
+
+def redact_message(value: str) -> str:
+    return value.replace("Bearer ", "Bearer ***").replace("token", "token=***")[:500]
+
+
+def json_http_request(url: str, token: str, payload: Any, endpoint: str = "", timeout: int = 45) -> tuple[int, Any, str]:
+    target = url.rstrip("/") + "/" + endpoint.lstrip("/")
+    body = json.dumps(payload if payload is not None else {}, ensure_ascii=False).encode("utf-8")
+    request_obj = urllib.request.Request(target, data=body, method="POST", headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "platform": "android",
+        "User-Agent": "ReaMicro-Cloud-Worker/1.0",
+    })
+    try:
+        with urllib.request.urlopen(request_obj, timeout=timeout) as stream:
+            raw = stream.read(128_000).decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                parsed = {"raw": raw}
+            return stream.status, parsed, raw
+    except urllib.error.HTTPError as error:
+        raw = error.read(16_000).decode("utf-8", errors="replace")
+        return error.code, {}, raw
+
+
+def nested_value(value: Any, *keys: str) -> Any:
+    current = value
+    for key in keys:
+        if isinstance(current, dict):
+            current = current.get(key)
+        else:
+            return None
+    return current
+
+
+def credential_for_task(task: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    request = decrypt_secret(str(task.get("requestEncrypted", ""))) if task.get("requestEncrypted") else {}
+    credential_id = str(request.get("credentialId", "")).strip()
+    credentials = load_credentials()
+    credential = credentials.get(credential_id)
+    if not credential or credential.get("owner") != task.get("owner"):
+        raise ValueError("阅微凭据不存在或不属于当前账号")
+    secret = decrypt_secret(str(credential.get("secretEncrypted", "")))
+    if not isinstance(secret, dict) or not secret.get("token"):
+        raise ValueError("阅微凭据无有效 token")
+    return request, secret
+
+
+def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
+    request, secret = credential_for_task(task)
+    base_url = str(secret.get("baseUrl") or "https://api.reamicro.zhendong.ltd/").strip()
+    token = str(secret.get("token"))
+    task_type = str(task.get("taskType"))
+    configured_body = request.get("body", {})
+    if isinstance(configured_body, str):
+        try:
+            configured_body = json.loads(configured_body or "{}")
+        except ValueError:
+            configured_body = {}
+    if task_type == "yeshe_draw_card":
+        status_code, body, raw = json_http_request(base_url, token, configured_body, str(request.get("endpoint") or "rest/lottery/lottery-v2"))
+        if status_code in (401, 403, 429):
+            return "paused", f"阅微认证/风控响应 HTTP {status_code}"
+        if status_code < 200 or status_code >= 300:
+            return "failed", f"抽卡请求 HTTP {status_code}: {redact_message(raw)}"
+        return "success", f"野社抽卡完成：{redact_message(json.dumps(body, ensure_ascii=False)[:300])}"
+    if task_type == "yeshe_checkin":
+        status_code, lore, raw = json_http_request(base_url, token, configured_body, str(request.get("endpoint") or "rest/community/get-daily-lore"))
+        if status_code in (401, 403, 429):
+            return "paused", f"阅微认证/风控响应 HTTP {status_code}"
+        if status_code < 200 or status_code >= 300:
+            return "failed", f"获取野社每日轶闻失败 HTTP {status_code}: {redact_message(raw)}"
+        lore_id = nested_value(lore, "data", "id") or nested_value(lore, "data", "loreId") or nested_value(lore, "id")
+        claimed = bool(nested_value(lore, "data", "isFinish") or nested_value(lore, "data", "claimed"))
+        if claimed:
+            return "success", "野社零点签到已完成，无需重复提交"
+        if not lore_id:
+            return "failed", "阅微每日轶闻响应缺少 userLoreId"
+        status_code, body, raw = json_http_request(base_url, token, {"userLoreId": int(lore_id)}, str(request.get("completeEndpoint") or "rest/community/complete-daily-lore"))
+        if status_code in (401, 403, 429):
+            return "paused", f"阅微认证/风控响应 HTTP {status_code}"
+        if status_code < 200 or status_code >= 300:
+            return "failed", f"野社签到提交失败 HTTP {status_code}: {redact_message(raw)}"
+        return "success", f"野社零点签到完成：{redact_message(json.dumps(body, ensure_ascii=False)[:300])}"
+    if task_type == "cloud_auto_read":
+        books = request.get("books") if isinstance(request.get("books"), list) else []
+        if not books:
+            status_code, record_body, raw = json_http_request(
+                base_url,
+                token,
+                {"pageNum": 1, "pageSize": int(request.get("recentLimit", 1) or 1)},
+                "rest/read/get-reader-record-list",
+            )
+            if status_code < 200 or status_code >= 300:
+                return ("paused", f"读取最近阅读记录失败 HTTP {status_code}") if status_code in (401, 403, 429) else ("failed", f"读取最近阅读记录失败 HTTP {status_code}: {redact_message(raw)}")
+            books = nested_value(record_body, "data", "list") or nested_value(record_body, "data") or []
+        if isinstance(books, dict):
+            books = [books]
+        books = books[: max(1, min(int(request.get("bookLimit", 1) or 1), 10))]
+        duration_minutes = max(1, min(int(request.get("durationMinutes", 30) or 30), 720))
+        duration_seconds = duration_minutes * 60
+        completed = 0
+        for book in books:
+            if not isinstance(book, dict):
+                continue
+            cloud_id = book.get("cloudBookId") or book.get("bookId") or book.get("id")
+            if not cloud_id:
+                continue
+            progress_payload = {
+                "objectId": str(book.get("objectId") or cloud_id),
+                "bookId": str(book.get("bookId") or cloud_id),
+                "bookName": str(book.get("name") or book.get("bookName") or ""),
+                "chapterNum": int(book.get("chapterNum") or 0),
+                "cursorIndex": str(book.get("cursorIndex") or ""),
+                "title": str(book.get("name") or book.get("bookName") or ""),
+                "progress": min(0.999, float(book.get("progress") or 0.0) + 0.01),
+            }
+            progress_status, _, progress_raw = json_http_request(base_url, token, progress_payload, "rest/read/update-reader-progress")
+            if progress_status in (401, 403, 429):
+                return "paused", f"上报阅读进度触发认证/风控 HTTP {progress_status}"
+            if progress_status < 200 or progress_status >= 300:
+                return "failed", f"上报阅读进度失败 HTTP {progress_status}: {redact_message(progress_raw)}"
+            china_date = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+            time_payload = {"list": [{"bookId": int(cloud_id), "date": china_date, "duration": duration_seconds, "verify": ""}]}
+            time_status, _, time_raw = json_http_request(base_url, token, time_payload, "rest/read/update-reader-time-by-date")
+            if time_status in (401, 403, 429):
+                return "paused", f"上报阅读时长触发认证/风控 HTTP {time_status}"
+            if time_status < 200 or time_status >= 300:
+                return "failed", f"上报阅读时长失败 HTTP {time_status}: {redact_message(time_raw)}"
+            completed += 1
+        return ("success", f"云端自动阅读完成 {completed} 本，累计 {duration_minutes} 分钟") if completed else ("failed", "没有找到可阅读的图书")
+    return "failed", f"未知阅微任务类型：{task_type}"
+
+
+def execute_task(task: dict[str, Any]) -> tuple[str, str]:
+    if task.get("taskType") in {"http"}:
+        return execute_http_task(task)
+    if task.get("taskType") in {"yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"}:
+        return execute_reamicro_task(task)
+    return "failed", f"未知任务类型：{task.get('taskType')}"
+
+
+async def task_scheduler_loop() -> None:
+    while True:
+        try:
+            tasks = load_tasks()
+            now = int(datetime.now(timezone.utc).timestamp() * 1000)
+            changed = False
+            for task_id, task in tasks.items():
+                if not task.get("enabled", True) or task.get("status") in {"paused", "cancelled", "running"}:
+                    continue
+                next_run = int(task.get("nextRunAt", 0))
+                if next_run > now:
+                    continue
+                task["status"] = "running"
+                task["lastRunAt"] = now
+                changed = True
+                save_tasks(tasks)
+                result, message = await asyncio.to_thread(execute_task, task)
+                task_log(task_id, message, "ERROR" if result == "failed" else "WARN" if result == "paused" else "INFO")
+                task["status"] = result
+                task["lastMessage"] = message
+                task["runCount"] = int(task.get("runCount", 0)) + 1
+                task["nextRunAt"] = next_task_run(task, now) if result != "paused" else 0
+                changed = True
+                save_tasks(tasks)
+            if changed:
+                save_tasks(tasks)
+        except Exception as error:
+            print(f"task scheduler failed: {error}", flush=True)
+        await asyncio.sleep(15)
 
 app = FastAPI(title="ReaMicro API", version=API_VERSION)
 
@@ -189,6 +518,7 @@ async def release_sync_loop() -> None:
 @app.on_event("startup")
 async def start_release_sync() -> None:
     asyncio.create_task(release_sync_loop())
+    asyncio.create_task(task_scheduler_loop())
 
 
 def response(data: Any = None, code: str = "OK", message: str = "") -> dict[str, Any]:
@@ -243,6 +573,21 @@ def check_request_auth(
     raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="认证信息无效"))
 
 
+def resolve_identity(api_key_value: str | None, account_name: str | None, account_password: str | None, host_account_id: str | None) -> str:
+    config = load_config()
+    api_key = str(config.get("apiKey", ""))
+    if api_key and api_key_value and hmac.compare_digest(api_key_value, api_key):
+        return "key:" + hashlib.sha256(api_key_value.encode()).hexdigest()[:24]
+    encoded = str(config.get("accounts", {}).get(account_name or "", ""))
+    if account_name and account_password and encoded and password_matches(account_password, encoded):
+        return "account:" + account_name
+    if host_account_id and host_account_id in set(config.get("hostAccountAllowlist", [])):
+        return "host:" + host_account_id
+    if config.get("allowPublic", True) and not api_key and not config.get("accounts") and not config.get("hostAccountAllowlist"):
+        return "public"
+    raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="认证信息无效"))
+
+
 async def authenticated(
     x_reamicro_api_key: str | None = Header(default=None),
     x_reamicro_account: str | None = Header(default=None),
@@ -250,6 +595,18 @@ async def authenticated(
     x_reamicro_host_account_id: str | None = Header(default=None),
 ) -> None:
     check_request_auth(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
+
+
+async def task_owner(
+    x_reamicro_api_key: str | None = Header(default=None),
+    x_reamicro_account: str | None = Header(default=None),
+    x_reamicro_password: str | None = Header(default=None),
+    x_reamicro_host_account_id: str | None = Header(default=None),
+) -> str:
+    identity = resolve_identity(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
+    if identity == "public":
+        raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="云任务需要非公开认证"))
+    return identity
 
 
 async def backup_owner(
@@ -318,6 +675,13 @@ def admin_page(config: dict[str, Any], message: str = "") -> str:
             except (OSError, ValueError):
                 continue
     package_table = "".join(package_rows) or "<tr><td colspan='4'>暂无内容包</td></tr>"
+    task_rows = []
+    for task in load_tasks().values():
+        task_rows.append(
+            f"<tr><td>{esc(task.get('taskType', ''))}</td><td>{esc(task.get('status', ''))}</td>"
+            f"<td>{esc(task.get('lastMessage', ''))}</td><td>{esc(task.get('nextRunAt', ''))}</td></tr>"
+        )
+    task_table = "".join(task_rows) or "<tr><td colspan='4'>暂无云任务</td></tr>"
     return f"""<!doctype html>
 <html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>ReaMicro API 管理后台</title>
@@ -347,6 +711,13 @@ def admin_page(config: dict[str, Any], message: str = "") -> str:
 <label>Ed25519 签名（可选，需与服务器公钥匹配）</label><input name='signature' placeholder='Base64 签名'>
 <label>内容文件</label><input type='file' name='payload' required>
 <button type='submit'>上传并发布</button></form><h3>已发布内容包</h3><table><thead><tr><th>类型</th><th>包 ID</th><th>版本</th><th>构建时间</th></tr></thead><tbody>{package_table}</tbody></table>
+<hr><h2>云任务</h2><form method='post' action='/admin/tasks/create'>
+<div class='row'><div><label>任务类型</label><select name='task_type'><option value='yeshe_checkin'>野社零点签到</option><option value='yeshe_draw_card'>野社自动抽卡</option><option value='cloud_auto_read'>云端自动阅读</option><option value='http'>通用 HTTPS 请求</option></select></div><div><label>每日执行时间</label><input name='time_of_day' value='00:05' placeholder='HH:MM'></div></div>
+<div class='row'><div><label>阅微凭据 ID</label><input name='credential_id' placeholder='上传凭据接口返回的 id'></div><div><label>任务所有者标识</label><input name='owner' value='admin'></div></div>
+<div class='row'><div><label>阅读时长（分钟）</label><input name='duration_minutes' type='number' min='1' max='720' value='30'></div><div><label>最近阅读数量</label><input name='recent_limit' type='number' min='1' max='20' value='1'></div></div>
+<label>自定义图书 JSON（可选，留空读取最近阅读记录）</label><textarea name='request_body' placeholder='[{"cloudBookId":123,"bookId":123,"name":"书名"}]'></textarea>
+<details><summary>通用 HTTP 任务高级字段</summary><label>请求 URL</label><input name='request_url' placeholder='https://api.example.com/checkin'><div class='row'><div><label>HTTP 方法</label><input name='request_method' value='POST'></div><div><label>执行间隔（秒）</label><input name='interval_seconds' type='number' value='86400'></div></div><label>请求头 JSON</label><textarea name='request_headers' placeholder='{{"X-Example":"value"}}'></textarea></details><button type='submit'>创建云任务</button></form>
+<h3>任务状态</h3><table><thead><tr><th>类型</th><th>状态</th><th>最近结果</th><th>下次执行</th></tr></thead><tbody>{task_table}</tbody></table>
 <hr><p><a href='/v1/health'>健康检查</a>　<a href='/v1/meta'>能力信息</a></p></main></body></html>"""
 
 
@@ -512,6 +883,68 @@ async def admin_upload_package(
     return HTMLResponse(admin_page(load_config(), f"已发布 {kind}/{package_id} {version}"))
 
 
+@app.post("/admin/tasks/create", response_class=HTMLResponse)
+async def admin_create_task(
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    task_type: str = Form(...),
+    interval_seconds: int = Form(86_400),
+    request_url: str = Form(""),
+    request_method: str = Form("POST"),
+    request_headers: str = Form("{}"),
+    request_body: str = Form(""),
+    credential_id: str = Form(""),
+    duration_minutes: int = Form(30),
+    recent_limit: int = Form(1),
+    book_limit: int = Form(1),
+    time_of_day: str = Form("00:00"),
+    owner: str = Form("admin"),
+) -> HTMLResponse:
+    require_admin(credentials)
+    try:
+        headers = json.loads(request_headers or "{}")
+        if not isinstance(headers, dict):
+            raise ValueError("headers must be object")
+        request_value = {
+            "url": request_url.strip(),
+            "method": request_method.strip().upper(),
+            "headers": headers,
+            "body": request_body,
+            "credentialId": credential_id.strip(),
+            "durationMinutes": max(1, min(duration_minutes, 720)),
+            "recentLimit": max(1, min(recent_limit, 20)),
+            "bookLimit": max(1, min(book_limit, 10)),
+        }
+        if task_type.strip() == "cloud_auto_read" and request_body.strip():
+            decoded_body = json.loads(request_body)
+            if not isinstance(decoded_body, list):
+                raise ValueError("自定义图书必须是 JSON 数组")
+            request_value["books"] = decoded_body
+        task_id = "task_" + secrets.token_hex(10)
+        now = int(datetime.now(timezone.utc).timestamp() * 1000)
+        tasks = load_tasks()
+        tasks[task_id] = {
+            "id": task_id,
+            "owner": owner.strip() or "admin",
+            "taskType": task_type.strip(),
+            "schedule": {
+                "intervalSeconds": max(interval_seconds, 60),
+                "timeOfDay": time_of_day.strip() if task_type.strip() in {"yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"} else "",
+                "timezoneOffsetMinutes": 480,
+            },
+            "requestEncrypted": encrypt_secret(request_value),
+            "status": "scheduled",
+            "enabled": True,
+            "createdAt": now,
+            "nextRunAt": now,
+            "runCount": 0,
+        }
+        save_tasks(tasks)
+        task_log(task_id, "管理员创建任务")
+        return HTMLResponse(admin_page(load_config(), f"任务 {task_id} 已创建"))
+    except Exception as error:
+        return HTMLResponse(admin_page(load_config(), f"创建任务失败：{error}"), status_code=400)
+
+
 @app.get("/v1/meta")
 async def meta(_: None = Depends(authenticated)) -> dict[str, Any]:
     config = load_config()
@@ -575,6 +1008,274 @@ async def download_module_backup(owner: str = Depends(backup_owner)) -> FileResp
     if target.parent != owner_dir.resolve() or not target.is_file():
         raise HTTPException(status_code=404, detail=response(code="BACKUP_NOT_FOUND", message="备份文件不存在"))
     return FileResponse(target, media_type="application/zip", filename="reamicro-module-backup.zip")
+
+
+def credential_public(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": value.get("id", ""),
+        "type": value.get("type", "reamicro"),
+        "label": value.get("label", "阅微账号"),
+        "accountId": value.get("accountId", ""),
+        "createdAt": value.get("createdAt", 0),
+        "updatedAt": value.get("updatedAt", 0),
+        "lastVerifiedAt": value.get("lastVerifiedAt", 0),
+        "lastVerifyMessage": value.get("lastVerifyMessage", ""),
+    }
+
+
+@app.get("/v1/credentials/reamicro")
+async def list_reamicro_credentials(owner: str = Depends(task_owner)) -> dict[str, Any]:
+    items = [credential_public(item) for item in load_credentials().values() if item.get("owner") == owner and item.get("type") == "reamicro"]
+    items.sort(key=lambda item: int(item.get("updatedAt", 0)), reverse=True)
+    return response({"items": items})
+
+
+@app.post("/v1/credentials/reamicro")
+async def save_reamicro_credential(request: Request, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_INVALID", message="凭据 JSON 无效"))
+    token = str(payload.get("token", "")).strip() if isinstance(payload, dict) else ""
+    if len(token) < 16 or len(token) > 8_192:
+        raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_INVALID", message="阅微登录密钥长度无效"))
+    base_url = str(payload.get("baseUrl") or "https://api.reamicro.zhendong.ltd/").strip()
+    if not base_url.startswith("https://"):
+        raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_INVALID", message="阅微 API 地址必须使用 HTTPS"))
+    status_code, _, raw = await asyncio.to_thread(
+        json_http_request,
+        base_url,
+        token,
+        {"pageNum": 1, "pageSize": 1},
+        "rest/read/get-reader-record-list",
+    )
+    if status_code < 200 or status_code >= 300:
+        raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_VERIFY_FAILED", message=f"阅微登录密钥验证失败：HTTP {status_code} {redact_message(raw)}"))
+    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    credential_id = str(payload.get("id", "")).strip() or "rea_" + secrets.token_hex(10)
+    credentials = load_credentials()
+    existing = credentials.get(credential_id, {})
+    if existing and existing.get("owner") != owner:
+        raise HTTPException(status_code=404, detail=response(code="CREDENTIAL_NOT_FOUND", message="凭据不存在"))
+    credentials[credential_id] = {
+        "id": credential_id,
+        "owner": owner,
+        "type": "reamicro",
+        "label": str(payload.get("label") or "阅微账号")[:100],
+        "accountId": str(payload.get("accountId") or "")[:100],
+        "secretEncrypted": encrypt_secret({"token": token, "baseUrl": base_url}),
+        "createdAt": int(existing.get("createdAt", now)),
+        "updatedAt": now,
+        "lastVerifiedAt": now,
+        "lastVerifyMessage": "验证成功",
+    }
+    save_credentials(credentials)
+    return response(credential_public(credentials[credential_id]))
+
+
+@app.delete("/v1/credentials/reamicro/{credential_id}")
+async def delete_reamicro_credential(credential_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    credentials = load_credentials()
+    credential = credentials.get(credential_id)
+    if not credential or credential.get("owner") != owner:
+        raise HTTPException(status_code=404, detail=response(code="CREDENTIAL_NOT_FOUND", message="凭据不存在"))
+    credentials.pop(credential_id, None)
+    save_credentials(credentials)
+    tasks = load_tasks()
+    changed = False
+    for task in tasks.values():
+        if task.get("owner") != owner or not task.get("requestEncrypted"):
+            continue
+        try:
+            task_request = decrypt_secret(str(task["requestEncrypted"]))
+        except Exception:
+            continue
+        if task_request.get("credentialId") == credential_id:
+            task["enabled"] = False
+            task["status"] = "paused"
+            task["lastMessage"] = "关联的阅微凭据已删除"
+            changed = True
+    if changed:
+        save_tasks(tasks)
+    return response({"deleted": True})
+
+
+@app.post("/v1/tasks")
+async def create_task(request: Request, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务 JSON 无效"))
+    if not isinstance(payload, dict) or not payload.get("taskType"):
+        raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="缺少 taskType"))
+    task_type = str(payload.get("taskType", "")).strip()
+    if task_type not in {"http", "yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"}:
+        raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="不支持的任务类型"))
+    request_value = payload.get("request", {})
+    if not isinstance(request_value, dict):
+        raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务 request 必须是对象"))
+    credential_id = str(request_value.get("credentialId", "")).strip()
+    if task_type != "http":
+        credential = load_credentials().get(credential_id)
+        if not credential or credential.get("owner") != owner:
+            raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_NOT_FOUND", message="阅微凭据不存在或不属于当前账号"))
+    schedule = payload.get("schedule", {})
+    if not isinstance(schedule, dict):
+        raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务 schedule 必须是对象"))
+    if schedule.get("timeOfDay"):
+        schedule["timeOfDay"] = normalized_time_of_day(schedule.get("timeOfDay"))
+    task_id = "task_" + secrets.token_hex(10)
+    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    task = {
+        **payload,
+        "id": task_id,
+        "taskType": task_type,
+        "schedule": schedule,
+        "owner": owner,
+        "status": "scheduled",
+        "enabled": bool(payload.get("enabled", True)),
+        "createdAt": now,
+        "nextRunAt": int(payload.get("nextRunAt", now)),
+        "runCount": 0,
+    }
+    task["credentialId"] = credential_id
+    task["requestEncrypted"] = encrypt_secret(request_value)
+    task.pop("request", None)
+    tasks = load_tasks()
+    tasks[task_id] = task
+    save_tasks(tasks)
+    task_log(task_id, "任务已创建")
+    return response(public_task(task))
+
+
+@app.get("/v1/tasks")
+async def list_tasks(owner: str = Depends(task_owner)) -> dict[str, Any]:
+    tasks = [public_task(task, include_request=False) for task in load_tasks().values() if task.get("owner") == owner]
+    return response({"items": tasks})
+
+
+def public_task(task: dict[str, Any], include_request: bool = False) -> dict[str, Any]:
+    value = {key: item for key, item in task.items() if key != "requestEncrypted"}
+    value["credentialId"] = task_credential_id(task)
+    if include_request and task.get("requestEncrypted"):
+        try:
+            value["request"] = decrypt_secret(str(task["requestEncrypted"]))
+        except Exception:
+            value["request"] = {}
+    return value
+
+
+def find_owned_task(task_id: str, owner: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    tasks = load_tasks()
+    task = tasks.get(task_id)
+    if not task or task.get("owner") != owner:
+        raise HTTPException(status_code=404, detail=response(code="TASK_NOT_FOUND", message="任务不存在"))
+    return tasks, task
+
+
+@app.get("/v1/tasks/{task_id}")
+async def get_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    _, task = find_owned_task(task_id, owner)
+    return response(public_task(task))
+
+
+@app.post("/v1/tasks/{task_id}/pause")
+async def pause_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    tasks, task = find_owned_task(task_id, owner)
+    task["status"] = "paused"
+    task["enabled"] = False
+    save_tasks(tasks)
+    task_log(task_id, "任务已暂停")
+    return response(public_task(task))
+
+
+@app.post("/v1/tasks/{task_id}/resume")
+async def resume_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    tasks, task = find_owned_task(task_id, owner)
+    task["status"] = "scheduled"
+    task["enabled"] = True
+    task["nextRunAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+    save_tasks(tasks)
+    task_log(task_id, "任务已恢复")
+    return response(public_task(task))
+
+
+@app.post("/v1/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    tasks, task = find_owned_task(task_id, owner)
+    task["status"] = "cancelled"
+    task["enabled"] = False
+    save_tasks(tasks)
+    task_log(task_id, "任务已取消")
+    return response(public_task(task))
+
+
+@app.post("/v1/tasks/{task_id}/run")
+async def run_task_now(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    tasks, task = find_owned_task(task_id, owner)
+    task["status"] = "scheduled"
+    task["enabled"] = True
+    task["nextRunAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+    save_tasks(tasks)
+    task_log(task_id, "任务已安排立即执行")
+    return response(public_task(task))
+
+
+@app.post("/v1/tasks/{task_id}/configure")
+async def configure_task(task_id: str, request: Request, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务配置无效"))
+    tasks, task = find_owned_task(task_id, owner)
+    if "schedule" in payload:
+        schedule = payload.get("schedule")
+        if not isinstance(schedule, dict):
+            raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务 schedule 必须是对象"))
+        if schedule.get("timeOfDay"):
+            schedule["timeOfDay"] = normalized_time_of_day(schedule.get("timeOfDay"))
+        task["schedule"] = schedule
+    if "request" in payload:
+        request_value = payload.get("request") or {}
+        if not isinstance(request_value, dict):
+            raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务 request 必须是对象"))
+        credential_id = str(request_value.get("credentialId", "")).strip()
+        if task.get("taskType") != "http":
+            credential = load_credentials().get(credential_id)
+            if not credential or credential.get("owner") != owner:
+                raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_NOT_FOUND", message="阅微凭据不存在或不属于当前账号"))
+        task["credentialId"] = credential_id
+        task["requestEncrypted"] = encrypt_secret(request_value)
+    if "enabled" in payload:
+        task["enabled"] = bool(payload.get("enabled"))
+        task["status"] = "scheduled" if task["enabled"] else "paused"
+        task["nextRunAt"] = next_task_run(task) if task["enabled"] else 0
+    task["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+    save_tasks(tasks)
+    task_log(task_id, "任务配置已更新")
+    return response(public_task(task))
+
+
+@app.delete("/v1/tasks/{task_id}")
+async def delete_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    tasks, _ = find_owned_task(task_id, owner)
+    tasks.pop(task_id, None)
+    save_tasks(tasks)
+    task_log(task_id, "任务已删除")
+    return response({"deleted": True})
+
+
+@app.get("/v1/tasks/{task_id}/logs")
+async def task_logs(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    find_owned_task(task_id, owner)
+    path = TASK_LOG_ROOT / f"{task_id}.log"
+    items = []
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8").splitlines()[-200:]:
+            try:
+                items.append(json.loads(line))
+            except ValueError:
+                continue
+    return response({"items": items})
 
 
 @app.get("/v1/releases/module/download")

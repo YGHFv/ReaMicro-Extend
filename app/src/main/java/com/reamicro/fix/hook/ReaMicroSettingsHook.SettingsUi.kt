@@ -925,6 +925,12 @@ internal fun ReaMicroSettingsHook.renderCloudCompletionSettingsContent(innerPadd
                 subtitle = "恢复前请确认会覆盖本机模块设置",
                 onClick = { restoreApiModuleSettings() },
             ),
+            ActionRow(
+                key = "api_cloud_automation",
+                title = "云端签到、抽卡与自动阅读",
+                subtitle = "上传阅微登录密钥后由服务器执行，可选择最近阅读或自定义图书",
+                onClick = { openCloudAutomationDialog() },
+            ),
         )
         val rows = listOf(
             ToggleRow(
