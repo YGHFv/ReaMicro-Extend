@@ -13,6 +13,8 @@ import urllib.error
 import shutil
 import threading
 import html
+import base64
+import hashlib as _hashlib
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from datetime import datetime, timezone
@@ -61,6 +63,8 @@ def default_config() -> dict[str, Any]:
         "githubIncludePrerelease": env_bool("REAMICRO_GITHUB_INCLUDE_PRERELEASE", False),
         "releaseSyncSeconds": max(int(os.getenv("REAMICRO_RELEASE_SYNC_SECONDS", "1800")), 300),
         "releaseVersionCode": int(os.getenv("REAMICRO_RELEASE_VERSION_CODE", "0")),
+        "accounts": {},
+        "hostAccountAllowlist": [],
     }
 
 
@@ -86,6 +90,8 @@ def save_config(next_config: dict[str, Any]) -> dict[str, Any]:
         safe.update(next_config)
         safe["features"] = sorted({str(item).strip() for item in safe.get("features", []) if str(item).strip()})
         safe["releaseSyncSeconds"] = max(int(safe.get("releaseSyncSeconds", 1800)), 300)
+        safe["accounts"] = safe.get("accounts", {}) if isinstance(safe.get("accounts", {}), dict) else {}
+        safe["hostAccountAllowlist"] = sorted({str(item).strip() for item in safe.get("hostAccountAllowlist", []) if str(item).strip()})
         temp = CONFIG_PATH.with_suffix(".tmp")
         temp.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
         temp.replace(CONFIG_PATH)
@@ -195,26 +201,77 @@ def response(data: Any = None, code: str = "OK", message: str = "") -> dict[str,
     }
 
 
-def check_api_key(value: str | None) -> None:
+def password_hash(password: str, salt: bytes | None = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    digest = _hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 210_000)
+    return "pbkdf2$210000$" + base64.urlsafe_b64encode(salt).decode() + "$" + base64.urlsafe_b64encode(digest).decode()
+
+
+def password_matches(password: str, encoded: str) -> bool:
+    try:
+        scheme, rounds, salt_text, digest_text = encoded.split("$", 3)
+        if scheme != "pbkdf2":
+            return False
+        salt = base64.urlsafe_b64decode(salt_text.encode())
+        expected = base64.urlsafe_b64decode(digest_text.encode())
+        actual = _hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, int(rounds))
+        return hmac.compare_digest(actual, expected)
+    except (ValueError, TypeError):
+        return False
+
+
+def check_request_auth(
+    api_key_value: str | None,
+    account_name: str | None,
+    account_password: str | None,
+    host_account_id: str | None,
+) -> None:
     config = load_config()
     api_key = str(config.get("apiKey", ""))
-    if api_key:
-        if not value or not hmac.compare_digest(value, api_key):
-            raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="API Key 无效"))
-    elif not config.get("allowPublic", True):
-        raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="服务器未开启公开访问"))
+    if api_key and api_key_value and hmac.compare_digest(api_key_value, api_key):
+        return
+    accounts = config.get("accounts", {})
+    if account_name and account_password and isinstance(accounts, dict):
+        encoded = accounts.get(account_name)
+        if encoded and password_matches(account_password, str(encoded)):
+            return
+    allowlist = set(config.get("hostAccountAllowlist", []))
+    if host_account_id and host_account_id in allowlist:
+        return
+    if config.get("allowPublic", True) and not api_key and not accounts and not allowlist:
+        return
+    raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="认证信息无效"))
 
 
-async def authenticated(x_reamicro_api_key: str | None = Header(default=None)) -> None:
-    check_api_key(x_reamicro_api_key)
+async def authenticated(
+    x_reamicro_api_key: str | None = Header(default=None),
+    x_reamicro_account: str | None = Header(default=None),
+    x_reamicro_password: str | None = Header(default=None),
+    x_reamicro_host_account_id: str | None = Header(default=None),
+) -> None:
+    check_request_auth(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
 
 
-async def backup_owner(x_reamicro_api_key: str | None = Header(default=None)) -> str:
+async def backup_owner(
+    x_reamicro_api_key: str | None = Header(default=None),
+    x_reamicro_account: str | None = Header(default=None),
+    x_reamicro_password: str | None = Header(default=None),
+    x_reamicro_host_account_id: str | None = Header(default=None),
+) -> str:
     config = load_config()
     api_key = str(config.get("apiKey", ""))
-    if not api_key or not x_reamicro_api_key or not hmac.compare_digest(api_key, x_reamicro_api_key):
-        raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="备份功能需要 API Key"))
-    return hashlib.sha256(x_reamicro_api_key.encode("utf-8")).hexdigest()[:32]
+    if api_key and x_reamicro_api_key and hmac.compare_digest(api_key, x_reamicro_api_key):
+        identity = "key:" + x_reamicro_api_key
+    elif x_reamicro_account and x_reamicro_password and password_matches(
+        x_reamicro_password,
+        str(config.get("accounts", {}).get(x_reamicro_account, "")),
+    ):
+        identity = "account:" + x_reamicro_account
+    elif x_reamicro_host_account_id and x_reamicro_host_account_id in set(config.get("hostAccountAllowlist", [])):
+        identity = "host:" + x_reamicro_host_account_id
+    else:
+        raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="备份功能需要非公开认证"))
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
 
 
 @app.exception_handler(HTTPException)
@@ -271,6 +328,9 @@ def admin_page(config: dict[str, Any], message: str = "") -> str:
 <div class='row'><div><label>服务器 ID</label><input name='server_id' value='{esc(config.get("serverId", ""))}'></div><div><label>最低模块版本</label><input name='min_module_version' value='{esc(config.get("minModuleVersion", ""))}'></div></div>
 <label>API Key（当前：{'已设置' if config.get("apiKey") else '未设置'}）</label><input type='password' name='api_key' placeholder='留空保持当前值'><label><input type='checkbox' name='clear_api_key'> 清除 API Key</label>
 <label><input type='checkbox' name='allow_public' {checked_public}> 允许公开访问（无 API Key 时）</label>
+<label>阅微账号白名单（每行一个账号 ID）</label><textarea name='host_account_allowlist'>{esc(chr(10).join(config.get('hostAccountAllowlist', [])))}</textarea>
+<div class='row'><div><label>新增独立账号</label><input name='account_name' placeholder='用户名'></div><div><label>新增账号密码</label><input type='password' name='account_password' placeholder='留空不修改'></div></div>
+<label>删除独立账号（可选，填写用户名）</label><input name='remove_account' placeholder='username'>
 <label>功能列表（逗号分隔）</label><textarea name='features'>{esc(feature_text)}</textarea>
 <label>内容包签名公钥（Base64 X.509 Ed25519）</label><textarea name='signing_public_key'>{esc(config.get("signingPublicKey", ""))}</textarea>
 <div class='row'><div><label>GitHub 仓库</label><input name='github_repository' value='{esc(config.get("githubRepository", ""))}'></div><div><label>Release 同步秒数（至少 300）</label><input name='release_sync_seconds' type='number' value='{esc(config.get("releaseSyncSeconds", 1800))}'></div></div>
@@ -303,6 +363,10 @@ async def admin_settings(
     min_module_version: str = Form("2.0.0"),
     api_key: str = Form(""),
     allow_public: str | None = Form(None),
+    host_account_allowlist: str = Form(""),
+    account_name: str = Form(""),
+    account_password: str = Form(""),
+    remove_account: str = Form(""),
     features: str = Form(""),
     signing_public_key: str = Form(""),
     github_repository: str = Form("YGHFv/ReaMicro-Extend"),
@@ -320,6 +384,7 @@ async def admin_settings(
         "minModuleVersion": min_module_version.strip() or current["minModuleVersion"],
         "apiKey": "" if clear_api_key is not None else (api_key or current.get("apiKey", "")),
         "allowPublic": allow_public is not None,
+        "hostAccountAllowlist": [item.strip() for item in host_account_allowlist.splitlines() if item.strip()],
         "features": [item.strip() for item in features.split(",") if item.strip()],
         "signingPublicKey": signing_public_key.strip(),
         "githubRepository": github_repository.strip() or current["githubRepository"],
@@ -328,6 +393,12 @@ async def admin_settings(
         "releaseSyncSeconds": release_sync_seconds,
         "releaseVersionCode": release_version_code,
     }
+    accounts = dict(current.get("accounts", {}))
+    if account_name.strip() and account_password:
+        accounts[account_name.strip()] = password_hash(account_password)
+    if remove_account.strip():
+        accounts.pop(remove_account.strip(), None)
+    next_config["accounts"] = accounts
     return HTMLResponse(admin_page(save_config(next_config), "设置已保存"))
 
 
@@ -448,7 +519,7 @@ async def meta(_: None = Depends(authenticated)) -> dict[str, Any]:
         "apiVersion": API_VERSION,
         "serverId": config["serverId"],
         "features": config["features"],
-        "authModes": ["public", "api_key"],
+        "authModes": ["public", "api_key", "account", "host_account_allowlist"],
         "minModuleVersion": config["minModuleVersion"],
         "signingPublicKey": config["signingPublicKey"],
     })
