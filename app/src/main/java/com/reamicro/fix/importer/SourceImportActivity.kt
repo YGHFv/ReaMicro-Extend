@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Build
 import android.provider.OpenableColumns
 import android.util.Base64
 import android.widget.Toast
@@ -54,10 +55,25 @@ class SourceImportActivity : Activity() {
         intent ?: return null
         return when (intent.action) {
             Intent.ACTION_VIEW -> intent.data
-            Intent.ACTION_SEND -> intent.getParcelableExtra(Intent.EXTRA_STREAM)
+            Intent.ACTION_SEND -> streamUri(intent)
+                ?: intent.clipData?.let { clip ->
+                    if (clip.itemCount > 0) clip.getItemAt(0).uri else null
+                }
+                ?: intent.data
             else -> intent.data
+                ?: intent.clipData?.let { clip ->
+                    if (clip.itemCount > 0) clip.getItemAt(0).uri else null
+                }
         }
     }
+
+    private fun streamUri(intent: Intent): Uri? =
+        if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        }
 
     private fun launchHostImport(bytes: ByteArray, displayName: String) {
         val launch = packageManager.getLaunchIntentForPackage(HOST_PACKAGE)
@@ -78,7 +94,11 @@ class SourceImportActivity : Activity() {
             return
         }
         launch.apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP,
+            )
             putExtra(EXTRA_IMPORT_PAYLOAD, Base64.encodeToString(bytes, Base64.NO_WRAP))
             putExtra(EXTRA_IMPORT_NAME, displayName)
         }

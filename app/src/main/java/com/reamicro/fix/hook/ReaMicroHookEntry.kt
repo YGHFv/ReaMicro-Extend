@@ -56,7 +56,7 @@ class ReaMicroHookEntry {
                 settingsProvider = settingsProvider,
             ).install()
         }
-        installFeature("ReaderImportOverwriteHook") {
+        HookInstallReport.installResult(ENTRY_FEATURE_ID, "ReaderImportOverwriteHook") {
             ReaderImportOverwriteHook(
                 classLoader = classLoader,
                 activityProvider = activityProvider,

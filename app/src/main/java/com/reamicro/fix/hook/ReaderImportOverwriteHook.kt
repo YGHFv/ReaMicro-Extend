@@ -81,8 +81,8 @@ class ReaderImportOverwriteHook(
     private var repositoryRef: WeakReference<Any>? = null
     private val pendingPreImportDecisions = ConcurrentHashMap<String, PreImportDecision>()
 
-    fun install() {
-        runCatching {
+    fun install(): Boolean {
+        return runCatching {
             val bookshelfClass = XposedHelpers.findClass(BOOKSHELF_REPOSITORY_CLASS, classLoader)
             XposedBridge.hookAllConstructors(bookshelfClass, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
@@ -90,6 +90,12 @@ class ReaderImportOverwriteHook(
                     ReaMicroBookMetadataSync.rememberBookshelfRepository(param.thisObject)
                 }
             })
+            val importMethods = (bookshelfClass.methods.asSequence() + bookshelfClass.declaredMethods.asSequence())
+                .filter { it.name == BOOKSHELF_IMPORT_BOOK_METHOD && it.parameterTypes.size >= 6 &&
+                    it.parameterTypes.last().name == KOTLIN_CONTINUATION_CLASS }
+                .distinct()
+                .toList()
+            if (importMethods.isEmpty()) error("BookshelfRepository.importBook hook target not found")
             hookWorkerManagerRepositoryCapture()
             XposedBridge.hookAllMethods(bookshelfClass, BOOKSHELF_IMPORT_BOOK_METHOD, object : XC_MethodHook(XCallback.PRIORITY_LOWEST) {
                 override fun beforeHookedMethod(param: MethodHookParam) {
@@ -171,11 +177,12 @@ class ReaderImportOverwriteHook(
                     XposedBridge.log("$LOG_PREFIX overwrite import decision applied: title=$title, uuid=$uuid")
                 }
             })
-            hookEpubFileManagerImport()
+            if (!hookEpubFileManagerImport()) error("EpubFileManager.import hook target not found")
             XposedBridge.log("$LOG_PREFIX reader overwrite check hook installed")
+            true
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to hook reader overwrite check: ${it.stackTraceToString()}")
-        }
+        }.getOrDefault(false)
     }
 
     private fun hookWorkerManagerRepositoryCapture() {
@@ -195,8 +202,8 @@ class ReaderImportOverwriteHook(
         }
     }
 
-    private fun hookEpubFileManagerImport() {
-        runCatching {
+    private fun hookEpubFileManagerImport(): Boolean {
+        return runCatching {
             val managerClass = XposedHelpers.findClass(EPUB_FILE_MANAGER_CLASS, classLoader)
             // 2.2.0：import(Path, Path):Pair 两参；2.3.0 起新增进度回调 import(Path, Path, Function1):Pair 三参。
             // 旧写法要求 size==2 且全部为 okio.Path，2.3.0 因多出 Function1 而匹配失败 → 预检 hook 不安装。
@@ -211,7 +218,7 @@ class ReaderImportOverwriteHook(
                 }
                 .minByOrNull { it.parameterTypes.size }
                 ?.apply { isAccessible = true }
-                ?: return@runCatching
+                ?: return@runCatching false
             XposedBridge.hookMethod(importMethod, object : XC_MethodHook(XCallback.PRIORITY_HIGHEST) {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val snapshot = settingsProvider()
@@ -272,9 +279,10 @@ class ReaderImportOverwriteHook(
                 }
             })
             XposedBridge.log("$LOG_PREFIX epub file manager import hook installed: ${importMethod.name}")
+            true
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to hook epub file manager import: ${it.stackTraceToString()}")
-        }
+        }.getOrDefault(false)
     }
 
     private fun applyPreImportDecision(
@@ -323,7 +331,7 @@ class ReaderImportOverwriteHook(
         val urlBook = if (uriOverride.isNotBlank()) {
             runCatching { invokeSuspendBlocking(method(repository.javaClass, "findBookByUrl", 2), repository, uriOverride) }
                 .getOrNull()
-                ?.takeIf { it.hasLocalBookData() }
+                ?.takeIf { it.hasLocalBookData(repository) }
         } else {
             null
         }
@@ -528,7 +536,7 @@ class ReaderImportOverwriteHook(
         val listedBook = listExistingBooks(repository)?.firstOrNull { book ->
             val candidateTitle = book.titleOrNull()?.normalizedBookTitle()
             val candidateUuid = book.uuidOrNull().orEmpty()
-            candidateTitle == normalizedTitle && candidateUuid != importUuid && book.hasLocalBookData()
+            candidateTitle == normalizedTitle && candidateUuid != importUuid && book.hasLocalBookData(repository)
         }
         if (listedBook != null) return listedBook
 
@@ -552,7 +560,7 @@ class ReaderImportOverwriteHook(
         return candidates.firstOrNull { book ->
             val candidateTitle = book.titleOrNull()?.normalizedBookTitle()
             val candidateUuid = book.uuidOrNull().orEmpty()
-            candidateTitle == normalizedTitle && candidateUuid != importUuid && book.hasLocalBookData()
+            candidateTitle == normalizedTitle && candidateUuid != importUuid && book.hasLocalBookData(repository)
         }
     }
 
@@ -600,7 +608,7 @@ class ReaderImportOverwriteHook(
             ?: return null
         return runCatching { invokeSuspendBlocking(findMethod, bookDao, uid, uuid) }
             .getOrNull()
-            ?.takeIf { it.hasLocalBookData() }
+            ?.takeIf { it.hasLocalBookData(repository) }
     }
 
     private fun currentUser(repository: Any): Any? =
@@ -667,10 +675,30 @@ class ReaderImportOverwriteHook(
                 ?.invoke(this)?.toString()
         }.getOrNull()?.takeIf { it.isNotBlank() }
 
-    private fun Any?.hasLocalBookData(): Boolean {
+    private fun Any?.hasLocalBookData(repository: Any): Boolean {
+        val uuid = uuidOrNull()?.trim().orEmpty()
+        if (uuid.isBlank()) return false
+
+        // 阅微 2.3.1 的 UserStorage 根目录不再能从宿主 filesDir/uid 可靠推导。
+        // 直接调用宿主自己的 checkBookExists，跟随其当前 UserStorage/userBooksDir 实现。
+        val hostResult = runCatching {
+            val checkMethod = (repository.javaClass.methods.asSequence() + repository.javaClass.declaredMethods.asSequence())
+                .firstOrNull {
+                    it.name == "checkBookExists" &&
+                        it.parameterTypes.size == 2 &&
+                        it.parameterTypes[0] == String::class.java &&
+                        it.parameterTypes[1].name == KOTLIN_CONTINUATION_CLASS
+                }
+                ?.apply { isAccessible = true }
+                ?: return@runCatching null
+            invokeSuspendBlocking(checkMethod, repository, uuid) as? Boolean
+        }.getOrNull()
+        if (hostResult == true) return true
+        if (hostResult == false) return false
+
+        // 旧版宿主没有 checkBookExists 时保留原路径回退。
         val context = activityProvider()?.applicationContext ?: currentApplicationContext() ?: return false
         val uid = longOrNull("getUid") ?: return false
-        val uuid = uuidOrNull() ?: return false
         return File(context.filesDir, "$uid/books/$uuid/META-INF/container.xml").isFile
     }
 
@@ -889,17 +917,14 @@ class ReaderImportOverwriteHook(
         false
     }
 
-    private fun duplicateBookException(message: String): RuntimeException =
-        runCatching {
-            val clazz = XposedHelpers.findClass(BOOKSHELF_REPOSITORY_CLASS, classLoader)
-            clazz.declaredClasses.firstOrNull { it.simpleName == "DuplicateBookException" }
-                ?.getConstructor(String::class.java)
-                ?.newInstance(message) as? RuntimeException
-        }.getOrNull() ?: RuntimeException(message)
-
     private fun cancelImport(param: XC_MethodHook.MethodHookParam) {
-        param.throwable = duplicateBookException("导入已取消")
+        // 不要伪造宿主 DuplicateBookException：阅微会对该异常走“重复书籍”分支，
+        // 在 WorkerManager 的批量导入流程里可能被吞掉并继续处理。使用模块自己的
+        // 取消异常，让协程直接进入失败清理路径，既不写库也不移动书籍目录。
+        param.throwable = ImportCancelledException()
     }
+
+    private class ImportCancelledException : RuntimeException("导入已取消")
 
     private fun method(targetClass: Class<*>, name: String, parameterCount: Int): Method =
         (targetClass.methods.asSequence() + targetClass.declaredMethods.asSequence())

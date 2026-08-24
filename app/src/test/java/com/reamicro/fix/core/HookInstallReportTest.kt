@@ -41,6 +41,26 @@ class HookInstallReportTest {
     }
 
     @Test
+    fun `返回 false 的安装动作被记为失败`() {
+        val ok = HookInstallReport.installResult("Demo", "returnedFalse") { false }
+
+        assertFalse(ok)
+        assertEquals(listOf("Demo.returnedFalse"), HookInstallReport.failures())
+    }
+
+    @Test
+    fun `外层动作吞掉的内部失败仍会被标记`() {
+        val ok = HookInstallReport.installResult("Entry", "feature") {
+            HookInstallReport.install("Demo", "inner") { error("inner boom") }
+            Unit
+        }
+
+        assertFalse(ok)
+        assertEquals(listOf("Demo.inner", "Entry.feature"), HookInstallReport.failures())
+        assertTrue(HookInstallReport.failureDetails().last().contains("nested hook steps failed"))
+    }
+
+    @Test
     fun `单个动作失败不会中断后续动作`() {
         val executed = mutableListOf<String>()
         HookInstallReport.installAll(

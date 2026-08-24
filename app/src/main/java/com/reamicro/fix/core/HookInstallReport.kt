@@ -33,10 +33,24 @@ object HookInstallReport {
      *
      * @return 安装是否成功
      */
-    fun install(feature: String, name: String, block: () -> Unit): Boolean {
+    fun install(feature: String, name: String, block: () -> Unit): Boolean =
+        installResult(feature, name) {
+            block()
+            Unit
+        }
+
+    /** 执行可能返回 Boolean 的安装动作；返回 false 会被记录为失败。 */
+    fun installResult(feature: String, name: String, block: () -> Any?): Boolean {
+        val before = snapshot().mapTo(hashSetOf()) { it.id }
         val result = runCatching(block)
-        record(feature, name, result.isSuccess, result.exceptionOrNull())
-        return result.isSuccess
+        val nestedFailures = snapshot().filter { it.id !in before && !it.ok }
+        val nestedError = nestedFailures
+            .takeIf { it.isNotEmpty() }
+            ?.joinToString(", ") { it.id }
+            ?.let { IllegalStateException("nested hook steps failed: $it") }
+        val success = result.isSuccess && result.getOrNull() != false && nestedFailures.isEmpty()
+        record(feature, name, success, result.exceptionOrNull() ?: nestedError)
+        return success
     }
 
     /** 按顺序执行一组 hook 安装动作，逐个隔离异常。 */

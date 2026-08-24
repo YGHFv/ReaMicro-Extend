@@ -1607,11 +1607,14 @@ internal fun WebDavDriveHook.hookWebDavImportBookSource() {
         val repositoryClass = cls(BOOKSHELF_REPOSITORY_CLASS)
         // 2.2.0 importBook 6 参、2.3.0 起 7 参（新增进度回调）。按方法名 + 末参 Continuation 匹配，
         // 兼容新旧签名；hook 内只改 args[3]=url、args[4]=size，两下标在新版仍不变。
-        repositoryClass.declaredMethods.filter {
+        (repositoryClass.methods.asSequence() + repositoryClass.declaredMethods.asSequence())
+            .distinct()
+            .filter {
             it.name == BOOKSHELF_IMPORT_BOOK_METHOD &&
                 it.parameterTypes.size >= 6 &&
                 it.parameterTypes.last().name == KOTLIN_CONTINUATION_CLASS
-        }.forEach { method ->
+            }
+            .forEach { method ->
             method.isAccessible = true
             XposedBridge.hookMethod(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
