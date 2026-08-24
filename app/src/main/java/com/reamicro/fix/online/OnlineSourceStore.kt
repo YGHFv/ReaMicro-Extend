@@ -35,6 +35,8 @@ data class OnlineSourceEntry(
     val chapterBatchEndpoint: String = "",
     val chapterBatchSize: Int = 0,
     val variableComment: String = "",
+    val packageId: String = "",
+    val aliases: Set<String> = emptySet(),
 ) {
     val hasLoginConfig: Boolean
         get() = loginUrl.isNotBlank() || loginUi.isNotBlank() || loginCheckJs.isNotBlank()
@@ -194,6 +196,31 @@ object OnlineSourceStore {
         return OnlineSourceDownloadPolicyStore.attach(context, parsed.copy(fileName = target.name))
     }
 
+    /**
+     * 安装服务器书源包。包 ID 负责版本更新，书源 ID 独立保持稳定；若本机已有旧 ID，
+     * 首次接管时继续沿用旧 ID，避免已下载图书、登录凭据和下载策略失联。
+     */
+    fun importPackageBytes(
+        context: Context,
+        bytes: ByteArray,
+        displayName: String,
+        packageId: String,
+        stableSourceId: String,
+        aliases: Set<String>,
+    ): OnlineSourceEntry {
+        val incoming = parseSingleSource(bytes, displayName.substringBeforeLast('.', displayName), displayName)
+        val knownAliases = (aliases + stableSourceId + incoming.id).filterTo(linkedSetOf()) { it.isNotBlank() }
+        val existing = list(context).firstOrNull { source ->
+            source.packageId == packageId || source.id in knownAliases || source.aliases.any(knownAliases::contains)
+        }
+        val effectiveId = existing?.id ?: stableSourceId.ifBlank { incoming.id }
+        val payload = injectPackageIdentity(bytes, effectiveId, packageId, knownAliases + effectiveId)
+        return importBytes(context, payload, displayName, "api:$packageId")
+    }
+
+    fun matchesIdentity(source: OnlineSourceEntry, candidate: String): Boolean =
+        candidate.isNotBlank() && (source.id == candidate || candidate in source.aliases)
+
     fun remove(context: Context?, sourceId: String): Boolean {
         context ?: return false
         val dir = sourceDir(context)
@@ -250,9 +277,17 @@ object OnlineSourceStore {
             .toIntOrNull()
             ?.takeIf { it > 0 }
             ?: 180_000
+        val explicitId = firstString(json, "reamicroSourceId")
         val idBase = sourceUrl.ifBlank { name }
+        val aliases = buildSet {
+            val array = json.optJSONArray("reamicroSourceAliases")
+            if (array != null) for (index in 0 until array.length()) {
+                array.optString(index).takeIf(String::isNotBlank)?.let(::add)
+            }
+            add(stableId(idBase))
+        }
         return OnlineSourceEntry(
-            id = stableId(idBase),
+            id = explicitId.ifBlank { stableId(idBase) },
             name = name,
             fileName = fileName,
             sourceUrl = sourceUrl,
@@ -273,6 +308,8 @@ object OnlineSourceStore {
             chapterBatchEndpoint = chapterBatchEndpoint,
             chapterBatchSize = chapterBatchSize,
             variableComment = variableComment,
+            packageId = firstString(json, "reamicroPackageId"),
+            aliases = aliases,
         )
     }
 
@@ -299,6 +336,24 @@ object OnlineSourceStore {
 
     private fun safeFileName(value: String): String =
         value.replace(Regex("[^A-Za-z0-9_.-]+"), "_").ifBlank { "online_source" }
+
+    private fun injectPackageIdentity(
+        bytes: ByteArray,
+        sourceId: String,
+        packageId: String,
+        aliases: Set<String>,
+    ): ByteArray {
+        val text = bytes.toString(Charsets.UTF_8).trim()
+        val root = if (text.startsWith("[")) {
+            val array = JSONArray(text)
+            require(array.length() == 1) { "一次最多导入一个在线源" }
+            array.optJSONObject(0) ?: error("在线源格式不正确")
+        } else JSONObject(text)
+        root.put("reamicroSourceId", sourceId)
+            .put("reamicroPackageId", packageId)
+            .put("reamicroSourceAliases", JSONArray(aliases.toList()))
+        return root.toString(2).toByteArray(Charsets.UTF_8)
+    }
 
     private fun download(url: String): ByteArray {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {

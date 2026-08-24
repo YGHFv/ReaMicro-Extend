@@ -2,6 +2,8 @@ package com.reamicro.fix.hook
 
 import android.widget.Switch
 import com.reamicro.fix.ai.AiApiStore
+import com.reamicro.fix.cloud.api.ApiServerClient
+import com.reamicro.fix.cloud.api.ApiServerSettingsStore
 import com.reamicro.fix.core.AppTopBarArguments
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.ai.AiImagePresetTarget
@@ -886,6 +888,32 @@ internal fun ReaMicroSettingsHook.renderCloudCompletionSettingsContent(innerPadd
     val listContent = functionProxy("CloudCompletionList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
         val snapshot = settings.snapshot()
+        val apiRows = listOf(
+            ActionRow(
+                key = "api_server_settings",
+                title = "API 服务器",
+                subtitle = apiServerSettingsSubtitle(),
+                onClick = { openApiServerSettingsDialog() },
+            ),
+            ActionRow(
+                key = "api_package_updates",
+                title = "检查内容库更新",
+                subtitle = "书源、成书样式和高亮样式",
+                onClick = { checkApiPackageUpdates() },
+            ),
+            ActionRow(
+                key = "api_module_update",
+                title = "检查模块更新",
+                subtitle = "从服务器获取 GitHub 最新 Release",
+                onClick = { checkApiModuleUpdate() },
+            ),
+            ActionRow(
+                key = "api_module_download",
+                title = "下载并安装模块更新",
+                subtitle = "下载后交由 Android 安装器确认",
+                onClick = { downloadApiModuleUpdate() },
+            ),
+        )
         val rows = listOf(
             ToggleRow(
                 key = ModuleSettings.KEY_CLOUD_WEBDAV_ENABLED,
@@ -933,6 +961,9 @@ internal fun ReaMicroSettingsHook.renderCloudCompletionSettingsContent(innerPadd
                 },
             ),
         )
+        addLazyItem(lazyListScope, "api_server_settings_card".hashCode()) { itemComposer ->
+            renderHostActionCard(apiRows, itemComposer)
+        }
         addLazyItem(lazyListScope, CLOUD_SWITCHES_ITEM_KEY) { itemComposer ->
             renderHostSettingsCard(rows, itemComposer)
         }

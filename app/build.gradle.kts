@@ -62,6 +62,14 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    buildFeatures {
+        buildConfig = true
+    }
+
+    buildTypes.configureEach {
+        buildConfigField("long", "BUILD_TIME", "${System.currentTimeMillis()}L")
+    }
+
     signingConfigs {
         if (hasReleaseSigning) {
             create("release") {

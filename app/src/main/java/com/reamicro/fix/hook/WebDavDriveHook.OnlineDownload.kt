@@ -267,7 +267,9 @@ internal fun WebDavDriveHook.onlineImportedBookSourceInfo(book: Any): OnlineImpo
         onlineSourceIdFromEncodedValue(backupId),
         onlineSourceIdFromUuid(uuid),
     ).filter { it.isNotBlank() }.distinct()
-    val sourceById = sources.firstOrNull { source -> source.id in sourceIdCandidates }
+    val sourceById = sources.firstOrNull { source ->
+        sourceIdCandidates.any { candidate -> OnlineSourceStore.matchesIdentity(source, candidate) }
+    }
     val sourceByPublisher = sources.firstOrNull { source ->
         source.name == publisher || source.id == publisher
     }
@@ -308,7 +310,7 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(book: Any, info:
     }
     val appContext = context.applicationContext ?: context
     val source = (info.source ?: OnlineSourceStore.list(appContext).firstOrNull { source ->
-        source.id == info.sourceId
+        OnlineSourceStore.matchesIdentity(source, info.sourceId)
     })?.let { OnlineSourceDownloadPolicyStore.attach(appContext, it) }
     if (source == null) {
         showToast("在线补全源不可用：${info.sourceName}")
@@ -1549,7 +1551,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandChapter(
 ) {
     val context = currentContext() ?: error("按需下载缺少 Context")
     val source = OnlineSourceStore.list(context)
-        .firstOrNull { it.id == request.metadata.sourceId }
+        .firstOrNull { OnlineSourceStore.matchesIdentity(it, request.metadata.sourceId) }
         ?.let { OnlineSourceDownloadPolicyStore.attach(context, it) }
         ?: error("在线书源已不存在：${request.metadata.sourceId}")
     val metadata = OnlineOnDemandMetadataStore.read(request.bookDir)

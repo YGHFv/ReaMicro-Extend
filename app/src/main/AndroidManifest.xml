@@ -1,5 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
@@ -42,6 +43,12 @@
         <meta-data
             android:name="lyricon_module_description"
             android:value="Send ReaMicro read-aloud captions to Lyricon" />
+
+        <provider
+            android:name=".cloud.api.ModuleApkContentProvider"
+            android:authorities="com.reamicro.fix.module-apk"
+            android:exported="false"
+            android:grantUriPermissions="true" />
 
         <receiver
             android:name=".notification.OnlineCompletionNotificationReceiver"
