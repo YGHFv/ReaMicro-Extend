@@ -489,12 +489,19 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
         except ValueError:
             configured_body = {}
     if task_type == "yeshe_draw_card":
+        daily_limit = max(1, min(int(request.get("dailyLimit", 1) or 1), 20))
+        today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+        if task.get("dailyCounterDate") == today and int(task.get("dailyCounter", 0)) >= daily_limit:
+            return "success", f"野社今日抽卡已达到上限 {daily_limit} 次"
         status_code, body, raw = json_http_request(base_url, token, configured_body, str(request.get("endpoint") or "rest/lottery/lottery-v2"))
         if status_code in (401, 403, 429):
             return "paused", f"阅微认证/风控响应 HTTP {status_code}"
         if status_code < 200 or status_code >= 300:
             return "failed", f"抽卡请求 HTTP {status_code}: {redact_message(raw)}"
-        return "success", f"野社抽卡完成：{redact_message(json.dumps(body, ensure_ascii=False)[:300])}"
+        previous_date = task.get("dailyCounterDate")
+        task["dailyCounterDate"] = today
+        task["dailyCounter"] = int(task.get("dailyCounter", 0)) + 1 if previous_date == today else 1
+        return "success", f"野社抽卡完成（今日 {task['dailyCounter']}/{daily_limit}）：{redact_message(json.dumps(body, ensure_ascii=False)[:300])}"
     if task_type == "yeshe_checkin":
         status_code, lore, raw = json_http_request(base_url, token, configured_body, str(request.get("endpoint") or "rest/community/get-daily-lore"))
         if status_code in (401, 403, 429):
@@ -529,7 +536,15 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             books = [books]
         books = books[: max(1, min(int(request.get("bookLimit", 1) or 1), 10))]
         duration_minutes = max(1, min(int(request.get("durationMinutes", 30) or 30), 720))
+        daily_limit_minutes = max(duration_minutes, min(int(request.get("dailyLimitMinutes", 720) or 720), 1440))
+        today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+        used_today = int(task.get("dailyReadMinutes", 0)) if task.get("dailyReadDate") == today else 0
+        duration_minutes = min(duration_minutes, max(daily_limit_minutes - used_today, 0))
+        if duration_minutes <= 0:
+            return "success", f"云端阅读今日已达到 {daily_limit_minutes} 分钟上限"
         duration_seconds = duration_minutes * 60
+        rotation = int(task.get("bookRotation", 0)) % max(len(books), 1)
+        books = books[rotation:] + books[:rotation]
         completed = 0
         for book in books:
             if not isinstance(book, dict):
@@ -559,6 +574,10 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             if time_status < 200 or time_status >= 300:
                 return "failed", f"上报阅读时长失败 HTTP {time_status}: {redact_message(time_raw)}"
             completed += 1
+        if completed:
+            task["dailyReadDate"] = today
+            task["dailyReadMinutes"] = used_today + duration_minutes
+            task["bookRotation"] = rotation + completed
         return ("success", f"云端自动阅读完成 {completed} 本，累计 {duration_minutes} 分钟") if completed else ("failed", "没有找到可阅读的图书")
     return "failed", f"未知阅微任务类型：{task_type}"
 
