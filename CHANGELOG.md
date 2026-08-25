@@ -1,5 +1,12 @@
 # 更新记录
 
+## Docker 镜像自动发布 - 2026-08-25
+
+- 新增独立 GitHub Actions 工作流，服务器代码推送到主分支时自动构建并发布 GHCR Docker 镜像。
+- 镜像同时支持 `linux/amd64` 与 `linux/arm64`，发布 `latest`、分支、版本标签和提交 SHA 标签。
+- Pull Request 只执行多架构构建验证，不推送镜像；构建启用 GitHub Actions 缓存、OCI 元数据、provenance 和 SBOM。
+- 增加 Docker 构建忽略文件，排除本地环境文件、数据卷、测试缓存和 Python 字节码。
+
 ## 云端自动化任务安全与后台配置 - 2026-08-25
 
 ### 阅微云端任务

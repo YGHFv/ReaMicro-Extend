@@ -11,6 +11,25 @@ curl http://127.0.0.1:5222/v1/health
 默认 API 端口为 `5222`，后台管理地址为 `http://服务器地址:5222/admin`。
 必须设置 `REAMICRO_ADMIN_PASSWORD` 后才能进入后台。后台使用 HTTP Basic 认证，默认用户名为 `admin`。
 
+## GitHub Actions 镜像
+
+主分支中的服务器代码发生变化后，GitHub Actions 会自动构建 `linux/amd64` 和 `linux/arm64` 镜像并推送到：
+
+```text
+ghcr.io/yghfv/reamicro-extend/reamicro-api:latest
+```
+
+版本标签（例如 `v2.1.0`）会同时生成同名镜像标签，每次构建还会生成 `sha-<短提交号>` 标签。可以直接运行：
+
+```bash
+docker run -d --name reamicro-api \
+  -p 5222:5222 \
+  -v reamicro-api-data:/data \
+  -e REAMICRO_ADMIN_PASSWORD='请修改为强密码' \
+  -e REAMICRO_SECRET_KEY='请设置随机长密钥并永久保存' \
+  ghcr.io/yghfv/reamicro-extend/reamicro-api:latest
+```
+
 配置 `REAMICRO_API_KEY` 后，客户端请求需要携带：
 
 ```text
