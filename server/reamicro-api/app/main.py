@@ -1570,13 +1570,22 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
         content += f"<form class='toolbar' method='get' action='/admin'><input type='hidden' name='section' value='{esc(section)}'><input name='q' value='{esc(query)}' placeholder='搜索名称、包 ID、版本或别名'><button class='button' type='submit'>搜索</button></form><div class='table-wrap'><table><thead><tr><th>类型</th><th>内容</th><th>版本</th><th>状态</th><th>渠道 / 依赖</th><th>操作</th></tr></thead><tbody>{_admin_package_table(visible, can_packages, query, admin_csrf_token(config, actor))}</tbody></table></div>"
     else:
         task_credentials = f"<div class='stats'><div><strong>{len(load_credentials())}</strong><span>阅微凭据</span></div><div><strong>{len(load_tasks())}</strong><span>云端任务</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('enabled', True))}</strong><span>已启用</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('status') == 'failed')}</strong><span>执行失败</span></div></div><div class='panel'><h2>已上传阅微凭据</h2><p class='muted'>凭据只保存加密密文，后台不会显示登录密钥原文；账号 ID、验证状态和更新时间来自模块上传结果。</p><div class='table-wrap'><table><thead><tr><th>凭据 ID</th><th>阅微账号 ID</th><th>名称</th><th>所有者</th><th>验证状态</th><th>更新时间</th></tr></thead><tbody>{credential_table}</tbody></table></div></div><div class='panel'><h2>任务运行状态</h2><div class='table-wrap'><table><thead><tr><th>任务类型</th><th>所有者</th><th>凭据 ID</th><th>状态</th><th>开关</th><th>最近结果</th><th>下次执行</th><th>日志</th></tr></thead><tbody>{task_table}</tbody></table></div></div>" if section == "tasks" else ""
-        content = f"<div class='page-head'><div><p class='eyebrow'>系统</p><h1>{'云端任务' if section == 'tasks' else ('服务器设置' if section == 'settings' else '安全与备份')}</h1><p class='muted'>按分类维护后台功能。</p></div></div>{task_credentials}<div class='panel'><p>当前版本先保留完整配置表单入口，避免重构期间遗漏任何既有参数。</p><p><a class='button' href='/admin/legacy'>打开完整管理表单</a></p><p><a href='/admin/audit'>审计日志</a> · <a href='/admin/backups/server'>服务器快照</a></p>{'<p>子管理员账户管理仍受主管理员权限保护。</p>' if section == 'security' else ''}</div>"
+        if section == "tasks":
+            task_form = f"<div class='panel'><h2>创建云端任务</h2><form method='post' action='/admin/tasks/create'>{csrf_html}<div class='grid-2'><label>任务类型<select name='task_type'><option value='yeshe_checkin'>野社零点签到</option><option value='yeshe_draw_card'>野社自动抽卡</option><option value='cloud_auto_read'>云端自动阅读</option><option value='http'>通用 HTTPS 请求</option></select></label><label>每日执行时间<input name='time_of_day' value='00:05'></label><label>凭据 ID<input name='credential_id'></label><label>所有者<input name='owner' value='admin'></label><label>阅读时长（分钟）<input name='duration_minutes' type='number' value='30'></label><label>最近阅读数量<input name='recent_limit' type='number' value='1'></label></div><label>自定义图书 JSON<textarea name='request_body'></textarea></label><button class='button' type='submit'>创建任务</button></form></div>"
+            content = f"<div class='page-head'><div><p class='eyebrow'>自动化</p><h1>云端任务</h1><p class='muted'>配置、查看和控制自动阅读、签到、抽卡任务。</p></div></div>{task_credentials}{task_form}"
+        elif section == "settings":
+            content = f"<div class='page-head'><div><p class='eyebrow'>系统</p><h1>服务器设置</h1><p class='muted'>认证、白名单、模块同步和快照配置。</p></div></div><div class='panel'><form method='post' action='/admin/settings'>{csrf_html}<input type='hidden' name='signing_public_key' value='{esc(config.get('signingPublicKey', ''))}'><input type='hidden' name='release_version_code' value='{esc(config.get('releaseVersionCode', 0))}'><input type='hidden' name='github_include_prerelease' value='{'on' if config.get('githubIncludePrerelease') else ''}'><input type='hidden' name='server_snapshot_enabled' value='{'on' if config.get('serverSnapshotEnabled', True) else ''}'><div class='grid-2'><label>服务器 ID<input name='server_id' value='{esc(config.get('serverId', ''))}'></label><label>最低模块版本<input name='min_module_version' value='{esc(config.get('minModuleVersion', ''))}'></label><label>GitHub 仓库<input name='github_repository' value='{esc(config.get('githubRepository', ''))}'></label><label>同步间隔（秒）<input name='release_sync_seconds' type='number' value='{esc(config.get('releaseSyncSeconds', 1800))}'></label><label>快照间隔（秒）<input name='server_snapshot_seconds' type='number' value='{esc(config.get('serverSnapshotSeconds', 86400))}'></label><label>快照保留份数<input name='server_snapshot_retention' type='number' value='{esc(config.get('serverSnapshotRetention', 30))}'></label></div><label>API Key（留空保持）<input type='password' name='api_key'></label><label><input type='checkbox' name='generate_api_key'> 生成新 API Key</label><label><input type='checkbox' name='allow_public' {'checked' if config.get('allowPublic') else ''}> 允许公开访问</label><label>阅微账号白名单<textarea name='host_account_allowlist'>{esc(chr(10).join(config.get('hostAccountAllowlist', [])))}</textarea></label><label>功能列表<textarea name='features'>{esc(','.join(config.get('features', [])))}</textarea></label><button class='button' type='submit'>保存设置</button><button class='button subtle' type='submit' formaction='/admin/sync'>立即同步模块</button></form></div>"
+        else:
+            admin_block = ""
+            if section == "security" and actor.get("role") == "primary":
+                admin_block = f"<div class='panel'><h2>子管理员</h2><form method='post' action='/admin/admins/create'>{csrf_html}<div class='grid-2'><label>用户名<input name='username' required></label><label>初始密码<input type='password' name='password'></label></div><label>权限<input name='permissions' value='settings:write,packages:write,tasks:write'></label><button class='button' type='submit'>创建子管理员</button></form></div>"
+            content = f"<div class='page-head'><div><p class='eyebrow'>保护</p><h1>子管理员与安全</h1><p class='muted'>管理员、快照和审计操作。</p></div></div>{admin_block}<div class='panel'><h2>服务器快照</h2><p>快照包含数据库与服务器配置，并支持完整性校验。</p><form method='post' action='/admin/backups/server'>{csrf_html}<button class='button' type='submit'>立即创建快照</button></form><p><a href='/admin/audit'>查看审计日志</a> · <a href='/admin/backups/server'>快照列表</a></p></div>"
     return f"""<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>ReaMicro API 管理后台</title><style>:root{{--line:#e5e9f0;--muted:#64748b;--blue:#2563eb}}*{{box-sizing:border-box}}body{{margin:0;background:#f4f7fb;color:#1f2937;font-family:system-ui,-apple-system,'Microsoft YaHei',sans-serif}}aside{{position:fixed;inset:0 auto 0 0;width:236px;padding:22px 14px;background:#f8fafc;border-right:1px solid var(--line)}}.brand{{font-size:18px;font-weight:700;padding:0 12px 22px}}.brand small{{display:block;color:var(--muted);font-size:11px;margin-top:5px}}nav a{{display:flex;justify-content:space-between;padding:10px 12px;margin:3px 0;border-radius:6px;color:#475569;text-decoration:none;font-size:14px}}nav a.active,nav a:hover{{background:#e8f0ff;color:#1d4ed8;font-weight:650}}nav span{{color:#94a3b8;font-size:11px}}main{{margin-left:236px;padding:25px 34px 50px}}.topbar{{display:flex;justify-content:flex-end;gap:15px;color:var(--muted);font-size:13px;margin-bottom:24px}}.page-head{{display:flex;justify-content:space-between;margin-bottom:20px}}h1{{margin:3px 0 5px;font-size:26px}}.eyebrow{{color:var(--blue);font-size:12px;font-weight:700;margin:0}}.muted,small{{color:var(--muted)}}.stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}}.stats div,.table-wrap,.panel{{background:#fff;border:1px solid var(--line);border-radius:8px}}.stats div{{padding:18px}}.stats strong{{display:block;font-size:24px}}.stats span{{color:var(--muted);font-size:13px}}.toolbar{{display:flex;gap:8px;margin-bottom:12px}}input{{padding:9px 10px;border:1px solid #cfd6e1;border-radius:5px;font:inherit}}.toolbar input{{width:420px}}.button{{display:inline-block;padding:9px 14px;border:0;border-radius:5px;background:var(--blue);color:#fff;text-decoration:none;font:inherit;font-weight:650;cursor:pointer}}.button.subtle{{background:#eef2f7;color:#334155;padding:6px 9px;font-size:12px}}.table-wrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:760px}}th,td{{padding:13px 14px;border-bottom:1px solid var(--line);text-align:left;font-size:13px}}th{{background:#fafbfc;color:var(--muted)}}td small{{display:block;margin-top:4px;font-size:11px}}.status{{padding:3px 7px;border-radius:4px;font-size:11px;background:#eef2f7}}.status-published{{background:#ecfdf3;color:#047857}}.status-draft{{background:#fff7ed;color:#b45309}}.actions{{white-space:nowrap}}.notice,.secret,.panel{{padding:14px;margin-bottom:18px}}.notice{{background:#ecfdf5;color:#166534}}.secret{{background:#fff7ed;color:#9a3412}}.inline{{display:inline}}.empty{{padding:28px;text-align:center;color:var(--muted)}}@media(max-width:760px){{aside{{width:190px}}main{{margin-left:190px;padding:20px 15px}}.stats{{grid-template-columns:repeat(2,1fr)}}.page-head{{display:block}}}}</style></head><body><aside><div class='brand'>ReaMicro<small>API 管理后台 · 5222</small></div><nav>{nav_html}</nav></aside><main><div class='topbar'><span>管理员：{esc(actor.get('username', ''))}</span><span>{'主管理员' if actor.get('role') == 'primary' else '子管理员'}</span><form class='inline' method='post' action='/admin/logout'>{csrf_html}<button class='button subtle' type='submit'>退出</button></form></div>{notice}{secret}{content}</main></body></html>"""
 
 
 @app.get("/admin/legacy", response_class=HTMLResponse)
 async def admin_legacy(actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
-    return HTMLResponse(_legacy_admin_page(load_config(), actor=actor))
+    return RedirectResponse("/admin?section=settings", status_code=303)
 
 
 def _admin_shell(title: str, body: str, config: dict[str, Any], actor: dict[str, Any]) -> str:
@@ -1942,10 +1951,10 @@ async def admin_server_backup(
     try:
         snapshot = await asyncio.to_thread(create_server_snapshot)
         audit_event("server_snapshot_created", audit_actor(actor), success=True, metadata={"filename": snapshot.name})
-        return HTMLResponse(admin_page(current, f"服务器快照已创建：{snapshot.name}", actor=actor))
+        return HTMLResponse(admin_page(current, f"服务器快照已创建：{snapshot.name}", actor=actor, section="security"))
     except Exception as error:
         audit_event("server_snapshot_created", audit_actor(actor), success=False)
-        return HTMLResponse(admin_page(current, f"服务器快照失败：{error}", actor=actor), status_code=500)
+        return HTMLResponse(admin_page(current, f"服务器快照失败：{error}", actor=actor, section="security"), status_code=500)
 
 
 @app.post("/admin/security/rotate-secret", response_class=HTMLResponse)
@@ -1961,10 +1970,10 @@ async def admin_rotate_secret(
     try:
         count = await asyncio.to_thread(rotate_secret_key, new_secret_key)
         audit_event("secret_key_rotated", audit_actor(actor), metadata={"reencrypted": count})
-        return HTMLResponse(admin_page(load_config(), f"服务器加密密钥已轮换并重新加密 {count} 项数据", actor=actor))
+        return HTMLResponse(admin_page(load_config(), f"服务器加密密钥已轮换并重新加密 {count} 项数据", actor=actor, section="security"))
     except Exception as error:
         audit_event("secret_key_rotation_failed", audit_actor(actor), success=False)
-        return HTMLResponse(admin_page(current, f"密钥轮换失败：{error}", actor=actor), status_code=400)
+        return HTMLResponse(admin_page(current, f"密钥轮换失败：{error}", actor=actor, section="security"), status_code=400)
 
 
 @app.get("/admin/backups/server")
@@ -2059,15 +2068,15 @@ async def admin_task_action(
     tasks = load_tasks()
     task = tasks.get(task_id)
     if not task:
-        return HTMLResponse(admin_page(config, "任务不存在", actor=actor), status_code=404)
+        return HTMLResponse(admin_page(config, "任务不存在", actor=actor, section="tasks"), status_code=404)
     try:
         message = apply_task_action(task, action)
     except ValueError:
-        return HTMLResponse(admin_page(config, "不支持的任务操作", actor=actor), status_code=400)
+        return HTMLResponse(admin_page(config, "不支持的任务操作", actor=actor, section="tasks"), status_code=400)
     save_tasks(tasks)
     task_log(task_id, message)
     audit_event("admin_task_action", audit_actor(actor), metadata={"taskId": task_id, "action": action})
-    return HTMLResponse(admin_page(config, message, actor=actor))
+    return HTMLResponse(admin_page(config, message, actor=actor, section="tasks"))
 
 
 @app.post("/admin/setup", response_class=HTMLResponse)
@@ -2160,10 +2169,10 @@ async def admin_settings(
         "signingPublicKey": signing_public_key.strip(),
         "githubRepository": github_repository.strip() or current["githubRepository"],
         "githubToken": "" if clear_github_token is not None else (github_token or current.get("githubToken", "")),
-        "githubIncludePrerelease": github_include_prerelease is not None,
+        "githubIncludePrerelease": github_include_prerelease is not None and str(github_include_prerelease).lower() not in {"", "0", "false"},
         "releaseSyncSeconds": release_sync_seconds,
         "releaseVersionCode": release_version_code,
-        "serverSnapshotEnabled": server_snapshot_enabled is not None,
+        "serverSnapshotEnabled": server_snapshot_enabled is not None and str(server_snapshot_enabled).lower() not in {"", "0", "false"},
         "serverSnapshotSeconds": server_snapshot_seconds,
         "serverSnapshotRetention": server_snapshot_retention,
         "primaryAdmin": current.get("primaryAdmin", {}),
@@ -2199,7 +2208,7 @@ async def admin_settings(
         notices.append(f"新服务器加密密钥：{generated_secret_key}")
     if secret_key_message:
         notices.append(secret_key_message)
-    return HTMLResponse(admin_page(saved, "设置已保存", actor=actor, secret_notice="\n".join(notices)))
+    return HTMLResponse(admin_page(saved, "设置已保存", actor=actor, secret_notice="\n".join(notices), section="settings"))
 
 
 @app.post("/admin/admins/create", response_class=HTMLResponse)
@@ -2237,9 +2246,9 @@ async def admin_create_subadmin(
         saved = save_config(current)
         audit_event("subadmin_created", audit_actor(actor), success=True, metadata={"username": username})
         notice = f"子管理员 {username} 的初始密码：{password}" if generated else ""
-        return HTMLResponse(admin_page(saved, f"子管理员 {username} 已创建", actor=actor, secret_notice=notice))
+        return HTMLResponse(admin_page(saved, f"子管理员 {username} 已创建", actor=actor, secret_notice=notice, section="security"))
     except ValueError as error:
-        return HTMLResponse(admin_page(current, str(error), actor=actor), status_code=400)
+        return HTMLResponse(admin_page(current, str(error), actor=actor, section="security"), status_code=400)
 
 
 @app.post("/admin/admins/reset", response_class=HTMLResponse)
@@ -2255,7 +2264,7 @@ async def admin_reset_subadmin(
     admins = dict(current.get("adminAccounts", {}))
     record = admins.get(username)
     if not isinstance(record, dict):
-        return HTMLResponse(admin_page(current, "子管理员不存在", actor=actor), status_code=404)
+        return HTMLResponse(admin_page(current, "子管理员不存在", actor=actor, section="security"), status_code=404)
     password = generate_long_secret(24)
     record = dict(record)
     record["passwordHash"] = password_hash(password)
@@ -2265,7 +2274,7 @@ async def admin_reset_subadmin(
     saved = save_config(current)
     get_state_store().delete_admin_sessions_for_user(username)
     audit_event("subadmin_password_reset", audit_actor(actor), success=True, metadata={"username": username})
-    return HTMLResponse(admin_page(saved, f"子管理员 {username} 的密码已重置", actor=actor, secret_notice=f"新密码：{password}"))
+    return HTMLResponse(admin_page(saved, f"子管理员 {username} 的密码已重置", actor=actor, secret_notice=f"新密码：{password}", section="security"))
 
 
 @app.post("/admin/admins/toggle", response_class=HTMLResponse)
@@ -2281,7 +2290,7 @@ async def admin_toggle_subadmin(
     admins = dict(current.get("adminAccounts", {}))
     record = admins.get(username)
     if not isinstance(record, dict):
-        return HTMLResponse(admin_page(current, "子管理员不存在", actor=actor), status_code=404)
+        return HTMLResponse(admin_page(current, "子管理员不存在", actor=actor, section="security"), status_code=404)
     record = dict(record)
     record["enabled"] = not bool(record.get("enabled", True))
     record["updatedAt"] = datetime.now(timezone.utc).isoformat()
@@ -2292,7 +2301,7 @@ async def admin_toggle_subadmin(
         get_state_store().delete_admin_sessions_for_user(username)
     audit_event("subadmin_toggled", audit_actor(actor), success=True, metadata={"username": username, "enabled": record["enabled"]})
     state_text = "启用" if record["enabled"] else "停用"
-    return HTMLResponse(admin_page(saved, f"子管理员 {username} 已{state_text}", actor=actor))
+    return HTMLResponse(admin_page(saved, f"子管理员 {username} 已{state_text}", actor=actor, section="security"))
 
 
 @app.post("/admin/admins/delete", response_class=HTMLResponse)
@@ -2307,13 +2316,13 @@ async def admin_delete_subadmin(
     require_admin_csrf(current, actor, csrf_token)
     admins = dict(current.get("adminAccounts", {}))
     if username not in admins:
-        return HTMLResponse(admin_page(current, "子管理员不存在", actor=actor), status_code=404)
+        return HTMLResponse(admin_page(current, "子管理员不存在", actor=actor, section="security"), status_code=404)
     admins.pop(username, None)
     current["adminAccounts"] = admins
     saved = save_config(current)
     get_state_store().delete_admin_sessions_for_user(username)
     audit_event("subadmin_deleted", audit_actor(actor), success=True, metadata={"username": username})
-    return HTMLResponse(admin_page(saved, f"子管理员 {username} 已删除", actor=actor))
+    return HTMLResponse(admin_page(saved, f"子管理员 {username} 已删除", actor=actor, section="security"))
 
 
 @app.post("/admin/sync", response_class=HTMLResponse)
@@ -2326,9 +2335,9 @@ async def admin_sync(
     require_admin_permission(actor, "module:sync")
     try:
         await asyncio.to_thread(sync_module_release)
-        return HTMLResponse(admin_page(load_config(), "模块 Release 已同步", actor=actor))
+        return HTMLResponse(admin_page(load_config(), "模块 Release 已同步", actor=actor, section="settings"))
     except Exception as error:
-        return HTMLResponse(admin_page(load_config(), f"同步失败：{error}", actor=actor), status_code=502)
+        return HTMLResponse(admin_page(load_config(), f"同步失败：{error}", actor=actor, section="settings"), status_code=502)
 
 
 PACKAGE_KINDS = {
@@ -2553,7 +2562,7 @@ async def admin_upload_package(
     temp_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     temp_manifest.replace(manifest_path)
     audit_event("package_uploaded", audit_actor(actor), success=True, metadata={"kind": kind, "packageId": package_id, "version": version, "status": normalized_status})
-    return HTMLResponse(admin_page(load_config(), f"已发布 {kind}/{package_id} {version}", actor=actor))
+    return HTMLResponse(admin_page(load_config(), f"已发布 {kind}/{package_id} {version}", actor=actor, section=kind))
 
 
 @app.post("/admin/tasks/create", response_class=HTMLResponse)
@@ -2628,9 +2637,9 @@ async def admin_create_task(
         }
         save_tasks(tasks)
         task_log(task_id, "管理员创建任务")
-        return HTMLResponse(admin_page(load_config(), f"任务 {task_id} 已创建", actor=actor))
+        return HTMLResponse(admin_page(load_config(), f"任务 {task_id} 已创建", actor=actor, section="tasks"))
     except Exception as error:
-        return HTMLResponse(admin_page(load_config(), f"创建任务失败：{error}", actor=actor), status_code=400)
+        return HTMLResponse(admin_page(load_config(), f"创建任务失败：{error}", actor=actor, section="tasks"), status_code=400)
 
 
 @app.get("/v1/discovery")
