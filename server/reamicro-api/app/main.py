@@ -1231,7 +1231,7 @@ def admin_login_page(message: str = "") -> str:
 <body><main><h1>ReaMicro 管理后台</h1>{message_html}<form method='post' action='/admin/login'><label>管理员用户名</label><input name='username' autocomplete='username' required><label>密码</label><input type='password' name='password' autocomplete='current-password' required><button type='submit'>登录</button></form></main></body></html>"""
 
 
-def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] | None = None, secret_notice: str = "") -> str:
+def _legacy_admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] | None = None, secret_notice: str = "") -> str:
     def esc(value: Any) -> str:
         return html.escape(str(value), quote=True)
 
@@ -1352,6 +1352,192 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
 {admin_management}{system_tools}{security_tools}<hr><p><a href='/admin/audit'>审计日志</a>　<a href='/health/live'>存活检查</a>　<a href='/health/ready'>就绪检查</a>　<a href='/v1/meta'>能力信息</a></p></main></body></html>"""
 
 
+def _admin_package_records() -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for kind in sorted(PACKAGE_KINDS):
+        for manifest_path in sorted((PACKAGE_ROOT / kind).glob("*/manifest.json")):
+            try:
+                item = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if not isinstance(item, dict):
+                    continue
+                item.setdefault("kind", kind)
+                item.setdefault("packageId", manifest_path.parent.name)
+                item.update(package_dependency_status(item))
+                records.append(item)
+            except (OSError, ValueError, HTTPException):
+                continue
+    return records
+
+
+def _admin_kind_label(kind: str) -> str:
+    return {"online_source": "书源", "association_source": "关联源", "epub_style": "EPUB 样式", "highlight_style": "高亮样式", "theme": "主题库"}.get(kind, kind)
+
+
+def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: str = "") -> str:
+    esc = lambda value: html.escape(str(value), quote=True)
+    needle = query.strip().lower()
+    rows: list[str] = []
+    for item in sorted(records, key=lambda value: (str(value.get("kind", "")), str(value.get("packageId", "")))):
+        haystack = " ".join(str(item.get(key, "")) for key in ("kind", "packageId", "contentId", "name", "version", "aliases")).lower()
+        if needle and needle not in haystack:
+            continue
+        kind = str(item.get("kind", "")); package_id = str(item.get("packageId", ""))
+        dependency = "满足" if item.get("dependenciesSatisfied", True) else "缺少依赖"
+        actions = f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/edit'>编辑</a> <a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/preview'>预览</a> <a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/history'>历史</a>" if can_write else f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/preview'>预览</a>"
+        rows.append(f"<tr><td>{esc(_admin_kind_label(kind))}</td><td><strong>{esc(item.get('name', package_id))}</strong><small>{esc(package_id)} · {esc(item.get('contentId', ''))}</small></td><td>{esc(item.get('version', ''))}<small>{esc(item.get('buildTime', ''))}</small></td><td><span class='status status-{esc(item.get('status', 'published'))}'>{esc(item.get('status', 'published'))}</span></td><td>{esc(item.get('channel', 'stable'))}<small>{dependency}</small></td><td class='actions'>{actions}</td></tr>")
+    return "".join(rows) or "<tr><td colspan='6' class='empty'>没有匹配的内容包</td></tr>"
+
+
+def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] | None = None, secret_notice: str = "", section: str = "overview", query: str = "") -> str:
+    """分类管理后台，保留原有写入路由并提供统一内容列表入口。"""
+    esc = lambda value: html.escape(str(value), quote=True)
+    actor = actor or {"username": "", "role": "subadmin", "permissions": []}
+    valid_sections = {"overview", "packages", "tasks", "settings", "security", *PACKAGE_KINDS}
+    section = section if section in valid_sections else "overview"
+    csrf_html = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
+    records = _admin_package_records()
+    can_packages = actor.get("role") == "primary" or "packages:write" in set(actor.get("permissions", []))
+    labels = [("overview", "概览"), ("packages", "全部内容"), ("online_source", "书源"), ("association_source", "关联源"), ("epub_style", "EPUB 样式"), ("highlight_style", "高亮样式"), ("theme", "主题库"), ("tasks", "云端任务"), ("settings", "服务器设置"), ("security", "安全与备份")]
+    nav_html = "".join(f"<a class={'active' if key == section else ''} href='/admin?section={key}'>{label}<span>{len([x for x in records if x.get('kind') == key]) if key in PACKAGE_KINDS else ''}</span></a>" for key, label in labels)
+    notice = f"<div class='notice'>{esc(message)}</div>" if message else ""
+    secret = f"<div class='secret'><strong>请立即保存：</strong><br>{esc(secret_notice)}</div>" if secret_notice else ""
+    if section in {"overview", "packages", *PACKAGE_KINDS}:
+        selected = section if section in PACKAGE_KINDS else ""
+        visible = [item for item in records if not selected or item.get("kind") == selected]
+        title = "概览" if section == "overview" else ("内容管理" if section == "packages" else _admin_kind_label(section))
+        head_action = f"<a class='button' href='/admin/packages/new?kind={esc(selected or 'online_source')}'>新增内容</a>" if can_packages else ""
+        content = f"<div class='page-head'><div><p class='eyebrow'>内容中心</p><h1>{title}</h1><p class='muted'>独立管理版本、依赖、发布状态和历史版本。</p></div>{head_action}</div>"
+        if section == "overview":
+            content += f"<div class='stats'><div><strong>{len(records)}</strong><span>内容包</span></div><div><strong>{sum(1 for x in records if x.get('status', 'published') == 'published')}</strong><span>已发布</span></div><div><strong>{len(load_tasks())}</strong><span>云端任务</span></div><div><strong>{esc(config.get('serverId', ''))}</strong><span>服务器 ID</span></div></div>"
+            content += '<template id="cloud-book-example">[{"cloudBookId":123,"bookId":123,"name":"书名"}]</template>'
+        content += f"<form class='toolbar' method='get' action='/admin'><input type='hidden' name='section' value='{esc(section)}'><input name='q' value='{esc(query)}' placeholder='搜索名称、包 ID、版本或别名'><button class='button' type='submit'>搜索</button></form><div class='table-wrap'><table><thead><tr><th>类型</th><th>内容</th><th>版本</th><th>状态</th><th>渠道 / 依赖</th><th>操作</th></tr></thead><tbody>{_admin_package_table(visible, can_packages, query)}</tbody></table></div>"
+    else:
+        content = f"<div class='page-head'><div><p class='eyebrow'>系统</p><h1>{'云端任务' if section == 'tasks' else ('服务器设置' if section == 'settings' else '安全与备份')}</h1><p class='muted'>按分类维护后台功能。</p></div></div><div class='panel'><p>此分类已独立，原有详细操作仍通过现有安全路由执行。</p><p><a href='/admin'>返回概览</a> · <a href='/admin/audit'>审计日志</a> · <a href='/admin/backups/server'>服务器快照</a></p>{'<p>子管理员账户管理仍受主管理员权限保护。</p>' if section == 'security' else ''}</div>"
+    return f"""<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>ReaMicro API 管理后台</title><style>:root{{--line:#e5e9f0;--muted:#64748b;--blue:#2563eb}}*{{box-sizing:border-box}}body{{margin:0;background:#f4f7fb;color:#1f2937;font-family:system-ui,-apple-system,'Microsoft YaHei',sans-serif}}aside{{position:fixed;inset:0 auto 0 0;width:236px;padding:22px 14px;background:#f8fafc;border-right:1px solid var(--line)}}.brand{{font-size:18px;font-weight:700;padding:0 12px 22px}}.brand small{{display:block;color:var(--muted);font-size:11px;margin-top:5px}}nav a{{display:flex;justify-content:space-between;padding:10px 12px;margin:3px 0;border-radius:6px;color:#475569;text-decoration:none;font-size:14px}}nav a.active,nav a:hover{{background:#e8f0ff;color:#1d4ed8;font-weight:650}}nav span{{color:#94a3b8;font-size:11px}}main{{margin-left:236px;padding:25px 34px 50px}}.topbar{{display:flex;justify-content:flex-end;gap:15px;color:var(--muted);font-size:13px;margin-bottom:24px}}.page-head{{display:flex;justify-content:space-between;margin-bottom:20px}}h1{{margin:3px 0 5px;font-size:26px}}.eyebrow{{color:var(--blue);font-size:12px;font-weight:700;margin:0}}.muted,small{{color:var(--muted)}}.stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}}.stats div,.table-wrap,.panel{{background:#fff;border:1px solid var(--line);border-radius:8px}}.stats div{{padding:18px}}.stats strong{{display:block;font-size:24px}}.stats span{{color:var(--muted);font-size:13px}}.toolbar{{display:flex;gap:8px;margin-bottom:12px}}input{{padding:9px 10px;border:1px solid #cfd6e1;border-radius:5px;font:inherit}}.toolbar input{{width:420px}}.button{{display:inline-block;padding:9px 14px;border:0;border-radius:5px;background:var(--blue);color:#fff;text-decoration:none;font:inherit;font-weight:650;cursor:pointer}}.button.subtle{{background:#eef2f7;color:#334155;padding:6px 9px;font-size:12px}}.table-wrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:760px}}th,td{{padding:13px 14px;border-bottom:1px solid var(--line);text-align:left;font-size:13px}}th{{background:#fafbfc;color:var(--muted)}}td small{{display:block;margin-top:4px;font-size:11px}}.status{{padding:3px 7px;border-radius:4px;font-size:11px;background:#eef2f7}}.status-published{{background:#ecfdf3;color:#047857}}.status-draft{{background:#fff7ed;color:#b45309}}.actions{{white-space:nowrap}}.notice,.secret,.panel{{padding:14px;margin-bottom:18px}}.notice{{background:#ecfdf5;color:#166534}}.secret{{background:#fff7ed;color:#9a3412}}.inline{{display:inline}}.empty{{padding:28px;text-align:center;color:var(--muted)}}@media(max-width:760px){{aside{{width:190px}}main{{margin-left:190px;padding:20px 15px}}.stats{{grid-template-columns:repeat(2,1fr)}}.page-head{{display:block}}}}</style></head><body><aside><div class='brand'>ReaMicro<small>API 管理后台 · 5222</small></div><nav>{nav_html}</nav></aside><main><div class='topbar'><span>管理员：{esc(actor.get('username', ''))}</span><span>{'主管理员' if actor.get('role') == 'primary' else '子管理员'}</span><form class='inline' method='post' action='/admin/logout'>{csrf_html}<button class='button subtle' type='submit'>退出</button></form></div>{notice}{secret}{content}</main></body></html>"""
+
+
+def _admin_shell(title: str, body: str, config: dict[str, Any], actor: dict[str, Any]) -> str:
+    esc = lambda value: html.escape(str(value), quote=True)
+    csrf_html = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
+    return f"<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{esc(title)}</title><style>body{{margin:0;background:#f4f7fb;color:#1f2937;font-family:system-ui,-apple-system,'Microsoft YaHei',sans-serif}}main{{max-width:1100px;margin:0 auto;padding:28px 20px}}.panel{{background:#fff;border:1px solid #e5e9f0;border-radius:8px;padding:22px;margin-top:16px}}h1{{margin:0 0 5px}}.muted,small{{color:#64748b}}label{{display:block;font-weight:600;font-size:13px;margin:13px 0}}input,textarea,select{{width:100%;box-sizing:border-box;margin-top:6px;padding:9px;border:1px solid #cfd6e1;border-radius:5px;font:inherit}}textarea{{min-height:260px;font-family:ui-monospace,monospace}}.grid{{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}}button,.button{{display:inline-block;padding:9px 14px;border:0;border-radius:5px;background:#2563eb;color:#fff;text-decoration:none;font:inherit;font-weight:650;cursor:pointer}}.subtle{{background:#eef2f7;color:#334155}}pre{{white-space:pre-wrap;overflow:auto;background:#0f172a;color:#e2e8f0;border-radius:6px;padding:16px;line-height:1.55}}table{{width:100%;border-collapse:collapse}}th,td{{padding:11px;border-bottom:1px solid #e5e9f0;text-align:left;font-size:13px}}.notice{{padding:11px;background:#ecfdf5;color:#166534;border-radius:6px}}@media(max-width:700px){{.grid{{grid-template-columns:1fr}}}}</style></head><body><main><p><a href='/admin'>← 返回后台</a></p><h1>{esc(title)}</h1>{body}<p><form method='post' action='/admin/logout'>{csrf_html}<button class='subtle' type='submit'>退出登录</button></form></p></main></body></html>"
+
+
+def _admin_package_payload(package_dir: Path, manifest: dict[str, Any]) -> tuple[str, bytes]:
+    filename = safe_payload_filename(str(manifest.get("payload", "payload.bin")))
+    payload_path = package_dir / filename
+    if not payload_path.is_file():
+        raise HTTPException(status_code=404, detail="内容文件不存在")
+    return filename, payload_path.read_bytes()
+
+
+@app.get("/admin/packages/new", response_class=HTMLResponse)
+async def admin_new_package(kind: str = Query("online_source"), actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+    require_admin_permission(actor, "packages:write")
+    kind = kind if kind in PACKAGE_KINDS else "online_source"
+    config = load_config(); esc = lambda value: html.escape(str(value), quote=True)
+    csrf = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
+    options = "".join(f"<option value='{k}' {'selected' if k == kind else ''}>{_admin_kind_label(k)}</option>" for k in sorted(PACKAGE_KINDS))
+    body = f"<div class='panel'><p class='muted'>新增内容请使用统一上传入口，旧版本会自动进入历史目录。</p><form method='post' action='/admin/packages/upload' enctype='multipart/form-data'>{csrf}<div class='grid'><label>内容类型<select name='kind'>{options}</select></label><label>包 ID<input name='package_id' required></label><label>版本号<input name='version' required></label><label>稳定内容 ID<input name='content_id'></label><label>状态<select name='status_value'><option value='published'>立即发布</option><option value='draft'>草稿</option><option value='testing'>测试中</option></select></label><label>渠道<select name='channel'><option>stable</option><option>beta</option><option>nightly</option></select></label></div><label>别名（逗号分隔）<input name='aliases'></label><label>依赖 JSON<textarea name='dependencies' placeholder='[]'></textarea></label><label>内容文件<input type='file' name='payload' required></label><button type='submit'>上传并保存</button></form></div>"
+    return HTMLResponse(_admin_shell("新增内容", body, config, actor))
+
+
+@app.get("/admin/packages/{package_kind}/{package_id}/preview", response_class=HTMLResponse)
+async def admin_preview_package(package_kind: str, package_id: str, actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+    package_kind = safe_package_segment(package_kind); package_id = safe_package_segment(package_id)
+    manifest_path, manifest = package_manifest(package_kind, package_id)
+    filename, payload = _admin_package_payload(manifest_path.parent, manifest)
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        text = "[二进制内容，无法在浏览器中预览]"
+    if filename.lower().endswith((".json", ".json5")):
+        try:
+            text = json.dumps(json.loads(text), ensure_ascii=False, indent=2)
+        except ValueError:
+            pass
+    body = f"<div class='panel'><p class='muted'>{html.escape(_admin_kind_label(package_kind))} · {html.escape(package_id)} · 版本 {html.escape(str(manifest.get('version', '')))} · 构建时间 {html.escape(str(manifest.get('buildTime', '')))}</p><pre>{html.escape(text)}</pre></div>"
+    return HTMLResponse(_admin_shell("预览 · " + _admin_kind_label(package_kind), body, load_config(), actor))
+
+
+@app.get("/admin/packages/{package_kind}/{package_id}/edit", response_class=HTMLResponse)
+async def admin_edit_package_get(package_kind: str, package_id: str, actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+    require_admin_permission(actor, "packages:write")
+    package_kind = safe_package_segment(package_kind); package_id = safe_package_segment(package_id)
+    manifest_path, manifest = package_manifest(package_kind, package_id)
+    filename, payload = _admin_package_payload(manifest_path.parent, manifest)
+    try: text = payload.decode("utf-8")
+    except UnicodeDecodeError: text = ""
+    config = load_config(); esc = lambda value: html.escape(str(value), quote=True)
+    csrf = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
+    status_options = "".join(f"<option value='{status}' {'selected' if manifest.get('status', 'published') == status else ''}>{status}</option>" for status in ('published', 'draft', 'testing', 'unpublished'))
+    channel_options = "".join(f"<option value='{channel}' {'selected' if manifest.get('channel', 'stable') == channel else ''}>{channel}</option>" for channel in ('stable', 'beta', 'nightly'))
+    body = f"<div class='panel'><form method='post' action='/admin/packages/{esc(package_kind)}/{esc(package_id)}/edit'>{csrf}<div class='grid'><label>版本号<input name='version' value='{esc(manifest.get('version', ''))}' required></label><label>内容文件名<input name='filename' value='{esc(filename)}' required></label><label>稳定内容 ID<input name='content_id' value='{esc(manifest.get('contentId', ''))}'></label><label>名称<input name='name' value='{esc(manifest.get('name', package_id))}'></label><label>发布状态<select name='status_value'>{status_options}</select></label><label>发布渠道<select name='channel'>{channel_options}</select></label></div><label>别名（逗号分隔）<input name='aliases' value='{esc(','.join(manifest.get('aliases', [])))}'></label><label>依赖 JSON<textarea name='dependencies'>{esc(json.dumps(manifest.get('dependencies', []), ensure_ascii=False, indent=2))}</textarea></label><label>内容<textarea name='payload_text'>{esc(text)}</textarea></label><button type='submit'>保存新版本</button> <a class='button subtle' href='/admin/packages/{esc(package_kind)}/{esc(package_id)}/preview'>取消</a></form></div>"
+    return HTMLResponse(_admin_shell("编辑 · " + _admin_kind_label(package_kind), body, config, actor))
+
+
+@app.post("/admin/packages/{package_kind}/{package_id}/edit", response_class=HTMLResponse)
+async def admin_edit_package_post(
+    package_kind: str,
+    package_id: str,
+    version: str = Form(...),
+    filename: str = Form(...),
+    content_id: str = Form(""),
+    name: str = Form(""),
+    aliases: str = Form(""),
+    status_value: str = Form("published"),
+    channel: str = Form("stable"),
+    dependencies: str = Form("[]"),
+    payload_text: str = Form(""),
+    csrf_token: str = Form(""),
+    actor: dict[str, Any] = Depends(admin_actor),
+) -> HTMLResponse:
+    require_admin_permission(actor, "packages:write")
+    package_kind = safe_package_segment(package_kind); package_id = safe_package_segment(package_id)
+    config = load_config(); require_admin_csrf(config, actor, csrf_token)
+    manifest_path, current = package_manifest(package_kind, package_id)
+    filename = safe_payload_filename(filename)
+    version = safe_package_segment(version)
+    stable_id = safe_package_segment(content_id) if content_id.strip() else package_id
+    status_value = status_value.strip().lower(); channel = channel.strip().lower()
+    if status_value not in {"published", "draft", "testing", "unpublished"} or channel not in {"stable", "beta", "nightly"}:
+        raise HTTPException(status_code=400, detail="状态或渠道无效")
+    body = payload_text.encode("utf-8")
+    validate_package_payload(package_kind, filename, body)
+    try: dependency_items = normalize_package_dependencies(json.loads(dependencies or "[]"), package_kind, package_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="依赖必须是 JSON 数组")
+    package_dir = manifest_path.parent
+    history = package_dir / "history"; history.mkdir(exist_ok=True)
+    old_version = safe_package_segment(current.get("version", "old"))
+    archive_dir = history / f"{old_version}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"; archive_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(manifest_path, archive_dir / "manifest.json")
+    old_payload = package_dir / str(current.get("payload", ""))
+    if old_payload.is_file() and old_payload.parent == package_dir:
+        shutil.copy2(old_payload, archive_dir / old_payload.name)
+    build_time = int(datetime.now(timezone.utc).timestamp() * 1000); digest = hashlib.sha256(body).hexdigest()
+    manifest = {**current, "packageId": package_id, "kind": package_kind, "version": version, "buildTime": build_time, "sha256": digest, "payload": filename, "contentId": stable_id, "aliases": [x.strip() for x in aliases.split(",") if x.strip()], "name": name.strip() or package_id, "status": status_value, "channel": channel, "dependencies": dependency_items}
+    if status_value == "published" and not package_dependency_status(manifest).get("dependenciesSatisfied", True):
+        raise HTTPException(status_code=409, detail="内容包存在未满足的必需依赖")
+    manifest["signature"] = package_signature(package_id, package_kind, stable_id, version, build_time, digest, body)
+    payload_path = package_dir / filename; payload_path.write_bytes(body)
+    temp_manifest = package_dir / ".manifest.json.tmp"; temp_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"); temp_manifest.replace(manifest_path)
+    audit_event("package_edited", audit_actor(actor), metadata={"kind": package_kind, "packageId": package_id, "version": version})
+    return HTMLResponse(admin_page(load_config(), f"已保存 {_admin_kind_label(package_kind)}/{package_id} {version}", actor=actor, section=package_kind))
+
+
+@app.get("/admin/packages/{package_kind}/{package_id}/history", response_class=HTMLResponse)
+async def admin_history_package(package_kind: str, package_id: str, actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+    package_kind = safe_package_segment(package_kind); package_id = safe_package_segment(package_id)
+    manifest_path, _ = package_manifest(package_kind, package_id); rows = []
+    for path in sorted((manifest_path.parent / "history").glob("*/manifest.json"), reverse=True):
+        try: item = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError): continue
+        rows.append(f"<tr><td>{html.escape(str(item.get('version', '')))}</td><td>{html.escape(str(item.get('buildTime', '')))}</td><td>{html.escape(str(item.get('sha256', ''))[:16])}</td><td>{html.escape(str(item.get('status', '')))}</td></tr>")
+    history_rows = ''.join(rows) or '<tr><td colspan="4">暂无历史版本</td></tr>'
+    body = f"<div class='panel'><table><thead><tr><th>版本</th><th>构建时间</th><th>SHA256</th><th>状态</th></tr></thead><tbody>{history_rows}</tbody></table></div>"
+    return HTMLResponse(_admin_shell("历史版本 · " + _admin_kind_label(package_kind), body, load_config(), actor))
+
+
 @app.get("/admin/login", response_class=HTMLResponse)
 async def admin_login_get(request: Request) -> HTMLResponse:
     if session_admin(request):
@@ -1395,10 +1581,10 @@ async def admin_logout(request: Request, csrf_token: str = Form("")) -> Redirect
 
 
 @app.get("/admin", response_class=HTMLResponse)
-async def admin(actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+async def admin(section: str = Query("overview"), q: str = Query(""), actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
     if actor.get("needsSetup"):
         return HTMLResponse(admin_setup_page(actor=actor))
-    return HTMLResponse(admin_page(load_config(), actor=actor))
+    return HTMLResponse(admin_page(load_config(), actor=actor, section=section, query=q))
 
 
 @app.get("/admin/audit", response_class=HTMLResponse)
