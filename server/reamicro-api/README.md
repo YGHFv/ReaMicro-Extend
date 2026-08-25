@@ -82,7 +82,9 @@ X-ReaMicro-Api-Key: <key>
 
 云任务支持 `yeshe_checkin`、`yeshe_draw_card` 和 `cloud_auto_read`。自动阅读可指定图书，未指定时读取阅微最近阅读记录；服务器按配置上报阅读进度和时长。
 
-当前版本使用 Docker 数据卷内的 JSON 与文件存储，适合个人或小规模部署。多实例部署前应迁移到共享数据库、对象存储和独立 Worker，避免多个调度器同时执行同一任务。
+当前版本使用 Docker 数据卷内的 SQLite 事务库、JSON 配置与文件存储，适合个人或小规模部署。任务锁可避免同一数据卷上的多个 Worker 重复执行；真正的多主机部署仍应迁移到 PostgreSQL、共享对象存储和独立 Worker。
+
+云任务和阅微凭据现使用 `/data/state/reamicro.sqlite3` 的 SQLite WAL 事务库。升级时会自动导入旧的 `tasks.json` 和 `credentials.json`，并把原文件保留为 `.migrated`。后台“服务器数据保护”可以创建包含数据库和 `server.json` 的 ZIP 快照，保存于 `/data/backups/server`，最多保留 30 份。存活与就绪检查分别为 `/health/live` 和 `/health/ready`。
 
 ## 内容包目录
 

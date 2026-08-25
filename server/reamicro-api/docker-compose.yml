@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5222/v1/health', timeout=5)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5222/health/live', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -36,8 +36,10 @@ services:
       REAMICRO_SIGNING_PRIVATE_KEY_FILE: ${REAMICRO_SIGNING_PRIVATE_KEY_FILE:-}
       REAMICRO_BACKUP_ROOT: /data/backups
       REAMICRO_TASK_ROOT: /data/tasks
+      REAMICRO_STATE_DB: /data/state/reamicro.sqlite3
       REAMICRO_SECRET_KEY: ${REAMICRO_SECRET_KEY:-}
       REAMICRO_SECRET_BACKUP_ROOT: /data/backups/secrets
+      REAMICRO_SERVER_BACKUP_ROOT: /data/backups/server
       REAMICRO_AUDIT_ROOT: /data/audit
       REAMICRO_RATE_LIMIT: ${REAMICRO_RATE_LIMIT:-120}
 

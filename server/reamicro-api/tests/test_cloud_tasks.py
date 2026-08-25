@@ -19,6 +19,9 @@ class CloudTaskSecurityTest(unittest.TestCase):
         main.ACCOUNT_PATH = main.ACCOUNT_ROOT / "credentials.json"
         main.TASK_ROOT = root / "tasks"
         main.TASKS_PATH = main.TASK_ROOT / "tasks.json"
+        main.STATE_DB_PATH = root / "state" / "reamicro.sqlite3"
+        main.SERVER_BACKUP_ROOT = root / "backups" / "server"
+        main.state_store = None
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -66,6 +69,9 @@ class AdminSecurityTest(unittest.TestCase):
         self.original_admin_password = main.ADMIN_PASSWORD
         main.CONFIG_ROOT = root / "config"
         main.CONFIG_PATH = main.CONFIG_ROOT / "server.json"
+        main.STATE_DB_PATH = root / "state" / "reamicro.sqlite3"
+        main.SERVER_BACKUP_ROOT = root / "backups" / "server"
+        main.state_store = None
         main.ADMIN_USERNAME = "bootstrap-admin"
         main.ADMIN_PASSWORD = "bootstrap-password-123"
 
@@ -171,6 +177,25 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertTrue(main.allow_rate_limit(key))
         self.assertFalse(main.allow_rate_limit(key))
         main.RATE_LIMIT = original_limit
+
+    def test_state_store_persists_and_locks_tasks(self):
+        store = main.get_state_store()
+        store.save_namespace("tasks", {"task_1": {"id": "task_1", "status": "scheduled"}})
+        self.assertEqual(store.load_namespace("tasks")["task_1"]["status"], "scheduled")
+        self.assertTrue(store.acquire_task_lock("task_1", "worker_1", 2000, 1000))
+        self.assertFalse(store.acquire_task_lock("task_1", "worker_2", 2000, 1000))
+        store.release_task_lock("task_1", "worker_1")
+        self.assertTrue(store.acquire_task_lock("task_1", "worker_2", 2000, 1000))
+
+    def test_state_store_backup_integrity(self):
+        store = main.get_state_store()
+        store.save_namespace("credentials", {"credential_1": {"id": "credential_1"}})
+        backup = Path(self.temp_dir.name) / "backup.sqlite3"
+        store.backup(backup)
+        self.assertTrue(backup.is_file())
+        self.assertEqual(store.integrity_check(), "ok")
+        snapshot = main.create_server_snapshot()
+        self.assertTrue(snapshot.is_file())
 
 
 if __name__ == "__main__":

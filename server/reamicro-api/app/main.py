@@ -16,6 +16,7 @@ import html
 import base64
 import re
 import time
+import zipfile
 import hashlib as _hashlib
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Query, For
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.responses import JSONResponse
+from app.storage import StateStore
 
 API_VERSION = "1.0"
 CONFIG_ROOT = Path(os.getenv("REAMICRO_CONFIG_ROOT", "/data/config"))
@@ -42,8 +44,10 @@ PACKAGE_ROOT = Path(os.getenv("REAMICRO_PACKAGE_ROOT", "/data/packages"))
 RELEASE_ROOT = Path(os.getenv("REAMICRO_RELEASE_ROOT", "/data/releases/module"))
 BACKUP_ROOT = Path(os.getenv("REAMICRO_BACKUP_ROOT", "/data/backups"))
 SECRET_BACKUP_ROOT = Path(os.getenv("REAMICRO_SECRET_BACKUP_ROOT", "/data/backups/secrets"))
+SERVER_BACKUP_ROOT = Path(os.getenv("REAMICRO_SERVER_BACKUP_ROOT", "/data/backups/server"))
 TASK_ROOT = Path(os.getenv("REAMICRO_TASK_ROOT", "/data/tasks"))
 TASKS_PATH = TASK_ROOT / "tasks.json"
+STATE_DB_PATH = Path(os.getenv("REAMICRO_STATE_DB", "/data/state/reamicro.sqlite3"))
 TASK_LOG_ROOT = TASK_ROOT / "logs"
 AUDIT_ROOT = Path(os.getenv("REAMICRO_AUDIT_ROOT", "/data/audit"))
 AUDIT_PATH = AUDIT_ROOT / "events.jsonl"
@@ -55,6 +59,8 @@ ADMIN_PASSWORD = os.getenv("REAMICRO_ADMIN_PASSWORD", "")
 SIGNING_PRIVATE_KEY_FILE = os.getenv("REAMICRO_SIGNING_PRIVATE_KEY_FILE", "")
 config_lock = threading.RLock()
 basic_security = HTTPBasic(auto_error=False)
+state_store_lock = threading.RLock()
+state_store: StateStore | None = None
 rate_lock = threading.RLock()
 rate_buckets: dict[str, list[float]] = {}
 RATE_LIMIT = max(int(os.getenv("REAMICRO_RATE_LIMIT", "120")), 10)
@@ -118,36 +124,31 @@ def save_config(next_config: dict[str, Any]) -> dict[str, Any]:
         return safe
 
 
+def get_state_store() -> StateStore:
+    global state_store
+    with state_store_lock:
+        if state_store is None or state_store.path != STATE_DB_PATH:
+            state_store = StateStore(STATE_DB_PATH)
+            state_store.initialize()
+            state_store.import_json_namespace("tasks", TASKS_PATH)
+            state_store.import_json_namespace("credentials", ACCOUNT_PATH)
+        return state_store
+
+
 def load_tasks() -> dict[str, dict[str, Any]]:
-    TASK_ROOT.mkdir(parents=True, exist_ok=True)
-    try:
-        value = json.loads(TASKS_PATH.read_text(encoding="utf-8")) if TASKS_PATH.is_file() else {}
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    return get_state_store().load_namespace("tasks")
 
 
 def save_tasks(tasks: dict[str, dict[str, Any]]) -> None:
-    TASK_ROOT.mkdir(parents=True, exist_ok=True)
-    temp = TASKS_PATH.with_suffix(".tmp")
-    temp.write_text(json.dumps(tasks, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(TASKS_PATH)
+    get_state_store().save_namespace("tasks", tasks)
 
 
 def load_credentials() -> dict[str, dict[str, Any]]:
-    ACCOUNT_ROOT.mkdir(parents=True, exist_ok=True)
-    try:
-        value = json.loads(ACCOUNT_PATH.read_text(encoding="utf-8")) if ACCOUNT_PATH.is_file() else {}
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    return get_state_store().load_namespace("credentials")
 
 
 def save_credentials(credentials: dict[str, dict[str, Any]]) -> None:
-    ACCOUNT_ROOT.mkdir(parents=True, exist_ok=True)
-    temp = ACCOUNT_PATH.with_suffix(".tmp")
-    temp.write_text(json.dumps(credentials, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(ACCOUNT_PATH)
+    get_state_store().save_namespace("credentials", credentials)
 
 
 def audit_event(action: str, actor: str = "system", request_id: str = "", success: bool = True, metadata: dict[str, Any] | None = None) -> None:
@@ -172,6 +173,23 @@ def audit_actor(actor: dict[str, Any] | None) -> str:
     if not actor:
         return "system"
     return f"admin:{actor.get('username', 'unknown')}"
+
+
+def create_server_snapshot() -> Path:
+    SERVER_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    database_copy = SERVER_BACKUP_ROOT / f"state-{timestamp}.sqlite3"
+    archive = SERVER_BACKUP_ROOT / f"reamicro-server-{timestamp}.zip"
+    get_state_store().backup(database_copy)
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as stream:
+        stream.write(database_copy, "state/reamicro.sqlite3")
+        if CONFIG_PATH.is_file():
+            stream.write(CONFIG_PATH, "config/server.json")
+    database_copy.unlink(missing_ok=True)
+    snapshots = sorted(SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"), reverse=True)
+    for expired in snapshots[30:]:
+        expired.unlink(missing_ok=True)
+    return archive
 
 
 def allow_rate_limit(key: str) -> bool:
@@ -451,6 +469,7 @@ def execute_task(task: dict[str, Any]) -> tuple[str, str]:
 
 
 async def task_scheduler_loop() -> None:
+    worker_id = "worker_" + secrets.token_hex(6)
     while True:
         try:
             tasks = load_tasks()
@@ -462,18 +481,23 @@ async def task_scheduler_loop() -> None:
                 next_run = int(task.get("nextRunAt", 0))
                 if next_run > now:
                     continue
+                if not get_state_store().acquire_task_lock(task_id, worker_id, now + 15 * 60 * 1000, now):
+                    continue
                 task["status"] = "running"
                 task["lastRunAt"] = now
                 changed = True
                 save_tasks(tasks)
-                result, message = await asyncio.to_thread(execute_task, task)
-                task_log(task_id, message, "ERROR" if result == "failed" else "WARN" if result == "paused" else "INFO")
-                task["status"] = result
-                task["lastMessage"] = message
-                task["runCount"] = int(task.get("runCount", 0)) + 1
-                task["nextRunAt"] = next_task_run(task, now) if result != "paused" else 0
-                changed = True
-                save_tasks(tasks)
+                try:
+                    result, message = await asyncio.to_thread(execute_task, task)
+                    task_log(task_id, message, "ERROR" if result == "failed" else "WARN" if result == "paused" else "INFO")
+                    task["status"] = result
+                    task["lastMessage"] = message
+                    task["runCount"] = int(task.get("runCount", 0)) + 1
+                    task["nextRunAt"] = next_task_run(task, now) if result != "paused" else 0
+                    changed = True
+                    save_tasks(tasks)
+                finally:
+                    get_state_store().release_task_lock(task_id, worker_id)
             if changed:
                 save_tasks(tasks)
         except Exception as error:
@@ -814,6 +838,29 @@ async def health(_: None = Depends(authenticated)) -> dict[str, Any]:
     return response({"status": "ok", "serverId": load_config()["serverId"]})
 
 
+@app.get("/health/live")
+async def health_live() -> dict[str, Any]:
+    return response({"status": "alive"})
+
+
+@app.get("/health/ready")
+async def health_ready() -> JSONResponse:
+    database = get_state_store().integrity_check()
+    ready = database == "ok" and CONFIG_ROOT.parent.exists()
+    payload = response({"status": "ready" if ready else "not_ready", "database": database})
+    return JSONResponse(status_code=200 if ready else 503, content=payload)
+
+
+@app.get("/health/dependencies")
+async def health_dependencies(_: None = Depends(authenticated)) -> dict[str, Any]:
+    return response({
+        "database": get_state_store().integrity_check(),
+        "releaseCache": (RELEASE_ROOT / "latest.json").is_file(),
+        "packageStorage": PACKAGE_ROOT.exists(),
+        "backupStorage": BACKUP_ROOT.exists(),
+    })
+
+
 def admin_setup_page(message: str = "", actor: dict[str, Any] | None = None) -> str:
     message_html = f"<p class='msg'>{html.escape(message)}</p>" if message else ""
     actor = actor or {"username": ADMIN_USERNAME, "role": "primary", "needsSetup": True}
@@ -879,6 +926,10 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
         admin_management = f"""<hr><h2>子管理员</h2><p><small>子管理员可以协助维护服务器设置、内容包和云任务，但不能新增、重置、停用或删除其他管理员。</small></p>
 <form method='post' action='/admin/admins/create'>{csrf_html}<div class='row'><div><label>子管理员用户名</label><input name='username' placeholder='operator' required></div><div><label>初始密码（可留空自动生成）</label><input type='password' name='password' minlength='12' placeholder='至少 12 位'></div></div><label>权限（逗号分隔）</label><input name='permissions' value='settings:write,packages:write,tasks:write'><button type='submit'>创建子管理员</button></form>
 <table><thead><tr><th>用户名</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{admin_table}</tbody></table>"""
+    system_tools = ""
+    if actor.get("role") == "primary" or "backup:admin" in set(actor.get("permissions", [])):
+        system_tools = f"""<hr><h2>服务器数据保护</h2><p><small>快照包含事务数据库和服务器配置，最多保留 30 份。</small></p>
+<form method='post' action='/admin/backups/server'>{csrf_html}<button type='submit'>立即创建服务器快照</button></form>"""
     return f"""<!doctype html>
 <html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>ReaMicro API 管理后台</title>
@@ -918,7 +969,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
 <label>自定义图书 JSON（可选，留空读取最近阅读记录）</label><textarea name='request_body' placeholder='[{{"cloudBookId":123,"bookId":123,"name":"书名"}}]'></textarea>
 <details><summary>通用 HTTP 任务高级字段</summary><label>请求 URL</label><input name='request_url' placeholder='https://api.example.com/checkin'><div class='row'><div><label>HTTP 方法</label><input name='request_method' value='POST'></div><div><label>执行间隔（秒）</label><input name='interval_seconds' type='number' value='86400'></div></div><label>请求头 JSON</label><textarea name='request_headers' placeholder='{{"X-Example":"value"}}'></textarea></details><button type='submit'>创建云任务</button></form>
 <h3>任务状态</h3><table><thead><tr><th>类型</th><th>状态</th><th>最近结果</th><th>下次执行</th></tr></thead><tbody>{task_table}</tbody></table>
-{admin_management}<hr><p><a href='/admin/audit'>审计日志</a>　<a href='/v1/health'>健康检查</a>　<a href='/v1/meta'>能力信息</a></p></main></body></html>"""
+{admin_management}{system_tools}<hr><p><a href='/admin/audit'>审计日志</a>　<a href='/health/live'>存活检查</a>　<a href='/health/ready'>就绪检查</a>　<a href='/v1/meta'>能力信息</a></p></main></body></html>"""
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -955,6 +1006,24 @@ async def admin_audit(credentials: HTTPBasicCredentials | None = Depends(basic_s
         "<title>审计日志</title><style>body{font-family:system-ui;margin:30px;background:#f5f7fb}main{background:#fff;padding:24px;border-radius:12px}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #ddd;text-align:left}code{white-space:pre-wrap}</style></head>"
         f"<body><main><h1>后台审计日志</h1><p><a href='/admin'>返回管理后台</a></p><table><thead><tr><th>时间</th><th>操作者</th><th>操作</th><th>结果</th><th>详情</th></tr></thead><tbody>{table}</tbody></table></main></body></html>"
     )
+
+
+@app.post("/admin/backups/server", response_class=HTMLResponse)
+async def admin_server_backup(
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    csrf_token: str = Form(""),
+) -> HTMLResponse:
+    actor = require_admin(credentials)
+    current = load_config()
+    require_admin_csrf(current, actor, csrf_token)
+    require_admin_permission(actor, "backup:admin")
+    try:
+        snapshot = await asyncio.to_thread(create_server_snapshot)
+        audit_event("server_snapshot_created", audit_actor(actor), success=True, metadata={"filename": snapshot.name})
+        return HTMLResponse(admin_page(current, f"服务器快照已创建：{snapshot.name}", actor=actor))
+    except Exception as error:
+        audit_event("server_snapshot_created", audit_actor(actor), success=False)
+        return HTMLResponse(admin_page(current, f"服务器快照失败：{error}", actor=actor), status_code=500)
 
 
 @app.post("/admin/setup", response_class=HTMLResponse)
