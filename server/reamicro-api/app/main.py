@@ -79,6 +79,7 @@ def default_config() -> dict[str, Any]:
     return {
         "serverId": os.getenv("REAMICRO_SERVER_ID", "reamicro-api"),
         "apiKey": os.getenv("REAMICRO_API_KEY", ""),
+        "apiKeyRecords": [],
         "secretKey": os.getenv("REAMICRO_SECRET_KEY", ""),
         "allowPublic": env_bool("REAMICRO_ALLOW_PUBLIC", True),
         "features": sorted(DEFAULT_FEATURES),
@@ -119,6 +120,7 @@ def save_config(next_config: dict[str, Any]) -> dict[str, Any]:
         safe["features"] = sorted({str(item).strip() for item in safe.get("features", []) if str(item).strip()})
         safe["releaseSyncSeconds"] = max(int(safe.get("releaseSyncSeconds", 1800)), 300)
         safe["accounts"] = safe.get("accounts", {}) if isinstance(safe.get("accounts", {}), dict) else {}
+        safe["apiKeyRecords"] = safe.get("apiKeyRecords", []) if isinstance(safe.get("apiKeyRecords", []), list) else []
         safe["primaryAdmin"] = safe.get("primaryAdmin", {}) if isinstance(safe.get("primaryAdmin", {}), dict) else {}
         safe["adminAccounts"] = safe.get("adminAccounts", {}) if isinstance(safe.get("adminAccounts", {}), dict) else {}
         safe["hostAccountAllowlist"] = sorted({str(item).strip() for item in safe.get("hostAccountAllowlist", []) if str(item).strip()})
@@ -196,6 +198,40 @@ def create_server_snapshot() -> Path:
     return archive
 
 
+def list_server_snapshots() -> list[dict[str, Any]]:
+    items = []
+    for path in sorted(SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"), reverse=True):
+        try:
+            items.append({"name": path.name, "size": path.stat().st_size, "modifiedAt": int(path.stat().st_mtime * 1000)})
+        except OSError:
+            continue
+    return items
+
+
+def rotate_secret_key(new_key: str) -> int:
+    validate_admin_password(new_key)
+    credentials = load_credentials()
+    tasks = load_tasks()
+    decrypted_credentials: dict[str, Any] = {}
+    for key, value in credentials.items():
+        if value.get("secretEncrypted"):
+            decrypted_credentials[key] = decrypt_secret(str(value["secretEncrypted"]))
+    decrypted_tasks: dict[str, Any] = {}
+    for key, value in tasks.items():
+        if value.get("requestEncrypted"):
+            decrypted_tasks[key] = decrypt_secret(str(value["requestEncrypted"]))
+    config = load_config()
+    config["secretKey"] = new_key
+    save_config(config)
+    for key, secret in decrypted_credentials.items():
+        credentials[key]["secretEncrypted"] = encrypt_secret(secret)
+    for key, request in decrypted_tasks.items():
+        tasks[key]["requestEncrypted"] = encrypt_secret(request)
+    save_credentials(credentials)
+    save_tasks(tasks)
+    return len(decrypted_credentials) + len(decrypted_tasks)
+
+
 def allow_rate_limit(key: str) -> bool:
     now = time.monotonic()
     with rate_lock:
@@ -230,17 +266,23 @@ def secret_cipher_key() -> bytes:
     return hashlib.sha256(material.encode("utf-8")).digest()
 
 
+def secret_key_id() -> str:
+    material = str(load_config().get("secretKey", "")) or SECRET_KEY or ADMIN_PASSWORD
+    return "key_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
+
+
 def encrypt_secret(value: Any) -> str:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     nonce = secrets.token_bytes(12)
     body = json.dumps(value, ensure_ascii=False).encode("utf-8")
     encrypted = AESGCM(secret_cipher_key()).encrypt(nonce, body, b"reamicro-task-v1")
-    return base64.urlsafe_b64encode(nonce + encrypted).decode("ascii")
+    return "RCSEC2:" + secret_key_id() + ":" + base64.urlsafe_b64encode(nonce + encrypted).decode("ascii")
 
 
 def decrypt_secret(value: str) -> Any:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    raw = base64.urlsafe_b64decode(value.encode("ascii"))
+    encoded = value.split(":", 2)[-1] if value.startswith("RCSEC2:") else value
+    raw = base64.urlsafe_b64decode(encoded.encode("ascii"))
     body = AESGCM(secret_cipher_key()).decrypt(raw[:12], raw[12:], b"reamicro-task-v1")
     return json.loads(body.decode("utf-8"))
 
@@ -681,6 +723,22 @@ def generate_long_secret(byte_length: int = 48) -> str:
     return secrets.token_urlsafe(max(32, byte_length))
 
 
+def api_key_digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def configured_api_key(config: dict[str, Any], value: str | None) -> dict[str, Any] | None:
+    if not value:
+        return None
+    for record in config.get("apiKeyRecords", []):
+        if isinstance(record, dict) and record.get("enabled", True) and hmac.compare_digest(str(record.get("digest", "")), api_key_digest(value)):
+            return record
+    legacy = str(config.get("apiKey", ""))
+    if legacy and hmac.compare_digest(value, legacy):
+        return {"id": "legacy", "name": "legacy", "permissions": ["read", "write"], "enabled": True}
+    return None
+
+
 def normalized_admin_name(value: str) -> str:
     name = value.strip()
     if not 3 <= len(name) <= 64 or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
@@ -777,7 +835,7 @@ def check_request_auth(
 ) -> None:
     config = load_config()
     api_key = str(config.get("apiKey", ""))
-    if api_key and api_key_value and hmac.compare_digest(api_key_value, api_key):
+    if configured_api_key(config, api_key_value):
         return
     accounts = config.get("accounts", {})
     if account_name and account_password and isinstance(accounts, dict):
@@ -795,7 +853,8 @@ def check_request_auth(
 def resolve_identity(api_key_value: str | None, account_name: str | None, account_password: str | None, host_account_id: str | None) -> str:
     config = load_config()
     api_key = str(config.get("apiKey", ""))
-    if api_key and api_key_value and hmac.compare_digest(api_key_value, api_key):
+    key_record = configured_api_key(config, api_key_value)
+    if key_record:
         return "key:" + hashlib.sha256(api_key_value.encode()).hexdigest()[:24]
     encoded = str(config.get("accounts", {}).get(account_name or "", ""))
     if account_name and account_password and encoded and password_matches(account_password, encoded):
@@ -836,7 +895,7 @@ async def backup_owner(
 ) -> str:
     config = load_config()
     api_key = str(config.get("apiKey", ""))
-    if api_key and x_reamicro_api_key and hmac.compare_digest(api_key, x_reamicro_api_key):
+    if configured_api_key(config, x_reamicro_api_key):
         identity = "key:" + x_reamicro_api_key
     elif x_reamicro_account and x_reamicro_password and password_matches(
         x_reamicro_password,
@@ -978,6 +1037,10 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
     if actor.get("role") == "primary" or "backup:admin" in set(actor.get("permissions", [])):
         system_tools = f"""<hr><h2>服务器数据保护</h2><p><small>快照包含事务数据库和服务器配置，最多保留 30 份。</small></p>
 <form method='post' action='/admin/backups/server'>{csrf_html}<button type='submit'>立即创建服务器快照</button></form>"""
+    security_tools = ""
+    if actor.get("role") == "primary":
+        security_tools = f"""<hr><h2>加密密钥轮换</h2><p><small>轮换前会先解密全部阅微凭据和任务请求，再以新密钥重新加密。请先创建服务器快照并永久保存新密钥。</small></p>
+<form method='post' action='/admin/security/rotate-secret'>{csrf_html}<label>新服务器加密密钥（至少 12 位，建议 64 位以上随机值）</label><input type='password' name='new_secret_key' minlength='12' required><button class='danger' type='submit'>轮换并重新加密</button></form>"""
     return f"""<!doctype html>
 <html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>ReaMicro API 管理后台</title>
@@ -989,6 +1052,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
 <div class='row'><div><label>服务器 ID</label><input name='server_id' value='{esc(config.get("serverId", ""))}'></div><div><label>最低模块版本</label><input name='min_module_version' value='{esc(config.get("minModuleVersion", ""))}'></div></div>
 <label>API Key（当前：{'已设置' if config.get("apiKey") else '未设置'}）</label><input type='password' name='api_key' placeholder='留空保持当前值'><label><input type='checkbox' name='generate_api_key'> 自动生成 64 位以上长密钥</label><label><input type='checkbox' name='clear_api_key'> 清除 API Key</label>
 <label>服务器加密密钥（当前：{'已设置' if config.get("secretKey") else '未设置'}）</label><label><input type='checkbox' name='generate_secret_key'> 当前未设置时生成新的服务器加密长密钥</label><small>已有密钥不能直接替换，否则历史阅微凭据将无法解密。</small>
+<small>如需轮换已有密钥，请使用维护接口完成重新加密，不要直接修改环境变量。</small>
 <label><input type='checkbox' name='allow_public' {checked_public}> 允许公开访问（无 API Key 时）</label>
 <label>阅微账号白名单（每行一个账号 ID）</label><textarea name='host_account_allowlist'>{esc(chr(10).join(config.get('hostAccountAllowlist', [])))}</textarea>
 <div class='row'><div><label>新增独立账号</label><input name='account_name' placeholder='用户名'></div><div><label>新增账号密码</label><input type='password' name='account_password' placeholder='留空不修改'></div></div>
@@ -1019,7 +1083,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
 <label>自定义图书 JSON（可选，留空读取最近阅读记录）</label><textarea name='request_body' placeholder='[{{"cloudBookId":123,"bookId":123,"name":"书名"}}]'></textarea>
 <details><summary>通用 HTTP 任务高级字段</summary><label>请求 URL</label><input name='request_url' placeholder='https://api.example.com/checkin'><div class='row'><div><label>HTTP 方法</label><input name='request_method' value='POST'></div><div><label>执行间隔（秒）</label><input name='interval_seconds' type='number' value='86400'></div></div><label>请求头 JSON</label><textarea name='request_headers' placeholder='{{"X-Example":"value"}}'></textarea></details><button type='submit'>创建云任务</button></form>
 <h3>任务状态</h3><table><thead><tr><th>类型</th><th>状态</th><th>最近结果</th><th>下次执行</th></tr></thead><tbody>{task_table}</tbody></table>
-{admin_management}{system_tools}<hr><p><a href='/admin/audit'>审计日志</a>　<a href='/health/live'>存活检查</a>　<a href='/health/ready'>就绪检查</a>　<a href='/v1/meta'>能力信息</a></p></main></body></html>"""
+{admin_management}{system_tools}{security_tools}<hr><p><a href='/admin/audit'>审计日志</a>　<a href='/health/live'>存活检查</a>　<a href='/health/ready'>就绪检查</a>　<a href='/v1/meta'>能力信息</a></p></main></body></html>"""
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -1074,6 +1138,44 @@ async def admin_server_backup(
     except Exception as error:
         audit_event("server_snapshot_created", audit_actor(actor), success=False)
         return HTMLResponse(admin_page(current, f"服务器快照失败：{error}", actor=actor), status_code=500)
+
+
+@app.post("/admin/security/rotate-secret", response_class=HTMLResponse)
+async def admin_rotate_secret(
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    new_secret_key: str = Form(""),
+    csrf_token: str = Form(""),
+) -> HTMLResponse:
+    actor = require_admin(credentials)
+    require_primary_admin(actor)
+    current = load_config()
+    require_admin_csrf(current, actor, csrf_token)
+    try:
+        count = await asyncio.to_thread(rotate_secret_key, new_secret_key)
+        audit_event("secret_key_rotated", audit_actor(actor), metadata={"reencrypted": count})
+        return HTMLResponse(admin_page(load_config(), f"服务器加密密钥已轮换并重新加密 {count} 项数据", actor=actor))
+    except Exception as error:
+        audit_event("secret_key_rotation_failed", audit_actor(actor), success=False)
+        return HTMLResponse(admin_page(current, f"密钥轮换失败：{error}", actor=actor), status_code=400)
+
+
+@app.get("/admin/backups/server")
+async def admin_server_backups(credentials: HTTPBasicCredentials | None = Depends(basic_security)) -> JSONResponse:
+    actor = require_admin(credentials)
+    require_admin_permission(actor, "backup:admin")
+    return JSONResponse(content=response({"items": list_server_snapshots()}))
+
+
+@app.get("/admin/backups/server/{filename}")
+async def admin_server_backup_download(filename: str, credentials: HTTPBasicCredentials | None = Depends(basic_security)) -> FileResponse:
+    actor = require_admin(credentials)
+    require_admin_permission(actor, "backup:admin")
+    if not re.fullmatch(r"reamicro-server-[0-9TZ-]+\.zip", filename):
+        raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="备份文件名无效"))
+    path = (SERVER_BACKUP_ROOT / filename).resolve()
+    if path.parent != SERVER_BACKUP_ROOT.resolve() or not path.is_file():
+        raise HTTPException(status_code=404, detail=response(code="BACKUP_NOT_FOUND", message="服务器快照不存在"))
+    return FileResponse(path, media_type="application/zip", filename=filename)
 
 
 @app.post("/admin/setup", response_class=HTMLResponse)
@@ -1168,6 +1270,19 @@ async def admin_settings(
         "primaryAdmin": current.get("primaryAdmin", {}),
         "adminAccounts": current.get("adminAccounts", {}),
     }
+    if generated_api_key:
+        records = [item for item in current.get("apiKeyRecords", []) if isinstance(item, dict) and item.get("enabled", True)]
+        records.append({
+            "id": "key_" + secrets.token_hex(8),
+            "name": "后台生成密钥",
+            "digest": api_key_digest(generated_api_key),
+            "permissions": ["read", "write"],
+            "enabled": True,
+            "createdAt": int(datetime.now(timezone.utc).timestamp() * 1000),
+        })
+        next_config["apiKeyRecords"] = records
+    else:
+        next_config["apiKeyRecords"] = current.get("apiKeyRecords", [])
     accounts = dict(current.get("accounts", {}))
     if account_name.strip() and account_password:
         accounts[account_name.strip()] = password_hash(account_password)

@@ -152,6 +152,16 @@ class AdminSecurityTest(unittest.TestCase):
         main.save_config(config)
         expected = main._hashlib.sha256(b"persisted-secret-key").digest()
         self.assertEqual(main.secret_cipher_key(), expected)
+        encrypted = main.encrypt_secret({"token": "secret"})
+        self.assertTrue(encrypted.startswith("RCSEC2:"))
+        self.assertEqual(main.decrypt_secret(encrypted), {"token": "secret"})
+
+    def test_api_key_records_and_rotation(self):
+        config = main.load_config()
+        config["apiKeyRecords"] = [{"digest": main.api_key_digest("long-api-key"), "enabled": True}]
+        main.save_config(config)
+        self.assertTrue(main.configured_api_key(main.load_config(), "long-api-key"))
+        self.assertIsNone(main.configured_api_key(main.load_config(), "revoked"))
 
     def test_admin_page_renders_after_primary_setup(self):
         config = main.load_config()
