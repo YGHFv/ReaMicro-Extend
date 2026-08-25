@@ -9,7 +9,9 @@ curl http://127.0.0.1:5222/v1/health
 ```
 
 默认 API 端口为 `5222`，后台管理地址为 `http://服务器地址:5222/admin`。
-必须设置 `REAMICRO_ADMIN_PASSWORD` 后才能进入后台。后台使用 HTTP Basic 认证，默认用户名为 `admin`。
+首次部署必须设置 `REAMICRO_ADMIN_PASSWORD` 作为主管理员一次性引导密码。第一次使用该账号打开 `/admin` 时会强制进入初始化页面，设置新的主管理员用户名和至少 12 位密码；初始化完成后，环境变量中的引导密码立即失效，主管理员密码只以 PBKDF2 哈希保存到 `/data/config/server.json`。如果遗失主管理员密码，请通过数据卷备份恢复配置，或在停机维护时移除 `primaryAdmin` 后重新使用引导密码初始化。
+
+主管理员可以在后台分发子管理员账号。子管理员使用同一个 `/admin` 地址登录，可以协助调整服务器设置、上传内容包和创建云任务，但不能管理主管理员或其他子管理员。主管理员可以停用、删除或随机重置子管理员密码；随机密码只在操作结果页显示一次，请立即保存。子管理员停用后现有 Basic 认证会立即失效。
 
 ## GitHub Actions 镜像
 
@@ -25,7 +27,7 @@ ghcr.io/yghfv/reamicro-extend/reamicro-api:latest
 docker run -d --name reamicro-api \
   -p 5222:5222 \
   -v reamicro-api-data:/data \
-  -e REAMICRO_ADMIN_PASSWORD='请修改为强密码' \
+  -e REAMICRO_ADMIN_PASSWORD='仅用于首次初始化的引导密码' \
   -e REAMICRO_SECRET_KEY='请设置随机长密钥并永久保存' \
   ghcr.io/yghfv/reamicro-extend/reamicro-api:latest
 ```

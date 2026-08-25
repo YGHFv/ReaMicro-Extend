@@ -14,6 +14,7 @@ import shutil
 import threading
 import html
 import base64
+import re
 import hashlib as _hashlib
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -61,6 +62,7 @@ def default_config() -> dict[str, Any]:
     return {
         "serverId": os.getenv("REAMICRO_SERVER_ID", "reamicro-api"),
         "apiKey": os.getenv("REAMICRO_API_KEY", ""),
+        "secretKey": os.getenv("REAMICRO_SECRET_KEY", ""),
         "allowPublic": env_bool("REAMICRO_ALLOW_PUBLIC", True),
         "features": sorted(DEFAULT_FEATURES),
         "minModuleVersion": os.getenv("REAMICRO_MIN_MODULE_VERSION", "2.0.0"),
@@ -71,6 +73,8 @@ def default_config() -> dict[str, Any]:
         "releaseSyncSeconds": max(int(os.getenv("REAMICRO_RELEASE_SYNC_SECONDS", "1800")), 300),
         "releaseVersionCode": int(os.getenv("REAMICRO_RELEASE_VERSION_CODE", "0")),
         "accounts": {},
+        "primaryAdmin": {},
+        "adminAccounts": {},
         "hostAccountAllowlist": [],
     }
 
@@ -98,6 +102,8 @@ def save_config(next_config: dict[str, Any]) -> dict[str, Any]:
         safe["features"] = sorted({str(item).strip() for item in safe.get("features", []) if str(item).strip()})
         safe["releaseSyncSeconds"] = max(int(safe.get("releaseSyncSeconds", 1800)), 300)
         safe["accounts"] = safe.get("accounts", {}) if isinstance(safe.get("accounts", {}), dict) else {}
+        safe["primaryAdmin"] = safe.get("primaryAdmin", {}) if isinstance(safe.get("primaryAdmin", {}), dict) else {}
+        safe["adminAccounts"] = safe.get("adminAccounts", {}) if isinstance(safe.get("adminAccounts", {}), dict) else {}
         safe["hostAccountAllowlist"] = sorted({str(item).strip() for item in safe.get("hostAccountAllowlist", []) if str(item).strip()})
         temp = CONFIG_PATH.with_suffix(".tmp")
         temp.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -149,7 +155,7 @@ def task_log(task_id: str, message: str, level: str = "INFO") -> None:
 
 
 def secret_cipher_key() -> bytes:
-    material = SECRET_KEY or ADMIN_PASSWORD
+    material = str(load_config().get("secretKey", "")) or SECRET_KEY or ADMIN_PASSWORD
     if not material:
         raise ValueError("未配置 REAMICRO_SECRET_KEY 或管理密码")
     return hashlib.sha256(material.encode("utf-8")).digest()
@@ -551,6 +557,69 @@ def password_matches(password: str, encoded: str) -> bool:
         return False
 
 
+def generate_long_secret(byte_length: int = 48) -> str:
+    """生成适合 API Key 或初始密码的 URL 安全随机值。"""
+    return secrets.token_urlsafe(max(32, byte_length))
+
+
+def normalized_admin_name(value: str) -> str:
+    name = value.strip()
+    if not 3 <= len(name) <= 64 or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        raise ValueError("管理员用户名需为 3-64 位字母、数字、点、下划线或短横线")
+    return name
+
+
+def validate_admin_password(value: str) -> str:
+    if len(value) < 12:
+        raise ValueError("管理员密码至少需要 12 位")
+    return value
+
+
+def primary_admin_configured(config: dict[str, Any]) -> bool:
+    record = config.get("primaryAdmin", {})
+    return isinstance(record, dict) and bool(record.get("username")) and bool(record.get("passwordHash"))
+
+
+def resolve_admin(credentials: HTTPBasicCredentials | None, allow_bootstrap: bool = False) -> dict[str, Any]:
+    config = load_config()
+    if not primary_admin_configured(config):
+        if not ADMIN_PASSWORD:
+            raise HTTPException(status_code=503, detail="未配置主管理员初始密码 REAMICRO_ADMIN_PASSWORD")
+        if credentials and hmac.compare_digest(credentials.username, ADMIN_USERNAME) and hmac.compare_digest(credentials.password, ADMIN_PASSWORD):
+            if allow_bootstrap:
+                return {"username": ADMIN_USERNAME, "role": "primary", "needsSetup": True}
+            raise HTTPException(status_code=403, detail="主管理员首次登录必须先设置新账号密码")
+    else:
+        primary = config["primaryAdmin"]
+        if credentials and hmac.compare_digest(credentials.username, str(primary.get("username", ""))) and password_matches(
+            credentials.password,
+            str(primary.get("passwordHash", "")),
+        ):
+            return {"username": credentials.username, "role": "primary", "needsSetup": False}
+
+    if credentials:
+        record = config.get("adminAccounts", {}).get(credentials.username)
+        if isinstance(record, dict) and record.get("enabled", True) and password_matches(
+            credentials.password,
+            str(record.get("passwordHash", "")),
+        ):
+            return {"username": credentials.username, "role": "subadmin", "needsSetup": False}
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="需要后台管理员认证",
+        headers={"WWW-Authenticate": 'Basic realm="ReaMicro Admin"'},
+    )
+
+
+def require_admin(credentials: HTTPBasicCredentials | None, allow_bootstrap: bool = False) -> dict[str, Any]:
+    return resolve_admin(credentials, allow_bootstrap=allow_bootstrap)
+
+
+def require_primary_admin(actor: dict[str, Any]) -> None:
+    if actor.get("role") != "primary" or actor.get("needsSetup"):
+        raise HTTPException(status_code=403, detail="只有主管理员可以管理子管理员")
+
+
 def check_request_auth(
     api_key_value: str | None,
     account_name: str | None,
@@ -643,21 +712,18 @@ async def health(_: None = Depends(authenticated)) -> dict[str, Any]:
     return response({"status": "ok", "serverId": load_config()["serverId"]})
 
 
-def require_admin(credentials: HTTPBasicCredentials | None) -> None:
-    if not ADMIN_PASSWORD:
-        raise HTTPException(status_code=503, detail="未配置 REAMICRO_ADMIN_PASSWORD")
-    if not credentials or not (
-        hmac.compare_digest(credentials.username, ADMIN_USERNAME)
-        and hmac.compare_digest(credentials.password, ADMIN_PASSWORD)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="需要后台管理员认证",
-            headers={"WWW-Authenticate": "Basic"},
-        )
+def admin_setup_page(message: str = "") -> str:
+    message_html = f"<p class='msg'>{html.escape(message)}</p>" if message else ""
+    return f"""<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>初始化主管理员</title><style>body{{font-family:system-ui,-apple-system,sans-serif;max-width:560px;margin:48px auto;padding:0 18px;background:#f5f7fb;color:#182230}}main{{background:#fff;border-radius:14px;padding:26px;box-shadow:0 5px 24px #0001}}label{{display:block;margin:14px 0 5px;font-weight:600}}input{{box-sizing:border-box;width:100%;padding:10px;border:1px solid #ccd4df;border-radius:8px;font:inherit}}button{{margin-top:20px;padding:11px 18px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-weight:600}}.msg{{padding:10px;background:#fef2f2;color:#991b1b;border-radius:8px}}small{{color:#64748b}}</style></head>
+<body><main><h1>首次设置主管理员</h1><p>当前环境变量账号仅用于首次引导。完成后将停用初始密码，并改用数据卷内保存的加盐密码哈希。</p>{message_html}
+<form method='post' action='/admin/setup'><label>主管理员用户名</label><input name='username' value='{html.escape(ADMIN_USERNAME, quote=True)}' autocomplete='username' required>
+<label>新密码（至少 12 位）</label><input type='password' name='password' minlength='12' autocomplete='new-password' required>
+<label>确认新密码</label><input type='password' name='password_confirm' minlength='12' autocomplete='new-password' required><button type='submit'>完成初始化</button></form>
+<p><small>初始化信息保存于 /data/config/server.json；密码只保存 PBKDF2 哈希。</small></p></main></body></html>"""
 
 
-def admin_page(config: dict[str, Any], message: str = "") -> str:
+def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] | None = None, secret_notice: str = "") -> str:
     def esc(value: Any) -> str:
         return html.escape(str(value), quote=True)
 
@@ -690,15 +756,35 @@ def admin_page(config: dict[str, Any], message: str = "") -> str:
             f"<td>{esc(credential.get('label', ''))}</td><td>{esc(credential.get('lastVerifyMessage', ''))}</td></tr>"
         )
     credential_table = "".join(credential_rows) or "<tr><td colspan='4'>暂无阅微凭据，请由模块客户端上传</td></tr>"
+    actor = actor or {"username": "", "role": "subadmin"}
+    admin_rows = []
+    for username, record in sorted(config.get("adminAccounts", {}).items()):
+        if not isinstance(record, dict):
+            continue
+        enabled = bool(record.get("enabled", True))
+        admin_rows.append(
+            f"<tr><td>{esc(username)}</td><td>{'启用' if enabled else '停用'}</td><td>{esc(record.get('createdAt', ''))}</td><td>"
+            f"<form class='inline' method='post' action='/admin/admins/reset'><input type='hidden' name='username' value='{esc(username)}'><button class='compact secondary' type='submit'>重置密码</button></form>"
+            f"<form class='inline' method='post' action='/admin/admins/toggle'><input type='hidden' name='username' value='{esc(username)}'><button class='compact secondary' type='submit'>{'停用' if enabled else '启用'}</button></form>"
+            f"<form class='inline' method='post' action='/admin/admins/delete'><input type='hidden' name='username' value='{esc(username)}'><button class='compact danger' type='submit'>删除</button></form></td></tr>"
+        )
+    admin_table = "".join(admin_rows) or "<tr><td colspan='4'>暂无子管理员</td></tr>"
+    admin_management = ""
+    if actor.get("role") == "primary":
+        admin_management = f"""<hr><h2>子管理员</h2><p><small>子管理员可以协助维护服务器设置、内容包和云任务，但不能新增、重置、停用或删除其他管理员。</small></p>
+<form method='post' action='/admin/admins/create'><div class='row'><div><label>子管理员用户名</label><input name='username' placeholder='operator' required></div><div><label>初始密码（可留空自动生成）</label><input type='password' name='password' minlength='12' placeholder='至少 12 位'></div></div><button type='submit'>创建子管理员</button></form>
+<table><thead><tr><th>用户名</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{admin_table}</tbody></table>"""
     return f"""<!doctype html>
 <html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>ReaMicro API 管理后台</title>
-<style>body{{font-family:system-ui,-apple-system,sans-serif;max-width:860px;margin:32px auto;padding:0 18px;background:#f5f7fb;color:#182230}}main{{background:white;border-radius:14px;padding:24px;box-shadow:0 5px 24px #0001}}label{{display:block;margin:14px 0 5px;font-weight:600}}input,textarea,select{{box-sizing:border-box;width:100%;padding:10px;border:1px solid #ccd4df;border-radius:8px;font:inherit;background:white}}textarea{{min-height:72px}}.row{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}button{{margin-top:20px;padding:10px 16px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-weight:600;cursor:pointer}}.secondary{{background:#475569;margin-left:8px}}.msg{{padding:10px;background:#ecfdf5;color:#166534;border-radius:8px}}small{{color:#64748b}}table{{width:100%;border-collapse:collapse;margin-top:12px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}details{{margin-top:18px;padding:12px;border:1px solid #e2e8f0;border-radius:8px}}</style></head>
-<body><main><h1>ReaMicro API 管理后台</h1><p><small>默认端口：5222 · 配置保存到 Docker 数据卷 /data/config/server.json</small></p>
+<style>body{{font-family:system-ui,-apple-system,sans-serif;max-width:980px;margin:32px auto;padding:0 18px;background:#f5f7fb;color:#182230}}main{{background:white;border-radius:14px;padding:24px;box-shadow:0 5px 24px #0001}}label{{display:block;margin:14px 0 5px;font-weight:600}}input,textarea,select{{box-sizing:border-box;width:100%;padding:10px;border:1px solid #ccd4df;border-radius:8px;font:inherit;background:white}}textarea{{min-height:72px}}.row{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}button{{margin-top:20px;padding:10px 16px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-weight:600;cursor:pointer}}.secondary{{background:#475569;margin-left:8px}}.danger{{background:#b91c1c}}.compact{{margin:2px;padding:6px 9px}}.inline{{display:inline}}.msg{{padding:10px;background:#ecfdf5;color:#166534;border-radius:8px}}.secret{{padding:12px;background:#fff7ed;color:#9a3412;border-radius:8px;overflow-wrap:anywhere}}small{{color:#64748b}}table{{width:100%;border-collapse:collapse;margin-top:12px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}details{{margin-top:18px;padding:12px;border:1px solid #e2e8f0;border-radius:8px}}</style></head>
+<body><main><h1>ReaMicro API 管理后台</h1><p><small>当前管理员：{esc(actor.get('username', ''))}（{'主管理员' if actor.get('role') == 'primary' else '子管理员'}） · 默认端口：5222 · 配置保存到 Docker 数据卷 /data/config/server.json</small></p>
 {f"<p class='msg'>{esc(message)}</p>" if message else ""}
+{f"<p class='secret'><strong>请立即保存，关闭页面后不再显示：</strong><br>{esc(secret_notice)}</p>" if secret_notice else ""}
 <form method='post' action='/admin/settings'>
 <div class='row'><div><label>服务器 ID</label><input name='server_id' value='{esc(config.get("serverId", ""))}'></div><div><label>最低模块版本</label><input name='min_module_version' value='{esc(config.get("minModuleVersion", ""))}'></div></div>
-<label>API Key（当前：{'已设置' if config.get("apiKey") else '未设置'}）</label><input type='password' name='api_key' placeholder='留空保持当前值'><label><input type='checkbox' name='clear_api_key'> 清除 API Key</label>
+<label>API Key（当前：{'已设置' if config.get("apiKey") else '未设置'}）</label><input type='password' name='api_key' placeholder='留空保持当前值'><label><input type='checkbox' name='generate_api_key'> 自动生成 64 位以上长密钥</label><label><input type='checkbox' name='clear_api_key'> 清除 API Key</label>
+<label>服务器加密密钥（当前：{'已设置' if config.get("secretKey") else '未设置'}）</label><label><input type='checkbox' name='generate_secret_key'> 当前未设置时生成新的服务器加密长密钥</label><small>已有密钥不能直接替换，否则历史阅微凭据将无法解密。</small>
 <label><input type='checkbox' name='allow_public' {checked_public}> 允许公开访问（无 API Key 时）</label>
 <label>阅微账号白名单（每行一个账号 ID）</label><textarea name='host_account_allowlist'>{esc(chr(10).join(config.get('hostAccountAllowlist', [])))}</textarea>
 <div class='row'><div><label>新增独立账号</label><input name='account_name' placeholder='用户名'></div><div><label>新增账号密码</label><input type='password' name='account_password' placeholder='留空不修改'></div></div>
@@ -727,13 +813,49 @@ def admin_page(config: dict[str, Any], message: str = "") -> str:
 <label>自定义图书 JSON（可选，留空读取最近阅读记录）</label><textarea name='request_body' placeholder='[{"cloudBookId":123,"bookId":123,"name":"书名"}]'></textarea>
 <details><summary>通用 HTTP 任务高级字段</summary><label>请求 URL</label><input name='request_url' placeholder='https://api.example.com/checkin'><div class='row'><div><label>HTTP 方法</label><input name='request_method' value='POST'></div><div><label>执行间隔（秒）</label><input name='interval_seconds' type='number' value='86400'></div></div><label>请求头 JSON</label><textarea name='request_headers' placeholder='{{"X-Example":"value"}}'></textarea></details><button type='submit'>创建云任务</button></form>
 <h3>任务状态</h3><table><thead><tr><th>类型</th><th>状态</th><th>最近结果</th><th>下次执行</th></tr></thead><tbody>{task_table}</tbody></table>
-<hr><p><a href='/v1/health'>健康检查</a>　<a href='/v1/meta'>能力信息</a></p></main></body></html>"""
+{admin_management}<hr><p><a href='/v1/health'>健康检查</a>　<a href='/v1/meta'>能力信息</a></p></main></body></html>"""
 
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin(credentials: HTTPBasicCredentials | None = Depends(basic_security)) -> HTMLResponse:
-    require_admin(credentials)
-    return HTMLResponse(admin_page(load_config()))
+    actor = require_admin(credentials, allow_bootstrap=True)
+    if actor.get("needsSetup"):
+        return HTMLResponse(admin_setup_page())
+    return HTMLResponse(admin_page(load_config(), actor=actor))
+
+
+@app.post("/admin/setup", response_class=HTMLResponse)
+async def admin_setup(
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    username: str = Form(""),
+    password: str = Form(""),
+    password_confirm: str = Form(""),
+) -> HTMLResponse:
+    actor = require_admin(credentials, allow_bootstrap=True)
+    if not actor.get("needsSetup"):
+        raise HTTPException(status_code=409, detail="主管理员已经完成初始化")
+    try:
+        username = normalized_admin_name(username)
+        validate_admin_password(password)
+        if password != password_confirm:
+            raise ValueError("两次输入的密码不一致")
+        current = load_config()
+        now = datetime.now(timezone.utc).isoformat()
+        current["primaryAdmin"] = {
+            "username": username,
+            "passwordHash": password_hash(password),
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        save_config(current)
+        return HTMLResponse(
+            "<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>初始化完成</title>"
+            "<body style='font-family:system-ui;max-width:560px;margin:48px auto;padding:18px'>"
+            "<h1>主管理员初始化完成</h1><p>初始环境变量密码已经停用。请关闭当前浏览器登录窗口，使用刚设置的新账号密码重新进入后台。</p>"
+            "<p><a href='/admin'>重新进入后台</a></p></body></html>"
+        )
+    except ValueError as error:
+        return HTMLResponse(admin_setup_page(str(error)), status_code=400)
 
 
 @app.post("/admin/settings", response_class=HTMLResponse)
@@ -752,17 +874,28 @@ async def admin_settings(
     github_repository: str = Form("YGHFv/ReaMicro-Extend"),
     github_token: str = Form(""),
     clear_api_key: str | None = Form(None),
+    generate_api_key: str | None = Form(None),
+    generate_secret_key: str | None = Form(None),
     clear_github_token: str | None = Form(None),
     github_include_prerelease: str | None = Form(None),
     release_sync_seconds: int = Form(1800),
     release_version_code: int = Form(0),
 ) -> HTMLResponse:
-    require_admin(credentials)
+    actor = require_admin(credentials)
     current = load_config()
+    generated_api_key = generate_long_secret() if generate_api_key is not None else ""
+    generated_secret_key = ""
+    secret_key_message = ""
+    if generate_secret_key is not None:
+        if current.get("secretKey"):
+            secret_key_message = "服务器加密密钥已存在，本次未覆盖，避免历史阅微凭据失效"
+        else:
+            generated_secret_key = generate_long_secret()
     next_config = {
         "serverId": server_id.strip() or current["serverId"],
         "minModuleVersion": min_module_version.strip() or current["minModuleVersion"],
-        "apiKey": "" if clear_api_key is not None else (api_key or current.get("apiKey", "")),
+        "apiKey": "" if clear_api_key is not None else (generated_api_key or api_key or current.get("apiKey", "")),
+        "secretKey": generated_secret_key or current.get("secretKey", "") or SECRET_KEY,
         "allowPublic": allow_public is not None,
         "hostAccountAllowlist": [item.strip() for item in host_account_allowlist.splitlines() if item.strip()],
         "features": [item.strip() for item in features.split(",") if item.strip()],
@@ -772,6 +905,8 @@ async def admin_settings(
         "githubIncludePrerelease": github_include_prerelease is not None,
         "releaseSyncSeconds": release_sync_seconds,
         "releaseVersionCode": release_version_code,
+        "primaryAdmin": current.get("primaryAdmin", {}),
+        "adminAccounts": current.get("adminAccounts", {}),
     }
     accounts = dict(current.get("accounts", {}))
     if account_name.strip() and account_password:
@@ -779,17 +914,121 @@ async def admin_settings(
     if remove_account.strip():
         accounts.pop(remove_account.strip(), None)
     next_config["accounts"] = accounts
-    return HTMLResponse(admin_page(save_config(next_config), "设置已保存"))
+    saved = save_config(next_config)
+    notices = []
+    if generated_api_key:
+        notices.append(f"新 API Key：{generated_api_key}")
+    if generated_secret_key:
+        notices.append(f"新服务器加密密钥：{generated_secret_key}")
+    if secret_key_message:
+        notices.append(secret_key_message)
+    return HTMLResponse(admin_page(saved, "设置已保存", actor=actor, secret_notice="\n".join(notices)))
+
+
+@app.post("/admin/admins/create", response_class=HTMLResponse)
+async def admin_create_subadmin(
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    username: str = Form(""),
+    password: str = Form(""),
+) -> HTMLResponse:
+    actor = require_admin(credentials)
+    require_primary_admin(actor)
+    current = load_config()
+    try:
+        username = normalized_admin_name(username)
+        if username == str(current.get("primaryAdmin", {}).get("username", "")):
+            raise ValueError("子管理员用户名不能与主管理员相同")
+        admins = dict(current.get("adminAccounts", {}))
+        if username in admins:
+            raise ValueError("该子管理员已经存在")
+        generated = not password
+        password = password or generate_long_secret(24)
+        validate_admin_password(password)
+        now = datetime.now(timezone.utc).isoformat()
+        admins[username] = {
+            "passwordHash": password_hash(password),
+            "enabled": True,
+            "createdAt": now,
+            "updatedAt": now,
+            "createdBy": actor["username"],
+        }
+        current["adminAccounts"] = admins
+        saved = save_config(current)
+        notice = f"子管理员 {username} 的初始密码：{password}" if generated else ""
+        return HTMLResponse(admin_page(saved, f"子管理员 {username} 已创建", actor=actor, secret_notice=notice))
+    except ValueError as error:
+        return HTMLResponse(admin_page(current, str(error), actor=actor), status_code=400)
+
+
+@app.post("/admin/admins/reset", response_class=HTMLResponse)
+async def admin_reset_subadmin(
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    username: str = Form(""),
+) -> HTMLResponse:
+    actor = require_admin(credentials)
+    require_primary_admin(actor)
+    current = load_config()
+    admins = dict(current.get("adminAccounts", {}))
+    record = admins.get(username)
+    if not isinstance(record, dict):
+        return HTMLResponse(admin_page(current, "子管理员不存在", actor=actor), status_code=404)
+    password = generate_long_secret(24)
+    record = dict(record)
+    record["passwordHash"] = password_hash(password)
+    record["updatedAt"] = datetime.now(timezone.utc).isoformat()
+    admins[username] = record
+    current["adminAccounts"] = admins
+    saved = save_config(current)
+    return HTMLResponse(admin_page(saved, f"子管理员 {username} 的密码已重置", actor=actor, secret_notice=f"新密码：{password}"))
+
+
+@app.post("/admin/admins/toggle", response_class=HTMLResponse)
+async def admin_toggle_subadmin(
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    username: str = Form(""),
+) -> HTMLResponse:
+    actor = require_admin(credentials)
+    require_primary_admin(actor)
+    current = load_config()
+    admins = dict(current.get("adminAccounts", {}))
+    record = admins.get(username)
+    if not isinstance(record, dict):
+        return HTMLResponse(admin_page(current, "子管理员不存在", actor=actor), status_code=404)
+    record = dict(record)
+    record["enabled"] = not bool(record.get("enabled", True))
+    record["updatedAt"] = datetime.now(timezone.utc).isoformat()
+    admins[username] = record
+    current["adminAccounts"] = admins
+    saved = save_config(current)
+    state_text = "启用" if record["enabled"] else "停用"
+    return HTMLResponse(admin_page(saved, f"子管理员 {username} 已{state_text}", actor=actor))
+
+
+@app.post("/admin/admins/delete", response_class=HTMLResponse)
+async def admin_delete_subadmin(
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    username: str = Form(""),
+) -> HTMLResponse:
+    actor = require_admin(credentials)
+    require_primary_admin(actor)
+    current = load_config()
+    admins = dict(current.get("adminAccounts", {}))
+    if username not in admins:
+        return HTMLResponse(admin_page(current, "子管理员不存在", actor=actor), status_code=404)
+    admins.pop(username, None)
+    current["adminAccounts"] = admins
+    saved = save_config(current)
+    return HTMLResponse(admin_page(saved, f"子管理员 {username} 已删除", actor=actor))
 
 
 @app.post("/admin/sync", response_class=HTMLResponse)
 async def admin_sync(credentials: HTTPBasicCredentials | None = Depends(basic_security)) -> HTMLResponse:
-    require_admin(credentials)
+    actor = require_admin(credentials)
     try:
         await asyncio.to_thread(sync_module_release)
-        return HTMLResponse(admin_page(load_config(), "模块 Release 已同步"))
+        return HTMLResponse(admin_page(load_config(), "模块 Release 已同步", actor=actor))
     except Exception as error:
-        return HTMLResponse(admin_page(load_config(), f"同步失败：{error}"), status_code=502)
+        return HTMLResponse(admin_page(load_config(), f"同步失败：{error}", actor=actor), status_code=502)
 
 
 PACKAGE_KINDS = {
@@ -835,7 +1074,7 @@ async def admin_upload_package(
     signature: str = Form(""),
     payload: UploadFile = File(...),
 ) -> HTMLResponse:
-    require_admin(credentials)
+    actor = require_admin(credentials)
     if kind not in PACKAGE_KINDS:
         raise HTTPException(status_code=400, detail="不支持的内容包类型")
     package_id = safe_package_segment(package_id)
@@ -889,7 +1128,7 @@ async def admin_upload_package(
     temp_manifest = package_dir / ".manifest.json.tmp"
     temp_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     temp_manifest.replace(manifest_path)
-    return HTMLResponse(admin_page(load_config(), f"已发布 {kind}/{package_id} {version}"))
+    return HTMLResponse(admin_page(load_config(), f"已发布 {kind}/{package_id} {version}", actor=actor))
 
 
 @app.post("/admin/tasks/create", response_class=HTMLResponse)
@@ -908,7 +1147,7 @@ async def admin_create_task(
     time_of_day: str = Form("00:00"),
     owner: str = Form("admin"),
 ) -> HTMLResponse:
-    require_admin(credentials)
+    actor = require_admin(credentials)
     try:
         task_type = task_type.strip()
         if task_type not in {"http", "yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"}:
@@ -958,9 +1197,9 @@ async def admin_create_task(
         }
         save_tasks(tasks)
         task_log(task_id, "管理员创建任务")
-        return HTMLResponse(admin_page(load_config(), f"任务 {task_id} 已创建"))
+        return HTMLResponse(admin_page(load_config(), f"任务 {task_id} 已创建", actor=actor))
     except Exception as error:
-        return HTMLResponse(admin_page(load_config(), f"创建任务失败：{error}"), status_code=400)
+        return HTMLResponse(admin_page(load_config(), f"创建任务失败：{error}", actor=actor), status_code=400)
 
 
 @app.get("/v1/meta")
