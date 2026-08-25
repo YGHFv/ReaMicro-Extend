@@ -269,6 +269,36 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertIn("子管理员", page)
         self.assertIn("csrf_token", page)
 
+    def test_admin_navigation_uses_stable_clickable_paths(self):
+        config = main.load_config()
+        actor = {"username": "owner", "role": "primary", "permissions": []}
+        page = main.admin_page(config, actor=actor, section="overview")
+        self.assertIn('class="" href="/admin/tasks"', page)
+        self.assertIn('class="" href="/admin/settings"', page)
+        self.assertIn('class="" href="/admin/security"', page)
+        self.assertNotIn("/admin?section=", page)
+        self.assertNotIn("class= href=", page)
+        self.assertEqual(main.admin_section_path("online_source"), "/admin/content/online_source")
+
+    def test_admin_section_routes_render_and_legacy_redirects(self):
+        actor = {"username": "owner", "role": "primary", "permissions": []}
+        cases = (
+            (main.admin_tasks_page, "云端任务"),
+            (main.admin_settings_page, "服务器设置"),
+            (main.admin_security_page, "子管理员与安全"),
+        )
+        for endpoint, title in cases:
+            response = asyncio.run(endpoint(actor=actor))
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(title, response.body.decode("utf-8"))
+            self.assertEqual(response.headers.get("cache-control"), "no-store, no-cache, must-revalidate, max-age=0")
+        legacy = asyncio.run(main.admin_legacy(actor=actor))
+        self.assertEqual(legacy.status_code, 303)
+        self.assertEqual(legacy.headers.get("location"), "/admin/settings")
+        old_link = asyncio.run(main.admin(section="tasks", q="", actor=actor))
+        self.assertEqual(old_link.status_code, 303)
+        self.assertEqual(old_link.headers.get("location"), "/admin/tasks")
+
     def test_admin_permissions_and_csrf(self):
         config = main.load_config()
         config["primaryAdmin"] = {

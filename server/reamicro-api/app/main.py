@@ -10,6 +10,7 @@ import json
 import asyncio
 import urllib.request
 import urllib.error
+import urllib.parse
 import shutil
 import threading
 import html
@@ -1228,6 +1229,11 @@ async def security_middleware(request: Request, call_next):
         audit_event("request_error", actor=client_host, request_id=request_id, success=False, metadata={"path": request.url.path})
         raise
     result.headers["X-Request-Id"] = request_id
+    # 后台页面包含账号、凭据状态和 CSRF，禁止浏览器及反向代理复用旧 HTML。
+    if request.url.path == "/admin" or request.url.path.startswith("/admin/"):
+        result.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        result.headers["Pragma"] = "no-cache"
+        result.headers["Expires"] = "0"
     with metrics_lock:
         metrics_counters["requests"] += 1
         metrics_routes[request.url.path] = metrics_routes.get(request.url.path, 0) + 1
@@ -1519,6 +1525,18 @@ def _admin_kind_label(kind: str) -> str:
     return {"online_source": "书源", "association_source": "关联源", "epub_style": "EPUB 样式", "highlight_style": "高亮样式", "theme": "主题库"}.get(kind, kind)
 
 
+def admin_section_path(section: str) -> str:
+    if section in PACKAGE_KINDS:
+        return f"/admin/content/{section}"
+    return {
+        "overview": "/admin",
+        "packages": "/admin/content",
+        "tasks": "/admin/tasks",
+        "settings": "/admin/settings",
+        "security": "/admin/security",
+    }.get(section, "/admin")
+
+
 def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: str = "", csrf_token: str = "") -> str:
     esc = lambda value: html.escape(str(value), quote=True)
     needle = query.strip().lower()
@@ -1555,7 +1573,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
     for task in sorted(load_tasks().values(), key=lambda value: int(value.get("createdAt", 0)), reverse=True):
         task_rows.append(f"<tr><td>{esc(task.get('taskType', ''))}</td><td>{esc(task.get('owner', ''))}</td><td>{esc(task_credential_id(task))}</td><td>{esc(task.get('status', ''))}</td><td>{'启用' if task.get('enabled', True) else '停用'}</td><td>{esc(task.get('lastMessage', ''))}</td><td>{esc(task.get('nextRunAt', ''))}</td><td><a href='/admin/tasks/{esc(task.get('id', ''))}/logs'>日志</a></td></tr>")
     task_table = "".join(task_rows) or "<tr><td colspan='7' class='empty'>暂无云端任务</td></tr>"
-    nav_html = "".join(f"<a class={'active' if key == section else ''} href='/admin?section={key}'>{label}<span>{len([x for x in records if x.get('kind') == key]) if key in PACKAGE_KINDS else ''}</span></a>" for key, label in labels)
+    nav_html = "".join(f"<a class=\"{'active' if key == section else ''}\" href=\"{admin_section_path(key)}\">{label}<span>{len([x for x in records if x.get('kind') == key]) if key in PACKAGE_KINDS else ''}</span></a>" for key, label in labels)
     notice = f"<div class='notice'>{esc(message)}</div>" if message else ""
     secret = f"<div class='secret'><strong>请立即保存：</strong><br>{esc(secret_notice)}</div>" if secret_notice else ""
     if section in {"overview", "packages", *PACKAGE_KINDS}:
@@ -1567,7 +1585,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
         if section == "overview":
             content += f"<div class='stats'><div><strong>{len(records)}</strong><span>内容包</span></div><div><strong>{sum(1 for x in records if x.get('status', 'published') == 'published')}</strong><span>已发布</span></div><div><strong>{len(load_tasks())}</strong><span>云端任务</span></div><div><strong>{esc(config.get('serverId', ''))}</strong><span>服务器 ID</span></div></div>"
             content += '<template id="cloud-book-example">[{"cloudBookId":123,"bookId":123,"name":"书名"}]</template>'
-        content += f"<form class='toolbar' method='get' action='/admin'><input type='hidden' name='section' value='{esc(section)}'><input name='q' value='{esc(query)}' placeholder='搜索名称、包 ID、版本或别名'><button class='button' type='submit'>搜索</button></form><div class='table-wrap'><table><thead><tr><th>类型</th><th>内容</th><th>版本</th><th>状态</th><th>渠道 / 依赖</th><th>操作</th></tr></thead><tbody>{_admin_package_table(visible, can_packages, query, admin_csrf_token(config, actor))}</tbody></table></div>"
+        content += f"<form class='toolbar' method='get' action='{admin_section_path(section)}'><input name='q' value='{esc(query)}' placeholder='搜索名称、包 ID、版本或别名'><button class='button' type='submit'>搜索</button></form><div class='table-wrap'><table><thead><tr><th>类型</th><th>内容</th><th>版本</th><th>状态</th><th>渠道 / 依赖</th><th>操作</th></tr></thead><tbody>{_admin_package_table(visible, can_packages, query, admin_csrf_token(config, actor))}</tbody></table></div>"
     else:
         task_credentials = f"<div class='stats'><div><strong>{len(load_credentials())}</strong><span>阅微凭据</span></div><div><strong>{len(load_tasks())}</strong><span>云端任务</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('enabled', True))}</strong><span>已启用</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('status') == 'failed')}</strong><span>执行失败</span></div></div><div class='panel'><h2>已上传阅微凭据</h2><p class='muted'>凭据只保存加密密文，后台不会显示登录密钥原文；账号 ID、验证状态和更新时间来自模块上传结果。</p><div class='table-wrap'><table><thead><tr><th>凭据 ID</th><th>阅微账号 ID</th><th>名称</th><th>所有者</th><th>验证状态</th><th>更新时间</th></tr></thead><tbody>{credential_table}</tbody></table></div></div><div class='panel'><h2>任务运行状态</h2><div class='table-wrap'><table><thead><tr><th>任务类型</th><th>所有者</th><th>凭据 ID</th><th>状态</th><th>开关</th><th>最近结果</th><th>下次执行</th><th>日志</th></tr></thead><tbody>{task_table}</tbody></table></div></div>" if section == "tasks" else ""
         if section == "tasks":
@@ -1585,7 +1603,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
 
 @app.get("/admin/legacy", response_class=HTMLResponse)
 async def admin_legacy(actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
-    return RedirectResponse("/admin?section=settings", status_code=303)
+    return RedirectResponse("/admin/settings", status_code=303)
 
 
 def _admin_shell(title: str, body: str, config: dict[str, Any], actor: dict[str, Any]) -> str:
@@ -1832,11 +1850,47 @@ async def admin_logout(request: Request, csrf_token: str = Form("")) -> Redirect
     return result
 
 
+def admin_html(page: str, status_code: int = 200) -> HTMLResponse:
+    return HTMLResponse(page, status_code=status_code, headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache", "Expires": "0"})
+
+
 @app.get("/admin", response_class=HTMLResponse)
-async def admin(section: str = Query("overview"), q: str = Query(""), actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+async def admin(section: str = Query("overview"), q: str = Query(""), actor: dict[str, Any] = Depends(admin_actor)) -> Response:
     if actor.get("needsSetup"):
-        return HTMLResponse(admin_setup_page(actor=actor))
-    return HTMLResponse(admin_page(load_config(), actor=actor, section=section, query=q))
+        return admin_html(admin_setup_page(actor=actor))
+    if section != "overview":
+        target = admin_section_path(section)
+        if q:
+            target += "?q=" + urllib.parse.quote(q, safe="")
+        return RedirectResponse(target, status_code=303, headers={"Cache-Control": "no-store"})
+    return admin_html(admin_page(load_config(), actor=actor, section="overview", query=q))
+
+
+@app.get("/admin/content", response_class=HTMLResponse)
+async def admin_content(q: str = Query(""), actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+    return admin_html(admin_page(load_config(), actor=actor, section="packages", query=q))
+
+
+@app.get("/admin/content/{package_kind}", response_class=HTMLResponse)
+async def admin_content_kind(package_kind: str, q: str = Query(""), actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+    if package_kind not in PACKAGE_KINDS:
+        raise HTTPException(status_code=404, detail="内容分类不存在")
+    return admin_html(admin_page(load_config(), actor=actor, section=package_kind, query=q))
+
+
+@app.get("/admin/tasks", response_class=HTMLResponse)
+async def admin_tasks_page(actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+    return admin_html(admin_page(load_config(), actor=actor, section="tasks"))
+
+
+@app.get("/admin/settings", response_class=HTMLResponse)
+async def admin_settings_page(actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+    return admin_html(admin_page(load_config(), actor=actor, section="settings"))
+
+
+@app.get("/admin/security", response_class=HTMLResponse)
+async def admin_security_page(actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+    return admin_html(admin_page(load_config(), actor=actor, section="security"))
 
 
 @app.get("/admin/audit", response_class=HTMLResponse)
