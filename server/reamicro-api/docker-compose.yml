@@ -38,6 +38,8 @@ services:
       REAMICRO_TASK_ROOT: /data/tasks
       REAMICRO_SECRET_KEY: ${REAMICRO_SECRET_KEY:-}
       REAMICRO_SECRET_BACKUP_ROOT: /data/backups/secrets
+      REAMICRO_AUDIT_ROOT: /data/audit
+      REAMICRO_RATE_LIMIT: ${REAMICRO_RATE_LIMIT:-120}
 
   watchtower:
     image: containrrr/watchtower:1.7.1

@@ -15,6 +15,7 @@ import threading
 import html
 import base64
 import re
+import time
 import hashlib as _hashlib
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -44,6 +45,8 @@ SECRET_BACKUP_ROOT = Path(os.getenv("REAMICRO_SECRET_BACKUP_ROOT", "/data/backup
 TASK_ROOT = Path(os.getenv("REAMICRO_TASK_ROOT", "/data/tasks"))
 TASKS_PATH = TASK_ROOT / "tasks.json"
 TASK_LOG_ROOT = TASK_ROOT / "logs"
+AUDIT_ROOT = Path(os.getenv("REAMICRO_AUDIT_ROOT", "/data/audit"))
+AUDIT_PATH = AUDIT_ROOT / "events.jsonl"
 ACCOUNT_ROOT = Path(os.getenv("REAMICRO_ACCOUNT_ROOT", "/data/accounts"))
 ACCOUNT_PATH = ACCOUNT_ROOT / "credentials.json"
 SECRET_KEY = os.getenv("REAMICRO_SECRET_KEY", "")
@@ -52,6 +55,10 @@ ADMIN_PASSWORD = os.getenv("REAMICRO_ADMIN_PASSWORD", "")
 SIGNING_PRIVATE_KEY_FILE = os.getenv("REAMICRO_SIGNING_PRIVATE_KEY_FILE", "")
 config_lock = threading.RLock()
 basic_security = HTTPBasic(auto_error=False)
+rate_lock = threading.RLock()
+rate_buckets: dict[str, list[float]] = {}
+RATE_LIMIT = max(int(os.getenv("REAMICRO_RATE_LIMIT", "120")), 10)
+RATE_WINDOW_SECONDS = 60
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -141,6 +148,46 @@ def save_credentials(credentials: dict[str, dict[str, Any]]) -> None:
     temp = ACCOUNT_PATH.with_suffix(".tmp")
     temp.write_text(json.dumps(credentials, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(ACCOUNT_PATH)
+
+
+def audit_event(action: str, actor: str = "system", request_id: str = "", success: bool = True, metadata: dict[str, Any] | None = None) -> None:
+    """记录不含敏感值的管理与安全事件。"""
+    try:
+        AUDIT_ROOT.mkdir(parents=True, exist_ok=True)
+        event = {
+            "at": int(datetime.now(timezone.utc).timestamp() * 1000),
+            "action": action,
+            "actor": actor,
+            "requestId": request_id,
+            "success": success,
+            "metadata": metadata or {},
+        }
+        with AUDIT_PATH.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
+
+
+def audit_actor(actor: dict[str, Any] | None) -> str:
+    if not actor:
+        return "system"
+    return f"admin:{actor.get('username', 'unknown')}"
+
+
+def allow_rate_limit(key: str) -> bool:
+    now = time.monotonic()
+    with rate_lock:
+        values = [item for item in rate_buckets.get(key, []) if now - item < RATE_WINDOW_SECONDS]
+        if len(values) >= RATE_LIMIT:
+            rate_buckets[key] = values
+            return False
+        values.append(now)
+        rate_buckets[key] = values
+        if len(rate_buckets) > 10_000:
+            oldest = sorted(rate_buckets, key=lambda item: rate_buckets[item][-1] if rate_buckets[item] else now)[:1000]
+            for item in oldest:
+                rate_buckets.pop(item, None)
+        return True
 
 
 def task_log(task_id: str, message: str, level: str = "INFO") -> None:
@@ -528,12 +575,12 @@ async def start_release_sync() -> None:
     asyncio.create_task(task_scheduler_loop())
 
 
-def response(data: Any = None, code: str = "OK", message: str = "") -> dict[str, Any]:
+def response(data: Any = None, code: str = "OK", message: str = "", request_id: str = "") -> dict[str, Any]:
     return {
         "code": code,
         "message": message,
         "data": data,
-        "requestId": "req_" + secrets.token_hex(8),
+        "requestId": request_id or "req_" + secrets.token_hex(8),
         "serverTime": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -603,7 +650,13 @@ def resolve_admin(credentials: HTTPBasicCredentials | None, allow_bootstrap: boo
             credentials.password,
             str(record.get("passwordHash", "")),
         ):
-            return {"username": credentials.username, "role": "subadmin", "needsSetup": False}
+            permissions = record.get("permissions", ["settings:write", "packages:write", "tasks:write"])
+            return {
+                "username": credentials.username,
+                "role": "subadmin",
+                "needsSetup": False,
+                "permissions": [str(item) for item in permissions] if isinstance(permissions, list) else [],
+            }
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="需要后台管理员认证",
@@ -618,6 +671,30 @@ def require_admin(credentials: HTTPBasicCredentials | None, allow_bootstrap: boo
 def require_primary_admin(actor: dict[str, Any]) -> None:
     if actor.get("role") != "primary" or actor.get("needsSetup"):
         raise HTTPException(status_code=403, detail="只有主管理员可以管理子管理员")
+
+
+def require_admin_permission(actor: dict[str, Any], permission: str) -> None:
+    if actor.get("role") == "primary":
+        return
+    if permission not in set(actor.get("permissions", [])):
+        raise HTTPException(status_code=403, detail=f"当前子管理员缺少权限：{permission}")
+
+
+def admin_csrf_token(config: dict[str, Any], actor: dict[str, Any]) -> str:
+    username = str(actor.get("username", ""))
+    if actor.get("role") == "primary":
+        encoded = str(config.get("primaryAdmin", {}).get("passwordHash", ""))
+    else:
+        encoded = str(config.get("adminAccounts", {}).get(username, {}).get("passwordHash", ""))
+    material = (str(config.get("secretKey", "")) or SECRET_KEY or ADMIN_PASSWORD or encoded).encode("utf-8")
+    return hmac.new(hashlib.sha256(material).digest(), f"admin-csrf:{username}:{encoded}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def require_admin_csrf(config: dict[str, Any], actor: dict[str, Any], value: str) -> None:
+    expected = admin_csrf_token(config, actor)
+    if not value or not hmac.compare_digest(value, expected):
+        audit_event("admin_csrf_rejected", audit_actor(actor), success=False)
+        raise HTTPException(status_code=403, detail="后台请求校验失败，请刷新页面后重试")
 
 
 def check_request_auth(
@@ -701,10 +778,35 @@ async def backup_owner(
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
 
 
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-Id", "").strip()[:80] or "req_" + secrets.token_hex(8)
+    request.state.request_id = request_id
+    client_host = request.client.host if request.client else "unknown"
+    rate_key = f"{client_host}:{request.url.path}"
+    if not allow_rate_limit(rate_key):
+        audit_event("rate_limit", actor=client_host, request_id=request_id, success=False, metadata={"path": request.url.path})
+        return JSONResponse(
+            status_code=429,
+            content=response(code="RATE_LIMITED", message="请求过于频繁，请稍后重试", request_id=request_id),
+            headers={"Retry-After": str(RATE_WINDOW_SECONDS), "X-Request-Id": request_id},
+        )
+    try:
+        result = await call_next(request)
+    except Exception:
+        audit_event("request_error", actor=client_host, request_id=request_id, success=False, metadata={"path": request.url.path})
+        raise
+    result.headers["X-Request-Id"] = request_id
+    return result
+
+
 @app.exception_handler(HTTPException)
-async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
-    detail = exc.detail if isinstance(exc.detail, dict) else response(code="HTTP_ERROR", message=str(exc.detail))
-    return JSONResponse(status_code=exc.status_code, content=detail, headers=exc.headers)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", "")
+    detail = exc.detail if isinstance(exc.detail, dict) else response(code="HTTP_ERROR", message=str(exc.detail), request_id=request_id)
+    if isinstance(detail, dict):
+        detail["requestId"] = request_id or detail.get("requestId", "")
+    return JSONResponse(status_code=exc.status_code, content=detail, headers={**(exc.headers or {}), "X-Request-Id": request_id})
 
 
 @app.get("/v1/health")
@@ -712,12 +814,14 @@ async def health(_: None = Depends(authenticated)) -> dict[str, Any]:
     return response({"status": "ok", "serverId": load_config()["serverId"]})
 
 
-def admin_setup_page(message: str = "") -> str:
+def admin_setup_page(message: str = "", actor: dict[str, Any] | None = None) -> str:
     message_html = f"<p class='msg'>{html.escape(message)}</p>" if message else ""
+    actor = actor or {"username": ADMIN_USERNAME, "role": "primary", "needsSetup": True}
+    csrf_value = admin_csrf_token(load_config(), actor)
     return f"""<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>初始化主管理员</title><style>body{{font-family:system-ui,-apple-system,sans-serif;max-width:560px;margin:48px auto;padding:0 18px;background:#f5f7fb;color:#182230}}main{{background:#fff;border-radius:14px;padding:26px;box-shadow:0 5px 24px #0001}}label{{display:block;margin:14px 0 5px;font-weight:600}}input{{box-sizing:border-box;width:100%;padding:10px;border:1px solid #ccd4df;border-radius:8px;font:inherit}}button{{margin-top:20px;padding:11px 18px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-weight:600}}.msg{{padding:10px;background:#fef2f2;color:#991b1b;border-radius:8px}}small{{color:#64748b}}</style></head>
 <body><main><h1>首次设置主管理员</h1><p>当前环境变量账号仅用于首次引导。完成后将停用初始密码，并改用数据卷内保存的加盐密码哈希。</p>{message_html}
-<form method='post' action='/admin/setup'><label>主管理员用户名</label><input name='username' value='{html.escape(ADMIN_USERNAME, quote=True)}' autocomplete='username' required>
+<form method='post' action='/admin/setup'><input type='hidden' name='csrf_token' value='{csrf_value}'><label>主管理员用户名</label><input name='username' value='{html.escape(ADMIN_USERNAME, quote=True)}' autocomplete='username' required>
 <label>新密码（至少 12 位）</label><input type='password' name='password' minlength='12' autocomplete='new-password' required>
 <label>确认新密码</label><input type='password' name='password_confirm' minlength='12' autocomplete='new-password' required><button type='submit'>完成初始化</button></form>
 <p><small>初始化信息保存于 /data/config/server.json；密码只保存 PBKDF2 哈希。</small></p></main></body></html>"""
@@ -757,6 +861,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
         )
     credential_table = "".join(credential_rows) or "<tr><td colspan='4'>暂无阅微凭据，请由模块客户端上传</td></tr>"
     actor = actor or {"username": "", "role": "subadmin"}
+    csrf_html = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
     admin_rows = []
     for username, record in sorted(config.get("adminAccounts", {}).items()):
         if not isinstance(record, dict):
@@ -764,15 +869,15 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
         enabled = bool(record.get("enabled", True))
         admin_rows.append(
             f"<tr><td>{esc(username)}</td><td>{'启用' if enabled else '停用'}</td><td>{esc(record.get('createdAt', ''))}</td><td>"
-            f"<form class='inline' method='post' action='/admin/admins/reset'><input type='hidden' name='username' value='{esc(username)}'><button class='compact secondary' type='submit'>重置密码</button></form>"
-            f"<form class='inline' method='post' action='/admin/admins/toggle'><input type='hidden' name='username' value='{esc(username)}'><button class='compact secondary' type='submit'>{'停用' if enabled else '启用'}</button></form>"
-            f"<form class='inline' method='post' action='/admin/admins/delete'><input type='hidden' name='username' value='{esc(username)}'><button class='compact danger' type='submit'>删除</button></form></td></tr>"
+            f"<form class='inline' method='post' action='/admin/admins/reset'>{csrf_html}<input type='hidden' name='username' value='{esc(username)}'><button class='compact secondary' type='submit'>重置密码</button></form>"
+            f"<form class='inline' method='post' action='/admin/admins/toggle'>{csrf_html}<input type='hidden' name='username' value='{esc(username)}'><button class='compact secondary' type='submit'>{'停用' if enabled else '启用'}</button></form>"
+            f"<form class='inline' method='post' action='/admin/admins/delete'>{csrf_html}<input type='hidden' name='username' value='{esc(username)}'><button class='compact danger' type='submit'>删除</button></form></td></tr>"
         )
     admin_table = "".join(admin_rows) or "<tr><td colspan='4'>暂无子管理员</td></tr>"
     admin_management = ""
     if actor.get("role") == "primary":
         admin_management = f"""<hr><h2>子管理员</h2><p><small>子管理员可以协助维护服务器设置、内容包和云任务，但不能新增、重置、停用或删除其他管理员。</small></p>
-<form method='post' action='/admin/admins/create'><div class='row'><div><label>子管理员用户名</label><input name='username' placeholder='operator' required></div><div><label>初始密码（可留空自动生成）</label><input type='password' name='password' minlength='12' placeholder='至少 12 位'></div></div><button type='submit'>创建子管理员</button></form>
+<form method='post' action='/admin/admins/create'>{csrf_html}<div class='row'><div><label>子管理员用户名</label><input name='username' placeholder='operator' required></div><div><label>初始密码（可留空自动生成）</label><input type='password' name='password' minlength='12' placeholder='至少 12 位'></div></div><label>权限（逗号分隔）</label><input name='permissions' value='settings:write,packages:write,tasks:write'><button type='submit'>创建子管理员</button></form>
 <table><thead><tr><th>用户名</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{admin_table}</tbody></table>"""
     return f"""<!doctype html>
 <html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
@@ -781,7 +886,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
 <body><main><h1>ReaMicro API 管理后台</h1><p><small>当前管理员：{esc(actor.get('username', ''))}（{'主管理员' if actor.get('role') == 'primary' else '子管理员'}） · 默认端口：5222 · 配置保存到 Docker 数据卷 /data/config/server.json</small></p>
 {f"<p class='msg'>{esc(message)}</p>" if message else ""}
 {f"<p class='secret'><strong>请立即保存，关闭页面后不再显示：</strong><br>{esc(secret_notice)}</p>" if secret_notice else ""}
-<form method='post' action='/admin/settings'>
+<form method='post' action='/admin/settings'>{csrf_html}
 <div class='row'><div><label>服务器 ID</label><input name='server_id' value='{esc(config.get("serverId", ""))}'></div><div><label>最低模块版本</label><input name='min_module_version' value='{esc(config.get("minModuleVersion", ""))}'></div></div>
 <label>API Key（当前：{'已设置' if config.get("apiKey") else '未设置'}）</label><input type='password' name='api_key' placeholder='留空保持当前值'><label><input type='checkbox' name='generate_api_key'> 自动生成 64 位以上长密钥</label><label><input type='checkbox' name='clear_api_key'> 清除 API Key</label>
 <label>服务器加密密钥（当前：{'已设置' if config.get("secretKey") else '未设置'}）</label><label><input type='checkbox' name='generate_secret_key'> 当前未设置时生成新的服务器加密长密钥</label><small>已有密钥不能直接替换，否则历史阅微凭据将无法解密。</small>
@@ -798,14 +903,14 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
 <button type='submit'>保存设置</button><button class='secondary' type='submit' formaction='/admin/sync'>立即同步模块 Release</button>
 </form><hr><h2>内容包上传/更新</h2>
 <p><small>上传后立即覆盖当前版本；旧文件保留在对应目录的 history 中。kind 支持 online_source、epub_style、highlight_style、association_source、theme。</small></p>
-<form method='post' action='/admin/packages/upload' enctype='multipart/form-data'>
+<form method='post' action='/admin/packages/upload' enctype='multipart/form-data'>{csrf_html}
 <div class='row'><div><label>内容类型</label><input name='kind' placeholder='online_source' required></div><div><label>包 ID</label><input name='package_id' placeholder='source.example' required></div></div>
 <div class='row'><div><label>版本号</label><input name='version' placeholder='1.0.0' required></div><div><label>稳定内容 ID（书源建议固定）</label><input name='content_id' placeholder='source.example'></div></div>
 <label>旧 ID/域名别名（逗号分隔）</label><input name='aliases' placeholder='online_old_hash,old.example.com'>
 <label>Ed25519 签名（可选，需与服务器公钥匹配）</label><input name='signature' placeholder='Base64 签名'>
 <label>内容文件</label><input type='file' name='payload' required>
 <button type='submit'>上传并发布</button></form><h3>已发布内容包</h3><table><thead><tr><th>类型</th><th>包 ID</th><th>版本</th><th>构建时间</th></tr></thead><tbody>{package_table}</tbody></table>
-<hr><h2>云任务</h2><form method='post' action='/admin/tasks/create'>
+<hr><h2>云任务</h2><form method='post' action='/admin/tasks/create'>{csrf_html}
 <h3>已上传阅微凭据</h3><table><thead><tr><th>凭据 ID</th><th>所有者</th><th>名称</th><th>验证状态</th></tr></thead><tbody>{credential_table}</tbody></table>
 <div class='row'><div><label>任务类型</label><select name='task_type'><option value='yeshe_checkin'>野社零点签到</option><option value='yeshe_draw_card'>野社自动抽卡</option><option value='cloud_auto_read'>云端自动阅读</option><option value='http'>通用 HTTPS 请求</option></select></div><div><label>每日执行时间</label><input name='time_of_day' value='00:05' placeholder='HH:MM'></div></div>
 <div class='row'><div><label>阅微凭据 ID</label><input name='credential_id' placeholder='上传凭据接口返回的 id'></div><div><label>任务所有者标识</label><input name='owner' value='admin'></div></div>
@@ -813,15 +918,43 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
 <label>自定义图书 JSON（可选，留空读取最近阅读记录）</label><textarea name='request_body' placeholder='[{{"cloudBookId":123,"bookId":123,"name":"书名"}}]'></textarea>
 <details><summary>通用 HTTP 任务高级字段</summary><label>请求 URL</label><input name='request_url' placeholder='https://api.example.com/checkin'><div class='row'><div><label>HTTP 方法</label><input name='request_method' value='POST'></div><div><label>执行间隔（秒）</label><input name='interval_seconds' type='number' value='86400'></div></div><label>请求头 JSON</label><textarea name='request_headers' placeholder='{{"X-Example":"value"}}'></textarea></details><button type='submit'>创建云任务</button></form>
 <h3>任务状态</h3><table><thead><tr><th>类型</th><th>状态</th><th>最近结果</th><th>下次执行</th></tr></thead><tbody>{task_table}</tbody></table>
-{admin_management}<hr><p><a href='/v1/health'>健康检查</a>　<a href='/v1/meta'>能力信息</a></p></main></body></html>"""
+{admin_management}<hr><p><a href='/admin/audit'>审计日志</a>　<a href='/v1/health'>健康检查</a>　<a href='/v1/meta'>能力信息</a></p></main></body></html>"""
 
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin(credentials: HTTPBasicCredentials | None = Depends(basic_security)) -> HTMLResponse:
     actor = require_admin(credentials, allow_bootstrap=True)
     if actor.get("needsSetup"):
-        return HTMLResponse(admin_setup_page())
+        return HTMLResponse(admin_setup_page(actor=actor))
     return HTMLResponse(admin_page(load_config(), actor=actor))
+
+
+@app.get("/admin/audit", response_class=HTMLResponse)
+async def admin_audit(credentials: HTTPBasicCredentials | None = Depends(basic_security)) -> HTMLResponse:
+    actor = require_admin(credentials)
+    require_admin_permission(actor, "audit:read")
+    rows = []
+    if AUDIT_PATH.is_file():
+        for line in AUDIT_PATH.read_text(encoding="utf-8").splitlines()[-500:][::-1]:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            rows.append(
+                "<tr>"
+                f"<td>{html.escape(str(event.get('at', '')))}</td>"
+                f"<td>{html.escape(str(event.get('actor', '')))}</td>"
+                f"<td>{html.escape(str(event.get('action', '')))}</td>"
+                f"<td>{'成功' if event.get('success') else '失败'}</td>"
+                f"<td><code>{html.escape(json.dumps(event.get('metadata', {}), ensure_ascii=False))}</code></td>"
+                "</tr>"
+            )
+    table = "".join(rows) or "<tr><td colspan='5'>暂无审计记录</td></tr>"
+    return HTMLResponse(
+        "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>审计日志</title><style>body{font-family:system-ui;margin:30px;background:#f5f7fb}main{background:#fff;padding:24px;border-radius:12px}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #ddd;text-align:left}code{white-space:pre-wrap}</style></head>"
+        f"<body><main><h1>后台审计日志</h1><p><a href='/admin'>返回管理后台</a></p><table><thead><tr><th>时间</th><th>操作者</th><th>操作</th><th>结果</th><th>详情</th></tr></thead><tbody>{table}</tbody></table></main></body></html>"
+    )
 
 
 @app.post("/admin/setup", response_class=HTMLResponse)
@@ -830,10 +963,12 @@ async def admin_setup(
     username: str = Form(""),
     password: str = Form(""),
     password_confirm: str = Form(""),
+    csrf_token: str = Form(""),
 ) -> HTMLResponse:
     actor = require_admin(credentials, allow_bootstrap=True)
     if not actor.get("needsSetup"):
         raise HTTPException(status_code=409, detail="主管理员已经完成初始化")
+    require_admin_csrf(load_config(), actor, csrf_token)
     try:
         username = normalized_admin_name(username)
         validate_admin_password(password)
@@ -848,6 +983,7 @@ async def admin_setup(
             "updatedAt": now,
         }
         save_config(current)
+        audit_event("primary_admin_initialized", f"admin:{username}", success=True)
         return HTMLResponse(
             "<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>初始化完成</title>"
             "<body style='font-family:system-ui;max-width:560px;margin:48px auto;padding:18px'>"
@@ -855,7 +991,7 @@ async def admin_setup(
             "<p><a href='/admin'>重新进入后台</a></p></body></html>"
         )
     except ValueError as error:
-        return HTMLResponse(admin_setup_page(str(error)), status_code=400)
+        return HTMLResponse(admin_setup_page(str(error), actor=actor), status_code=400)
 
 
 @app.post("/admin/settings", response_class=HTMLResponse)
@@ -880,9 +1016,14 @@ async def admin_settings(
     github_include_prerelease: str | None = Form(None),
     release_sync_seconds: int = Form(1800),
     release_version_code: int = Form(0),
+    csrf_token: str = Form(""),
 ) -> HTMLResponse:
     actor = require_admin(credentials)
     current = load_config()
+    require_admin_csrf(current, actor, csrf_token)
+    require_admin_permission(actor, "settings:write")
+    if (generate_api_key is not None or generate_secret_key is not None or clear_api_key is not None or clear_github_token is not None) and actor.get("role") != "primary":
+        require_admin_permission(actor, "security:write")
     generated_api_key = generate_long_secret() if generate_api_key is not None else ""
     generated_secret_key = ""
     secret_key_message = ""
@@ -915,6 +1056,7 @@ async def admin_settings(
         accounts.pop(remove_account.strip(), None)
     next_config["accounts"] = accounts
     saved = save_config(next_config)
+    audit_event("admin_settings_updated", audit_actor(actor), success=True, metadata={"serverId": saved.get("serverId")})
     notices = []
     if generated_api_key:
         notices.append(f"新 API Key：{generated_api_key}")
@@ -930,10 +1072,13 @@ async def admin_create_subadmin(
     credentials: HTTPBasicCredentials | None = Depends(basic_security),
     username: str = Form(""),
     password: str = Form(""),
+    permissions: str = Form("settings:write,packages:write,tasks:write"),
+    csrf_token: str = Form(""),
 ) -> HTMLResponse:
     actor = require_admin(credentials)
     require_primary_admin(actor)
     current = load_config()
+    require_admin_csrf(current, actor, csrf_token)
     try:
         username = normalized_admin_name(username)
         if username == str(current.get("primaryAdmin", {}).get("username", "")):
@@ -951,9 +1096,11 @@ async def admin_create_subadmin(
             "createdAt": now,
             "updatedAt": now,
             "createdBy": actor["username"],
+            "permissions": sorted({item.strip() for item in permissions.split(",") if item.strip()}),
         }
         current["adminAccounts"] = admins
         saved = save_config(current)
+        audit_event("subadmin_created", audit_actor(actor), success=True, metadata={"username": username})
         notice = f"子管理员 {username} 的初始密码：{password}" if generated else ""
         return HTMLResponse(admin_page(saved, f"子管理员 {username} 已创建", actor=actor, secret_notice=notice))
     except ValueError as error:
@@ -964,10 +1111,12 @@ async def admin_create_subadmin(
 async def admin_reset_subadmin(
     credentials: HTTPBasicCredentials | None = Depends(basic_security),
     username: str = Form(""),
+    csrf_token: str = Form(""),
 ) -> HTMLResponse:
     actor = require_admin(credentials)
     require_primary_admin(actor)
     current = load_config()
+    require_admin_csrf(current, actor, csrf_token)
     admins = dict(current.get("adminAccounts", {}))
     record = admins.get(username)
     if not isinstance(record, dict):
@@ -979,6 +1128,7 @@ async def admin_reset_subadmin(
     admins[username] = record
     current["adminAccounts"] = admins
     saved = save_config(current)
+    audit_event("subadmin_password_reset", audit_actor(actor), success=True, metadata={"username": username})
     return HTMLResponse(admin_page(saved, f"子管理员 {username} 的密码已重置", actor=actor, secret_notice=f"新密码：{password}"))
 
 
@@ -986,10 +1136,12 @@ async def admin_reset_subadmin(
 async def admin_toggle_subadmin(
     credentials: HTTPBasicCredentials | None = Depends(basic_security),
     username: str = Form(""),
+    csrf_token: str = Form(""),
 ) -> HTMLResponse:
     actor = require_admin(credentials)
     require_primary_admin(actor)
     current = load_config()
+    require_admin_csrf(current, actor, csrf_token)
     admins = dict(current.get("adminAccounts", {}))
     record = admins.get(username)
     if not isinstance(record, dict):
@@ -1000,6 +1152,7 @@ async def admin_toggle_subadmin(
     admins[username] = record
     current["adminAccounts"] = admins
     saved = save_config(current)
+    audit_event("subadmin_toggled", audit_actor(actor), success=True, metadata={"username": username, "enabled": record["enabled"]})
     state_text = "启用" if record["enabled"] else "停用"
     return HTMLResponse(admin_page(saved, f"子管理员 {username} 已{state_text}", actor=actor))
 
@@ -1008,22 +1161,30 @@ async def admin_toggle_subadmin(
 async def admin_delete_subadmin(
     credentials: HTTPBasicCredentials | None = Depends(basic_security),
     username: str = Form(""),
+    csrf_token: str = Form(""),
 ) -> HTMLResponse:
     actor = require_admin(credentials)
     require_primary_admin(actor)
     current = load_config()
+    require_admin_csrf(current, actor, csrf_token)
     admins = dict(current.get("adminAccounts", {}))
     if username not in admins:
         return HTMLResponse(admin_page(current, "子管理员不存在", actor=actor), status_code=404)
     admins.pop(username, None)
     current["adminAccounts"] = admins
     saved = save_config(current)
+    audit_event("subadmin_deleted", audit_actor(actor), success=True, metadata={"username": username})
     return HTMLResponse(admin_page(saved, f"子管理员 {username} 已删除", actor=actor))
 
 
 @app.post("/admin/sync", response_class=HTMLResponse)
-async def admin_sync(credentials: HTTPBasicCredentials | None = Depends(basic_security)) -> HTMLResponse:
+async def admin_sync(
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    csrf_token: str = Form(""),
+) -> HTMLResponse:
     actor = require_admin(credentials)
+    require_admin_csrf(load_config(), actor, csrf_token)
+    require_admin_permission(actor, "module:sync")
     try:
         await asyncio.to_thread(sync_module_release)
         return HTMLResponse(admin_page(load_config(), "模块 Release 已同步", actor=actor))
@@ -1073,8 +1234,12 @@ async def admin_upload_package(
     aliases: str = Form(""),
     signature: str = Form(""),
     payload: UploadFile = File(...),
+    csrf_token: str = Form(""),
 ) -> HTMLResponse:
     actor = require_admin(credentials)
+    current_config = load_config()
+    require_admin_csrf(current_config, actor, csrf_token)
+    require_admin_permission(actor, "packages:write")
     if kind not in PACKAGE_KINDS:
         raise HTTPException(status_code=400, detail="不支持的内容包类型")
     package_id = safe_package_segment(package_id)
@@ -1146,8 +1311,12 @@ async def admin_create_task(
     book_limit: int = Form(1),
     time_of_day: str = Form("00:00"),
     owner: str = Form("admin"),
+    csrf_token: str = Form(""),
 ) -> HTMLResponse:
     actor = require_admin(credentials)
+    current_config = load_config()
+    require_admin_csrf(current_config, actor, csrf_token)
+    require_admin_permission(actor, "tasks:write")
     try:
         task_type = task_type.strip()
         if task_type not in {"http", "yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"}:

@@ -13,6 +13,8 @@ curl http://127.0.0.1:5222/v1/health
 
 主管理员可以在后台分发子管理员账号。子管理员使用同一个 `/admin` 地址登录，可以协助调整服务器设置、上传内容包和创建云任务，但不能管理主管理员或其他子管理员。主管理员可以停用、删除或随机重置子管理员密码；随机密码只在操作结果页显示一次，请立即保存。子管理员停用后现有 Basic 认证会立即失效。
 
+后台修改操作带有 CSRF 校验；每个请求会返回 `X-Request-Id`，异常和限流事件写入 `/data/audit/events.jsonl`，主管理员或具备 `audit:read` 权限的管理员可以通过 `/admin/audit` 查看。子管理员创建时可以分配 `settings:write`、`packages:write`、`tasks:write`、`module:sync`、`audit:read` 和 `security:write` 权限；未分配的操作会返回 403。
+
 ## GitHub Actions 镜像
 
 主分支中的服务器代码发生变化后，GitHub Actions 会自动构建 `linux/amd64` 和 `linux/arm64` 镜像并推送到：

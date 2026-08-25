@@ -138,6 +138,39 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertIn("ReaMicro API 管理后台", page)
         self.assertIn('[{"cloudBookId":123', page)
         self.assertIn("子管理员", page)
+        self.assertIn("csrf_token", page)
+
+    def test_admin_permissions_and_csrf(self):
+        config = main.load_config()
+        config["primaryAdmin"] = {
+            "username": "owner",
+            "passwordHash": main.password_hash("owner-password-123"),
+        }
+        config["adminAccounts"] = {
+            "content": {
+                "passwordHash": main.password_hash("content-password-123"),
+                "enabled": True,
+                "permissions": ["packages:write"],
+            }
+        }
+        main.save_config(config)
+        actor = main.require_admin(HTTPBasicCredentials(username="content", password="content-password-123"))
+        main.require_admin_permission(actor, "packages:write")
+        with self.assertRaises(HTTPException):
+            main.require_admin_permission(actor, "settings:write")
+        token = main.admin_csrf_token(config, actor)
+        main.require_admin_csrf(config, actor, token)
+        with self.assertRaises(HTTPException):
+            main.require_admin_csrf(config, actor, "invalid")
+
+    def test_rate_limit_window(self):
+        original_limit = main.RATE_LIMIT
+        main.RATE_LIMIT = 1
+        key = "test-rate-limit"
+        main.rate_buckets.pop(key, None)
+        self.assertTrue(main.allow_rate_limit(key))
+        self.assertFalse(main.allow_rate_limit(key))
+        main.RATE_LIMIT = original_limit
 
 
 if __name__ == "__main__":
