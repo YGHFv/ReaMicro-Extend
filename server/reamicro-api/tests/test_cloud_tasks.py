@@ -140,6 +140,43 @@ class AdminSecurityTest(unittest.TestCase):
             main.require_admin(HTTPBasicCredentials(username="disabled", password="disabled-password-123"))
         self.assertEqual(raised.exception.status_code, 401)
 
+    def test_admin_session_is_hashed_and_invalidated_by_password_change(self):
+        config = main.load_config()
+        config["primaryAdmin"] = {
+            "username": "owner",
+            "passwordHash": main.password_hash("owner-password-123"),
+        }
+        main.save_config(config)
+        actor = main.require_admin(HTTPBasicCredentials(username="owner", password="owner-password-123"))
+        token = main.create_admin_session(actor)
+        self.assertEqual(main.validate_admin_session_token(token)["username"], "owner")
+        raw = main.STATE_DB_PATH.read_bytes()
+        self.assertNotIn(token.encode("utf-8"), raw)
+        config["primaryAdmin"]["passwordHash"] = main.password_hash("new-owner-password-123")
+        main.save_config(config)
+        self.assertIsNone(main.validate_admin_session_token(token))
+
+    def test_subadmin_session_is_invalidated_when_disabled(self):
+        config = main.load_config()
+        config["primaryAdmin"] = {
+            "username": "owner",
+            "passwordHash": main.password_hash("owner-password-123"),
+        }
+        config["adminAccounts"] = {
+            "operator": {
+                "passwordHash": main.password_hash("operator-password-123"),
+                "enabled": True,
+                "permissions": ["settings:write"],
+            }
+        }
+        main.save_config(config)
+        actor = main.require_admin(HTTPBasicCredentials(username="operator", password="operator-password-123"))
+        token = main.create_admin_session(actor)
+        self.assertIsNotNone(main.validate_admin_session_token(token))
+        config["adminAccounts"]["operator"]["enabled"] = False
+        main.save_config(config)
+        self.assertIsNone(main.validate_admin_session_token(token))
+
     def test_long_secret_has_sufficient_entropy_and_is_unique(self):
         first = main.generate_long_secret()
         second = main.generate_long_secret()

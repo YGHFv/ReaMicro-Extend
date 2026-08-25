@@ -14,6 +14,7 @@ import shutil
 import threading
 import html
 import base64
+import binascii
 import re
 import time
 import zipfile
@@ -24,7 +25,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Query, Form, status, UploadFile, File
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.security import HTTPBasicCredentials
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.responses import JSONResponse
 from fastapi.responses import Response
@@ -60,13 +61,15 @@ ADMIN_PASSWORD = os.getenv("REAMICRO_ADMIN_PASSWORD", "")
 SIGNING_PRIVATE_KEY_FILE = os.getenv("REAMICRO_SIGNING_PRIVATE_KEY_FILE", "")
 GITHUB_WEBHOOK_SECRET = os.getenv("REAMICRO_GITHUB_WEBHOOK_SECRET", "")
 config_lock = threading.RLock()
-basic_security = HTTPBasic(auto_error=False)
 state_store_lock = threading.RLock()
 state_store: StateStore | None = None
 rate_lock = threading.RLock()
 rate_buckets: dict[str, list[float]] = {}
 RATE_LIMIT = max(int(os.getenv("REAMICRO_RATE_LIMIT", "120")), 10)
 RATE_WINDOW_SECONDS = 60
+ADMIN_SESSION_SECONDS = max(int(os.getenv("REAMICRO_ADMIN_SESSION_SECONDS", "43200")), 900)
+ADMIN_COOKIE_SECURE = os.getenv("REAMICRO_ADMIN_COOKIE_SECURE", "true").lower() == "true"
+ADMIN_SESSION_COOKIE = "reamicro_admin_session"
 metrics_lock = threading.RLock()
 metrics_counters: dict[str, int] = {"requests": 0, "errors": 0, "rate_limited": 0}
 metrics_routes: dict[str, int] = {}
@@ -765,6 +768,11 @@ def primary_admin_configured(config: dict[str, Any]) -> bool:
 
 def resolve_admin(credentials: HTTPBasicCredentials | None, allow_bootstrap: bool = False) -> dict[str, Any]:
     config = load_config()
+    if credentials and credentials.username.startswith("__session__:"):
+        actor = validate_admin_session_token(credentials.username.split(":", 1)[1])
+        if actor:
+            return actor
+        raise HTTPException(status_code=401, detail="后台会话已失效")
     if not primary_admin_configured(config):
         if not ADMIN_PASSWORD:
             raise HTTPException(status_code=503, detail="未配置主管理员初始密码 REAMICRO_ADMIN_PASSWORD")
@@ -802,6 +810,83 @@ def resolve_admin(credentials: HTTPBasicCredentials | None, allow_bootstrap: boo
 
 def require_admin(credentials: HTTPBasicCredentials | None, allow_bootstrap: bool = False) -> dict[str, Any]:
     return resolve_admin(credentials, allow_bootstrap=allow_bootstrap)
+
+
+def admin_auth_version(config: dict[str, Any], actor: dict[str, Any]) -> str:
+    username = str(actor.get("username", ""))
+    if actor.get("needsSetup"):
+        material = ADMIN_PASSWORD
+    elif actor.get("role") == "primary":
+        material = str(config.get("primaryAdmin", {}).get("passwordHash", ""))
+    else:
+        material = str(config.get("adminAccounts", {}).get(username, {}).get("passwordHash", ""))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+
+
+def create_admin_session(actor: dict[str, Any]) -> str:
+    token = generate_long_secret(48)
+    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    get_state_store().save_admin_session(
+        api_key_digest(token),
+        actor,
+        admin_auth_version(load_config(), actor),
+        now,
+        now + ADMIN_SESSION_SECONDS * 1000,
+    )
+    return token
+
+
+def session_admin(request: Request) -> dict[str, Any] | None:
+    token = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+    if not token:
+        return None
+    return validate_admin_session_token(token)
+
+
+def validate_admin_session_token(token: str) -> dict[str, Any] | None:
+    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    actor = get_state_store().load_admin_session(api_key_digest(token), now)
+    if not actor:
+        return None
+    config = load_config()
+    if actor.get("role") == "subadmin":
+        record = config.get("adminAccounts", {}).get(actor.get("username", ""), {})
+        if not isinstance(record, dict) or not record.get("enabled", True):
+            get_state_store().delete_admin_session(api_key_digest(token))
+            return None
+        actor["permissions"] = record.get("permissions", [])
+    if not hmac.compare_digest(str(actor.get("authVersion", "")), admin_auth_version(config, actor)):
+        get_state_store().delete_admin_session(api_key_digest(token))
+        return None
+    return actor
+
+
+async def basic_security(request: Request) -> HTTPBasicCredentials | None:
+    """会话优先，兼容旧的 HTTP Basic 登录。"""
+    token = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+    if token and validate_admin_session_token(token):
+        return HTTPBasicCredentials(username="__session__:" + token, password="")
+    authorization = request.headers.get("Authorization", "")
+    if not authorization.lower().startswith("basic "):
+        return None
+    try:
+        raw = base64.b64decode(authorization[6:].strip()).decode("utf-8")
+        username, password = raw.split(":", 1)
+        return HTTPBasicCredentials(username=username, password=password)
+    except (ValueError, UnicodeDecodeError, binascii.Error):
+        return None
+
+
+async def admin_actor(
+    request: Request,
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+) -> dict[str, Any]:
+    actor = session_admin(request)
+    if actor:
+        return actor
+    if credentials:
+        return require_admin(credentials, allow_bootstrap=True)
+    raise HTTPException(status_code=303, detail="请先登录后台", headers={"Location": "/admin/login"})
 
 
 def require_primary_admin(actor: dict[str, Any]) -> None:
@@ -945,8 +1030,13 @@ async def security_middleware(request: Request, call_next):
 
 
 @app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+async def http_exception_handler(request: Request, exc: HTTPException) -> Response:
     request_id = getattr(request.state, "request_id", "")
+    if exc.status_code in (302, 303, 307, 308) and exc.headers and exc.headers.get("Location"):
+        result = RedirectResponse(exc.headers["Location"], status_code=exc.status_code)
+        if request_id:
+            result.headers["X-Request-Id"] = request_id
+        return result
     detail = exc.detail if isinstance(exc.detail, dict) else response(code="HTTP_ERROR", message=str(exc.detail), request_id=request_id)
     if isinstance(detail, dict):
         detail["requestId"] = request_id or detail.get("requestId", "")
@@ -1016,6 +1106,13 @@ def admin_setup_page(message: str = "", actor: dict[str, Any] | None = None) -> 
 <p><small>初始化信息保存于 /data/config/server.json；密码只保存 PBKDF2 哈希。</small></p></main></body></html>"""
 
 
+def admin_login_page(message: str = "") -> str:
+    message_html = f"<p style='padding:10px;background:#fef2f2;color:#991b1b;border-radius:8px'>{html.escape(message)}</p>" if message else ""
+    return f"""<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>后台登录</title>
+<style>body{{font-family:system-ui;max-width:460px;margin:64px auto;padding:18px;background:#f5f7fb}}main{{background:white;padding:26px;border-radius:14px;box-shadow:0 5px 24px #0001}}label{{display:block;margin:14px 0 5px;font-weight:600}}input{{box-sizing:border-box;width:100%;padding:11px;border:1px solid #ccd4df;border-radius:8px}}button{{margin-top:20px;width:100%;padding:11px;border:0;border-radius:8px;background:#2563eb;color:white;font-weight:600}}</style></head>
+<body><main><h1>ReaMicro 管理后台</h1>{message_html}<form method='post' action='/admin/login'><label>管理员用户名</label><input name='username' autocomplete='username' required><label>密码</label><input type='password' name='password' autocomplete='current-password' required><button type='submit'>登录</button></form></main></body></html>"""
+
+
 def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] | None = None, secret_notice: str = "") -> str:
     def esc(value: Any) -> str:
         return html.escape(str(value), quote=True)
@@ -1081,6 +1178,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
 <title>ReaMicro API 管理后台</title>
 <style>body{{font-family:system-ui,-apple-system,sans-serif;max-width:980px;margin:32px auto;padding:0 18px;background:#f5f7fb;color:#182230}}main{{background:white;border-radius:14px;padding:24px;box-shadow:0 5px 24px #0001}}label{{display:block;margin:14px 0 5px;font-weight:600}}input,textarea,select{{box-sizing:border-box;width:100%;padding:10px;border:1px solid #ccd4df;border-radius:8px;font:inherit;background:white}}textarea{{min-height:72px}}.row{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}button{{margin-top:20px;padding:10px 16px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-weight:600;cursor:pointer}}.secondary{{background:#475569;margin-left:8px}}.danger{{background:#b91c1c}}.compact{{margin:2px;padding:6px 9px}}.inline{{display:inline}}.msg{{padding:10px;background:#ecfdf5;color:#166534;border-radius:8px}}.secret{{padding:12px;background:#fff7ed;color:#9a3412;border-radius:8px;overflow-wrap:anywhere}}small{{color:#64748b}}table{{width:100%;border-collapse:collapse;margin-top:12px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}details{{margin-top:18px;padding:12px;border:1px solid #e2e8f0;border-radius:8px}}</style></head>
 <body><main><h1>ReaMicro API 管理后台</h1><p><small>当前管理员：{esc(actor.get('username', ''))}（{'主管理员' if actor.get('role') == 'primary' else '子管理员'}） · 默认端口：5222 · 配置保存到 Docker 数据卷 /data/config/server.json</small></p>
+<form method='post' action='/admin/logout'>{csrf_html}<button class='secondary' type='submit'>退出登录</button></form>
 {f"<p class='msg'>{esc(message)}</p>" if message else ""}
 {f"<p class='secret'><strong>请立即保存，关闭页面后不再显示：</strong><br>{esc(secret_notice)}</p>" if secret_notice else ""}
 <form method='post' action='/admin/settings'>{csrf_html}
@@ -1121,9 +1219,50 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
 {admin_management}{system_tools}{security_tools}<hr><p><a href='/admin/audit'>审计日志</a>　<a href='/health/live'>存活检查</a>　<a href='/health/ready'>就绪检查</a>　<a href='/v1/meta'>能力信息</a></p></main></body></html>"""
 
 
+@app.get("/admin/login", response_class=HTMLResponse)
+async def admin_login_get(request: Request) -> HTMLResponse:
+    if session_admin(request):
+        return RedirectResponse("/admin", status_code=303)
+    return HTMLResponse(admin_login_page())
+
+
+@app.post("/admin/login", response_class=HTMLResponse)
+async def admin_login_post(username: str = Form(""), password: str = Form("")) -> Response:
+    try:
+        actor = resolve_admin(HTTPBasicCredentials(username=username, password=password), allow_bootstrap=True)
+    except HTTPException:
+        audit_event("admin_login_failed", actor=f"admin:{username}", success=False)
+        return HTMLResponse(admin_login_page("用户名或密码错误"), status_code=401)
+    token = create_admin_session(actor)
+    audit_event("admin_login_success", actor=audit_actor(actor))
+    result = RedirectResponse("/admin", status_code=303)
+    result.set_cookie(
+        ADMIN_SESSION_COOKIE,
+        token,
+        max_age=ADMIN_SESSION_SECONDS,
+        httponly=True,
+        secure=ADMIN_COOKIE_SECURE,
+        samesite="lax",
+        path="/admin",
+    )
+    return result
+
+
+@app.post("/admin/logout")
+async def admin_logout(request: Request, csrf_token: str = Form("")) -> RedirectResponse:
+    token = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+    if token:
+        actor = validate_admin_session_token(token)
+        if actor:
+            require_admin_csrf(load_config(), actor, csrf_token)
+        get_state_store().delete_admin_session(api_key_digest(token))
+    result = RedirectResponse("/admin/login", status_code=303)
+    result.delete_cookie(ADMIN_SESSION_COOKIE, path="/admin")
+    return result
+
+
 @app.get("/admin", response_class=HTMLResponse)
-async def admin(credentials: HTTPBasicCredentials | None = Depends(basic_security)) -> HTMLResponse:
-    actor = require_admin(credentials, allow_bootstrap=True)
+async def admin(actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
     if actor.get("needsSetup"):
         return HTMLResponse(admin_setup_page(actor=actor))
     return HTMLResponse(admin_page(load_config(), actor=actor))
@@ -1280,6 +1419,7 @@ async def admin_setup(
             "updatedAt": now,
         }
         save_config(current)
+        get_state_store().delete_admin_sessions_for_user(str(actor.get("username", "")))
         audit_event("primary_admin_initialized", f"admin:{username}", success=True)
         return HTMLResponse(
             "<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>初始化完成</title>"
@@ -1440,6 +1580,7 @@ async def admin_reset_subadmin(
     admins[username] = record
     current["adminAccounts"] = admins
     saved = save_config(current)
+    get_state_store().delete_admin_sessions_for_user(username)
     audit_event("subadmin_password_reset", audit_actor(actor), success=True, metadata={"username": username})
     return HTMLResponse(admin_page(saved, f"子管理员 {username} 的密码已重置", actor=actor, secret_notice=f"新密码：{password}"))
 
@@ -1464,6 +1605,8 @@ async def admin_toggle_subadmin(
     admins[username] = record
     current["adminAccounts"] = admins
     saved = save_config(current)
+    if not record["enabled"]:
+        get_state_store().delete_admin_sessions_for_user(username)
     audit_event("subadmin_toggled", audit_actor(actor), success=True, metadata={"username": username, "enabled": record["enabled"]})
     state_text = "启用" if record["enabled"] else "停用"
     return HTMLResponse(admin_page(saved, f"子管理员 {username} 已{state_text}", actor=actor))
@@ -1485,6 +1628,7 @@ async def admin_delete_subadmin(
     admins.pop(username, None)
     current["adminAccounts"] = admins
     saved = save_config(current)
+    get_state_store().delete_admin_sessions_for_user(username)
     audit_event("subadmin_deleted", audit_actor(actor), success=True, metadata={"username": username})
     return HTMLResponse(admin_page(saved, f"子管理员 {username} 已删除", actor=actor))
 

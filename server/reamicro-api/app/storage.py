@@ -63,6 +63,17 @@ class StateStore:
                     owner TEXT NOT NULL,
                     expires_at INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS admin_sessions (
+                    token_digest TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    needs_setup INTEGER NOT NULL,
+                    permissions TEXT NOT NULL,
+                    auth_version TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    last_seen_at INTEGER NOT NULL
+                );
                 """
             )
             connection.execute(
@@ -176,3 +187,56 @@ class StateStore:
         self.initialize()
         with self.lock, self.connect() as connection:
             connection.execute("DELETE FROM task_locks WHERE task_id = ? AND owner = ?", (task_id, owner))
+
+    def save_admin_session(self, digest: str, actor: dict[str, Any], auth_version: str, now: int, expires_at: int) -> None:
+        self.initialize()
+        with self.lock, self.connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO admin_sessions(token_digest, username, role, needs_setup, permissions, auth_version, created_at, expires_at, last_seen_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    digest,
+                    str(actor.get("username", "")),
+                    str(actor.get("role", "subadmin")),
+                    1 if actor.get("needsSetup") else 0,
+                    json.dumps(actor.get("permissions", []), ensure_ascii=False),
+                    auth_version,
+                    now,
+                    expires_at,
+                    now,
+                ),
+            )
+
+    def load_admin_session(self, digest: str, now: int) -> dict[str, Any] | None:
+        self.initialize()
+        with self.lock, self.connect() as connection:
+            connection.execute("DELETE FROM admin_sessions WHERE expires_at <= ?", (now,))
+            row = connection.execute(
+                "SELECT username, role, needs_setup, permissions, auth_version, expires_at FROM admin_sessions WHERE token_digest = ?",
+                (digest,),
+            ).fetchone()
+            if row:
+                connection.execute("UPDATE admin_sessions SET last_seen_at = ? WHERE token_digest = ?", (now, digest))
+        if not row:
+            return None
+        try:
+            permissions = json.loads(row[3])
+        except ValueError:
+            permissions = []
+        return {
+            "username": row[0],
+            "role": row[1],
+            "needsSetup": bool(row[2]),
+            "permissions": permissions if isinstance(permissions, list) else [],
+            "authVersion": row[4],
+            "expiresAt": row[5],
+        }
+
+    def delete_admin_session(self, digest: str) -> None:
+        self.initialize()
+        with self.lock, self.connect() as connection:
+            connection.execute("DELETE FROM admin_sessions WHERE token_digest = ?", (digest,))
+
+    def delete_admin_sessions_for_user(self, username: str) -> None:
+        self.initialize()
+        with self.lock, self.connect() as connection:
+            connection.execute("DELETE FROM admin_sessions WHERE username = ?", (username,))

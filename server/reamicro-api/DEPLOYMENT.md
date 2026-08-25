@@ -28,3 +28,9 @@
 - 存活检查：`https://你的域名/health/live`
 
 反向代理必须保留 `Range`、`If-None-Match`、`X-Request-Id`、`X-Hub-Signature-256` 和 `X-GitHub-Event` 请求头，且不要缓存 `/admin`、`/v1/tasks` 和 `/v1/credentials`。
+
+## 后台会话安全
+
+- 登录入口为 `/admin/login`，成功后 Cookie 名为 `reamicro_admin_session`，仅发送到 `/admin` 路径，并启用 HttpOnly、SameSite=Lax。
+- `REAMICRO_ADMIN_SESSION_SECONDS` 默认 43200 秒；修改主管理员密码、重置/停用/删除子管理员会使对应会话立即失效。
+- `REAMICRO_ADMIN_COOKIE_SECURE=true` 时浏览器只会在 HTTPS 下发送 Cookie。使用反向代理时必须正确终止 TLS 并转发 `/admin`；仅在本机临时调试 HTTP 时设为 `false`。

@@ -8,10 +8,10 @@ docker compose up -d --build
 curl http://127.0.0.1:5222/v1/health
 ```
 
-默认 API 端口为 `5222`，后台管理地址为 `http://服务器地址:5222/admin`。
+默认 API 端口为 `5222`，后台管理地址为 `http://服务器地址:5222/admin`，登录页为 `/admin/login`。后台登录成功后使用 HttpOnly Cookie 会话，默认有效期 12 小时；生产环境必须通过 HTTPS，并保持 `REAMICRO_ADMIN_COOKIE_SECURE=true`。本地明文测试可临时设为 `false`，不要在公网长期关闭。
 首次部署必须设置 `REAMICRO_ADMIN_PASSWORD` 作为主管理员一次性引导密码。第一次使用该账号打开 `/admin` 时会强制进入初始化页面，设置新的主管理员用户名和至少 12 位密码；初始化完成后，环境变量中的引导密码立即失效，主管理员密码只以 PBKDF2 哈希保存到 `/data/config/server.json`。如果遗失主管理员密码，请通过数据卷备份恢复配置，或在停机维护时移除 `primaryAdmin` 后重新使用引导密码初始化。
 
-主管理员可以在后台分发子管理员账号。子管理员使用同一个 `/admin` 地址登录，可以协助调整服务器设置、上传内容包和创建云任务，但不能管理主管理员或其他子管理员。主管理员可以停用、删除或随机重置子管理员密码；随机密码只在操作结果页显示一次，请立即保存。子管理员停用后现有 Basic 认证会立即失效。
+主管理员可以在后台分发子管理员账号。子管理员使用同一个 `/admin/login` 地址登录，可以协助调整服务器设置、上传内容包和创建云任务，但不能管理主管理员或其他子管理员。主管理员可以停用、删除或随机重置子管理员密码；随机密码只在操作结果页显示一次，请立即保存。密码重置、账号停用或删除会立即清理该账号的全部后台会话。旧 HTTP Basic 仅作为迁移兼容方式保留。
 
 后台修改操作带有 CSRF 校验；每个请求会返回 `X-Request-Id`，异常和限流事件写入 `/data/audit/events.jsonl`，主管理员或具备 `audit:read` 权限的管理员可以通过 `/admin/audit` 查看。子管理员创建时可以分配 `settings:write`、`packages:write`、`tasks:write`、`module:sync`、`audit:read` 和 `security:write` 权限；未分配的操作会返回 403。
 
