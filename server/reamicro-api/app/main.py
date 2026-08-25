@@ -274,6 +274,7 @@ def task_log(task_id: str, message: str, level: str = "INFO") -> None:
     with path.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps({
             "at": int(datetime.now(timezone.utc).timestamp() * 1000),
+            "taskId": task_id,
             "level": level,
             "message": message,
         }, ensure_ascii=False) + "\n")
@@ -563,6 +564,24 @@ def execute_task(task: dict[str, Any]) -> tuple[str, str]:
     return "failed", f"未知任务类型：{task.get('taskType')}"
 
 
+def record_task_execution(task: dict[str, Any], result: str, message: str, started_at: int, finished_at: int) -> None:
+    history = task.get("executionHistory", [])
+    if not isinstance(history, list):
+        history = []
+    history.append({
+        "at": finished_at,
+        "startedAt": started_at,
+        "finishedAt": finished_at,
+        "durationMs": max(0, finished_at - started_at),
+        "result": result,
+        "message": message,
+        "runCount": int(task.get("runCount", 0)),
+        "consecutiveFailures": int(task.get("consecutiveFailures", 0)),
+    })
+    task["executionHistory"] = history[-100:]
+    task["lastExecution"] = history[-1]
+
+
 def apply_task_action(task: dict[str, Any], action: str, now: int | None = None) -> str:
     now = now or int(datetime.now(timezone.utc).timestamp() * 1000)
     task_id = str(task.get("id", ""))
@@ -609,7 +628,9 @@ async def task_scheduler_loop() -> None:
                 changed = True
                 save_tasks(tasks)
                 try:
+                    started_at = int(datetime.now(timezone.utc).timestamp() * 1000)
                     result, message = await asyncio.to_thread(execute_task, task)
+                    finished_at = int(datetime.now(timezone.utc).timestamp() * 1000)
                     task_log(task_id, message, "ERROR" if result == "failed" else "WARN" if result == "paused" else "INFO")
                     task["status"] = result
                     task["lastMessage"] = message
@@ -631,6 +652,7 @@ async def task_scheduler_loop() -> None:
                             task["lastMessage"] = f"{message}；连续失败超过上限，任务已暂停"
                     else:
                         task["nextRunAt"] = 0
+                    record_task_execution(task, result, message, started_at, finished_at)
                     changed = True
                     save_tasks(tasks)
                 finally:
@@ -1414,7 +1436,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
     credential_table = "".join(credential_rows) or "<tr><td colspan='6' class='empty'>暂无模块上传的阅微凭据</td></tr>"
     task_rows = []
     for task in sorted(load_tasks().values(), key=lambda value: int(value.get("createdAt", 0)), reverse=True):
-        task_rows.append(f"<tr><td>{esc(task.get('taskType', ''))}</td><td>{esc(task.get('owner', ''))}</td><td>{esc(task_credential_id(task))}</td><td>{esc(task.get('status', ''))}</td><td>{'启用' if task.get('enabled', True) else '停用'}</td><td>{esc(task.get('lastMessage', ''))}</td><td>{esc(task.get('nextRunAt', ''))}</td></tr>")
+        task_rows.append(f"<tr><td>{esc(task.get('taskType', ''))}</td><td>{esc(task.get('owner', ''))}</td><td>{esc(task_credential_id(task))}</td><td>{esc(task.get('status', ''))}</td><td>{'启用' if task.get('enabled', True) else '停用'}</td><td>{esc(task.get('lastMessage', ''))}</td><td>{esc(task.get('nextRunAt', ''))}</td><td><a href='/admin/tasks/{esc(task.get('id', ''))}/logs'>日志</a></td></tr>")
     task_table = "".join(task_rows) or "<tr><td colspan='7' class='empty'>暂无云端任务</td></tr>"
     nav_html = "".join(f"<a class={'active' if key == section else ''} href='/admin?section={key}'>{label}<span>{len([x for x in records if x.get('kind') == key]) if key in PACKAGE_KINDS else ''}</span></a>" for key, label in labels)
     notice = f"<div class='notice'>{esc(message)}</div>" if message else ""
@@ -1430,7 +1452,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
             content += '<template id="cloud-book-example">[{"cloudBookId":123,"bookId":123,"name":"书名"}]</template>'
         content += f"<form class='toolbar' method='get' action='/admin'><input type='hidden' name='section' value='{esc(section)}'><input name='q' value='{esc(query)}' placeholder='搜索名称、包 ID、版本或别名'><button class='button' type='submit'>搜索</button></form><div class='table-wrap'><table><thead><tr><th>类型</th><th>内容</th><th>版本</th><th>状态</th><th>渠道 / 依赖</th><th>操作</th></tr></thead><tbody>{_admin_package_table(visible, can_packages, query)}</tbody></table></div>"
     else:
-        task_credentials = f"<div class='stats'><div><strong>{len(load_credentials())}</strong><span>阅微凭据</span></div><div><strong>{len(load_tasks())}</strong><span>云端任务</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('enabled', True))}</strong><span>已启用</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('status') == 'failed')}</strong><span>执行失败</span></div></div><div class='panel'><h2>已上传阅微凭据</h2><p class='muted'>凭据只保存加密密文，后台不会显示登录密钥原文；账号 ID、验证状态和更新时间来自模块上传结果。</p><div class='table-wrap'><table><thead><tr><th>凭据 ID</th><th>阅微账号 ID</th><th>名称</th><th>所有者</th><th>验证状态</th><th>更新时间</th></tr></thead><tbody>{credential_table}</tbody></table></div></div><div class='panel'><h2>任务运行状态</h2><div class='table-wrap'><table><thead><tr><th>任务类型</th><th>所有者</th><th>凭据 ID</th><th>状态</th><th>开关</th><th>最近结果</th><th>下次执行</th></tr></thead><tbody>{task_table}</tbody></table></div></div>" if section == "tasks" else ""
+        task_credentials = f"<div class='stats'><div><strong>{len(load_credentials())}</strong><span>阅微凭据</span></div><div><strong>{len(load_tasks())}</strong><span>云端任务</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('enabled', True))}</strong><span>已启用</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('status') == 'failed')}</strong><span>执行失败</span></div></div><div class='panel'><h2>已上传阅微凭据</h2><p class='muted'>凭据只保存加密密文，后台不会显示登录密钥原文；账号 ID、验证状态和更新时间来自模块上传结果。</p><div class='table-wrap'><table><thead><tr><th>凭据 ID</th><th>阅微账号 ID</th><th>名称</th><th>所有者</th><th>验证状态</th><th>更新时间</th></tr></thead><tbody>{credential_table}</tbody></table></div></div><div class='panel'><h2>任务运行状态</h2><div class='table-wrap'><table><thead><tr><th>任务类型</th><th>所有者</th><th>凭据 ID</th><th>状态</th><th>开关</th><th>最近结果</th><th>下次执行</th><th>日志</th></tr></thead><tbody>{task_table}</tbody></table></div></div>" if section == "tasks" else ""
         content = f"<div class='page-head'><div><p class='eyebrow'>系统</p><h1>{'云端任务' if section == 'tasks' else ('服务器设置' if section == 'settings' else '安全与备份')}</h1><p class='muted'>按分类维护后台功能。</p></div></div>{task_credentials}<div class='panel'><p>当前版本先保留完整配置表单入口，避免重构期间遗漏任何既有参数。</p><p><a class='button' href='/admin/legacy'>打开完整管理表单</a></p><p><a href='/admin/audit'>审计日志</a> · <a href='/admin/backups/server'>服务器快照</a></p>{'<p>子管理员账户管理仍受主管理员权限保护。</p>' if section == 'security' else ''}</div>"
     return f"""<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>ReaMicro API 管理后台</title><style>:root{{--line:#e5e9f0;--muted:#64748b;--blue:#2563eb}}*{{box-sizing:border-box}}body{{margin:0;background:#f4f7fb;color:#1f2937;font-family:system-ui,-apple-system,'Microsoft YaHei',sans-serif}}aside{{position:fixed;inset:0 auto 0 0;width:236px;padding:22px 14px;background:#f8fafc;border-right:1px solid var(--line)}}.brand{{font-size:18px;font-weight:700;padding:0 12px 22px}}.brand small{{display:block;color:var(--muted);font-size:11px;margin-top:5px}}nav a{{display:flex;justify-content:space-between;padding:10px 12px;margin:3px 0;border-radius:6px;color:#475569;text-decoration:none;font-size:14px}}nav a.active,nav a:hover{{background:#e8f0ff;color:#1d4ed8;font-weight:650}}nav span{{color:#94a3b8;font-size:11px}}main{{margin-left:236px;padding:25px 34px 50px}}.topbar{{display:flex;justify-content:flex-end;gap:15px;color:var(--muted);font-size:13px;margin-bottom:24px}}.page-head{{display:flex;justify-content:space-between;margin-bottom:20px}}h1{{margin:3px 0 5px;font-size:26px}}.eyebrow{{color:var(--blue);font-size:12px;font-weight:700;margin:0}}.muted,small{{color:var(--muted)}}.stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}}.stats div,.table-wrap,.panel{{background:#fff;border:1px solid var(--line);border-radius:8px}}.stats div{{padding:18px}}.stats strong{{display:block;font-size:24px}}.stats span{{color:var(--muted);font-size:13px}}.toolbar{{display:flex;gap:8px;margin-bottom:12px}}input{{padding:9px 10px;border:1px solid #cfd6e1;border-radius:5px;font:inherit}}.toolbar input{{width:420px}}.button{{display:inline-block;padding:9px 14px;border:0;border-radius:5px;background:var(--blue);color:#fff;text-decoration:none;font:inherit;font-weight:650;cursor:pointer}}.button.subtle{{background:#eef2f7;color:#334155;padding:6px 9px;font-size:12px}}.table-wrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:760px}}th,td{{padding:13px 14px;border-bottom:1px solid var(--line);text-align:left;font-size:13px}}th{{background:#fafbfc;color:var(--muted)}}td small{{display:block;margin-top:4px;font-size:11px}}.status{{padding:3px 7px;border-radius:4px;font-size:11px;background:#eef2f7}}.status-published{{background:#ecfdf3;color:#047857}}.status-draft{{background:#fff7ed;color:#b45309}}.actions{{white-space:nowrap}}.notice,.secret,.panel{{padding:14px;margin-bottom:18px}}.notice{{background:#ecfdf5;color:#166534}}.secret{{background:#fff7ed;color:#9a3412}}.inline{{display:inline}}.empty{{padding:28px;text-align:center;color:var(--muted)}}@media(max-width:760px){{aside{{width:190px}}main{{margin-left:190px;padding:20px 15px}}.stats{{grid-template-columns:repeat(2,1fr)}}.page-head{{display:block}}}}</style></head><body><aside><div class='brand'>ReaMicro<small>API 管理后台 · 5222</small></div><nav>{nav_html}</nav></aside><main><div class='topbar'><span>管理员：{esc(actor.get('username', ''))}</span><span>{'主管理员' if actor.get('role') == 'primary' else '子管理员'}</span><form class='inline' method='post' action='/admin/logout'>{csrf_html}<button class='button subtle' type='submit'>退出</button></form></div>{notice}{secret}{content}</main></body></html>"""
 
@@ -2912,6 +2934,18 @@ async def task_logs(task_id: str, owner: str = Depends(task_owner)) -> dict[str,
             except ValueError:
                 continue
     return response({"items": items})
+
+
+@app.get("/admin/tasks/{task_id}/logs", response_class=HTMLResponse)
+async def admin_task_logs(task_id: str, actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+    task = load_tasks().get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    rows = []
+    for item in task.get("executionHistory", [])[-100:][::-1] if isinstance(task.get("executionHistory"), list) else []:
+        rows.append(f"<tr><td>{html.escape(str(item.get('finishedAt', '')))}</td><td>{html.escape(str(item.get('result', '')))}</td><td>{html.escape(str(item.get('durationMs', '')))} ms</td><td>{html.escape(str(item.get('message', '')))}</td></tr>")
+    body = f"<div class='panel'><p>任务：{html.escape(task_id)} · 类型：{html.escape(str(task.get('taskType', '')))}</p><table><thead><tr><th>完成时间</th><th>结果</th><th>耗时</th><th>消息</th></tr></thead><tbody>{''.join(rows) or '<tr><td colspan=\"4\">暂无执行记录</td></tr>'}</tbody></table></div>"
+    return HTMLResponse(_admin_shell("任务执行日志", body, load_config(), actor))
 
 
 @app.get("/v1/releases/module/download")
