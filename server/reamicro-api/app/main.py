@@ -3190,6 +3190,18 @@ async def packages(kind: str = Query(...), _: None = Depends(authenticated)) -> 
     return response({"kind": kind, "items": items})
 
 
+@app.get("/v1/packages/dependency-graph")
+async def package_dependency_graph(_: None = Depends(authenticated)) -> dict[str, Any]:
+    nodes = []
+    edges = []
+    for manifest in _admin_package_records():
+        node_id = f"{manifest.get('kind')}:{manifest.get('packageId')}"
+        nodes.append({"id": node_id, "kind": manifest.get("kind"), "packageId": manifest.get("packageId"), "version": manifest.get("version"), "status": manifest.get("status", "published")})
+        for dependency in manifest.get("dependencies", []) if isinstance(manifest.get("dependencies"), list) else []:
+            edges.append({"from": node_id, "to": f"{dependency.get('kind', '*')}:{dependency.get('packageId', '')}", "required": dependency.get("required", True), "minVersion": dependency.get("minVersion", ""), "maxVersion": dependency.get("maxVersion", "")})
+    return response({"nodes": nodes, "edges": edges})
+
+
 @app.get("/v1/packages/{package_kind}/{package_id}/history")
 async def package_history(package_kind: str, package_id: str, _: None = Depends(authenticated)) -> dict[str, Any]:
     safe_package_segment(package_kind)
@@ -3236,6 +3248,44 @@ async def publish_package(
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     audit_event("package_status_changed", audit_actor(actor), metadata={"kind": package_kind, "packageId": package_id, "status": status_value})
     return response({"packageId": package_id, "status": manifest["status"], "channel": manifest.get("channel", "stable")})
+
+
+@app.post("/v1/packages/batch-publish")
+async def batch_publish_packages(
+    request: Request,
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    x_admin_csrf: str = Header(default=""),
+) -> dict[str, Any]:
+    actor = require_admin(credentials)
+    require_admin_permission(actor, "packages:write")
+    require_admin_csrf(load_config(), actor, x_admin_csrf)
+    payload = await request.json()
+    items = payload.get("items", []) if isinstance(payload, dict) else []
+    if not isinstance(items, list) or len(items) > 100:
+        raise HTTPException(status_code=400, detail=response(code="PACKAGE_INVALID", message="items 必须是最多 100 项的数组"))
+    results = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            kind = safe_package_segment(str(item.get("kind", ""))); package_id = safe_package_segment(str(item.get("packageId", "")))
+            manifest_path, manifest = package_manifest(kind, package_id)
+            desired = str(item.get("status", "published")).lower()
+            if desired not in {"draft", "testing", "published", "unpublished"}:
+                raise ValueError("状态无效")
+            if desired == "published" and not package_dependency_status(manifest).get("dependenciesSatisfied", True):
+                raise ValueError("依赖未满足")
+            manifest["status"] = desired
+            if item.get("channel"):
+                channel = str(item.get("channel")).lower()
+                if channel not in {"stable", "beta", "nightly"}: raise ValueError("渠道无效")
+                manifest["channel"] = channel
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            results.append({"kind": kind, "packageId": package_id, "status": desired})
+        except (HTTPException, ValueError) as error:
+            results.append({"kind": item.get("kind", ""), "packageId": item.get("packageId", ""), "error": str(error)})
+    audit_event("packages_batch_published", audit_actor(actor), metadata={"count": len(results)})
+    return response({"items": results})
 
 
 @app.post("/v1/packages/{package_kind}/{package_id}/rollback")
