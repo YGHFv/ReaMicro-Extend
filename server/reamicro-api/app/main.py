@@ -98,16 +98,33 @@ def default_config() -> dict[str, Any]:
         "githubRepository": os.getenv("REAMICRO_GITHUB_REPOSITORY", "YGHFv/ReaMicro-Extend"),
         "githubToken": os.getenv("REAMICRO_GITHUB_TOKEN", ""),
         "githubIncludePrerelease": env_bool("REAMICRO_GITHUB_INCLUDE_PRERELEASE", False),
-        "releaseSyncSeconds": max(int(os.getenv("REAMICRO_RELEASE_SYNC_SECONDS", "1800")), 300),
-        "releaseVersionCode": int(os.getenv("REAMICRO_RELEASE_VERSION_CODE", "0")),
+        "releaseSyncSeconds": bounded_config_int(os.getenv("REAMICRO_RELEASE_SYNC_SECONDS", "1800"), 1800, 300),
+        "releaseVersionCode": bounded_config_int(os.getenv("REAMICRO_RELEASE_VERSION_CODE", "0"), 0, 0),
         "serverSnapshotEnabled": env_bool("REAMICRO_SERVER_SNAPSHOT_ENABLED", True),
-        "serverSnapshotSeconds": max(int(os.getenv("REAMICRO_SERVER_SNAPSHOT_SECONDS", "86400")), 3600),
-        "serverSnapshotRetention": max(int(os.getenv("REAMICRO_SERVER_SNAPSHOT_RETENTION", "30")), 3),
+        "serverSnapshotSeconds": bounded_config_int(os.getenv("REAMICRO_SERVER_SNAPSHOT_SECONDS", "86400"), 86400, 3600),
+        "serverSnapshotRetention": bounded_config_int(os.getenv("REAMICRO_SERVER_SNAPSHOT_RETENTION", "30"), 30, 3),
         "accounts": {},
         "primaryAdmin": {},
         "adminAccounts": {},
         "hostAccountAllowlist": [],
     }
+
+
+def bounded_config_int(value: Any, default: int, minimum: int) -> int:
+    try:
+        return max(int(value), minimum)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def normalized_config_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        values = value.replace("\r", "\n").replace(",", "\n").splitlines()
+    elif isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        values = []
+    return sorted({str(item).strip() for item in values if str(item).strip()})
 
 
 def load_config() -> dict[str, Any]:
@@ -120,10 +137,15 @@ def load_config() -> dict[str, Any]:
                     config.update(stored)
         except (OSError, ValueError):
             pass
-        config["features"] = sorted({str(item).strip() for item in config.get("features", []) if str(item).strip()})
-        config["releaseSyncSeconds"] = max(int(config.get("releaseSyncSeconds", 1800)), 300)
-        config["serverSnapshotSeconds"] = max(int(config.get("serverSnapshotSeconds", 86400)), 3600)
-        config["serverSnapshotRetention"] = max(int(config.get("serverSnapshotRetention", 30)), 3)
+        config["features"] = normalized_config_list(config.get("features", []))
+        config["releaseSyncSeconds"] = bounded_config_int(config.get("releaseSyncSeconds", 1800), 1800, 300)
+        config["serverSnapshotSeconds"] = bounded_config_int(config.get("serverSnapshotSeconds", 86400), 86400, 3600)
+        config["serverSnapshotRetention"] = bounded_config_int(config.get("serverSnapshotRetention", 30), 30, 3)
+        config["accounts"] = config.get("accounts", {}) if isinstance(config.get("accounts", {}), dict) else {}
+        config["apiKeyRecords"] = config.get("apiKeyRecords", []) if isinstance(config.get("apiKeyRecords", []), list) else []
+        config["primaryAdmin"] = config.get("primaryAdmin", {}) if isinstance(config.get("primaryAdmin", {}), dict) else {}
+        config["adminAccounts"] = config.get("adminAccounts", {}) if isinstance(config.get("adminAccounts", {}), dict) else {}
+        config["hostAccountAllowlist"] = normalized_config_list(config.get("hostAccountAllowlist", []))
         return config
 
 
@@ -132,15 +154,15 @@ def save_config(next_config: dict[str, Any]) -> dict[str, Any]:
         CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
         safe = default_config()
         safe.update(next_config)
-        safe["features"] = sorted({str(item).strip() for item in safe.get("features", []) if str(item).strip()})
-        safe["releaseSyncSeconds"] = max(int(safe.get("releaseSyncSeconds", 1800)), 300)
-        safe["serverSnapshotSeconds"] = max(int(safe.get("serverSnapshotSeconds", 86400)), 3600)
-        safe["serverSnapshotRetention"] = max(int(safe.get("serverSnapshotRetention", 30)), 3)
+        safe["features"] = normalized_config_list(safe.get("features", []))
+        safe["releaseSyncSeconds"] = bounded_config_int(safe.get("releaseSyncSeconds", 1800), 1800, 300)
+        safe["serverSnapshotSeconds"] = bounded_config_int(safe.get("serverSnapshotSeconds", 86400), 86400, 3600)
+        safe["serverSnapshotRetention"] = bounded_config_int(safe.get("serverSnapshotRetention", 30), 30, 3)
         safe["accounts"] = safe.get("accounts", {}) if isinstance(safe.get("accounts", {}), dict) else {}
         safe["apiKeyRecords"] = safe.get("apiKeyRecords", []) if isinstance(safe.get("apiKeyRecords", []), list) else []
         safe["primaryAdmin"] = safe.get("primaryAdmin", {}) if isinstance(safe.get("primaryAdmin", {}), dict) else {}
         safe["adminAccounts"] = safe.get("adminAccounts", {}) if isinstance(safe.get("adminAccounts", {}), dict) else {}
-        safe["hostAccountAllowlist"] = sorted({str(item).strip() for item in safe.get("hostAccountAllowlist", []) if str(item).strip()})
+        safe["hostAccountAllowlist"] = normalized_config_list(safe.get("hostAccountAllowlist", []))
         temp = CONFIG_PATH.with_suffix(".tmp")
         temp.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
         temp.replace(CONFIG_PATH)
@@ -321,7 +343,10 @@ def decrypt_secret(value: str) -> Any:
 def task_interval(task: dict[str, Any]) -> int:
     schedule = task.get("schedule", {})
     if isinstance(schedule, dict):
-        return max(int(schedule.get("intervalSeconds", 86_400)), 60)
+        try:
+            return max(int(schedule.get("intervalSeconds", 86_400)), 60)
+        except (TypeError, ValueError):
+            return 86_400
     if schedule == "@hourly":
         return 3_600
     if schedule == "@daily":
@@ -333,6 +358,17 @@ def next_task_run(task: dict[str, Any], now_ms: int | None = None) -> int:
     now_ms = now_ms or int(datetime.now(timezone.utc).timestamp() * 1000)
     schedule = task.get("schedule", {})
     if not isinstance(schedule, dict) or not schedule.get("timeOfDay"):
+        return now_ms + task_interval(task) * 1000
+    try:
+        hour_text, minute_text = str(schedule.get("timeOfDay")).split(":", 1)
+        offset = int(schedule.get("timezoneOffsetMinutes", 480))
+        local_zone = timezone(timedelta(minutes=max(-720, min(offset, 840))))
+        local_now = datetime.fromtimestamp(now_ms / 1000, local_zone)
+        candidate = local_now.replace(hour=int(hour_text), minute=int(minute_text), second=0, microsecond=0)
+        if candidate <= local_now:
+            candidate += timedelta(days=1)
+        return int(candidate.timestamp() * 1000)
+    except (ValueError, TypeError, OverflowError):
         return now_ms + task_interval(task) * 1000
 
 
@@ -356,17 +392,6 @@ def recover_interrupted_tasks() -> int:
         save_tasks(tasks)
         audit_event("interrupted_tasks_recovered", metadata={"count": recovered})
     return recovered
-    try:
-        hour_text, minute_text = str(schedule.get("timeOfDay")).split(":", 1)
-        offset = int(schedule.get("timezoneOffsetMinutes", 480))
-        local_zone = timezone(timedelta(minutes=max(-720, min(offset, 840))))
-        local_now = datetime.fromtimestamp(now_ms / 1000, local_zone)
-        candidate = local_now.replace(hour=int(hour_text), minute=int(minute_text), second=0, microsecond=0)
-        if candidate <= local_now:
-            candidate += timedelta(days=1)
-        return int(candidate.timestamp() * 1000)
-    except (ValueError, TypeError):
-        return now_ms + task_interval(task) * 1000
 
 
 def normalized_time_of_day(value: Any) -> str:
@@ -1564,16 +1589,34 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
     can_packages = actor.get("role") == "primary" or "packages:write" in set(actor.get("permissions", []))
     labels = [("overview", "概览"), ("packages", "全部内容"), ("online_source", "书源"), ("association_source", "关联源"), ("epub_style", "EPUB 样式"), ("highlight_style", "高亮样式"), ("theme", "主题库"), ("tasks", "云端任务"), ("settings", "服务器设置"), ("security", "子管理员与安全")]
     credential_rows = []
-    for credential in sorted(load_credentials().values(), key=lambda value: int(value.get("updatedAt", 0)), reverse=True):
+    for credential in sorted(load_credentials().values(), key=lambda value: bounded_config_int(value.get("updatedAt", 0), 0, 0), reverse=True):
         owner = str(credential.get("owner", ""))
         owner_display = owner[:12] + "…" if len(owner) > 12 else owner
         public_credential = credential_public(credential)
         credential_rows.append(f"<tr><td>{esc(credential.get('id', ''))}</td><td>{esc(credential.get('accountId', '') or '未提供')}</td><td>{esc(credential.get('label', '阅微账号'))}</td><td>{esc(owner_display)}</td><td><span class='status status-{esc(public_credential.get('health', 'unverified'))}'>{esc(public_credential.get('health', 'unverified'))}</span><small>{esc(credential.get('lastVerifyMessage', ''))}</small></td><td>{esc(credential.get('updatedAt', ''))}</td></tr>")
     credential_table = "".join(credential_rows) or "<tr><td colspan='6' class='empty'>暂无模块上传的阅微凭据</td></tr>"
+    credential_options = "<option value=''>不使用凭据</option>" + "".join(
+        f"<option value='{esc(item.get('id', ''))}'>{esc(item.get('label', '阅微账号'))} · {esc(item.get('accountId', '') or item.get('owner', ''))}</option>"
+        for item in sorted(load_credentials().values(), key=lambda value: str(value.get('label', '')))
+    )
     task_rows = []
-    for task in sorted(load_tasks().values(), key=lambda value: int(value.get("createdAt", 0)), reverse=True):
-        task_rows.append(f"<tr><td>{esc(task.get('taskType', ''))}</td><td>{esc(task.get('owner', ''))}</td><td>{esc(task_credential_id(task))}</td><td>{esc(task.get('status', ''))}</td><td>{'启用' if task.get('enabled', True) else '停用'}</td><td>{esc(task.get('lastMessage', ''))}</td><td>{esc(task.get('nextRunAt', ''))}</td><td><a href='/admin/tasks/{esc(task.get('id', ''))}/logs'>日志</a></td></tr>")
-    task_table = "".join(task_rows) or "<tr><td colspan='7' class='empty'>暂无云端任务</td></tr>"
+    for task in sorted(load_tasks().values(), key=lambda value: bounded_config_int(value.get("createdAt", 0), 0, 0), reverse=True):
+        task_id = esc(task.get("id", "")); task_status = str(task.get("status", ""))
+        task_actions = ""
+        if actor.get("role") == "primary" or "tasks:write" in set(actor.get("permissions", [])):
+            buttons = ["<button class='button subtle' name='action' value='run'>立即运行</button>"]
+            if task_status == "running":
+                buttons = []
+            elif task.get("enabled", True) and task_status not in {"cancelled", "paused"}:
+                buttons.append("<button class='button subtle' name='action' value='pause'>暂停</button>")
+            else:
+                buttons.append("<button class='button subtle' name='action' value='resume'>恢复</button>")
+            if task_status not in {"cancelled", "running"}:
+                buttons.append("<button class='button subtle' name='action' value='cancel'>取消</button>")
+            if buttons:
+                task_actions = f"<form class='inline' method='post' action='/admin/tasks/action'>{csrf_html}<input type='hidden' name='task_id' value='{task_id}'>{''.join(buttons)}</form>"
+        task_rows.append(f"<tr><td>{esc(task.get('taskType', ''))}</td><td>{esc(task.get('owner', ''))}</td><td>{esc(task_credential_id(task))}</td><td>{esc(task_status)}</td><td>{'启用' if task.get('enabled', True) else '停用'}</td><td>{esc(task.get('lastMessage', ''))}</td><td>{esc(task.get('nextRunAt', ''))}</td><td><a href='/admin/tasks/{task_id}/logs'>日志</a> {task_actions}</td></tr>")
+    task_table = "".join(task_rows) or "<tr><td colspan='8' class='empty'>暂无云端任务</td></tr>"
     nav_html = "".join(f"<a class=\"{'active' if key == section else ''}\" href=\"{admin_section_path(key)}\">{label}<span>{len([x for x in records if x.get('kind') == key]) if key in PACKAGE_KINDS else ''}</span></a>" for key, label in labels)
     notice = f"<div class='notice'>{esc(message)}</div>" if message else ""
     secret = f"<div class='secret'><strong>请立即保存：</strong><br>{esc(secret_notice)}</div>" if secret_notice else ""
@@ -1590,7 +1633,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
     else:
         task_credentials = f"<div class='stats'><div><strong>{len(load_credentials())}</strong><span>阅微凭据</span></div><div><strong>{len(load_tasks())}</strong><span>云端任务</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('enabled', True))}</strong><span>已启用</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('status') == 'failed')}</strong><span>执行失败</span></div></div><div class='panel'><h2>已上传阅微凭据</h2><p class='muted'>凭据只保存加密密文，后台不会显示登录密钥原文；账号 ID、验证状态和更新时间来自模块上传结果。</p><div class='table-wrap'><table><thead><tr><th>凭据 ID</th><th>阅微账号 ID</th><th>名称</th><th>所有者</th><th>验证状态</th><th>更新时间</th></tr></thead><tbody>{credential_table}</tbody></table></div></div><div class='panel'><h2>任务运行状态</h2><div class='table-wrap'><table><thead><tr><th>任务类型</th><th>所有者</th><th>凭据 ID</th><th>状态</th><th>开关</th><th>最近结果</th><th>下次执行</th><th>日志</th></tr></thead><tbody>{task_table}</tbody></table></div></div>" if section == "tasks" else ""
         if section == "tasks":
-            task_form = f"<div class='panel'><h2>创建云端任务</h2><form method='post' action='/admin/tasks/create'>{csrf_html}<div class='grid-2'><label>任务类型<select name='task_type'><option value='yeshe_checkin'>野社零点签到</option><option value='yeshe_draw_card'>野社自动抽卡</option><option value='cloud_auto_read'>云端自动阅读</option><option value='http'>通用 HTTPS 请求</option></select></label><label>每日执行时间<input name='time_of_day' value='00:05'></label><label>凭据 ID<input name='credential_id'></label><label>所有者<input name='owner' value='admin'></label><label>阅读时长（分钟）<input name='duration_minutes' type='number' value='30'></label><label>最近阅读数量<input name='recent_limit' type='number' value='1'></label></div><label>自定义图书 JSON<textarea name='request_body'></textarea></label><button class='button' type='submit'>创建任务</button></form></div>"
+            task_form = f"<div class='panel'><h2>创建云端任务</h2><form method='post' action='/admin/tasks/create'>{csrf_html}<div class='grid-2'><label>任务类型<select name='task_type'><option value='yeshe_checkin'>野社零点签到</option><option value='yeshe_draw_card'>野社自动抽卡</option><option value='cloud_auto_read'>云端自动阅读</option><option value='http'>通用 HTTPS 请求</option></select></label><label>每日执行时间<input name='time_of_day' value='00:05'></label><label>凭据<select name='credential_id'>{credential_options}</select></label><label>所有者<input name='owner' value='admin'></label><label>阅读时长（分钟）<input name='duration_minutes' type='number' min='1' max='720' value='30'></label><label>最近阅读数量<input name='recent_limit' type='number' min='1' max='20' value='1'></label></div><label>自定义图书 JSON<textarea name='request_body' placeholder='留空则使用最近阅读记录'></textarea></label><button class='button' type='submit'>创建任务</button></form></div>"
             content = f"<div class='page-head'><div><p class='eyebrow'>自动化</p><h1>云端任务</h1><p class='muted'>配置、查看和控制自动阅读、签到、抽卡任务。</p></div></div>{task_credentials}{task_form}"
         elif section == "settings":
             content = f"<div class='page-head'><div><p class='eyebrow'>系统</p><h1>服务器设置</h1><p class='muted'>认证、白名单、模块同步和快照配置。</p></div></div><div class='panel'><form method='post' action='/admin/settings'>{csrf_html}<input type='hidden' name='signing_public_key' value='{esc(config.get('signingPublicKey', ''))}'><input type='hidden' name='release_version_code' value='{esc(config.get('releaseVersionCode', 0))}'><input type='hidden' name='github_include_prerelease' value='{'on' if config.get('githubIncludePrerelease') else ''}'><input type='hidden' name='server_snapshot_enabled' value='{'on' if config.get('serverSnapshotEnabled', True) else ''}'><div class='grid-2'><label>服务器 ID<input name='server_id' value='{esc(config.get('serverId', ''))}'></label><label>最低模块版本<input name='min_module_version' value='{esc(config.get('minModuleVersion', ''))}'></label><label>GitHub 仓库<input name='github_repository' value='{esc(config.get('githubRepository', ''))}'></label><label>同步间隔（秒）<input name='release_sync_seconds' type='number' value='{esc(config.get('releaseSyncSeconds', 1800))}'></label><label>快照间隔（秒）<input name='server_snapshot_seconds' type='number' value='{esc(config.get('serverSnapshotSeconds', 86400))}'></label><label>快照保留份数<input name='server_snapshot_retention' type='number' value='{esc(config.get('serverSnapshotRetention', 30))}'></label></div><label>API Key（留空保持）<input type='password' name='api_key'></label><label><input type='checkbox' name='generate_api_key'> 生成新 API Key</label><label><input type='checkbox' name='allow_public' {'checked' if config.get('allowPublic') else ''}> 允许公开访问</label><label>阅微账号白名单<textarea name='host_account_allowlist'>{esc(chr(10).join(config.get('hostAccountAllowlist', [])))}</textarea></label><label>功能列表<textarea name='features'>{esc(','.join(config.get('features', [])))}</textarea></label><button class='button' type='submit'>保存设置</button><button class='button subtle' type='submit' formaction='/admin/sync'>立即同步模块</button></form></div>"
@@ -3658,9 +3701,3 @@ async def package_download(package_kind: str, package_id: str, _: None = Depends
     if not payload.is_file():
         raise HTTPException(status_code=404, detail=response(code="NOT_FOUND", message="内容包文件不存在"))
     return FileResponse(payload, media_type="application/octet-stream", filename=payload.name)
-
-
-@app.get("/v1/diagnostics")
-async def diagnostics(_: None = Depends(authenticated)) -> dict[str, Any]:
-    config = load_config()
-    return response({"apiVersion": API_VERSION, "sha256ApiKeyConfigured": bool(config.get("apiKey"))})

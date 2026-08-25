@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
@@ -299,6 +300,17 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertEqual(old_link.status_code, 303)
         self.assertEqual(old_link.headers.get("location"), "/admin/tasks")
 
+    def test_task_page_exposes_state_aware_controls_and_credential_selector(self):
+        config = main.load_config()
+        main.save_credentials({"cred_1": {"id": "cred_1", "owner": "admin", "label": "主账号", "accountId": "1001", "updatedAt": 1}})
+        main.save_tasks({"task_1": {"id": "task_1", "owner": "admin", "taskType": "yeshe_checkin", "credentialId": "cred_1", "status": "scheduled", "enabled": True, "createdAt": 1, "nextRunAt": 0}})
+        actor = {"username": "owner", "role": "primary", "permissions": []}
+        page = main.admin_page(config, actor=actor, section="tasks")
+        self.assertIn("主账号 · 1001", page)
+        self.assertIn("value='run'", page)
+        self.assertIn("value='pause'", page)
+        self.assertIn("value='cancel'", page)
+
     def test_admin_permissions_and_csrf(self):
         config = main.load_config()
         config["primaryAdmin"] = {
@@ -330,6 +342,24 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertTrue(main.allow_rate_limit(key))
         self.assertFalse(main.allow_rate_limit(key))
         main.RATE_LIMIT = original_limit
+
+    def test_daily_task_schedule_uses_configured_timezone_and_rolls_to_next_day(self):
+        now = int(datetime(2026, 8, 26, 1, 0, tzinfo=timezone.utc).timestamp() * 1000)
+        task = {"schedule": {"timeOfDay": "10:30", "timezoneOffsetMinutes": 480}}
+        expected = int(datetime(2026, 8, 26, 2, 30, tzinfo=timezone.utc).timestamp() * 1000)
+        self.assertEqual(main.next_task_run(task, now), expected)
+        late_now = int(datetime(2026, 8, 26, 4, 0, tzinfo=timezone.utc).timestamp() * 1000)
+        next_day = int(datetime(2026, 8, 27, 2, 30, tzinfo=timezone.utc).timestamp() * 1000)
+        self.assertEqual(main.next_task_run(task, late_now), next_day)
+
+    def test_malformed_config_values_fall_back_without_breaking_backend(self):
+        main.CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
+        main.CONFIG_PATH.write_text(json.dumps({"releaseSyncSeconds": "invalid", "serverSnapshotSeconds": None, "features": "backup,module_update", "hostAccountAllowlist": "100\n200"}), encoding="utf-8")
+        config = main.load_config()
+        self.assertEqual(config["releaseSyncSeconds"], 1800)
+        self.assertEqual(config["serverSnapshotSeconds"], 86400)
+        self.assertEqual(config["features"], ["backup", "module_update"])
+        self.assertEqual(config["hostAccountAllowlist"], ["100", "200"])
 
     def test_unhandled_exception_response_contains_request_id(self):
         request = Request({
