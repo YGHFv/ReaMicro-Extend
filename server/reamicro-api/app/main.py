@@ -21,6 +21,7 @@ import time
 import zipfile
 import tempfile
 import hashlib as _hashlib
+import unicodedata
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -1627,7 +1628,7 @@ async def admin_new_package(kind: str = Query("online_source"), actor: dict[str,
     config = load_config(); esc = lambda value: html.escape(str(value), quote=True)
     csrf = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
     options = "".join(f"<option value='{k}' {'selected' if k == kind else ''}>{_admin_kind_label(k)}</option>" for k in sorted(PACKAGE_KINDS))
-    body = f"<div class='panel'><p class='muted'>新增内容请使用统一上传入口，旧版本会自动进入历史目录。</p><form method='post' action='/admin/packages/upload' enctype='multipart/form-data'>{csrf}<div class='grid'><label>内容类型<select name='kind'>{options}</select></label><label>包 ID<input name='package_id' required></label><label>版本号<input name='version' required></label><label>稳定内容 ID<input name='content_id'></label><label>状态<select name='status_value'><option value='published'>立即发布</option><option value='draft'>草稿</option><option value='testing'>测试中</option></select></label><label>渠道<select name='channel'><option>stable</option><option>beta</option><option>nightly</option></select></label></div><label>别名（逗号分隔）<input name='aliases'></label><label>依赖 JSON<textarea name='dependencies' placeholder='[]'></textarea></label><label>内容文件<input type='file' name='payload' required></label><button type='submit'>上传并保存</button></form></div>"
+    body = f"<div class='panel'><p class='muted'>包 ID、显示名称和版本号可留空：服务器会根据文件内容及已有列表自动生成；同一包再次上传会自动归档旧版本。</p><form method='post' action='/admin/packages/upload' enctype='multipart/form-data'>{csrf}<div class='grid'><label>内容类型<select name='kind'>{options}</select></label><label>包 ID（可留空自动生成）<input name='package_id' placeholder='根据名称自动生成'></label><label>版本号（可留空自动递增）<input name='version' placeholder='新包默认为 1.0.0'></label><label>显示名称（可留空自动识别）<input name='name' placeholder='从书源/样式文件识别'></label><label>稳定内容 ID（可留空使用包 ID）<input name='content_id'></label><label>状态<select name='status_value'><option value='published'>立即发布</option><option value='draft'>草稿</option><option value='testing'>测试中</option></select></label><label>渠道<select name='channel'><option>stable</option><option>beta</option><option>nightly</option></select></label></div><label>别名（逗号分隔）<input name='aliases'></label><label>依赖 JSON<textarea name='dependencies' placeholder='[]'></textarea></label><label>内容文件<input type='file' name='payload' required></label><button type='submit'>上传并保存</button></form></div>"
     return HTMLResponse(_admin_shell("新增内容", body, config, actor))
 
 
@@ -1687,12 +1688,13 @@ async def admin_edit_package_post(
     manifest_path, current = package_manifest(package_kind, package_id)
     filename = safe_payload_filename(filename)
     version = safe_package_segment(version)
-    stable_id = safe_package_segment(content_id) if content_id.strip() else package_id
     status_value = status_value.strip().lower(); channel = channel.strip().lower()
     if status_value not in {"published", "draft", "testing", "unpublished"} or channel not in {"stable", "beta", "nightly"}:
         raise HTTPException(status_code=400, detail="状态或渠道无效")
     body = payload_text.encode("utf-8")
     validate_package_payload(package_kind, filename, body)
+    metadata = infer_package_metadata(package_kind, filename, body)
+    stable_id = normalize_content_id(content_id, str(current.get("contentId", "")) if current.get("contentId") else package_id)
     try: dependency_items = normalize_package_dependencies(json.loads(dependencies or "[]"), package_kind, package_id)
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="依赖必须是 JSON 数组")
@@ -1705,11 +1707,15 @@ async def admin_edit_package_post(
     if old_payload.is_file() and old_payload.parent == package_dir:
         shutil.copy2(old_payload, archive_dir / old_payload.name)
     build_time = int(datetime.now(timezone.utc).timestamp() * 1000); digest = hashlib.sha256(body).hexdigest()
-    manifest = {**current, "packageId": package_id, "kind": package_kind, "version": version, "buildTime": build_time, "sha256": digest, "payload": filename, "contentId": stable_id, "aliases": [x.strip() for x in aliases.split(",") if x.strip()], "name": name.strip() or package_id, "status": status_value, "channel": channel, "dependencies": dependency_items}
+    manifest = {**current, "packageId": package_id, "kind": package_kind, "version": version, "buildTime": build_time, "sha256": digest, "payload": filename, "contentId": stable_id, "aliases": merge_package_aliases(current.get("aliases", []), metadata.get("identity", []), aliases), "name": name.strip() or (str(current.get("name", "")) if not metadata.get("explicitName") else "") or str(metadata.get("name") or package_id), "status": status_value, "channel": channel, "dependencies": dependency_items}
     if status_value == "published" and not package_dependency_status(manifest).get("dependenciesSatisfied", True):
         raise HTTPException(status_code=409, detail="内容包存在未满足的必需依赖")
     manifest["signature"] = package_signature(package_id, package_kind, stable_id, version, build_time, digest, body)
-    payload_path = package_dir / filename; payload_path.write_bytes(body)
+    payload_path = package_dir / filename
+    old_payload_path = package_dir / str(current.get("payload", ""))
+    temp_payload = package_dir / ".payload.tmp"; temp_payload.write_bytes(body); temp_payload.replace(payload_path)
+    if old_payload_path != payload_path and old_payload_path.is_file() and old_payload_path.parent == package_dir:
+        old_payload_path.unlink()
     temp_manifest = package_dir / ".manifest.json.tmp"; temp_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"); temp_manifest.replace(manifest_path)
     audit_event("package_edited", audit_actor(actor), metadata={"kind": package_kind, "packageId": package_id, "version": version})
     return HTMLResponse(admin_page(load_config(), f"已保存 {_admin_kind_label(package_kind)}/{package_id} {version}", actor=actor, section=package_kind))
@@ -2509,6 +2515,149 @@ def safe_payload_filename(value: str) -> str:
     return name[:120] or "payload.bin"
 
 
+def normalize_content_id(value: str, fallback: str) -> str:
+    """内容稳定 ID 不参与路径拼接，允许 URL/域名等源标识但拒绝控制字符。"""
+    text = " ".join(str(value or fallback).replace("\r", " ").replace("\n", " ").split()).strip()
+    if not text or len(text) > 240 or any(ord(char) < 32 for char in text):
+        raise HTTPException(status_code=400, detail="稳定内容 ID 无效")
+    return text
+
+
+def _metadata_text(value: Any) -> str:
+    """把内容元数据转成适合显示和匹配的单行文本。"""
+    if value is None or isinstance(value, (dict, list)):
+        return ""
+    text = " ".join(str(value).replace("\r", " ").replace("\n", " ").split())
+    return text[:160].strip()
+
+
+def infer_package_metadata(kind: str, filename: str, body: bytes) -> dict[str, Any]:
+    """从书源 JSON 或样式文件中提取外显名称和稳定标识。"""
+    stem = Path(filename or "payload").stem
+    objects: list[dict[str, Any]] = []
+    if filename.lower().endswith((".json", ".json5")):
+        try:
+            parsed = json.loads(body.decode("utf-8"))
+            if isinstance(parsed, dict):
+                objects = [parsed]
+            elif isinstance(parsed, list):
+                objects = [item for item in parsed[:20] if isinstance(item, dict)]
+        except (UnicodeDecodeError, ValueError):
+            objects = []
+    name_keys = (
+        "name", "title", "displayName", "label", "bookSourceName", "sourceName",
+        "styleName", "themeName", "epubStyleName", "highlightStyleName",
+    )
+    identity_keys = (
+        "contentId", "sourceId", "bookSourceId", "id", "key", "bookSourceUrl",
+        "sourceUrl", "url", "domain", "host",
+    )
+    name = ""
+    explicit_name = False
+    identity: list[str] = []
+    for item in objects:
+        if not name:
+            for key in name_keys:
+                name = _metadata_text(item.get(key))
+                if name:
+                    explicit_name = True
+                    break
+        for key in identity_keys:
+            value = _metadata_text(item.get(key))
+            if value and value not in identity:
+                identity.append(value)
+    if not name and filename.lower().endswith(".css"):
+        match = re.search(r"(?:^|[\*/#@])\s*(?:name|title)\s*[:=]\s*([^\r\n*]+)", body.decode("utf-8", errors="ignore"), re.IGNORECASE)
+        if match:
+            name = _metadata_text(match.group(1))
+            explicit_name = bool(name)
+    name = name or _metadata_text(stem) or _admin_kind_label(kind)
+    if not identity:
+        identity = [name]
+    return {"name": name[:120], "identity": identity[:12], "explicitName": explicit_name}
+
+
+def package_name_slug(name: str, kind: str) -> str:
+    normalized = unicodedata.normalize("NFKC", name or "")
+    normalized = re.sub(r"[^\w.-]+", "-", normalized, flags=re.UNICODE).strip("-._")
+    normalized = normalized[:80].strip("-._")
+    return normalized or kind.replace("_", "-")
+
+
+def _package_manifests(kind: str) -> list[tuple[Path, dict[str, Any]]]:
+    values: list[tuple[Path, dict[str, Any]]] = []
+    for path in sorted((PACKAGE_ROOT / kind).glob("*/manifest.json")):
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(manifest, dict):
+            values.append((path, manifest))
+    return values
+
+
+def resolve_package_identity(kind: str, requested_id: str, requested_content_id: str, metadata: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    """复用可识别的旧包，否则按已有 ID 列表分配不重复的新 ID。"""
+    manifests = _package_manifests(kind)
+    requested = requested_id.strip()
+    if requested:
+        package_id = safe_package_segment(requested)
+        return package_id, next((item for path, item in manifests if path.parent.name == package_id), None)
+    targets = {item.casefold() for item in metadata.get("identity", []) if item}
+    if requested_content_id.strip():
+        targets.add(requested_content_id.strip().casefold())
+    name = str(metadata.get("name", "")).strip().casefold()
+    for path, manifest in manifests:
+        values = {str(manifest.get(key, "")).strip().casefold() for key in ("packageId", "contentId", "name") if manifest.get(key)}
+        values.update(str(item).strip().casefold() for item in manifest.get("aliases", []) if item)
+        if targets.intersection(values) or (name and name == str(manifest.get("name", "")).strip().casefold()):
+            return safe_package_segment(str(manifest.get("packageId", path.parent.name))), manifest
+    identity_seed = next((str(item) for item in metadata.get("identity", []) if item), "")
+    identity_seed = re.sub(r"^[a-z]+://(?:www\.)?", "", identity_seed, flags=re.IGNORECASE).split("/")[0]
+    base = package_name_slug(identity_seed or str(metadata.get("name", "")), kind)
+    used = {path.parent.name for path, _ in manifests}
+    candidate = base
+    index = 2
+    while candidate in used:
+        suffix = f"-{index}"
+        candidate = (base[:120 - len(suffix)] + suffix).strip("-._")
+        index += 1
+    return safe_package_segment(candidate), None
+
+
+def next_package_version(current: Any) -> str:
+    value = str(current or "").strip()
+    numbers = re.findall(r"\d+", value)
+    if not numbers:
+        return "1.0.0"
+    parts = [int(item) for item in numbers[:3]]
+    while len(parts) < 3:
+        parts.append(0)
+    parts[2] += 1
+    return ".".join(str(item) for item in parts)
+
+
+def merge_package_aliases(existing: Any, detected: Any, requested: str) -> list[str]:
+    values = []
+    if isinstance(existing, list):
+        values.extend(existing)
+    if isinstance(detected, list):
+        values.extend(detected)
+    values.extend(requested.split(","))
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _metadata_text(value)
+        key = text.casefold()
+        if not text or len(text) > 240 or key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+        if len(result) >= 50:
+            break
+    return result
+
+
 def package_signature(package_id: str, kind: str, content_id: str, version: str, build_time: int, sha256: str, body: bytes) -> str:
     if not SIGNING_PRIVATE_KEY_FILE:
         return ""
@@ -2523,9 +2672,10 @@ def package_signature(package_id: str, kind: str, content_id: str, version: str,
 async def admin_upload_package(
     credentials: HTTPBasicCredentials | None = Depends(basic_security),
     kind: str = Form(...),
-    package_id: str = Form(...),
-    version: str = Form(...),
+    package_id: str = Form(""),
+    version: str = Form(""),
     content_id: str = Form(""),
+    name: str = Form(""),
     aliases: str = Form(""),
     signature: str = Form(""),
     status_value: str = Form("published"),
@@ -2540,14 +2690,17 @@ async def admin_upload_package(
     require_admin_permission(actor, "packages:write")
     if kind not in PACKAGE_KINDS:
         raise HTTPException(status_code=400, detail="不支持的内容包类型")
-    package_id = safe_package_segment(package_id)
-    version = safe_package_segment(version)
-    stable_id = safe_package_segment(content_id) if content_id.strip() else package_id
     filename = safe_payload_filename(payload.filename or "payload.bin")
     body = await payload.read()
     if not body or len(body) > 50 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="内容文件为空或超过 50 MB")
     validate_package_payload(kind, filename, body)
+    metadata = infer_package_metadata(kind, filename, body)
+    package_id, existing_manifest = resolve_package_identity(kind, package_id, content_id, metadata)
+    if existing_manifest is not None and not version.strip():
+        version = next_package_version(existing_manifest.get("version"))
+    version = safe_package_segment(version or "1.0.0")
+    stable_id = normalize_content_id(content_id, str(existing_manifest.get("contentId", "")) if existing_manifest and existing_manifest.get("contentId") else package_id)
     normalized_status = status_value.strip().lower() or "published"
     if normalized_status not in {"draft", "testing", "published", "unpublished"}:
         raise HTTPException(status_code=400, detail="内容包状态无效")
@@ -2566,6 +2719,7 @@ async def admin_upload_package(
         raise HTTPException(status_code=400, detail="内容包路径无效")
     package_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = package_dir / "manifest.json"
+    old_payload_path: Path | None = None
     if manifest_path.is_file():
         history = package_dir / "history"
         history.mkdir(exist_ok=True)
@@ -2582,6 +2736,7 @@ async def admin_upload_package(
         old_payload = package_dir / str(old_manifest.get("payload", ""))
         if old_payload.is_file() and old_payload.parent == package_dir:
             shutil.copy2(old_payload, archive_dir / old_payload.name)
+            old_payload_path = old_payload
     build_time = int(datetime.now(timezone.utc).timestamp() * 1000)
     digest = hashlib.sha256(body).hexdigest()
     effective_signature = signature.strip() or package_signature(package_id, kind, stable_id, version, build_time, digest, body)
@@ -2596,9 +2751,9 @@ async def admin_upload_package(
         "signature": effective_signature,
         "payload": filename,
         "contentId": stable_id,
-        "aliases": [item.strip() for item in aliases.split(",") if item.strip()],
-        "name": package_id,
-        "description": "后台上传内容包",
+        "aliases": merge_package_aliases(existing_manifest.get("aliases", []) if existing_manifest else [], metadata.get("identity", []), aliases),
+        "name": _metadata_text(name) or (str(existing_manifest.get("name", "")) if existing_manifest and not metadata.get("explicitName") else "") or str(metadata.get("name") or package_id),
+        "description": str(existing_manifest.get("description", "")) if existing_manifest and existing_manifest.get("description") else "后台上传内容包",
         "status": normalized_status,
         "channel": normalized_channel,
         "dependencies": dependency_items,
@@ -2611,12 +2766,16 @@ async def admin_upload_package(
                 detail=response(code="PACKAGE_DEPENDENCIES_UNRESOLVED", message="内容包存在未满足的必需依赖，请先上传依赖或保存为草稿", data=dependency_status),
             )
     payload_path = package_dir / filename
-    payload_path.write_bytes(body)
+    temp_payload = package_dir / ".payload.tmp"
+    temp_payload.write_bytes(body)
+    temp_payload.replace(payload_path)
     temp_manifest = package_dir / ".manifest.json.tmp"
     temp_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     temp_manifest.replace(manifest_path)
+    if old_payload_path and old_payload_path != payload_path and old_payload_path.is_file():
+        old_payload_path.unlink()
     audit_event("package_uploaded", audit_actor(actor), success=True, metadata={"kind": kind, "packageId": package_id, "version": version, "status": normalized_status})
-    return HTMLResponse(admin_page(load_config(), f"已发布 {kind}/{package_id} {version}", actor=actor, section=kind))
+    return admin_html(admin_page(load_config(), f"已保存 {_admin_kind_label(kind)}“{manifest['name']}” · {package_id} · {version}", actor=actor, section=kind))
 
 
 @app.post("/admin/tasks/create", response_class=HTMLResponse)

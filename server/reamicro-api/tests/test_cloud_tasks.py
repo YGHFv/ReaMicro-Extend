@@ -381,6 +381,34 @@ class AdminSecurityTest(unittest.TestCase):
         with self.assertRaises(HTTPException):
             main.validate_package_payload("online_source", "source.json", b"not-json")
 
+    def test_package_metadata_and_identity_are_generated_from_content(self):
+        body = json.dumps({"bookSourceName": "夜读书源", "bookSourceUrl": "https://reader.example.test"}, ensure_ascii=False).encode("utf-8")
+        metadata = main.infer_package_metadata("online_source", "upload.json", body)
+        self.assertEqual(metadata["name"], "夜读书源")
+        self.assertIn("https://reader.example.test", metadata["identity"])
+        package_id, existing = main.resolve_package_identity("online_source", "", "", metadata)
+        self.assertEqual(package_id, "reader.example.test")
+        self.assertIsNone(existing)
+        (main.PACKAGE_ROOT / "online_source" / package_id).mkdir(parents=True)
+        (main.PACKAGE_ROOT / "online_source" / package_id / "manifest.json").write_text(json.dumps({"packageId": package_id, "contentId": "https://reader.example.test", "name": "夜读书源", "version": "1.2.3"}), encoding="utf-8")
+        reused, manifest = main.resolve_package_identity("online_source", "", "", metadata)
+        self.assertEqual(reused, package_id)
+        self.assertEqual(manifest["version"], "1.2.3")
+        self.assertEqual(main.next_package_version(manifest["version"]), "1.2.4")
+
+    def test_style_name_can_be_read_from_css_metadata(self):
+        metadata = main.infer_package_metadata("epub_style", "clean.css", b"/* name: Clean Reading */\nbody { color: #222; }")
+        self.assertEqual(metadata["name"], "Clean Reading")
+        self.assertTrue(metadata["explicitName"])
+
+    def test_new_package_form_allows_automatic_metadata(self):
+        config = main.load_config()
+        actor = {"username": "owner", "role": "primary", "permissions": []}
+        page = asyncio.run(main.admin_new_package(kind="online_source", actor=actor))
+        html_text = page.body.decode("utf-8")
+        self.assertIn("包 ID（可留空自动生成）", html_text)
+        self.assertIn('name=\'name\'', html_text)
+
     def test_package_dependency_resolution_supports_alias_and_versions(self):
         dependency_dir = main.PACKAGE_ROOT / "online_source" / "parser.common"
         dependency_dir.mkdir(parents=True)
