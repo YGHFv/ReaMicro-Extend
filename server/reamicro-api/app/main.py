@@ -831,6 +831,7 @@ def configured_api_key(config: dict[str, Any], value: str | None) -> dict[str, A
         return None
     for record in config.get("apiKeyRecords", []):
         if isinstance(record, dict) and record.get("enabled", True) and hmac.compare_digest(str(record.get("digest", "")), api_key_digest(value)):
+            record["lastUsedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
             return record
     records = config.get("apiKeyRecords", [])
     if isinstance(records, list) and records:
@@ -1065,7 +1066,10 @@ def check_request_auth(
 ) -> None:
     config = load_config()
     api_key = str(config.get("apiKey", ""))
-    if configured_api_key(config, api_key_value):
+    key_record = configured_api_key(config, api_key_value)
+    if key_record:
+        if key_record.get("id") != "legacy":
+            save_config(config)
         return
     accounts = config.get("accounts", {})
     if account_name and account_password and isinstance(accounts, dict):
@@ -1830,8 +1834,39 @@ async def admin_api_keys(credentials: HTTPBasicCredentials | None = Depends(basi
     for item in load_config().get("apiKeyRecords", []):
         if not isinstance(item, dict):
             continue
-        records.append({key: item.get(key) for key in ("id", "name", "permissions", "enabled", "createdAt")})
+        records.append({key: item.get(key) for key in ("id", "name", "permissions", "enabled", "createdAt", "lastUsedAt", "revokedAt")})
     return response({"items": records})
+
+
+@app.post("/admin/api-keys")
+async def admin_create_api_key(
+    request: Request,
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    x_admin_csrf: str = Header(default=""),
+) -> dict[str, Any]:
+    actor = require_admin(credentials)
+    require_primary_admin(actor)
+    config = load_config()
+    require_admin_csrf(config, actor, x_admin_csrf)
+    try:
+        payload = await request.json()
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    raw_permissions = payload.get("permissions", ["read"])
+    if not isinstance(raw_permissions, list):
+        raise HTTPException(status_code=400, detail=response(code="API_SCOPE_INVALID", message="permissions 必须是数组"))
+    allowed = {"read", "write", "packages:read", "packages:write", "tasks:read", "tasks:write", "credentials:read", "credentials:write", "backup:read"}
+    permissions = sorted({str(item).strip() for item in raw_permissions if str(item).strip()})
+    if not set(permissions).issubset(allowed):
+        raise HTTPException(status_code=400, detail=response(code="API_SCOPE_INVALID", message="存在不支持的 API Key 权限范围"))
+    plain = generate_long_secret(48)
+    record = {"id": "key_" + secrets.token_hex(8), "name": str(payload.get("name") or "API Key")[:80], "digest": api_key_digest(plain), "permissions": permissions or ["read"], "enabled": True, "createdAt": int(datetime.now(timezone.utc).timestamp() * 1000), "lastUsedAt": 0}
+    config["apiKeyRecords"] = [item for item in config.get("apiKeyRecords", []) if isinstance(item, dict)] + [record]
+    save_config(config)
+    audit_event("api_key_created", audit_actor(actor), metadata={"keyId": record["id"], "permissions": record["permissions"]})
+    return response({"id": record["id"], "name": record["name"], "permissions": record["permissions"], "key": plain})
 
 
 @app.post("/admin/api-keys/{key_id}/revoke")
