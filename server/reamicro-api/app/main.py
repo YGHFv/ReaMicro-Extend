@@ -44,6 +44,7 @@ DEFAULT_FEATURES = {
 }
 PACKAGE_ROOT = Path(os.getenv("REAMICRO_PACKAGE_ROOT", "/data/packages"))
 RELEASE_ROOT = Path(os.getenv("REAMICRO_RELEASE_ROOT", "/data/releases/module"))
+RELEASE_STATUS_PATH = RELEASE_ROOT / "sync-status.json"
 BACKUP_ROOT = Path(os.getenv("REAMICRO_BACKUP_ROOT", "/data/backups"))
 SECRET_BACKUP_ROOT = Path(os.getenv("REAMICRO_SECRET_BACKUP_ROOT", "/data/backups/secrets"))
 SERVER_BACKUP_ROOT = Path(os.getenv("REAMICRO_SERVER_BACKUP_ROOT", "/data/backups/server"))
@@ -742,6 +743,8 @@ def sync_module_release() -> dict[str, Any] | None:
         "etag": hashlib.sha256(apk_path.read_bytes()).hexdigest(),
     }
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    RELEASE_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RELEASE_STATUS_PATH.write_text(json.dumps({"status": "ok", "syncedAt": int(datetime.now(timezone.utc).timestamp() * 1000), "versionName": version_name, "assetId": asset.get("id")}, ensure_ascii=False, indent=2), encoding="utf-8")
     return metadata
 
 
@@ -750,6 +753,8 @@ async def release_sync_loop() -> None:
         try:
             await asyncio.to_thread(sync_module_release)
         except Exception as error:
+            RELEASE_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            RELEASE_STATUS_PATH.write_text(json.dumps({"status": "error", "failedAt": int(datetime.now(timezone.utc).timestamp() * 1000), "message": redact_message(str(error))}, ensure_ascii=False, indent=2), encoding="utf-8")
             print(f"module release sync failed: {error}", flush=True)
         await asyncio.sleep(load_config()["releaseSyncSeconds"])
 
@@ -828,6 +833,43 @@ def configured_api_key(config: dict[str, Any], value: str | None) -> dict[str, A
     if legacy and hmac.compare_digest(value, legacy):
         return {"id": "legacy", "name": "legacy", "permissions": ["read", "write"], "enabled": True}
     return None
+
+
+def api_key_permissions(config: dict[str, Any], value: str | None) -> set[str]:
+    record = configured_api_key(config, value)
+    if not record:
+        return set()
+    permissions = record.get("permissions", [])
+    if not isinstance(permissions, list) or not permissions:
+        return {"read", "write", "packages:read", "packages:write", "tasks:read", "tasks:write", "credentials:read", "credentials:write", "backup:read"}
+    result = {str(item).strip() for item in permissions if str(item).strip()}
+    if "read" in result:
+        result.update({"packages:read", "tasks:read", "credentials:read", "backup:read"})
+    if "write" in result:
+        result.update({"packages:write", "tasks:write", "credentials:write"})
+    return result
+
+
+def required_api_scope(request: Request) -> str | None:
+    path = request.url.path
+    if path.startswith("/v1/packages"):
+        return "packages:write" if request.method not in {"GET", "HEAD"} else "packages:read"
+    if path.startswith("/v1/tasks"):
+        return "tasks:write" if request.method not in {"GET", "HEAD"} else "tasks:read"
+    if path.startswith("/v1/credentials"):
+        return "credentials:write" if request.method not in {"GET", "HEAD"} else "credentials:read"
+    if path.startswith("/v1/backups"):
+        return "backup:write" if request.method not in {"GET", "HEAD"} else "backup:read"
+    return None
+
+
+def enforce_api_scope(request: Request, api_key_value: str | None) -> None:
+    scope = required_api_scope(request)
+    if not scope or not api_key_value:
+        return
+    permissions = api_key_permissions(load_config(), api_key_value)
+    if scope not in permissions:
+        raise HTTPException(status_code=403, detail=response(code="API_SCOPE_REQUIRED", message=f"当前 API Key 缺少权限：{scope}"))
 
 
 def api_key_auth_configured(config: dict[str, Any]) -> bool:
@@ -1083,32 +1125,38 @@ def public_server_capabilities(config: dict[str, Any]) -> dict[str, Any]:
 
 
 async def authenticated(
+    request: Request,
     x_reamicro_api_key: str | None = Header(default=None),
     x_reamicro_account: str | None = Header(default=None),
     x_reamicro_password: str | None = Header(default=None),
     x_reamicro_host_account_id: str | None = Header(default=None),
 ) -> None:
     check_request_auth(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
+    enforce_api_scope(request, x_reamicro_api_key)
 
 
 async def task_owner(
+    request: Request,
     x_reamicro_api_key: str | None = Header(default=None),
     x_reamicro_account: str | None = Header(default=None),
     x_reamicro_password: str | None = Header(default=None),
     x_reamicro_host_account_id: str | None = Header(default=None),
 ) -> str:
     identity = resolve_identity(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
+    enforce_api_scope(request, x_reamicro_api_key)
     if identity == "public":
         raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="云任务需要非公开认证"))
     return identity
 
 
 async def backup_owner(
+    request: Request,
     x_reamicro_api_key: str | None = Header(default=None),
     x_reamicro_account: str | None = Header(default=None),
     x_reamicro_password: str | None = Header(default=None),
     x_reamicro_host_account_id: str | None = Header(default=None),
 ) -> str:
+    enforce_api_scope(request, x_reamicro_api_key)
     config = load_config()
     api_key = str(config.get("apiKey", ""))
     if configured_api_key(config, x_reamicro_api_key):
@@ -1210,9 +1258,14 @@ async def health_ready() -> JSONResponse:
 
 @app.get("/health/dependencies")
 async def health_dependencies(_: None = Depends(authenticated)) -> dict[str, Any]:
+    sync_status = {}
+    if RELEASE_STATUS_PATH.is_file():
+        try: sync_status = json.loads(RELEASE_STATUS_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError): sync_status = {"status": "invalid"}
     return response({
         "database": get_state_store().integrity_check(),
         "releaseCache": (RELEASE_ROOT / "latest.json").is_file(),
+        "releaseSync": sync_status,
         "packageStorage": PACKAGE_ROOT.exists(),
         "backupStorage": BACKUP_ROOT.exists(),
     })
