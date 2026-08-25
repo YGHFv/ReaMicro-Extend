@@ -18,6 +18,7 @@ import binascii
 import re
 import time
 import zipfile
+import tempfile
 import hashlib as _hashlib
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -1337,6 +1338,18 @@ async def metrics(_: None = Depends(authenticated)) -> Response:
         "# HELP reamicro_http_rate_limited_total Total rate-limited requests",
         "# TYPE reamicro_http_rate_limited_total counter",
         f"reamicro_http_rate_limited_total {counters['rate_limited']}",
+        "# HELP reamicro_credentials Current credential count",
+        "# TYPE reamicro_credentials gauge",
+        f"reamicro_credentials {len(load_credentials())}",
+        "# HELP reamicro_tasks Current task count",
+        "# TYPE reamicro_tasks gauge",
+        f"reamicro_tasks {len(load_tasks())}",
+        "# HELP reamicro_tasks_failed Current failed task count",
+        "# TYPE reamicro_tasks_failed gauge",
+        f"reamicro_tasks_failed {sum(1 for task in load_tasks().values() if task.get('status') == 'failed')}",
+        "# HELP reamicro_packages Current package count",
+        "# TYPE reamicro_packages gauge",
+        f"reamicro_packages {sum(1 for kind in PACKAGE_KINDS for _ in (PACKAGE_ROOT / kind).glob('*/manifest.json'))}",
     ]
     for route, count in sorted(routes.items()):
         safe_route = route.replace('"', '\\"')
@@ -1971,6 +1984,65 @@ async def admin_server_backup_download(filename: str, credentials: HTTPBasicCred
     if path.parent != SERVER_BACKUP_ROOT.resolve() or not path.is_file():
         raise HTTPException(status_code=404, detail=response(code="BACKUP_NOT_FOUND", message="服务器快照不存在"))
     return FileResponse(path, media_type="application/zip", filename=filename)
+
+
+def verify_server_snapshot(path: Path) -> dict[str, Any]:
+    with zipfile.ZipFile(path) as archive:
+        allowed = {"snapshot-manifest.json", "state/reamicro.sqlite3", "config/server.json"}
+        if any(name not in allowed for name in archive.namelist()):
+            raise ValueError("备份包含不允许的文件路径")
+        manifest = json.loads(archive.read("snapshot-manifest.json").decode("utf-8"))
+        results = []
+        for item in manifest.get("files", []):
+            data = archive.read(str(item.get("path", "")))
+            digest = hashlib.sha256(data).hexdigest()
+            results.append({"path": item.get("path"), "size": len(data), "sha256": digest, "valid": digest == item.get("sha256")})
+        return {"valid": all(item["valid"] for item in results), "createdAt": manifest.get("createdAt"), "files": results}
+
+
+@app.get("/admin/backups/server/{filename}/verify")
+async def admin_verify_server_backup(filename: str, credentials: HTTPBasicCredentials | None = Depends(basic_security)) -> JSONResponse:
+    actor = require_admin(credentials); require_admin_permission(actor, "backup:admin")
+    if not re.fullmatch(r"reamicro-server-[0-9TZ-]+\.zip", filename):
+        raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="备份文件名无效"))
+    path = (SERVER_BACKUP_ROOT / filename).resolve()
+    if path.parent != SERVER_BACKUP_ROOT.resolve() or not path.is_file():
+        raise HTTPException(status_code=404, detail=response(code="BACKUP_NOT_FOUND", message="服务器快照不存在"))
+    try: result = verify_server_snapshot(path)
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
+        raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message=f"备份校验失败：{error}"))
+    return JSONResponse(content=response(result), status_code=200 if result.get("valid") else 409)
+
+
+@app.post("/admin/backups/server/{filename}/restore")
+async def admin_restore_server_backup(filename: str, request: Request, credentials: HTTPBasicCredentials | None = Depends(basic_security), x_admin_csrf: str = Header(default="")) -> JSONResponse:
+    global state_store
+    actor = require_admin(credentials); require_primary_admin(actor); require_admin_permission(actor, "backup:admin"); require_admin_csrf(load_config(), actor, x_admin_csrf)
+    try: payload = await request.json()
+    except ValueError: payload = {}
+    if not isinstance(payload, dict) or payload.get("confirm") is not True:
+        raise HTTPException(status_code=400, detail=response(code="BACKUP_CONFIRM_REQUIRED", message="恢复操作必须明确 confirm=true"))
+    if not re.fullmatch(r"reamicro-server-[0-9TZ-]+\.zip", filename):
+        raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="备份文件名无效"))
+    path = (SERVER_BACKUP_ROOT / filename).resolve()
+    if path.parent != SERVER_BACKUP_ROOT.resolve() or not path.is_file():
+        raise HTTPException(status_code=404, detail=response(code="BACKUP_NOT_FOUND", message="服务器快照不存在"))
+    verification = verify_server_snapshot(path)
+    if not verification.get("valid"):
+        raise HTTPException(status_code=409, detail=response(code="BACKUP_INVALID", message="备份完整性校验失败"))
+    safety_snapshot = await asyncio.to_thread(create_server_snapshot)
+    with tempfile.TemporaryDirectory(prefix="reamicro-restore-") as directory:
+        extract_root = Path(directory)
+        with zipfile.ZipFile(path) as archive: archive.extractall(extract_root)
+        restored_db = extract_root / "state" / "reamicro.sqlite3"; restored_config = extract_root / "config" / "server.json"
+        if not restored_db.is_file() or not restored_config.is_file():
+            raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="备份缺少数据库或配置"))
+        CONFIG_ROOT.mkdir(parents=True, exist_ok=True); STATE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        Path(str(STATE_DB_PATH) + "-wal").unlink(missing_ok=True); Path(str(STATE_DB_PATH) + "-shm").unlink(missing_ok=True)
+        shutil.copy2(restored_config, CONFIG_PATH); shutil.copy2(restored_db, STATE_DB_PATH)
+    with state_store_lock: state_store = None
+    audit_event("server_snapshot_restored", audit_actor(actor), metadata={"filename": filename, "safetySnapshot": safety_snapshot.name})
+    return JSONResponse(content=response({"restored": True, "filename": filename, "safetySnapshot": safety_snapshot.name}))
 
 
 @app.post("/admin/tasks/action", response_class=HTMLResponse)
