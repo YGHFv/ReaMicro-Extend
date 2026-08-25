@@ -158,9 +158,13 @@ class AdminSecurityTest(unittest.TestCase):
 
     def test_api_key_records_and_rotation(self):
         config = main.load_config()
+        config["apiKey"] = "long-api-key"
         config["apiKeyRecords"] = [{"digest": main.api_key_digest("long-api-key"), "enabled": True}]
         main.save_config(config)
         self.assertTrue(main.configured_api_key(main.load_config(), "long-api-key"))
+        config["apiKeyRecords"][0]["enabled"] = False
+        main.save_config(config)
+        self.assertIsNone(main.configured_api_key(main.load_config(), "long-api-key"))
         self.assertIsNone(main.configured_api_key(main.load_config(), "revoked"))
         main.metrics_counters["requests"] = 2
         self.assertEqual(main.metrics_counters["requests"], 2)

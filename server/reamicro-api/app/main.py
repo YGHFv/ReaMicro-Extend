@@ -736,6 +736,9 @@ def configured_api_key(config: dict[str, Any], value: str | None) -> dict[str, A
     for record in config.get("apiKeyRecords", []):
         if isinstance(record, dict) and record.get("enabled", True) and hmac.compare_digest(str(record.get("digest", "")), api_key_digest(value)):
             return record
+    records = config.get("apiKeyRecords", [])
+    if isinstance(records, list) and records:
+        return None
     legacy = str(config.get("apiKey", ""))
     if legacy and hmac.compare_digest(value, legacy):
         return {"id": "legacy", "name": "legacy", "permissions": ["read", "write"], "enabled": True}
@@ -1354,6 +1357,8 @@ async def admin_settings(
             "createdAt": int(datetime.now(timezone.utc).timestamp() * 1000),
         })
         next_config["apiKeyRecords"] = records
+    elif clear_api_key is not None:
+        next_config["apiKeyRecords"] = []
     else:
         next_config["apiKeyRecords"] = current.get("apiKeyRecords", [])
     accounts = dict(current.get("accounts", {}))
@@ -1708,6 +1713,12 @@ async def meta(_: None = Depends(authenticated)) -> dict[str, Any]:
         "serverId": config["serverId"],
         "features": config["features"],
         "authModes": ["public", "api_key", "account", "host_account_allowlist"],
+        "authMethods": ["apiKey", "account", "hostAccount", "public"],
+        "packageSchemaVersions": [1],
+        "taskTypes": ["http", "yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"],
+        "maxUploadSize": 50 * 1024 * 1024,
+        "storage": {"state": "sqlite-wal", "multiHost": False},
+        "healthEndpoints": {"live": "/health/live", "ready": "/health/ready", "dependencies": "/health/dependencies"},
         "minModuleVersion": config["minModuleVersion"],
         "signingPublicKey": config["signingPublicKey"],
     })

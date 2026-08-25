@@ -1,0 +1,33 @@
+services:
+  reamicro-api:
+    image: ghcr.io/yghfv/reamicro-extend/reamicro-api:latest
+    pull_policy: always
+    container_name: reamicro-api
+    restart: unless-stopped
+    ports:
+      - "5222:5222"
+    volumes:
+      - reamicro-api-data:/data
+    environment:
+      REAMICRO_ADMIN_USERNAME: ${REAMICRO_ADMIN_USERNAME:-admin}
+      REAMICRO_ADMIN_PASSWORD: ${REAMICRO_ADMIN_PASSWORD:?请设置首次初始化密码}
+      REAMICRO_SECRET_KEY: ${REAMICRO_SECRET_KEY:?请设置长期固定加密密钥}
+      REAMICRO_API_KEY: ${REAMICRO_API_KEY:-}
+      REAMICRO_ALLOW_PUBLIC: ${REAMICRO_ALLOW_PUBLIC:-true}
+      REAMICRO_GITHUB_REPOSITORY: ${REAMICRO_GITHUB_REPOSITORY:-YGHFv/ReaMicro-Extend}
+      REAMICRO_GITHUB_TOKEN: ${REAMICRO_GITHUB_TOKEN:-}
+      REAMICRO_GITHUB_WEBHOOK_SECRET: ${REAMICRO_GITHUB_WEBHOOK_SECRET:-}
+      REAMICRO_RUN_SCHEDULER: "true"
+      REAMICRO_RUN_RELEASE_SYNC: "true"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5222/health/live', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+
+volumes:
+  reamicro-api-data:
+    name: reamicro-api-data
