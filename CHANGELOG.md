@@ -1,5 +1,12 @@
 # 更新记录
 
+## 模块更新 Webhook 与断点下载 - 2026-08-25
+
+- 新增 `/v1/webhooks/github`，使用 `X-Hub-Signature-256` 校验 GitHub Release Webhook；发布、预发布和编辑事件会立即触发模块 Release 同步，原有定时轮询继续作为兜底。
+- Release 元数据增加 `channel`、APK `etag` 和构建时间，模块可按 stable/beta/nightly 渠道检查更新。
+- APK 下载接口增加 ETag、`If-None-Match` 304 响应、`Range`/206 断点下载和 `Accept-Ranges`，弱网络环境下可恢复下载。
+- Webhook 签名错误会写入审计日志；新增模块更新安全测试。
+
 ## 内容发布工作流与回滚 - 2026-08-25
 
 - 内容包增加 `draft`、`testing`、`published`、`unpublished` 状态和 `stable`、`beta`、`nightly` 渠道；客户端列表与下载仅暴露已发布内容。

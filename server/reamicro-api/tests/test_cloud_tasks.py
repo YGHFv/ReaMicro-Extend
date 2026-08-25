@@ -1,5 +1,8 @@
 import tempfile
 import unittest
+import hashlib
+import hmac
+import json
 from pathlib import Path
 import sys
 
@@ -218,6 +221,20 @@ class AdminSecurityTest(unittest.TestCase):
         main.validate_package_payload("epub_style", "style.css", "body{}".encode("utf-8"))
         with self.assertRaises(HTTPException):
             main.validate_package_payload("online_source", "source.json", b"not-json")
+
+    def test_webhook_signature(self):
+        body = b'{"action":"published"}'
+        main.GITHUB_WEBHOOK_SECRET = "webhook-secret"
+        signature = "sha256=" + hmac.new(b"webhook-secret", body, hashlib.sha256).hexdigest()
+        self.assertTrue(hmac.compare_digest(signature, "sha256=" + hmac.new(main.GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()))
+
+    def test_release_range_and_etag_metadata(self):
+        main.RELEASE_ROOT.mkdir(parents=True, exist_ok=True)
+        apk = main.RELEASE_ROOT / "latest.apk"
+        apk.write_bytes(b"0123456789")
+        digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+        (main.RELEASE_ROOT / "latest.json").write_text(json.dumps({"etag": digest}), encoding="utf-8")
+        self.assertEqual(digest, hashlib.sha256(apk.read_bytes()).hexdigest())
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Query, For
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 from app.storage import StateStore
 
 API_VERSION = "1.0"
@@ -57,6 +58,7 @@ SECRET_KEY = os.getenv("REAMICRO_SECRET_KEY", "")
 ADMIN_USERNAME = os.getenv("REAMICRO_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("REAMICRO_ADMIN_PASSWORD", "")
 SIGNING_PRIVATE_KEY_FILE = os.getenv("REAMICRO_SIGNING_PRIVATE_KEY_FILE", "")
+GITHUB_WEBHOOK_SECRET = os.getenv("REAMICRO_GITHUB_WEBHOOK_SECRET", "")
 config_lock = threading.RLock()
 basic_security = HTTPBasic(auto_error=False)
 state_store_lock = threading.RLock()
@@ -619,6 +621,8 @@ def sync_module_release() -> dict[str, Any] | None:
         "releaseUrl": release.get("html_url", ""),
         "assetId": asset.get("id"),
         "assetName": asset.get("name", "latest.apk"),
+        "channel": "beta" if release.get("prerelease") else "stable",
+        "etag": hashlib.sha256(apk_path.read_bytes()).hexdigest(),
     }
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     return metadata
@@ -1522,7 +1526,7 @@ async def meta(_: None = Depends(authenticated)) -> dict[str, Any]:
 
 
 @app.get("/v1/releases/module/latest")
-async def latest_release(_: None = Depends(authenticated)) -> dict[str, Any]:
+async def latest_release(channel: str = Query("stable"), _: None = Depends(authenticated)) -> dict[str, Any]:
     metadata_path = RELEASE_ROOT / "latest.json"
     if not metadata_path.is_file():
         try:
@@ -1531,7 +1535,36 @@ async def latest_release(_: None = Depends(authenticated)) -> dict[str, Any]:
             return response(None, code="SYNC_FAILED", message=f"同步模块版本失败：{error}")
     if not metadata_path.is_file():
         return response(None, code="NOT_CONFIGURED", message="GitHub Release 中没有 APK")
-    return response(json.loads(metadata_path.read_text(encoding="utf-8")))
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    release_channel = str(metadata.get("channel", "stable"))
+    if channel not in {"stable", "beta", "nightly"}:
+        raise HTTPException(status_code=400, detail=response(code="INVALID_CHANNEL", message="更新渠道无效"))
+    if channel == "stable" and release_channel != "stable":
+        raise HTTPException(status_code=404, detail=response(code="RELEASE_NOT_FOUND", message="没有可用的稳定版更新"))
+    return response(metadata)
+
+
+@app.post("/v1/webhooks/github")
+async def github_release_webhook(request: Request) -> dict[str, Any]:
+    if not GITHUB_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail=response(code="WEBHOOK_DISABLED", message="未配置 GitHub Webhook Secret"))
+    body = await request.body()
+    provided = request.headers.get("X-Hub-Signature-256", "")
+    expected = "sha256=" + hmac.new(GITHUB_WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    if not provided or not hmac.compare_digest(provided, expected):
+        audit_event("github_webhook_rejected", success=False)
+        raise HTTPException(status_code=401, detail=response(code="WEBHOOK_SIGNATURE_INVALID", message="Webhook 签名无效"))
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail=response(code="WEBHOOK_INVALID", message="Webhook 内容无效"))
+    event = request.headers.get("X-GitHub-Event", "")
+    action = str(payload.get("action", "")) if isinstance(payload, dict) else ""
+    if event == "release" and action in {"published", "released", "prereleased", "edited"}:
+        await asyncio.to_thread(sync_module_release)
+        audit_event("github_release_synced", metadata={"action": action})
+        return response({"accepted": True, "synced": True})
+    return response({"accepted": True, "synced": False})
 
 
 @app.post("/v1/backups/module")
@@ -1930,11 +1963,47 @@ async def task_logs(task_id: str, owner: str = Depends(task_owner)) -> dict[str,
 
 
 @app.get("/v1/releases/module/download")
-async def download_release(_: None = Depends(authenticated)) -> FileResponse:
+async def download_release(request: Request, _: None = Depends(authenticated)) -> Response:
     apk_path = RELEASE_ROOT / "latest.apk"
     if not apk_path.is_file():
         raise HTTPException(status_code=404, detail=response(code="NOT_FOUND", message="模块 APK 尚未同步"))
-    return FileResponse(apk_path, media_type="application/vnd.android.package-archive", filename="ReaMicro-Extend-latest.apk")
+    metadata_path = RELEASE_ROOT / "latest.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else {}
+    etag = str(metadata.get("etag") or metadata.get("sha256") or hashlib.sha256(apk_path.read_bytes()).hexdigest())
+    if request.headers.get("If-None-Match", "").strip('"') == etag:
+        return Response(status_code=304, headers={"ETag": f'"{etag}"', "Accept-Ranges": "bytes"})
+    size = apk_path.stat().st_size
+    range_header = request.headers.get("Range", "")
+    if range_header.startswith("bytes="):
+        try:
+            start_text, end_text = range_header[6:].split("-", 1)
+            start = int(start_text or 0)
+            end = min(int(end_text) if end_text else size - 1, size - 1)
+            if start < 0 or start > end or start >= size:
+                raise ValueError
+        except ValueError:
+            return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+        with apk_path.open("rb") as stream:
+            stream.seek(start)
+            body = stream.read(end - start + 1)
+        return Response(
+            content=body,
+            status_code=206,
+            media_type="application/vnd.android.package-archive",
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{size}",
+                "Content-Length": str(len(body)),
+                "Accept-Ranges": "bytes",
+                "ETag": f'"{etag}"',
+                "Content-Disposition": 'attachment; filename="ReaMicro-Extend-latest.apk"',
+            },
+        )
+    return FileResponse(
+        apk_path,
+        media_type="application/vnd.android.package-archive",
+        filename="ReaMicro-Extend-latest.apk",
+        headers={"ETag": f'"{etag}"', "Accept-Ranges": "bytes"},
+    )
 
 
 @app.get("/v1/packages")
