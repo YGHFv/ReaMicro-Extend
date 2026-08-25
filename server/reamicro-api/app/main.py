@@ -205,6 +205,12 @@ def create_server_snapshot() -> Path:
         stream.write(database_copy, "state/reamicro.sqlite3")
         if CONFIG_PATH.is_file():
             stream.write(CONFIG_PATH, "config/server.json")
+        manifest = {"createdAt": int(datetime.now(timezone.utc).timestamp() * 1000), "files": []}
+        source_map = {"state/reamicro.sqlite3": database_copy, "config/server.json": CONFIG_PATH}
+        for name, source in source_map.items():
+            if source.is_file():
+                manifest["files"].append({"path": name, "size": source.stat().st_size, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()})
+        stream.writestr("snapshot-manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
     database_copy.unlink(missing_ok=True)
     prune_server_snapshots(int(load_config().get("serverSnapshotRetention", 30)))
     return archive
@@ -223,7 +229,7 @@ def list_server_snapshots() -> list[dict[str, Any]]:
     items = []
     for path in sorted(SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"), reverse=True):
         try:
-            items.append({"name": path.name, "size": path.stat().st_size, "modifiedAt": int(path.stat().st_mtime * 1000)})
+            items.append({"name": path.name, "size": path.stat().st_size, "modifiedAt": int(path.stat().st_mtime * 1000), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
         except OSError:
             continue
     return items
@@ -1268,6 +1274,28 @@ async def health_dependencies(_: None = Depends(authenticated)) -> dict[str, Any
         "releaseSync": sync_status,
         "packageStorage": PACKAGE_ROOT.exists(),
         "backupStorage": BACKUP_ROOT.exists(),
+    })
+
+
+@app.get("/v1/diagnostics")
+async def diagnostics(_: None = Depends(authenticated)) -> dict[str, Any]:
+    config = load_config()
+    database = get_state_store().integrity_check()
+    package_count = sum(1 for kind in PACKAGE_KINDS for _ in (PACKAGE_ROOT / kind).glob("*/manifest.json"))
+    snapshot_count = len(list(SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"))) if SERVER_BACKUP_ROOT.exists() else 0
+    release_status = {}
+    if RELEASE_STATUS_PATH.is_file():
+        try: release_status = json.loads(RELEASE_STATUS_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError): release_status = {"status": "invalid"}
+    return response({
+        "serverId": config.get("serverId", ""),
+        "database": database,
+        "packages": package_count,
+        "credentials": len(load_credentials()),
+        "tasks": len(load_tasks()),
+        "snapshots": snapshot_count,
+        "releaseSync": release_status,
+        "storage": {"config": CONFIG_ROOT.exists(), "packages": PACKAGE_ROOT.exists(), "backups": BACKUP_ROOT.exists()},
     })
 
 
