@@ -1532,10 +1532,46 @@ async def admin_history_package(package_kind: str, package_id: str, actor: dict[
     for path in sorted((manifest_path.parent / "history").glob("*/manifest.json"), reverse=True):
         try: item = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError): continue
-        rows.append(f"<tr><td>{html.escape(str(item.get('version', '')))}</td><td>{html.escape(str(item.get('buildTime', '')))}</td><td>{html.escape(str(item.get('sha256', ''))[:16])}</td><td>{html.escape(str(item.get('status', '')))}</td></tr>")
-    history_rows = ''.join(rows) or '<tr><td colspan="4">暂无历史版本</td></tr>'
-    body = f"<div class='panel'><table><thead><tr><th>版本</th><th>构建时间</th><th>SHA256</th><th>状态</th></tr></thead><tbody>{history_rows}</tbody></table></div>"
+        version_value = html.escape(str(item.get("version", "")), quote=True)
+        csrf = html.escape(admin_csrf_token(load_config(), actor), quote=True)
+        rows.append(f"<tr><td>{version_value}</td><td>{html.escape(str(item.get('buildTime', '')))}</td><td>{html.escape(str(item.get('sha256', ''))[:16])}</td><td>{html.escape(str(item.get('status', '')))}</td><td><form method='post' action='/admin/packages/{html.escape(package_kind)}/{html.escape(package_id)}/rollback'><input type='hidden' name='csrf_token' value='{csrf}'><input type='hidden' name='version' value='{version_value}'><button type='submit'>回滚</button></form></td></tr>")
+    history_rows = ''.join(rows) or '<tr><td colspan="5">暂无历史版本</td></tr>'
+    body = f"<div class='panel'><table><thead><tr><th>版本</th><th>构建时间</th><th>SHA256</th><th>状态</th><th>操作</th></tr></thead><tbody>{history_rows}</tbody></table></div>"
     return HTMLResponse(_admin_shell("历史版本 · " + _admin_kind_label(package_kind), body, load_config(), actor))
+
+
+@app.post("/admin/packages/{package_kind}/{package_id}/rollback", response_class=HTMLResponse)
+async def admin_rollback_package(
+    package_kind: str,
+    package_id: str,
+    version: str = Form(""),
+    csrf_token: str = Form(""),
+    actor: dict[str, Any] = Depends(admin_actor),
+) -> HTMLResponse:
+    require_admin_permission(actor, "packages:write")
+    package_kind = safe_package_segment(package_kind); package_id = safe_package_segment(package_id)
+    config = load_config(); require_admin_csrf(config, actor, csrf_token)
+    manifest_path, current = package_manifest(package_kind, package_id)
+    candidates = []
+    for history_manifest in (manifest_path.parent / "history").glob("*/manifest.json"):
+        try: item = json.loads(history_manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError): continue
+        if version and str(item.get("version")) != version: continue
+        old_payload = history_manifest.parent / str(item.get("payload", ""))
+        if old_payload.is_file(): candidates.append((item, old_payload))
+    if not candidates:
+        return HTMLResponse(admin_page(config, "历史版本不存在", actor=actor, section=package_kind), status_code=404)
+    selected, old_payload = sorted(candidates, key=lambda pair: int(pair[0].get("buildTime", 0)), reverse=True)[0]
+    if not package_dependency_status(selected).get("dependenciesSatisfied", True):
+        return HTMLResponse(admin_page(config, "历史版本依赖未满足，无法回滚", actor=actor, section=package_kind), status_code=409)
+    current_payload = manifest_path.parent / str(current.get("payload", ""))
+    if current_payload.is_file(): current_payload.unlink()
+    new_payload = manifest_path.parent / safe_payload_filename(str(selected.get("payload", old_payload.name)))
+    new_payload.write_bytes(old_payload.read_bytes())
+    selected["status"] = "published"; selected["rolledBackFrom"] = current.get("version", "")
+    manifest_path.write_text(json.dumps(selected, ensure_ascii=False, indent=2), encoding="utf-8")
+    audit_event("package_rolled_back", audit_actor(actor), metadata={"kind": package_kind, "packageId": package_id, "version": selected.get("version")})
+    return HTMLResponse(admin_page(load_config(), f"已回滚到版本 {selected.get('version', '')}", actor=actor, section=package_kind))
 
 
 @app.get("/admin/login", response_class=HTMLResponse)
