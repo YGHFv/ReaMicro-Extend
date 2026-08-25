@@ -72,6 +72,15 @@ class CloudTaskSecurityTest(unittest.TestCase):
         recovered = main.load_tasks()["task_1"]
         self.assertEqual(recovered["status"], "scheduled")
 
+    def test_task_admin_actions(self):
+        task = {"id": "task_1", "status": "scheduled", "enabled": True, "nextRunAt": 1}
+        self.assertIn("暂停", main.apply_task_action(task, "pause", 1000))
+        self.assertEqual((task["status"], task["enabled"], task["nextRunAt"]), ("paused", False, 0))
+        self.assertIn("恢复", main.apply_task_action(task, "resume", 2000))
+        self.assertEqual((task["status"], task["enabled"], task["nextRunAt"]), ("scheduled", True, 2000))
+        with self.assertRaises(ValueError):
+            main.apply_task_action(task, "invalid", 3000)
+
     def test_idempotency_storage(self):
         store = main.get_state_store()
         value = {"code": "OK", "data": {"id": "task_1"}}
@@ -299,6 +308,13 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertEqual(store.integrity_check(), "ok")
         snapshot = main.create_server_snapshot()
         self.assertTrue(snapshot.is_file())
+
+    def test_server_snapshot_retention(self):
+        main.SERVER_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+        for index in range(5):
+            (main.SERVER_BACKUP_ROOT / f"reamicro-server-2026082{index}T000000Z.zip").write_bytes(b"zip")
+        self.assertEqual(main.prune_server_snapshots(3), 2)
+        self.assertEqual(len(list(main.SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"))), 3)
 
     def test_package_payload_validation(self):
         main.validate_package_payload("online_source", "source.json", b'{"id":"source"}')

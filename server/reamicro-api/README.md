@@ -82,6 +82,8 @@ X-ReaMicro-Api-Key: <key>
 
 所有 API 异常响应都包含 `requestId`。未捕获异常只返回统一的 `INTERNAL_ERROR`，不会把服务器路径、凭据或 Python 异常详情暴露给客户端；可使用响应头 `X-Request-Id` 在审计日志中定位请求。
 
+启用完整 API/Worker 编排时，Worker 默认每天创建一次服务器快照，并按 `REAMICRO_SERVER_SNAPSHOT_RETENTION` 保留最近 30 份；可在后台设置中调整是否启用、间隔和保留数量。后台云任务表提供立即执行、暂停和恢复操作，操作会记录审计事件。
+
 阅微登录密钥使用 `REAMICRO_SECRET_KEY` 派生的 AES-GCM 密钥保存。生产环境必须设置随机长值并持久化；丢失或修改该值后既有凭据无法解密。账号密钥备份由 Android 客户端使用用户口令加密，服务器只保存 `RCRED1` 密文。
 
 云任务支持 `yeshe_checkin`、`yeshe_draw_card` 和 `cloud_auto_read`。自动阅读可指定图书，未指定时读取阅微最近阅读记录；服务器按配置上报阅读进度和时长。

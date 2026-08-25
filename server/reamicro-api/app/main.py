@@ -96,6 +96,9 @@ def default_config() -> dict[str, Any]:
         "githubIncludePrerelease": env_bool("REAMICRO_GITHUB_INCLUDE_PRERELEASE", False),
         "releaseSyncSeconds": max(int(os.getenv("REAMICRO_RELEASE_SYNC_SECONDS", "1800")), 300),
         "releaseVersionCode": int(os.getenv("REAMICRO_RELEASE_VERSION_CODE", "0")),
+        "serverSnapshotEnabled": env_bool("REAMICRO_SERVER_SNAPSHOT_ENABLED", True),
+        "serverSnapshotSeconds": max(int(os.getenv("REAMICRO_SERVER_SNAPSHOT_SECONDS", "86400")), 3600),
+        "serverSnapshotRetention": max(int(os.getenv("REAMICRO_SERVER_SNAPSHOT_RETENTION", "30")), 3),
         "accounts": {},
         "primaryAdmin": {},
         "adminAccounts": {},
@@ -115,6 +118,8 @@ def load_config() -> dict[str, Any]:
             pass
         config["features"] = sorted({str(item).strip() for item in config.get("features", []) if str(item).strip()})
         config["releaseSyncSeconds"] = max(int(config.get("releaseSyncSeconds", 1800)), 300)
+        config["serverSnapshotSeconds"] = max(int(config.get("serverSnapshotSeconds", 86400)), 3600)
+        config["serverSnapshotRetention"] = max(int(config.get("serverSnapshotRetention", 30)), 3)
         return config
 
 
@@ -125,6 +130,8 @@ def save_config(next_config: dict[str, Any]) -> dict[str, Any]:
         safe.update(next_config)
         safe["features"] = sorted({str(item).strip() for item in safe.get("features", []) if str(item).strip()})
         safe["releaseSyncSeconds"] = max(int(safe.get("releaseSyncSeconds", 1800)), 300)
+        safe["serverSnapshotSeconds"] = max(int(safe.get("serverSnapshotSeconds", 86400)), 3600)
+        safe["serverSnapshotRetention"] = max(int(safe.get("serverSnapshotRetention", 30)), 3)
         safe["accounts"] = safe.get("accounts", {}) if isinstance(safe.get("accounts", {}), dict) else {}
         safe["apiKeyRecords"] = safe.get("apiKeyRecords", []) if isinstance(safe.get("apiKeyRecords", []), list) else []
         safe["primaryAdmin"] = safe.get("primaryAdmin", {}) if isinstance(safe.get("primaryAdmin", {}), dict) else {}
@@ -198,10 +205,17 @@ def create_server_snapshot() -> Path:
         if CONFIG_PATH.is_file():
             stream.write(CONFIG_PATH, "config/server.json")
     database_copy.unlink(missing_ok=True)
-    snapshots = sorted(SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"), reverse=True)
-    for expired in snapshots[30:]:
-        expired.unlink(missing_ok=True)
+    prune_server_snapshots(int(load_config().get("serverSnapshotRetention", 30)))
     return archive
+
+
+def prune_server_snapshots(retention: int) -> int:
+    snapshots = sorted(SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"), reverse=True)
+    removed = 0
+    for expired in snapshots[max(int(retention), 3):]:
+        expired.unlink(missing_ok=True)
+        removed += 1
+    return removed
 
 
 def list_server_snapshots() -> list[dict[str, Any]]:
@@ -542,6 +556,32 @@ def execute_task(task: dict[str, Any]) -> tuple[str, str]:
     return "failed", f"未知任务类型：{task.get('taskType')}"
 
 
+def apply_task_action(task: dict[str, Any], action: str, now: int | None = None) -> str:
+    now = now or int(datetime.now(timezone.utc).timestamp() * 1000)
+    task_id = str(task.get("id", ""))
+    if action == "run":
+        task["status"] = "scheduled"
+        task["enabled"] = True
+        task["nextRunAt"] = now
+        return f"任务 {task_id} 已安排立即执行"
+    if action == "pause":
+        task["status"] = "paused"
+        task["enabled"] = False
+        task["nextRunAt"] = 0
+        return f"任务 {task_id} 已暂停"
+    if action == "resume":
+        task["status"] = "scheduled"
+        task["enabled"] = True
+        task["nextRunAt"] = now
+        return f"任务 {task_id} 已恢复"
+    if action == "cancel":
+        task["status"] = "cancelled"
+        task["enabled"] = False
+        task["nextRunAt"] = 0
+        return f"任务 {task_id} 已取消"
+    raise ValueError("不支持的任务操作")
+
+
 async def task_scheduler_loop() -> None:
     worker_id = "worker_" + secrets.token_hex(6)
     while True:
@@ -685,6 +725,18 @@ async def release_sync_loop() -> None:
         await asyncio.sleep(load_config()["releaseSyncSeconds"])
 
 
+async def server_snapshot_loop() -> None:
+    while True:
+        config = load_config()
+        if config.get("serverSnapshotEnabled", True):
+            try:
+                snapshot = await asyncio.to_thread(create_server_snapshot)
+                audit_event("scheduled_server_snapshot", metadata={"filename": snapshot.name})
+            except Exception as error:
+                audit_event("scheduled_server_snapshot_failed", success=False, metadata={"type": type(error).__name__})
+        await asyncio.sleep(max(int(config.get("serverSnapshotSeconds", 86400)), 3600))
+
+
 @app.on_event("startup")
 async def start_release_sync() -> None:
     get_state_store()
@@ -693,6 +745,7 @@ async def start_release_sync() -> None:
     if RUN_SCHEDULER:
         recover_interrupted_tasks()
         asyncio.create_task(task_scheduler_loop())
+        asyncio.create_task(server_snapshot_loop())
 
 
 def response(data: Any = None, code: str = "OK", message: str = "", request_id: str = "") -> dict[str, Any]:
@@ -1140,6 +1193,8 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
     checked_public = "checked" if config.get("allowPublic") else ""
     checked_pre = "checked" if config.get("githubIncludePrerelease") else ""
     feature_text = ",".join(config.get("features", []))
+    actor = actor or {"username": "", "role": "subadmin"}
+    csrf_html = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
     package_rows = []
     for kind in sorted(PACKAGE_KINDS):
         for manifest_path in sorted((PACKAGE_ROOT / kind).glob("*/manifest.json")):
@@ -1154,11 +1209,24 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
     package_table = "".join(package_rows) or "<tr><td colspan='4'>暂无内容包</td></tr>"
     task_rows = []
     for task in load_tasks().values():
+        task_id = esc(task.get("id", ""))
+        task_actions = ""
+        if actor and (actor.get("role") == "primary" or "tasks:write" in set(actor.get("permissions", []))):
+            secondary_action = "resume" if task.get("status") in {"paused", "cancelled"} else "pause"
+            secondary_label = "恢复" if secondary_action == "resume" else "暂停"
+            task_actions = (
+                f"<form class='inline' method='post' action='/admin/tasks/action'>{csrf_html}"
+                f"<input type='hidden' name='task_id' value='{task_id}'><input type='hidden' name='action' value='run'>"
+                "<button class='compact secondary' type='submit'>立即执行</button></form>"
+                f"<form class='inline' method='post' action='/admin/tasks/action'>{csrf_html}"
+                f"<input type='hidden' name='task_id' value='{task_id}'><input type='hidden' name='action' value='{secondary_action}'>"
+                f"<button class='compact secondary' type='submit'>{secondary_label}</button></form>"
+            )
         task_rows.append(
             f"<tr><td>{esc(task.get('taskType', ''))}</td><td>{esc(task.get('status', ''))}</td>"
-            f"<td>{esc(task.get('lastMessage', ''))}</td><td>{esc(task.get('nextRunAt', ''))}</td></tr>"
+            f"<td>{esc(task.get('lastMessage', ''))}</td><td>{esc(task.get('nextRunAt', ''))}</td><td>{task_actions}</td></tr>"
         )
-    task_table = "".join(task_rows) or "<tr><td colspan='4'>暂无云任务</td></tr>"
+    task_table = "".join(task_rows) or "<tr><td colspan='5'>暂无云任务</td></tr>"
     credential_rows = []
     for credential in load_credentials().values():
         credential_rows.append(
@@ -1166,8 +1234,6 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
             f"<td>{esc(credential.get('label', ''))}</td><td>{esc(credential.get('lastVerifyMessage', ''))}</td></tr>"
         )
     credential_table = "".join(credential_rows) or "<tr><td colspan='4'>暂无阅微凭据，请由模块客户端上传</td></tr>"
-    actor = actor or {"username": "", "role": "subadmin"}
-    csrf_html = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
     admin_rows = []
     for username, record in sorted(config.get("adminAccounts", {}).items()):
         if not isinstance(record, dict):
@@ -1216,6 +1282,8 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
 <label>GitHub Token（当前：{'已设置' if config.get("githubToken") else '未设置'}）</label><input type='password' name='github_token' placeholder='留空保持当前值'><label><input type='checkbox' name='clear_github_token'> 清除 GitHub Token</label>
 <label><input type='checkbox' name='github_include_prerelease' {checked_pre}> 包含预发布 Release</label>
 <label>Release versionCode 覆盖值</label><input name='release_version_code' type='number' value='{esc(config.get("releaseVersionCode", 0))}'>
+<div class='row'><div><label>自动服务器快照</label><label><input type='checkbox' name='server_snapshot_enabled' {'checked' if config.get('serverSnapshotEnabled', True) else ''}> 启用</label></div><div><label>快照间隔（秒，至少 3600）</label><input name='server_snapshot_seconds' type='number' value='{esc(config.get("serverSnapshotSeconds", 86400))}'></div></div>
+<label>快照保留份数（至少 3）</label><input name='server_snapshot_retention' type='number' value='{esc(config.get("serverSnapshotRetention", 30))}'>
 <button type='submit'>保存设置</button><button class='secondary' type='submit' formaction='/admin/sync'>立即同步模块 Release</button>
 </form><hr><h2>内容包上传/更新</h2>
 <p><small>上传后立即覆盖当前版本；旧文件保留在对应目录的 history 中。kind 支持 online_source、epub_style、highlight_style、association_source、theme。</small></p>
@@ -1235,7 +1303,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
 <div class='row'><div><label>阅读时长（分钟）</label><input name='duration_minutes' type='number' min='1' max='720' value='30'></div><div><label>最近阅读数量</label><input name='recent_limit' type='number' min='1' max='20' value='1'></div></div>
 <label>自定义图书 JSON（可选，留空读取最近阅读记录）</label><textarea name='request_body' placeholder='[{{"cloudBookId":123,"bookId":123,"name":"书名"}}]'></textarea>
 <details><summary>通用 HTTP 任务高级字段</summary><label>请求 URL</label><input name='request_url' placeholder='https://api.example.com/checkin'><div class='row'><div><label>HTTP 方法</label><input name='request_method' value='POST'></div><div><label>执行间隔（秒）</label><input name='interval_seconds' type='number' value='86400'></div></div><label>请求头 JSON</label><textarea name='request_headers' placeholder='{{"X-Example":"value"}}'></textarea></details><button type='submit'>创建云任务</button></form>
-<h3>任务状态</h3><table><thead><tr><th>类型</th><th>状态</th><th>最近结果</th><th>下次执行</th></tr></thead><tbody>{task_table}</tbody></table>
+<h3>任务状态</h3><table><thead><tr><th>类型</th><th>状态</th><th>最近结果</th><th>下次执行</th><th>操作</th></tr></thead><tbody>{task_table}</tbody></table>
 {admin_management}{system_tools}{security_tools}<hr><p><a href='/admin/audit'>审计日志</a>　<a href='/health/live'>存活检查</a>　<a href='/health/ready'>就绪检查</a>　<a href='/v1/meta'>能力信息</a></p></main></body></html>"""
 
 
@@ -1413,6 +1481,31 @@ async def admin_server_backup_download(filename: str, credentials: HTTPBasicCred
     return FileResponse(path, media_type="application/zip", filename=filename)
 
 
+@app.post("/admin/tasks/action", response_class=HTMLResponse)
+async def admin_task_action(
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    task_id: str = Form(""),
+    action: str = Form(""),
+    csrf_token: str = Form(""),
+) -> HTMLResponse:
+    actor = require_admin(credentials)
+    require_admin_permission(actor, "tasks:write")
+    config = load_config()
+    require_admin_csrf(config, actor, csrf_token)
+    tasks = load_tasks()
+    task = tasks.get(task_id)
+    if not task:
+        return HTMLResponse(admin_page(config, "任务不存在", actor=actor), status_code=404)
+    try:
+        message = apply_task_action(task, action)
+    except ValueError:
+        return HTMLResponse(admin_page(config, "不支持的任务操作", actor=actor), status_code=400)
+    save_tasks(tasks)
+    task_log(task_id, message)
+    audit_event("admin_task_action", audit_actor(actor), metadata={"taskId": task_id, "action": action})
+    return HTMLResponse(admin_page(config, message, actor=actor))
+
+
 @app.post("/admin/setup", response_class=HTMLResponse)
 async def admin_setup(
     credentials: HTTPBasicCredentials | None = Depends(basic_security),
@@ -1473,6 +1566,9 @@ async def admin_settings(
     github_include_prerelease: str | None = Form(None),
     release_sync_seconds: int = Form(1800),
     release_version_code: int = Form(0),
+    server_snapshot_enabled: str | None = Form(None),
+    server_snapshot_seconds: int = Form(86400),
+    server_snapshot_retention: int = Form(30),
     csrf_token: str = Form(""),
 ) -> HTMLResponse:
     actor = require_admin(credentials)
@@ -1503,6 +1599,9 @@ async def admin_settings(
         "githubIncludePrerelease": github_include_prerelease is not None,
         "releaseSyncSeconds": release_sync_seconds,
         "releaseVersionCode": release_version_code,
+        "serverSnapshotEnabled": server_snapshot_enabled is not None,
+        "serverSnapshotSeconds": server_snapshot_seconds,
+        "serverSnapshotRetention": server_snapshot_retention,
         "primaryAdmin": current.get("primaryAdmin", {}),
         "adminAccounts": current.get("adminAccounts", {}),
     }

@@ -16,6 +16,8 @@
 5. 登录后台创建一次服务器快照。
 6. 确认云任务能在 Worker 中执行后，再长期保留 API 的 `REAMICRO_RUN_SCHEDULER=false`。
 
+Worker 默认同时运行云任务调度和服务器快照调度。快照默认每 86400 秒创建一次，至少保留 3 份；可在 `.env` 中设置 `REAMICRO_SERVER_SNAPSHOT_ENABLED`、`REAMICRO_SERVER_SNAPSHOT_SECONDS` 和 `REAMICRO_SERVER_SNAPSHOT_RETENTION`，也可在后台设置页调整。若使用单容器编排，API 容器的调度器会负责这两类任务。
+
 ## 自动更新边界
 
 不涉及数据库 schema 变化的补丁版本可以交给 Watchtower 自动更新。未来如升级说明标注“需要迁移”，应暂时停止 Watchtower，先创建服务器快照，再固定版本标签升级。不要直接轮换 `REAMICRO_SECRET_KEY`；应使用后台密钥轮换功能。
