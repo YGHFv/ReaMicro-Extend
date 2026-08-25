@@ -67,6 +67,9 @@ rate_lock = threading.RLock()
 rate_buckets: dict[str, list[float]] = {}
 RATE_LIMIT = max(int(os.getenv("REAMICRO_RATE_LIMIT", "120")), 10)
 RATE_WINDOW_SECONDS = 60
+metrics_lock = threading.RLock()
+metrics_counters: dict[str, int] = {"requests": 0, "errors": 0, "rate_limited": 0}
+metrics_routes: dict[str, int] = {}
 RUN_SCHEDULER = os.getenv("REAMICRO_RUN_SCHEDULER", "true").lower() == "true"
 RUN_RELEASE_SYNC = os.getenv("REAMICRO_RUN_RELEASE_SYNC", "true").lower() == "true"
 
@@ -916,6 +919,8 @@ async def security_middleware(request: Request, call_next):
     client_host = request.client.host if request.client else "unknown"
     rate_key = f"{client_host}:{request.url.path}"
     if not allow_rate_limit(rate_key):
+        with metrics_lock:
+            metrics_counters["rate_limited"] += 1
         audit_event("rate_limit", actor=client_host, request_id=request_id, success=False, metadata={"path": request.url.path})
         return JSONResponse(
             status_code=429,
@@ -925,9 +930,14 @@ async def security_middleware(request: Request, call_next):
     try:
         result = await call_next(request)
     except Exception:
+        with metrics_lock:
+            metrics_counters["errors"] += 1
         audit_event("request_error", actor=client_host, request_id=request_id, success=False, metadata={"path": request.url.path})
         raise
     result.headers["X-Request-Id"] = request_id
+    with metrics_lock:
+        metrics_counters["requests"] += 1
+        metrics_routes[request.url.path] = metrics_routes.get(request.url.path, 0) + 1
     return result
 
 
@@ -966,6 +976,28 @@ async def health_dependencies(_: None = Depends(authenticated)) -> dict[str, Any
         "packageStorage": PACKAGE_ROOT.exists(),
         "backupStorage": BACKUP_ROOT.exists(),
     })
+
+
+@app.get("/metrics")
+async def metrics(_: None = Depends(authenticated)) -> Response:
+    with metrics_lock:
+        counters = dict(metrics_counters)
+        routes = dict(metrics_routes)
+    lines = [
+        "# HELP reamicro_http_requests_total Total HTTP responses",
+        "# TYPE reamicro_http_requests_total counter",
+        f"reamicro_http_requests_total {counters['requests']}",
+        "# HELP reamicro_http_errors_total Total unhandled HTTP errors",
+        "# TYPE reamicro_http_errors_total counter",
+        f"reamicro_http_errors_total {counters['errors']}",
+        "# HELP reamicro_http_rate_limited_total Total rate-limited requests",
+        "# TYPE reamicro_http_rate_limited_total counter",
+        f"reamicro_http_rate_limited_total {counters['rate_limited']}",
+    ]
+    for route, count in sorted(routes.items()):
+        safe_route = route.replace('"', '\\"')
+        lines.append(f'reamicro_http_route_requests_total{{route="{safe_route}"}} {count}')
+    return Response("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
 
 def admin_setup_page(message: str = "", actor: dict[str, Any] | None = None) -> str:
@@ -1120,6 +1152,47 @@ async def admin_audit(credentials: HTTPBasicCredentials | None = Depends(basic_s
         "<title>审计日志</title><style>body{font-family:system-ui;margin:30px;background:#f5f7fb}main{background:#fff;padding:24px;border-radius:12px}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #ddd;text-align:left}code{white-space:pre-wrap}</style></head>"
         f"<body><main><h1>后台审计日志</h1><p><a href='/admin'>返回管理后台</a></p><table><thead><tr><th>时间</th><th>操作者</th><th>操作</th><th>结果</th><th>详情</th></tr></thead><tbody>{table}</tbody></table></main></body></html>"
     )
+
+
+@app.get("/admin/api-keys")
+async def admin_api_keys(credentials: HTTPBasicCredentials | None = Depends(basic_security)) -> dict[str, Any]:
+    actor = require_admin(credentials)
+    require_primary_admin(actor)
+    records = []
+    for item in load_config().get("apiKeyRecords", []):
+        if not isinstance(item, dict):
+            continue
+        records.append({key: item.get(key) for key in ("id", "name", "permissions", "enabled", "createdAt")})
+    return response({"items": records})
+
+
+@app.post("/admin/api-keys/{key_id}/revoke")
+async def admin_revoke_api_key(
+    key_id: str,
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    x_admin_csrf: str = Header(default=""),
+) -> dict[str, Any]:
+    actor = require_admin(credentials)
+    require_primary_admin(actor)
+    config = load_config()
+    require_admin_csrf(config, actor, x_admin_csrf)
+    found = False
+    records = []
+    for item in config.get("apiKeyRecords", []):
+        if not isinstance(item, dict):
+            continue
+        value = dict(item)
+        if str(value.get("id")) == key_id:
+            value["enabled"] = False
+            value["revokedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+            found = True
+        records.append(value)
+    if not found:
+        raise HTTPException(status_code=404, detail=response(code="API_KEY_NOT_FOUND", message="API Key 不存在"))
+    config["apiKeyRecords"] = records
+    save_config(config)
+    audit_event("api_key_revoked", audit_actor(actor), metadata={"keyId": key_id})
+    return response({"id": key_id, "revoked": True})
 
 
 @app.post("/admin/backups/server", response_class=HTMLResponse)

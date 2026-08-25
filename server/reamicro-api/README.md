@@ -108,3 +108,5 @@ X-ReaMicro-Api-Key: <key>
 内容包支持 `status`（`draft`、`testing`、`published`、`unpublished`）、`channel`（`stable`、`beta`、`nightly`）和依赖数组 `dependencies`。客户端公共列表和下载仅返回 `published` 内容。后台上传会检查 JSON/CSS 编码与结构，旧版本自动进入 `history`；管理接口可查询历史、切换发布状态和回滚指定版本。书源应长期保持同一 `contentId`，把旧域名和旧书源 ID 加入 `aliases`，模块更新时即可保留既有图书关联。
 
 可选配置 `REAMICRO_GITHUB_WEBHOOK_SECRET` 后，将 GitHub Release Webhook 指向 `/v1/webhooks/github`，Content type 选择 `application/json`，Secret 填写相同值，服务器会在 Release 发布后立即同步。模块 APK 下载支持 ETag 和 HTTP Range 断点续传；更新检查可通过 `/v1/releases/module/latest?channel=stable|beta|nightly` 选择渠道。
+
+运维监控可使用认证请求访问 `/metrics` 获取 Prometheus 指标。主管理员可通过 `/admin/api-keys` 查看密钥元数据，并使用带 `X-Admin-CSRF` 的 POST `/admin/api-keys/{keyId}/revoke` 吊销泄露密钥。GitHub Actions 会先运行服务端单元测试和编译检查，只有通过后才构建并发布 GHCR 镜像。

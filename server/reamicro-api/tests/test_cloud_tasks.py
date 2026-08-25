@@ -162,6 +162,8 @@ class AdminSecurityTest(unittest.TestCase):
         main.save_config(config)
         self.assertTrue(main.configured_api_key(main.load_config(), "long-api-key"))
         self.assertIsNone(main.configured_api_key(main.load_config(), "revoked"))
+        main.metrics_counters["requests"] = 2
+        self.assertEqual(main.metrics_counters["requests"], 2)
 
     def test_admin_page_renders_after_primary_setup(self):
         config = main.load_config()
