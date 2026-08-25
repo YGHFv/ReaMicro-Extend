@@ -78,6 +78,10 @@ X-ReaMicro-Api-Key: <key>
 - `/v1/credentials/reamicro`
 - `/v1/tasks` 以及暂停、恢复、立即执行、配置、删除和日志接口
 
+内容包 `dependencies` 支持 `kind`、`packageId`（也可匹配稳定 `contentId` 或历史 `aliases`）、`minVersion`、`maxVersion` 和 `required`。列表响应会返回 `dependenciesSatisfied`、`resolvedDependencies` 与 `unresolvedDependencies`；必需依赖缺失时不能发布、回滚为发布态或下载，从而避免客户端安装不完整的书源、样式和主题。
+
+所有 API 异常响应都包含 `requestId`。未捕获异常只返回统一的 `INTERNAL_ERROR`，不会把服务器路径、凭据或 Python 异常详情暴露给客户端；可使用响应头 `X-Request-Id` 在审计日志中定位请求。
+
 阅微登录密钥使用 `REAMICRO_SECRET_KEY` 派生的 AES-GCM 密钥保存。生产环境必须设置随机长值并持久化；丢失或修改该值后既有凭据无法解密。账号密钥备份由 Android 客户端使用用户口令加密，服务器只保存 `RCRED1` 密文。
 
 云任务支持 `yeshe_checkin`、`yeshe_draw_card` 和 `cloud_auto_read`。自动阅读可指定图书，未指定时读取阅微最近阅读记录；服务器按配置上报阅读进度和时长。

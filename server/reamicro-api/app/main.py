@@ -1043,6 +1043,26 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> Respon
     return JSONResponse(status_code=exc.status_code, content=detail, headers={**(exc.headers or {}), "X-Request-Id": request_id})
 
 
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", "") or "req_" + secrets.token_hex(8)
+    client_host = request.client.host if request.client else "unknown"
+    with metrics_lock:
+        metrics_counters["errors"] += 1
+    audit_event(
+        "unhandled_exception",
+        actor=client_host,
+        request_id=request_id,
+        success=False,
+        metadata={"path": request.url.path, "type": type(exc).__name__},
+    )
+    return JSONResponse(
+        status_code=500,
+        content=response(code="INTERNAL_ERROR", message="服务器内部错误，请使用 requestId 查询日志", request_id=request_id),
+        headers={"X-Request-Id": request_id},
+    )
+
+
 @app.get("/v1/health")
 async def health(_: None = Depends(authenticated)) -> dict[str, Any]:
     return response({"status": "ok", "serverId": load_config()["serverId"]})
@@ -1657,6 +1677,99 @@ PACKAGE_KINDS = {
 }
 
 
+def comparable_version(value: Any) -> tuple[tuple[int, Any], ...]:
+    parts = re.findall(r"\d+|[A-Za-z]+", str(value).lower())
+    return tuple((1, int(part)) if part.isdigit() else (0, part) for part in parts)
+
+
+def version_satisfies(version: Any, minimum: str = "", maximum: str = "") -> bool:
+    current = comparable_version(version)
+    return (not minimum or current >= comparable_version(minimum)) and (not maximum or current <= comparable_version(maximum))
+
+
+def normalize_package_dependencies(items: Any, current_kind: str = "", current_package_id: str = "") -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="依赖必须是 JSON 数组")
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items[:50]:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="每项依赖必须是 JSON 对象")
+        dependency_kind = str(item.get("kind", "")).strip()
+        if dependency_kind and dependency_kind not in PACKAGE_KINDS:
+            raise HTTPException(status_code=400, detail=f"依赖内容类型无效：{dependency_kind}")
+        target = str(item.get("packageId") or item.get("contentId") or "").strip()
+        if not target:
+            raise HTTPException(status_code=400, detail="依赖缺少 packageId 或 contentId")
+        target = safe_package_segment(target)
+        if target == current_package_id and (not dependency_kind or dependency_kind == current_kind):
+            raise HTTPException(status_code=400, detail="内容包不能依赖自身")
+        minimum = str(item.get("minVersion", "")).strip()
+        maximum = str(item.get("maxVersion", "")).strip()
+        if minimum:
+            minimum = safe_package_segment(minimum)
+        if maximum:
+            maximum = safe_package_segment(maximum)
+        key = (dependency_kind, target)
+        if key in seen:
+            raise HTTPException(status_code=400, detail=f"依赖重复：{target}")
+        seen.add(key)
+        normalized.append({
+            "kind": dependency_kind,
+            "packageId": target,
+            "minVersion": minimum,
+            "maxVersion": maximum,
+            "required": bool(item.get("required", True)),
+        })
+    return normalized
+
+
+def published_package_manifests() -> list[dict[str, Any]]:
+    manifests: list[dict[str, Any]] = []
+    for kind in PACKAGE_KINDS:
+        for path in (PACKAGE_ROOT / kind).glob("*/manifest.json"):
+            try:
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(manifest, dict) and str(manifest.get("status", "published")) == "published":
+                manifest.setdefault("kind", kind)
+                manifests.append(manifest)
+    return manifests
+
+
+def package_dependency_status(manifest: dict[str, Any]) -> dict[str, Any]:
+    dependencies = normalize_package_dependencies(
+        manifest.get("dependencies", []),
+        str(manifest.get("kind", "")),
+        str(manifest.get("packageId", "")),
+    )
+    available = published_package_manifests()
+    resolved: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    for dependency in dependencies:
+        target = dependency["packageId"]
+        candidates = []
+        for candidate in available:
+            identities = {
+                str(candidate.get("packageId", "")),
+                str(candidate.get("contentId", "")),
+                *[str(alias) for alias in candidate.get("aliases", []) if alias],
+            }
+            if target not in identities or (dependency["kind"] and candidate.get("kind") != dependency["kind"]):
+                continue
+            candidates.append(candidate)
+        compatible = [candidate for candidate in candidates if version_satisfies(candidate.get("version", ""), dependency["minVersion"], dependency["maxVersion"])]
+        if compatible:
+            selected = sorted(compatible, key=lambda item: comparable_version(item.get("version", "")), reverse=True)[0]
+            resolved.append({**dependency, "resolvedKind": selected.get("kind"), "resolvedPackageId": selected.get("packageId"), "resolvedVersion": selected.get("version")})
+        else:
+            reason = "version_mismatch" if candidates else "not_found"
+            unresolved.append({**dependency, "reason": reason, "availableVersions": sorted({str(item.get("version", "")) for item in candidates})})
+    blocking = [item for item in unresolved if item.get("required", True)]
+    return {"dependenciesSatisfied": not blocking, "resolvedDependencies": resolved, "unresolvedDependencies": unresolved}
+
+
 def safe_package_segment(value: str) -> str:
     value = value.strip()
     if not value or len(value) > 120 or not value.replace("_", "").replace("-", "").replace(".", "").isalnum():
@@ -1721,6 +1834,7 @@ async def admin_upload_package(
         raise HTTPException(status_code=400, detail="依赖必须是 JSON 数组")
     if not isinstance(dependency_items, list):
         raise HTTPException(status_code=400, detail="依赖必须是 JSON 数组")
+    dependency_items = normalize_package_dependencies(dependency_items, kind, package_id)
     package_dir = (PACKAGE_ROOT / kind / package_id).resolve()
     if PACKAGE_ROOT.resolve() not in package_dir.parents:
         raise HTTPException(status_code=400, detail="内容包路径无效")
@@ -1742,8 +1856,6 @@ async def admin_upload_package(
         old_payload = package_dir / str(old_manifest.get("payload", ""))
         if old_payload.is_file() and old_payload.parent == package_dir:
             shutil.copy2(old_payload, archive_dir / old_payload.name)
-    payload_path = package_dir / filename
-    payload_path.write_bytes(body)
     build_time = int(datetime.now(timezone.utc).timestamp() * 1000)
     digest = hashlib.sha256(body).hexdigest()
     effective_signature = signature.strip() or package_signature(package_id, kind, stable_id, version, build_time, digest, body)
@@ -1763,8 +1875,17 @@ async def admin_upload_package(
         "description": "后台上传内容包",
         "status": normalized_status,
         "channel": normalized_channel,
-        "dependencies": [item for item in dependency_items if isinstance(item, dict)][:50],
+        "dependencies": dependency_items,
     }
+    if normalized_status == "published":
+        dependency_status = package_dependency_status(manifest)
+        if not dependency_status["dependenciesSatisfied"]:
+            raise HTTPException(
+                status_code=409,
+                detail=response(code="PACKAGE_DEPENDENCIES_UNRESOLVED", message="内容包存在未满足的必需依赖，请先上传依赖或保存为草稿", data=dependency_status),
+            )
+    payload_path = package_dir / filename
+    payload_path.write_bytes(body)
     temp_manifest = package_dir / ".manifest.json.tmp"
     temp_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     temp_manifest.replace(manifest_path)
@@ -2361,8 +2482,9 @@ async def packages(kind: str = Query(...), _: None = Depends(authenticated)) -> 
                 continue
             manifest.setdefault("kind", kind)
             manifest.setdefault("downloadUrl", f"/v1/packages/{kind}/{manifest_path.parent.name}/download")
+            manifest.update(package_dependency_status(manifest))
             items.append(manifest)
-        except (OSError, ValueError):
+        except (OSError, ValueError, HTTPException):
             continue
     return response({"kind": kind, "items": items})
 
@@ -2400,6 +2522,13 @@ async def publish_package(
     if status_value not in {"draft", "testing", "published", "unpublished"}:
         raise HTTPException(status_code=400, detail=response(code="PACKAGE_INVALID", message="内容包状态无效"))
     manifest_path, manifest = package_manifest(package_kind, package_id)
+    manifest.setdefault("kind", package_kind)
+    dependency_status = package_dependency_status(manifest)
+    if status_value == "published" and not dependency_status["dependenciesSatisfied"]:
+        raise HTTPException(
+            status_code=409,
+            detail=response(code="PACKAGE_DEPENDENCIES_UNRESOLVED", message="内容包存在未满足的必需依赖", data=dependency_status),
+        )
     manifest["status"] = status_value
     if isinstance(payload, dict) and payload.get("channel"):
         manifest["channel"] = str(payload["channel"]).strip().lower()
@@ -2437,6 +2566,13 @@ async def rollback_package(
     if not candidates:
         raise HTTPException(status_code=404, detail=response(code="PACKAGE_VERSION_NOT_FOUND", message="历史版本不存在"))
     selected, old_payload = sorted(candidates, key=lambda pair: int(pair[0].get("buildTime", 0)), reverse=True)[0]
+    selected.setdefault("kind", package_kind)
+    dependency_status = package_dependency_status(selected)
+    if not dependency_status["dependenciesSatisfied"]:
+        raise HTTPException(
+            status_code=409,
+            detail=response(code="PACKAGE_DEPENDENCIES_UNRESOLVED", message="历史版本存在未满足的必需依赖，不能发布回滚", data=dependency_status),
+        )
     current_payload = package_dir / str(current.get("payload", ""))
     if current_payload.is_file():
         current_payload.unlink()
@@ -2460,9 +2596,18 @@ async def package_download(package_kind: str, package_id: str, _: None = Depends
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if str(manifest.get("status", "published")) != "published":
             raise HTTPException(status_code=404, detail=response(code="PACKAGE_NOT_PUBLISHED", message="内容包尚未发布"))
+        manifest.setdefault("kind", package_kind)
+        dependency_status = package_dependency_status(manifest)
+        if not dependency_status["dependenciesSatisfied"]:
+            raise HTTPException(
+                status_code=409,
+                detail=response(code="PACKAGE_DEPENDENCIES_UNRESOLVED", message="内容包必需依赖尚未满足", data=dependency_status),
+            )
         payload = (manifest_path.parent / manifest["payload"]).resolve()
         if PACKAGE_ROOT.resolve() not in payload.parents:
             raise ValueError("invalid payload path")
+    except HTTPException:
+        raise
     except (OSError, ValueError, KeyError):
         raise HTTPException(status_code=500, detail=response(code="PACKAGE_INVALID", message="内容包清单无效"))
     if not payload.is_file():

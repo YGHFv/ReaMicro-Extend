@@ -3,10 +3,11 @@ import unittest
 import hashlib
 import hmac
 import json
+import asyncio
 from pathlib import Path
 import sys
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi.security import HTTPBasicCredentials
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -86,10 +87,18 @@ class AdminSecurityTest(unittest.TestCase):
         self.original_config_path = main.CONFIG_PATH
         self.original_admin_username = main.ADMIN_USERNAME
         self.original_admin_password = main.ADMIN_PASSWORD
+        self.original_package_root = main.PACKAGE_ROOT
+        self.original_release_root = main.RELEASE_ROOT
+        self.original_audit_root = main.AUDIT_ROOT
+        self.original_audit_path = main.AUDIT_PATH
         main.CONFIG_ROOT = root / "config"
         main.CONFIG_PATH = main.CONFIG_ROOT / "server.json"
         main.STATE_DB_PATH = root / "state" / "reamicro.sqlite3"
         main.SERVER_BACKUP_ROOT = root / "backups" / "server"
+        main.PACKAGE_ROOT = root / "packages"
+        main.RELEASE_ROOT = root / "releases" / "module"
+        main.AUDIT_ROOT = root / "audit"
+        main.AUDIT_PATH = main.AUDIT_ROOT / "events.jsonl"
         main.state_store = None
         main.ADMIN_USERNAME = "bootstrap-admin"
         main.ADMIN_PASSWORD = "bootstrap-password-123"
@@ -99,6 +108,10 @@ class AdminSecurityTest(unittest.TestCase):
         main.CONFIG_PATH = self.original_config_path
         main.ADMIN_USERNAME = self.original_admin_username
         main.ADMIN_PASSWORD = self.original_admin_password
+        main.PACKAGE_ROOT = self.original_package_root
+        main.RELEASE_ROOT = self.original_release_root
+        main.AUDIT_ROOT = self.original_audit_root
+        main.AUDIT_PATH = self.original_audit_path
         self.temp_dir.cleanup()
 
     def test_primary_admin_must_complete_first_login_setup(self):
@@ -250,6 +263,24 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertFalse(main.allow_rate_limit(key))
         main.RATE_LIMIT = original_limit
 
+    def test_unhandled_exception_response_contains_request_id(self):
+        request = Request({
+            "type": "http",
+            "method": "GET",
+            "path": "/boom",
+            "headers": [],
+            "query_string": b"",
+            "server": ("test", 80),
+            "client": ("127.0.0.1", 1234),
+            "scheme": "http",
+        })
+        request.state.request_id = "req_test_exception"
+        result = asyncio.run(main.unhandled_exception_handler(request, RuntimeError("secret detail")))
+        payload = json.loads(result.body)
+        self.assertEqual(result.status_code, 500)
+        self.assertEqual(payload["requestId"], "req_test_exception")
+        self.assertNotIn("secret detail", result.body.decode("utf-8"))
+
     def test_state_store_persists_and_locks_tasks(self):
         store = main.get_state_store()
         store.save_namespace("tasks", {"task_1": {"id": "task_1", "status": "scheduled"}})
@@ -274,6 +305,35 @@ class AdminSecurityTest(unittest.TestCase):
         main.validate_package_payload("epub_style", "style.css", "body{}".encode("utf-8"))
         with self.assertRaises(HTTPException):
             main.validate_package_payload("online_source", "source.json", b"not-json")
+
+    def test_package_dependency_resolution_supports_alias_and_versions(self):
+        dependency_dir = main.PACKAGE_ROOT / "online_source" / "parser.common"
+        dependency_dir.mkdir(parents=True)
+        (dependency_dir / "manifest.json").write_text(json.dumps({
+            "kind": "online_source",
+            "packageId": "parser.common",
+            "contentId": "parser.common",
+            "aliases": ["parser.old"],
+            "version": "2.1.0",
+            "status": "published",
+            "dependencies": [],
+        }), encoding="utf-8")
+        status = main.package_dependency_status({
+            "kind": "online_source",
+            "packageId": "book.source",
+            "dependencies": [{"packageId": "parser.old", "minVersion": "2.0.0"}],
+        })
+        self.assertTrue(status["dependenciesSatisfied"])
+        self.assertEqual(status["resolvedDependencies"][0]["resolvedVersion"], "2.1.0")
+
+    def test_package_dependency_resolution_reports_required_missing(self):
+        status = main.package_dependency_status({
+            "kind": "online_source",
+            "packageId": "book.source",
+            "dependencies": [{"packageId": "parser.missing", "required": True}],
+        })
+        self.assertFalse(status["dependenciesSatisfied"])
+        self.assertEqual(status["unresolvedDependencies"][0]["reason"], "not_found")
 
     def test_webhook_signature(self):
         body = b'{"action":"published"}'
