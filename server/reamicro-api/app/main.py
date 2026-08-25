@@ -1402,7 +1402,7 @@ def _admin_kind_label(kind: str) -> str:
     return {"online_source": "书源", "association_source": "关联源", "epub_style": "EPUB 样式", "highlight_style": "高亮样式", "theme": "主题库"}.get(kind, kind)
 
 
-def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: str = "") -> str:
+def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: str = "", csrf_token: str = "") -> str:
     esc = lambda value: html.escape(str(value), quote=True)
     needle = query.strip().lower()
     rows: list[str] = []
@@ -1412,7 +1412,7 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
             continue
         kind = str(item.get("kind", "")); package_id = str(item.get("packageId", ""))
         dependency = "满足" if item.get("dependenciesSatisfied", True) else "缺少依赖"
-        actions = f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/edit'>编辑</a> <a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/preview'>预览</a> <a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/history'>历史</a>" if can_write else f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/preview'>预览</a>"
+        actions = f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/edit'>编辑</a> <a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/preview'>预览</a> <a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/history'>历史</a> <form class='inline' method='post' action='/admin/packages/{esc(kind)}/{esc(package_id)}/delete'><input type='hidden' name='csrf_token' value='{esc(csrf_token)}'><button class='button subtle' type='submit'>删除</button></form>" if can_write else f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/preview'>预览</a>"
         rows.append(f"<tr><td>{esc(_admin_kind_label(kind))}</td><td><strong>{esc(item.get('name', package_id))}</strong><small>{esc(package_id)} · {esc(item.get('contentId', ''))}</small></td><td>{esc(item.get('version', ''))}<small>{esc(item.get('buildTime', ''))}</small></td><td><span class='status status-{esc(item.get('status', 'published'))}'>{esc(item.get('status', 'published'))}</span></td><td>{esc(item.get('channel', 'stable'))}<small>{dependency}</small></td><td class='actions'>{actions}</td></tr>")
     return "".join(rows) or "<tr><td colspan='6' class='empty'>没有匹配的内容包</td></tr>"
 
@@ -1450,7 +1450,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
         if section == "overview":
             content += f"<div class='stats'><div><strong>{len(records)}</strong><span>内容包</span></div><div><strong>{sum(1 for x in records if x.get('status', 'published') == 'published')}</strong><span>已发布</span></div><div><strong>{len(load_tasks())}</strong><span>云端任务</span></div><div><strong>{esc(config.get('serverId', ''))}</strong><span>服务器 ID</span></div></div>"
             content += '<template id="cloud-book-example">[{"cloudBookId":123,"bookId":123,"name":"书名"}]</template>'
-        content += f"<form class='toolbar' method='get' action='/admin'><input type='hidden' name='section' value='{esc(section)}'><input name='q' value='{esc(query)}' placeholder='搜索名称、包 ID、版本或别名'><button class='button' type='submit'>搜索</button></form><div class='table-wrap'><table><thead><tr><th>类型</th><th>内容</th><th>版本</th><th>状态</th><th>渠道 / 依赖</th><th>操作</th></tr></thead><tbody>{_admin_package_table(visible, can_packages, query)}</tbody></table></div>"
+        content += f"<form class='toolbar' method='get' action='/admin'><input type='hidden' name='section' value='{esc(section)}'><input name='q' value='{esc(query)}' placeholder='搜索名称、包 ID、版本或别名'><button class='button' type='submit'>搜索</button></form><div class='table-wrap'><table><thead><tr><th>类型</th><th>内容</th><th>版本</th><th>状态</th><th>渠道 / 依赖</th><th>操作</th></tr></thead><tbody>{_admin_package_table(visible, can_packages, query, admin_csrf_token(config, actor))}</tbody></table></div>"
     else:
         task_credentials = f"<div class='stats'><div><strong>{len(load_credentials())}</strong><span>阅微凭据</span></div><div><strong>{len(load_tasks())}</strong><span>云端任务</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('enabled', True))}</strong><span>已启用</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('status') == 'failed')}</strong><span>执行失败</span></div></div><div class='panel'><h2>已上传阅微凭据</h2><p class='muted'>凭据只保存加密密文，后台不会显示登录密钥原文；账号 ID、验证状态和更新时间来自模块上传结果。</p><div class='table-wrap'><table><thead><tr><th>凭据 ID</th><th>阅微账号 ID</th><th>名称</th><th>所有者</th><th>验证状态</th><th>更新时间</th></tr></thead><tbody>{credential_table}</tbody></table></div></div><div class='panel'><h2>任务运行状态</h2><div class='table-wrap'><table><thead><tr><th>任务类型</th><th>所有者</th><th>凭据 ID</th><th>状态</th><th>开关</th><th>最近结果</th><th>下次执行</th><th>日志</th></tr></thead><tbody>{task_table}</tbody></table></div></div>" if section == "tasks" else ""
         content = f"<div class='page-head'><div><p class='eyebrow'>系统</p><h1>{'云端任务' if section == 'tasks' else ('服务器设置' if section == 'settings' else '安全与备份')}</h1><p class='muted'>按分类维护后台功能。</p></div></div>{task_credentials}<div class='panel'><p>当前版本先保留完整配置表单入口，避免重构期间遗漏任何既有参数。</p><p><a class='button' href='/admin/legacy'>打开完整管理表单</a></p><p><a href='/admin/audit'>审计日志</a> · <a href='/admin/backups/server'>服务器快照</a></p>{'<p>子管理员账户管理仍受主管理员权限保护。</p>' if section == 'security' else ''}</div>"
@@ -1618,6 +1618,50 @@ async def admin_rollback_package(
     manifest_path.write_text(json.dumps(selected, ensure_ascii=False, indent=2), encoding="utf-8")
     audit_event("package_rolled_back", audit_actor(actor), metadata={"kind": package_kind, "packageId": package_id, "version": selected.get("version")})
     return HTMLResponse(admin_page(load_config(), f"已回滚到版本 {selected.get('version', '')}", actor=actor, section=package_kind))
+
+
+@app.post("/admin/packages/{package_kind}/{package_id}/delete", response_class=HTMLResponse)
+async def admin_delete_package(
+    package_kind: str,
+    package_id: str,
+    csrf_token: str = Form(""),
+    actor: dict[str, Any] = Depends(admin_actor),
+) -> HTMLResponse:
+    require_admin_permission(actor, "packages:write")
+    package_kind = safe_package_segment(package_kind); package_id = safe_package_segment(package_id)
+    config = load_config(); require_admin_csrf(config, actor, csrf_token)
+    manifest_path, manifest = package_manifest(package_kind, package_id)
+    if str(manifest.get("status", "published")) == "published":
+        raise HTTPException(status_code=409, detail="已发布内容不能直接删除，请先下架")
+    package_dir = manifest_path.parent
+    trash_dir = PACKAGE_ROOT / ".trash" / package_kind
+    trash_dir.mkdir(parents=True, exist_ok=True)
+    target = trash_dir / f"{package_id}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+    shutil.move(str(package_dir), str(target))
+    audit_event("package_deleted", audit_actor(actor), metadata={"kind": package_kind, "packageId": package_id, "status": manifest.get("status")})
+    return HTMLResponse(admin_page(load_config(), f"已移除未发布内容 {package_kind}/{package_id}", actor=actor, section=package_kind))
+
+
+@app.get("/admin/packages/{package_kind}/{package_id}/diff", response_class=HTMLResponse)
+async def admin_diff_package(package_kind: str, package_id: str, version: str = Query(""), actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+    package_kind = safe_package_segment(package_kind); package_id = safe_package_segment(package_id)
+    manifest_path, current = package_manifest(package_kind, package_id)
+    current_name, current_payload = _admin_package_payload(manifest_path.parent, current)
+    target_payload = b""; target_manifest: dict[str, Any] | None = None
+    for path in (manifest_path.parent / "history").glob("*/manifest.json"):
+        try: item = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError): continue
+        if version and str(item.get("version")) != version: continue
+        candidate = path.parent / str(item.get("payload", ""))
+        if candidate.is_file(): target_manifest, target_payload = item, candidate.read_bytes(); break
+    if target_manifest is None:
+        raise HTTPException(status_code=404, detail="历史版本不存在")
+    import difflib
+    current_text = current_payload.decode("utf-8", errors="replace").splitlines()
+    target_text = target_payload.decode("utf-8", errors="replace").splitlines()
+    diff = "\n".join(difflib.unified_diff(target_text, current_text, fromfile=f"{target_manifest.get('version')}/{current_name}", tofile=f"{current.get('version')}/{current_name}", lineterm=""))
+    body = f"<div class='panel'><p>历史版本 {html.escape(str(target_manifest.get('version')))} 与当前版本 {html.escape(str(current.get('version')))} 的差异。</p><pre>{html.escape(diff or '内容没有文本差异')}</pre></div>"
+    return HTMLResponse(_admin_shell("内容差异", body, load_config(), actor))
 
 
 @app.get("/admin/login", response_class=HTMLResponse)
