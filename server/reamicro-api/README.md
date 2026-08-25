@@ -104,3 +104,5 @@ X-ReaMicro-Api-Key: <key>
   "name": "示例书源"
 }
 ```
+
+内容包支持 `status`（`draft`、`testing`、`published`、`unpublished`）、`channel`（`stable`、`beta`、`nightly`）和依赖数组 `dependencies`。客户端公共列表和下载仅返回 `published` 内容。后台上传会检查 JSON/CSS 编码与结构，旧版本自动进入 `history`；管理接口可查询历史、切换发布状态和回滚指定版本。书源应长期保持同一 `contentId`，把旧域名和旧书源 ID 加入 `aliases`，模块更新时即可保留既有图书关联。

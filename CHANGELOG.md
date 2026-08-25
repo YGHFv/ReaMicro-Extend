@@ -1,5 +1,13 @@
 # 更新记录
 
+## 内容发布工作流与回滚 - 2026-08-25
+
+- 内容包增加 `draft`、`testing`、`published`、`unpublished` 状态和 `stable`、`beta`、`nightly` 渠道；客户端列表与下载仅暴露已发布内容。
+- 后台上传支持状态、渠道和依赖 JSON，JSON 内容包执行 UTF-8 与结构校验，CSS 样式校验 UTF-8，避免无效文件直接发布。
+- 清单继续保存稳定 `contentId`、旧域名/旧 ID `aliases`，并新增 `dependencies`，支持书源换域名后保持原图书身份及后续依赖解析。
+- 新增内容包历史列表、状态切换和服务器端回滚接口；回滚会恢复历史 payload 和 manifest，并记录审计事件。
+- 内容状态修改与回滚要求后台管理员认证、`packages:write` 权限和 CSRF 请求头。
+
 ## Worker 任务可靠性与幂等 - 2026-08-25
 
 - 增加 `app.worker` 独立 Worker 入口；API 容器可关闭调度器，Worker 单独执行云端阅读、签到和抽卡任务。

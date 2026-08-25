@@ -213,6 +213,12 @@ class AdminSecurityTest(unittest.TestCase):
         snapshot = main.create_server_snapshot()
         self.assertTrue(snapshot.is_file())
 
+    def test_package_payload_validation(self):
+        main.validate_package_payload("online_source", "source.json", b'{"id":"source"}')
+        main.validate_package_payload("epub_style", "style.css", "body{}".encode("utf-8"))
+        with self.assertRaises(HTTPException):
+            main.validate_package_payload("online_source", "source.json", b"not-json")
+
 
 if __name__ == "__main__":
     unittest.main()

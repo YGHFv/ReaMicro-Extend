@@ -1001,7 +1001,9 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
 <form method='post' action='/admin/packages/upload' enctype='multipart/form-data'>{csrf_html}
 <div class='row'><div><label>内容类型</label><input name='kind' placeholder='online_source' required></div><div><label>包 ID</label><input name='package_id' placeholder='source.example' required></div></div>
 <div class='row'><div><label>版本号</label><input name='version' placeholder='1.0.0' required></div><div><label>稳定内容 ID（书源建议固定）</label><input name='content_id' placeholder='source.example'></div></div>
+<div class='row'><div><label>发布状态</label><select name='status_value'><option value='published'>立即发布</option><option value='draft'>草稿</option><option value='testing'>测试中</option><option value='unpublished'>下架</option></select></div><div><label>发布渠道</label><select name='channel'><option value='stable'>稳定版</option><option value='beta'>测试版</option><option value='nightly'>开发版</option></select></div></div>
 <label>旧 ID/域名别名（逗号分隔）</label><input name='aliases' placeholder='online_old_hash,old.example.com'>
+<label>依赖 JSON 数组（可选）</label><textarea name='dependencies' placeholder='[{{"packageId":"parser.common","minVersion":"1.0.0"}}]'></textarea>
 <label>Ed25519 签名（可选，需与服务器公钥匹配）</label><input name='signature' placeholder='Base64 签名'>
 <label>内容文件</label><input type='file' name='payload' required>
 <button type='submit'>上传并发布</button></form><h3>已发布内容包</h3><table><thead><tr><th>类型</th><th>包 ID</th><th>版本</th><th>构建时间</th></tr></thead><tbody>{package_table}</tbody></table>
@@ -1346,6 +1348,9 @@ async def admin_upload_package(
     content_id: str = Form(""),
     aliases: str = Form(""),
     signature: str = Form(""),
+    status_value: str = Form("published"),
+    channel: str = Form("stable"),
+    dependencies: str = Form(""),
     payload: UploadFile = File(...),
     csrf_token: str = Form(""),
 ) -> HTMLResponse:
@@ -1362,6 +1367,19 @@ async def admin_upload_package(
     body = await payload.read()
     if not body or len(body) > 50 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="内容文件为空或超过 50 MB")
+    validate_package_payload(kind, filename, body)
+    normalized_status = status_value.strip().lower() or "published"
+    if normalized_status not in {"draft", "testing", "published", "unpublished"}:
+        raise HTTPException(status_code=400, detail="内容包状态无效")
+    normalized_channel = channel.strip().lower() or "stable"
+    if normalized_channel not in {"stable", "beta", "nightly"}:
+        raise HTTPException(status_code=400, detail="内容包发布渠道无效")
+    try:
+        dependency_items = json.loads(dependencies) if dependencies.strip() else []
+    except ValueError:
+        raise HTTPException(status_code=400, detail="依赖必须是 JSON 数组")
+    if not isinstance(dependency_items, list):
+        raise HTTPException(status_code=400, detail="依赖必须是 JSON 数组")
     package_dir = (PACKAGE_ROOT / kind / package_id).resolve()
     if PACKAGE_ROOT.resolve() not in package_dir.parents:
         raise HTTPException(status_code=400, detail="内容包路径无效")
@@ -1402,10 +1420,14 @@ async def admin_upload_package(
         "aliases": [item.strip() for item in aliases.split(",") if item.strip()],
         "name": package_id,
         "description": "后台上传内容包",
+        "status": normalized_status,
+        "channel": normalized_channel,
+        "dependencies": [item for item in dependency_items if isinstance(item, dict)][:50],
     }
     temp_manifest = package_dir / ".manifest.json.tmp"
     temp_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     temp_manifest.replace(manifest_path)
+    audit_event("package_uploaded", audit_actor(actor), success=True, metadata={"kind": kind, "packageId": package_id, "version": version, "status": normalized_status})
     return HTMLResponse(admin_page(load_config(), f"已发布 {kind}/{package_id} {version}", actor=actor))
 
 
@@ -1766,6 +1788,34 @@ def public_task(task: dict[str, Any], include_request: bool = False) -> dict[str
     return value
 
 
+def validate_package_payload(kind: str, filename: str, body: bytes) -> None:
+    if len(body) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="内容文件超过 50 MB")
+    if kind in {"online_source", "association_source", "theme", "epub_style", "highlight_style"} and filename.lower().endswith((".json", ".json5")):
+        try:
+            value = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise HTTPException(status_code=400, detail="JSON 内容包格式无效")
+        if not isinstance(value, (dict, list)):
+            raise HTTPException(status_code=400, detail="JSON 内容包必须是对象或数组")
+    if kind in {"epub_style", "highlight_style"} and filename.lower().endswith(".css"):
+        try:
+            body.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=400, detail="样式文件必须使用 UTF-8 编码")
+
+
+def package_manifest(package_kind: str, package_id: str) -> tuple[Path, dict[str, Any]]:
+    manifest_path = PACKAGE_ROOT / package_kind / package_id / "manifest.json"
+    if not manifest_path.is_file():
+        raise HTTPException(status_code=404, detail=response(code="PACKAGE_NOT_FOUND", message="内容包不存在"))
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise HTTPException(status_code=500, detail=response(code="PACKAGE_INVALID", message="内容包清单无效"))
+    return manifest_path, manifest
+
+
 def find_owned_task(task_id: str, owner: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     tasks = load_tasks()
     task = tasks.get(task_id)
@@ -1895,12 +1945,96 @@ async def packages(kind: str = Query(...), _: None = Depends(authenticated)) -> 
     for manifest_path in sorted((PACKAGE_ROOT / kind).glob("*/manifest.json")):
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if str(manifest.get("status", "published")) != "published":
+                continue
             manifest.setdefault("kind", kind)
             manifest.setdefault("downloadUrl", f"/v1/packages/{kind}/{manifest_path.parent.name}/download")
             items.append(manifest)
         except (OSError, ValueError):
             continue
     return response({"kind": kind, "items": items})
+
+
+@app.get("/v1/packages/{package_kind}/{package_id}/history")
+async def package_history(package_kind: str, package_id: str, _: None = Depends(authenticated)) -> dict[str, Any]:
+    safe_package_segment(package_kind)
+    safe_package_segment(package_id)
+    package_dir = (PACKAGE_ROOT / package_kind / package_id).resolve()
+    if PACKAGE_ROOT.resolve() not in package_dir.parents:
+        raise HTTPException(status_code=400, detail=response(code="INVALID_PACKAGE", message="内容包路径无效"))
+    history = []
+    for manifest_path in sorted((package_dir / "history").glob("*/manifest.json"), reverse=True):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            history.append({key: manifest.get(key) for key in ("packageId", "contentId", "version", "buildTime", "sha256", "status", "channel", "aliases")})
+        except (OSError, ValueError):
+            continue
+    return response({"kind": package_kind, "packageId": package_id, "items": history})
+
+
+@app.post("/v1/packages/{package_kind}/{package_id}/publish")
+async def publish_package(
+    package_kind: str,
+    package_id: str,
+    request: Request,
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    x_admin_csrf: str = Header(default=""),
+) -> dict[str, Any]:
+    actor = require_admin(credentials)
+    require_admin_permission(actor, "packages:write")
+    require_admin_csrf(load_config(), actor, x_admin_csrf)
+    payload = await request.json()
+    status_value = str(payload.get("status", "published")).strip().lower() if isinstance(payload, dict) else "published"
+    if status_value not in {"draft", "testing", "published", "unpublished"}:
+        raise HTTPException(status_code=400, detail=response(code="PACKAGE_INVALID", message="内容包状态无效"))
+    manifest_path, manifest = package_manifest(package_kind, package_id)
+    manifest["status"] = status_value
+    if isinstance(payload, dict) and payload.get("channel"):
+        manifest["channel"] = str(payload["channel"]).strip().lower()
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    audit_event("package_status_changed", audit_actor(actor), metadata={"kind": package_kind, "packageId": package_id, "status": status_value})
+    return response({"packageId": package_id, "status": manifest["status"], "channel": manifest.get("channel", "stable")})
+
+
+@app.post("/v1/packages/{package_kind}/{package_id}/rollback")
+async def rollback_package(
+    package_kind: str,
+    package_id: str,
+    request: Request,
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    x_admin_csrf: str = Header(default=""),
+) -> dict[str, Any]:
+    actor = require_admin(credentials)
+    require_admin_permission(actor, "packages:write")
+    require_admin_csrf(load_config(), actor, x_admin_csrf)
+    payload = await request.json()
+    target_version = str(payload.get("version", "")).strip() if isinstance(payload, dict) else ""
+    manifest_path, current = package_manifest(package_kind, package_id)
+    package_dir = manifest_path.parent
+    candidates = []
+    for history_manifest in (package_dir / "history").glob("*/manifest.json"):
+        try:
+            item = json.loads(history_manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if target_version and str(item.get("version")) != target_version:
+            continue
+        old_payload = history_manifest.parent / str(item.get("payload", ""))
+        if old_payload.is_file():
+            candidates.append((item, old_payload))
+    if not candidates:
+        raise HTTPException(status_code=404, detail=response(code="PACKAGE_VERSION_NOT_FOUND", message="历史版本不存在"))
+    selected, old_payload = sorted(candidates, key=lambda pair: int(pair[0].get("buildTime", 0)), reverse=True)[0]
+    current_payload = package_dir / str(current.get("payload", ""))
+    if current_payload.is_file():
+        current_payload.unlink()
+    new_payload = package_dir / str(selected.get("payload", old_payload.name))
+    new_payload.write_bytes(old_payload.read_bytes())
+    selected["status"] = "published"
+    selected["rolledBackFrom"] = current.get("version", "")
+    manifest_path.write_text(json.dumps(selected, ensure_ascii=False, indent=2), encoding="utf-8")
+    audit_event("package_rolled_back", audit_actor(actor), metadata={"kind": package_kind, "packageId": package_id, "version": selected.get("version")})
+    return response({"packageId": package_id, "version": selected.get("version"), "rolledBack": True})
 
 
 @app.get("/v1/packages/{package_kind}/{package_id}/download")
@@ -1912,6 +2046,8 @@ async def package_download(package_kind: str, package_id: str, _: None = Depends
         raise HTTPException(status_code=404, detail=response(code="NOT_FOUND", message="内容包不存在"))
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if str(manifest.get("status", "published")) != "published":
+            raise HTTPException(status_code=404, detail=response(code="PACKAGE_NOT_PUBLISHED", message="内容包尚未发布"))
         payload = (manifest_path.parent / manifest["payload"]).resolve()
         if PACKAGE_ROOT.resolve() not in payload.parents:
             raise ValueError("invalid payload path")
