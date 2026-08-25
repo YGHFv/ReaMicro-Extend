@@ -12,16 +12,51 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
         if (!settings.enabled) return ApiServerProbeResult(false, "API 服务器未启用")
         return runCatching {
             val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
-            val headers = authHeaders(settings)
-            val body = HttpClient.get(
-                "$baseUrl/v1/meta",
-                headers = headers,
+            val discoveryBody = HttpClient.get(
+                "$baseUrl/v1/discovery",
+                headers = mapOf("Accept" to "application/json"),
                 connectTimeoutMs = settings.timeoutSeconds * 1_000,
                 readTimeoutMs = settings.timeoutSeconds * 1_000,
                 followRedirects = false,
             )
-            parseMeta(JSONObject(body)).also(settingsStore::cacheMeta).let { ApiServerProbeResult(true, "连接成功", it) }
-        }.getOrElse { ApiServerProbeResult(false, it.message ?: "连接失败") }
+            val discovered = parseMeta(JSONObject(discoveryBody))
+            val resolvedMode = selectApiAuthMode(discovered, settings)
+                ?: return ApiServerProbeResult(false, "服务器需要认证，请填写服务器支持的登录信息", discovered)
+            val resolvedSettings = settings.copy(authMode = resolvedMode)
+            if (resolvedMode == ApiAuthMode.PUBLIC) {
+                settingsStore.cacheMeta(discovered)
+                return ApiServerProbeResult(true, "连接成功：公开访问", discovered, resolvedMode)
+            }
+            val body = HttpClient.get(
+                "$baseUrl/v1/meta",
+                headers = authHeaders(resolvedSettings),
+                connectTimeoutMs = settings.timeoutSeconds * 1_000,
+                readTimeoutMs = settings.timeoutSeconds * 1_000,
+                followRedirects = false,
+            )
+            parseMeta(JSONObject(body)).also(settingsStore::cacheMeta).let {
+                ApiServerProbeResult(true, "连接成功", it, resolvedMode)
+            }
+        }.getOrElse { error ->
+            val current = runCatching { discovery(settings) }.getOrNull()
+            val mode = current?.let { selectApiAuthMode(it, settings) }
+            val message = if (mode == ApiAuthMode.HOST_ACCOUNT_ALLOWLIST && settings.hostAccountId.isNotBlank()) {
+                "连接被服务器拒绝：当前阅微账号 ${settings.hostAccountId} 不在白名单"
+            } else error.message ?: "连接失败"
+            ApiServerProbeResult(false, message, current, mode)
+        }
+    }
+
+    fun discovery(settings: ApiServerSettings = settingsStore.get()): ApiServerMeta {
+        val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
+        val body = HttpClient.get(
+            "$baseUrl/v1/discovery",
+            headers = mapOf("Accept" to "application/json"),
+            connectTimeoutMs = settings.timeoutSeconds * 1_000,
+            readTimeoutMs = settings.timeoutSeconds * 1_000,
+            followRedirects = false,
+        )
+        return parseMeta(JSONObject(body))
     }
 
     fun health(): Boolean = runCatching {
@@ -34,15 +69,16 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
 
     private fun authHeaders(settings: ApiServerSettings): Map<String, String> = buildMap {
         put("Accept", "application/json")
+        if (settings.hostAccountId.isNotBlank()) {
+            put("X-ReaMicro-Host-Account-Id", settings.hostAccountId)
+        }
         when (settings.authMode) {
             ApiAuthMode.API_KEY -> if (settings.apiKey.isNotBlank()) put("X-ReaMicro-Api-Key", settings.apiKey)
             ApiAuthMode.ACCOUNT -> if (settings.accountName.isNotBlank()) {
                 put("X-ReaMicro-Account", settings.accountName)
                 put("X-ReaMicro-Password", settings.accountPassword)
             }
-            ApiAuthMode.HOST_ACCOUNT_ALLOWLIST -> if (settings.hostAccountId.isNotBlank()) {
-                put("X-ReaMicro-Host-Account-Id", settings.hostAccountId)
-            }
+            ApiAuthMode.HOST_ACCOUNT_ALLOWLIST -> Unit
             ApiAuthMode.PUBLIC -> Unit
         }
     }
@@ -65,6 +101,7 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
             minModuleVersion = data.optString("minModuleVersion"),
             serverTime = json.optString("serverTime", data.optString("serverTime")),
             signingPublicKey = data.optString("signingPublicKey"),
+            authRequired = data.optBoolean("authRequired", false),
         )
     }
 

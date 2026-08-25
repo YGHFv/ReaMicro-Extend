@@ -140,6 +140,17 @@ class AccountCompletionController(
         )
     }
 
+    fun currentCloudCredential(): CurrentCloudCredential {
+        val activity = activityProvider() ?: error("当前没有可用页面")
+        val current = currentAccountPreview(activity) ?: error("当前未登录阅微账号")
+        require(current.token.isNotBlank()) { "当前阅微登录密钥为空，请重新登录阅微" }
+        return CurrentCloudCredential(
+            accountId = current.accountId.toString(),
+            token = current.token,
+            label = current.nickname.ifBlank { "阅微账号 ${current.accountId}" },
+        )
+    }
+
     fun exportAllCredentialsBundle(): ExportedCredentialBundle {
         val activity = activityProvider() ?: error("褰撳墠娌℃湁鍙敤椤甸潰")
         val accounts = loadStoredAccounts(activity)
@@ -1709,6 +1720,12 @@ class AccountCompletionController(
     data class ExportedCredential(
         val account: AccountDisplayItem,
         val credential: String,
+    )
+
+    data class CurrentCloudCredential(
+        val accountId: String,
+        val token: String,
+        val label: String,
     )
 
     data class ExportedCredentialBundle(

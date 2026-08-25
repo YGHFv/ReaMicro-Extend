@@ -59,7 +59,7 @@ Token 至少需要 `read:packages` 权限。API 容器能否拉取镜像不代�
 
 Watchtower 只更新带有 `com.centurylinklabs.watchtower.enable=true` 标签的 API 容器。它通过 Docker Socket 管理容器；即使挂载标记为只读，对 Docker API 仍具有较高权限，因此只应使用可信的 Watchtower 镜像和受控的 1Panel 主机。若 GHCR 镜像为私有包，需要让 Docker 守护进程先登录 GHCR，或将包含登录凭据的 Docker config 以只读方式挂载给 Watchtower。
 
-配置 `REAMICRO_API_KEY` 后，客户端请求需要携带：
+客户端首次只请求 `/v1/discovery` 判断服务器认证模式，再按服务器要求发送认证信息。配置 `REAMICRO_API_KEY` 后，客户端请求需要携带：
 
 ```text
 X-ReaMicro-Api-Key: <key>
@@ -68,6 +68,7 @@ X-ReaMicro-Api-Key: <key>
 当前实现提供：
 
 - `/v1/health`
+- `/v1/discovery`（公开能力发现，不返回密钥、账号或白名单内容）
 - `/v1/meta`
 - `/v1/diagnostics`
 - `/v1/releases/module/latest`

@@ -35,13 +35,32 @@ data class ApiServerMeta(
     val minModuleVersion: String,
     val serverTime: String,
     val signingPublicKey: String = "",
+    val authRequired: Boolean = false,
 )
 
 data class ApiServerProbeResult(
     val success: Boolean,
     val message: String,
     val meta: ApiServerMeta? = null,
+    val resolvedAuthMode: ApiAuthMode? = null,
 )
+
+internal fun selectApiAuthMode(meta: ApiServerMeta, settings: ApiServerSettings): ApiAuthMode? {
+    if (meta.authModes == setOf(ApiAuthMode.PUBLIC)) return ApiAuthMode.PUBLIC
+    if (ApiAuthMode.HOST_ACCOUNT_ALLOWLIST in meta.authModes && settings.hostAccountId.isNotBlank()) {
+        return ApiAuthMode.HOST_ACCOUNT_ALLOWLIST
+    }
+    if (settings.authMode in meta.authModes && when (settings.authMode) {
+            ApiAuthMode.API_KEY -> settings.apiKey.isNotBlank()
+            ApiAuthMode.ACCOUNT -> settings.accountName.isNotBlank() && settings.accountPassword.isNotBlank()
+            ApiAuthMode.HOST_ACCOUNT_ALLOWLIST -> settings.hostAccountId.isNotBlank()
+            ApiAuthMode.PUBLIC -> true
+        }
+    ) return settings.authMode
+    if (ApiAuthMode.API_KEY in meta.authModes && settings.apiKey.isNotBlank()) return ApiAuthMode.API_KEY
+    if (ApiAuthMode.ACCOUNT in meta.authModes && settings.accountName.isNotBlank() && settings.accountPassword.isNotBlank()) return ApiAuthMode.ACCOUNT
+    return meta.authModes.singleOrNull()
+}
 
 internal fun normalizeApiBaseUrl(raw: String, allowHttp: Boolean = false): String {
     val value = raw.trim().removeSuffix("/")

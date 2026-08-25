@@ -131,6 +131,35 @@ class AdminSecurityTest(unittest.TestCase):
             main.require_admin(credentials)
         self.assertEqual(raised.exception.status_code, 403)
 
+    def test_public_discovery_reports_only_configured_auth_mode(self):
+        config = main.load_config()
+        config["allowPublic"] = True
+        config["apiKey"] = ""
+        config["apiKeyRecords"] = []
+        config["accounts"] = {}
+        config["hostAccountAllowlist"] = []
+        modes = main.public_server_capabilities(config)
+        self.assertEqual(modes["authModes"], ["public"])
+        self.assertFalse(modes["authRequired"])
+        config["hostAccountAllowlist"] = ["1001"]
+        modes = main.public_server_capabilities(config)
+        self.assertEqual(modes["authModes"], ["host_account_allowlist"])
+        self.assertTrue(modes["authRequired"])
+
+    def test_api_key_records_disable_public_discovery(self):
+        config = main.load_config()
+        config["allowPublic"] = True
+        config["apiKey"] = ""
+        config["apiKeyRecords"] = [{"digest": "abc", "enabled": True}]
+        config["accounts"] = {}
+        config["hostAccountAllowlist"] = []
+        self.assertEqual(main.public_server_capabilities(config)["authModes"], ["api_key"])
+
+    def test_owner_host_account_id_isolated(self):
+        self.assertEqual(main.owner_host_account_id("host:1001"), "1001")
+        self.assertEqual(main.owner_host_account_id("key:abc:host:1002"), "1002")
+        self.assertEqual(main.owner_host_account_id("public"), "")
+
     def test_persisted_primary_and_subadmin_authentication(self):
         now = "2026-08-25T00:00:00+00:00"
         config = main.load_config()

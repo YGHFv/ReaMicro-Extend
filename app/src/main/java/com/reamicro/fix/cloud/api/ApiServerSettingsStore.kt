@@ -67,6 +67,7 @@ class ApiServerSettingsStore(private val contextProvider: () -> Context?) {
             minModuleVersion = json.optString("minModuleVersion"),
             serverTime = json.optString("serverTime"),
             signingPublicKey = json.optString("signingPublicKey"),
+            authRequired = json.optBoolean("authRequired", false),
         )
     }.getOrNull()
 
@@ -79,6 +80,7 @@ class ApiServerSettingsStore(private val contextProvider: () -> Context?) {
             .put("minModuleVersion", meta.minModuleVersion)
             .put("serverTime", meta.serverTime)
             .put("signingPublicKey", meta.signingPublicKey)
+            .put("authRequired", meta.authRequired)
         prefs()?.edit()?.putString(KEY_CACHED_META, json.toString())?.apply()
     }
 

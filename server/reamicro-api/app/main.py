@@ -801,6 +801,15 @@ def configured_api_key(config: dict[str, Any], value: str | None) -> dict[str, A
     return None
 
 
+def api_key_auth_configured(config: dict[str, Any]) -> bool:
+    if str(config.get("apiKey", "")):
+        return True
+    return any(
+        isinstance(record, dict) and record.get("enabled", True) and str(record.get("digest", ""))
+        for record in config.get("apiKeyRecords", [])
+    )
+
+
 def normalized_admin_name(value: str) -> str:
     name = value.strip()
     if not 3 <= len(name) <= 64 or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
@@ -989,7 +998,7 @@ def check_request_auth(
     allowlist = set(config.get("hostAccountAllowlist", []))
     if host_account_id and host_account_id in allowlist:
         return
-    if config.get("allowPublic", True) and not api_key and not accounts and not allowlist:
+    if config.get("allowPublic", True) and not api_key_auth_configured(config) and not accounts and not allowlist:
         return
     raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="认证信息无效"))
 
@@ -999,15 +1008,49 @@ def resolve_identity(api_key_value: str | None, account_name: str | None, accoun
     api_key = str(config.get("apiKey", ""))
     key_record = configured_api_key(config, api_key_value)
     if key_record:
-        return "key:" + hashlib.sha256(api_key_value.encode()).hexdigest()[:24]
+        identity = "key:" + hashlib.sha256(api_key_value.encode()).hexdigest()[:24]
+        return identity + (":host:" + host_account_id if host_account_id else "")
     encoded = str(config.get("accounts", {}).get(account_name or "", ""))
     if account_name and account_password and encoded and password_matches(account_password, encoded):
-        return "account:" + account_name
+        identity = "account:" + account_name
+        return identity + (":host:" + host_account_id if host_account_id else "")
     if host_account_id and host_account_id in set(config.get("hostAccountAllowlist", [])):
         return "host:" + host_account_id
-    if config.get("allowPublic", True) and not api_key and not config.get("accounts") and not config.get("hostAccountAllowlist"):
-        return "public"
+    if config.get("allowPublic", True) and not api_key_auth_configured(config) and not config.get("accounts") and not config.get("hostAccountAllowlist"):
+        return "host-public:" + host_account_id if host_account_id else "public"
     raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="认证信息无效"))
+
+
+def configured_auth_modes(config: dict[str, Any]) -> list[str]:
+    modes: list[str] = []
+    if config.get("allowPublic", True) and not api_key_auth_configured(config) and not config.get("accounts") and not config.get("hostAccountAllowlist"):
+        modes.append("public")
+    if api_key_auth_configured(config):
+        modes.append("api_key")
+    if config.get("accounts"):
+        modes.append("account")
+    if config.get("hostAccountAllowlist"):
+        modes.append("host_account_allowlist")
+    return modes or ["api_key"]
+
+
+def public_server_capabilities(config: dict[str, Any]) -> dict[str, Any]:
+    modes = configured_auth_modes(config)
+    return {
+        "apiVersion": API_VERSION,
+        "serverId": config["serverId"],
+        "features": config["features"],
+        "authModes": modes,
+        "authMode": modes[0] if len(modes) == 1 else "multiple",
+        "authRequired": modes != ["public"],
+        "allowPublic": "public" in modes,
+        "authMethods": ["apiKey", "account", "hostAccount", "public"],
+        "packageSchemaVersions": [1],
+        "taskTypes": ["http", "yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"],
+        "maxUploadSize": 50 * 1024 * 1024,
+        "minModuleVersion": config["minModuleVersion"],
+        "signingPublicKey": config["signingPublicKey"],
+    }
 
 
 async def authenticated(
@@ -1040,14 +1083,16 @@ async def backup_owner(
     config = load_config()
     api_key = str(config.get("apiKey", ""))
     if configured_api_key(config, x_reamicro_api_key):
-        identity = "key:" + x_reamicro_api_key
+        identity = "key:" + x_reamicro_api_key + (":host:" + x_reamicro_host_account_id if x_reamicro_host_account_id else "")
     elif x_reamicro_account and x_reamicro_password and password_matches(
         x_reamicro_password,
         str(config.get("accounts", {}).get(x_reamicro_account, "")),
     ):
-        identity = "account:" + x_reamicro_account
+        identity = "account:" + x_reamicro_account + (":host:" + x_reamicro_host_account_id if x_reamicro_host_account_id else "")
     elif x_reamicro_host_account_id and x_reamicro_host_account_id in set(config.get("hostAccountAllowlist", [])):
         identity = "host:" + x_reamicro_host_account_id
+    elif x_reamicro_host_account_id and config.get("allowPublic", True) and not api_key_auth_configured(config) and not config.get("accounts") and not config.get("hostAccountAllowlist"):
+        identity = "host-public:" + x_reamicro_host_account_id
     else:
         raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="备份功能需要非公开认证"))
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
@@ -2069,23 +2114,16 @@ async def admin_create_task(
         return HTMLResponse(admin_page(load_config(), f"创建任务失败：{error}", actor=actor), status_code=400)
 
 
+@app.get("/v1/discovery")
+async def discovery() -> dict[str, Any]:
+    """公开能力发现，不返回 API Key、账号或白名单内容。"""
+    return response(public_server_capabilities(load_config()))
+
+
 @app.get("/v1/meta")
 async def meta(_: None = Depends(authenticated)) -> dict[str, Any]:
     config = load_config()
-    return response({
-        "apiVersion": API_VERSION,
-        "serverId": config["serverId"],
-        "features": config["features"],
-        "authModes": ["public", "api_key", "account", "host_account_allowlist"],
-        "authMethods": ["apiKey", "account", "hostAccount", "public"],
-        "packageSchemaVersions": [1],
-        "taskTypes": ["http", "yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"],
-        "maxUploadSize": 50 * 1024 * 1024,
-        "storage": {"state": "sqlite-wal", "multiHost": False},
-        "healthEndpoints": {"live": "/health/live", "ready": "/health/ready", "dependencies": "/health/dependencies"},
-        "minModuleVersion": config["minModuleVersion"],
-        "signingPublicKey": config["signingPublicKey"],
-    })
+    return response({**public_server_capabilities(config), "storage": {"state": "sqlite-wal", "multiHost": False}, "healthEndpoints": {"live": "/health/live", "ready": "/health/ready", "dependencies": "/health/dependencies"}})
 
 
 @app.get("/v1/releases/module/latest")
@@ -2220,6 +2258,17 @@ def credential_public(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def owner_host_account_id(owner: str) -> str:
+    marker = ":host:"
+    if marker in owner:
+        return owner.rsplit(marker, 1)[1]
+    if owner.startswith("host:"):
+        return owner.split(":", 1)[1]
+    if owner.startswith("host-public:"):
+        return owner.split(":", 1)[1]
+    return ""
+
+
 @app.get("/v1/credentials/reamicro")
 async def list_reamicro_credentials(owner: str = Depends(task_owner)) -> dict[str, Any]:
     items = [credential_public(item) for item in load_credentials().values() if item.get("owner") == owner and item.get("type") == "reamicro"]
@@ -2255,6 +2304,12 @@ async def save_reamicro_credential(request: Request, owner: str = Depends(task_o
     )
     if status_code < 200 or status_code >= 300:
         raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_VERIFY_FAILED", message=f"阅微登录密钥验证失败：HTTP {status_code} {redact_message(raw)}"))
+    account_id = str(payload.get("accountId") or "")[:100]
+    owner_account_id = owner_host_account_id(owner)
+    if owner_account_id and account_id and account_id != owner_account_id:
+        raise HTTPException(status_code=403, detail=response(code="ACCOUNT_ID_MISMATCH", message="上传凭据的阅微账号与当前连接账号不一致"))
+    if owner_account_id:
+        account_id = owner_account_id
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     credential_id = str(payload.get("id", "")).strip() or "rea_" + secrets.token_hex(10)
     credentials = load_credentials()
@@ -2266,7 +2321,7 @@ async def save_reamicro_credential(request: Request, owner: str = Depends(task_o
         "owner": owner,
         "type": "reamicro",
         "label": str(payload.get("label") or "阅微账号")[:100],
-        "accountId": str(payload.get("accountId") or "")[:100],
+        "accountId": account_id,
         "secretEncrypted": encrypt_secret({"token": token, "baseUrl": base_url}),
         "createdAt": int(existing.get("createdAt", now)),
         "updatedAt": now,

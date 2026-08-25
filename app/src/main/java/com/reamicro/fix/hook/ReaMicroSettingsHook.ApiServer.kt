@@ -1,8 +1,14 @@
 package com.reamicro.fix.hook
 
 import android.app.Dialog
+import android.graphics.Typeface
+import android.os.Handler
+import android.os.Looper
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.view.View
+import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -24,6 +30,7 @@ import com.reamicro.fix.cloud.api.normalizeApiBaseUrl
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 import com.reamicro.fix.hook.settings.*
 import de.robv.android.xposed.XposedBridge
+import java.io.File
 
 internal fun ReaMicroSettingsHook.apiServerSettingsSubtitle(): String {
     val current = ApiServerSettingsStore { activityProvider()?.applicationContext }.get()
@@ -40,6 +47,7 @@ internal fun ReaMicroSettingsHook.openApiServerSettingsDialog() {
         runCatching {
             val store = ApiServerSettingsStore { activity.applicationContext }
             val current = store.get()
+            val currentCredential = runCatching { accountController.currentCloudCredential() }.getOrNull()
             val colors = SettingsDialogColors(activity)
             val dialog = Dialog(activity)
             val card = settingsDialogCard(activity, colors)
@@ -50,96 +58,146 @@ internal fun ReaMicroSettingsHook.openApiServerSettingsDialog() {
                 setTextColor(colors.title)
             }
             card.addView(enabled, apiServerRowParams(activity))
-            val url = apiServerEdit(activity, "服务器地址，例如 https://example.com", current.baseUrl)
+            val url = apiServerEdit(activity, colors, "服务器地址，例如 https://example.com", current.baseUrl)
             card.addView(url, apiServerRowParams(activity))
-            val authModes = ApiAuthMode.entries
+            val authModes = mutableListOf(current.authMode)
             val authMode = Spinner(activity).apply {
-                adapter = ArrayAdapter(
-                    activity,
-                    android.R.layout.simple_spinner_dropdown_item,
-                    authModes.map {
-                        when (it) {
-                            ApiAuthMode.PUBLIC -> "公开访问"
-                            ApiAuthMode.API_KEY -> "API Key"
-                            ApiAuthMode.ACCOUNT -> "独立账号"
-                            ApiAuthMode.HOST_ACCOUNT_ALLOWLIST -> "阅微账号白名单"
-                        }
-                    },
-                )
-                setSelection(authModes.indexOf(current.authMode).coerceAtLeast(0))
+                adapter = apiServerAuthAdapter(activity, authModes)
             }
             card.addView(authMode, apiServerRowParams(activity))
-            val key = apiServerEdit(activity, "API Key（可选）", current.apiKey).apply {
+            val key = apiServerEdit(activity, colors, "API Key", current.apiKey).apply {
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             }
             card.addView(key, apiServerRowParams(activity))
-            val accountName = apiServerEdit(activity, "独立账号", current.accountName)
+            val accountName = apiServerEdit(activity, colors, "独立账号", current.accountName)
             card.addView(accountName, apiServerRowParams(activity))
-            val accountPassword = apiServerEdit(activity, "独立账号密码", current.accountPassword).apply {
+            val accountPassword = apiServerEdit(activity, colors, "独立账号密码", current.accountPassword).apply {
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             }
             card.addView(accountPassword, apiServerRowParams(activity))
-            val hostAccount = apiServerEdit(activity, "阅微账号 ID（白名单模式）", current.hostAccountId)
+            val hostAccount = TextView(activity).apply {
+                setTextColor(colors.body)
+                text = currentCredential?.let { "当前阅微账号：${it.label}（${it.accountId}）" } ?: "当前未登录阅微账号"
+                setPadding(24, 8, 24, 8)
+            }
             card.addView(hostAccount, apiServerRowParams(activity))
             val allowHttp = settingsDialogSwitchRow(activity, "允许局域网 HTTP", current.allowHttp, colors)
             card.addView(allowHttp)
             val autoUpdate = settingsDialogSwitchRow(activity, "自动检查内容库更新", current.autoCheckUpdates, colors)
             card.addView(autoUpdate)
             val status = TextView(activity).apply {
-                text = "认证模式：${current.authMode.wireValue}\n支持模式会在连接后从服务器读取"
+                text = "输入服务器地址后自动识别认证模式"
                 setTextColor(colors.body)
                 setPadding(24, 8, 24, 8)
             }
             card.addView(status)
+
+            fun selectedMode(): ApiAuthMode = authModes.getOrElse(authMode.selectedItemPosition) { current.authMode }
+
+            fun updateAuthFields(mode: ApiAuthMode, modes: Set<ApiAuthMode>) {
+                authMode.visibility = if (modes.size > 1 && modes != setOf(ApiAuthMode.PUBLIC)) View.VISIBLE else View.GONE
+                key.visibility = if (mode == ApiAuthMode.API_KEY) View.VISIBLE else View.GONE
+                accountName.visibility = if (mode == ApiAuthMode.ACCOUNT) View.VISIBLE else View.GONE
+                accountPassword.visibility = if (mode == ApiAuthMode.ACCOUNT) View.VISIBLE else View.GONE
+                hostAccount.visibility = if (mode == ApiAuthMode.HOST_ACCOUNT_ALLOWLIST) View.VISIBLE else View.GONE
+            }
+
+            fun draftSettings(mode: ApiAuthMode = selectedMode()): ApiServerSettings = current.copy(
+                enabled = enabled.isChecked,
+                baseUrl = url.text.toString(),
+                apiKey = key.text.toString(),
+                accountName = accountName.text.toString(),
+                accountPassword = accountPassword.text.toString(),
+                hostAccountId = currentCredential?.accountId.orEmpty(),
+                authMode = mode,
+                allowHttp = allowHttp.isChecked,
+                autoCheckUpdates = autoUpdate.isChecked,
+            )
+
+            fun applyDiscovery(meta: com.reamicro.fix.cloud.api.ApiServerMeta) {
+                authModes.clear()
+                authModes.addAll(meta.authModes.ifEmpty { setOf(ApiAuthMode.PUBLIC) })
+                val preferred = com.reamicro.fix.cloud.api.selectApiAuthMode(meta, draftSettings(current.authMode))
+                    ?: authModes.first()
+                authMode.adapter = apiServerAuthAdapter(activity, authModes)
+                authMode.setSelection(authModes.indexOf(preferred).coerceAtLeast(0))
+                updateAuthFields(preferred, meta.authModes)
+                status.text = when (preferred) {
+                    ApiAuthMode.PUBLIC -> "认证模式：公开访问"
+                    ApiAuthMode.HOST_ACCOUNT_ALLOWLIST -> currentCredential?.let { "认证模式：阅微账号白名单\n正在验证账号 ${it.accountId}……" }
+                        ?: "连接被服务器拒绝：请先登录阅微账号"
+                    ApiAuthMode.API_KEY -> "认证模式：API Key"
+                    ApiAuthMode.ACCOUNT -> "认证模式：独立账号"
+                }
+            }
+
+            fun probe(showProgress: Boolean = true, onSuccess: ((ApiServerSettings) -> Unit)? = null) {
+                val base = draftSettings()
+                runCatching { normalizeApiBaseUrl(base.baseUrl, base.allowHttp) }
+                    .onFailure { status.text = it.message ?: "地址无效" }
+                    .onSuccess {
+                        if (showProgress) status.text = "正在识别服务器设置……"
+                        Thread {
+                            val client = ApiServerClient(store)
+                            val discovered = runCatching { client.discovery(base) }
+                            activity.runOnUiThread {
+                                discovered.onSuccess(::applyDiscovery)
+                                    .onFailure { status.text = it.message ?: "服务器能力识别失败" }
+                            }
+                            val meta = discovered.getOrNull() ?: return@Thread
+                            val mode = com.reamicro.fix.cloud.api.selectApiAuthMode(meta, base) ?: return@Thread
+                            val resolved = base.copy(authMode = mode)
+                            if (mode == ApiAuthMode.HOST_ACCOUNT_ALLOWLIST && resolved.hostAccountId.isBlank()) return@Thread
+                            if (mode == ApiAuthMode.API_KEY && resolved.apiKey.isBlank()) return@Thread
+                            if (mode == ApiAuthMode.ACCOUNT && (resolved.accountName.isBlank() || resolved.accountPassword.isBlank())) return@Thread
+                            val result = client.probe(resolved)
+                            activity.runOnUiThread {
+                                if (result.success) {
+                                    status.text = result.message
+                                    onSuccess?.invoke(resolved.copy(authMode = result.resolvedAuthMode ?: mode))
+                                } else {
+                                    status.text = result.message
+                                }
+                            }
+                        }.start()
+                    }
+            }
+
+            authMode.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    updateAuthFields(selectedMode(), authModes.toSet())
+                }
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+            }
+            updateAuthFields(current.authMode, setOf(current.authMode))
+            val handler = Handler(Looper.getMainLooper())
+            var pendingDiscovery = Runnable {}
+            url.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                override fun afterTextChanged(s: Editable?) {
+                    handler.removeCallbacks(pendingDiscovery)
+                    pendingDiscovery = Runnable { if (enabled.isChecked && !s.isNullOrBlank()) probe(showProgress = false) }
+                    handler.postDelayed(pendingDiscovery, 700L)
+                }
+            })
             val actions = settingsDialogActions(activity)
             actions.addView(settingsDialogButton(activity, "测试连接", colors, SettingsDialogButtonRole.Neutral).apply {
-                setOnClickListener {
-                    val next = current.copy(
-                        enabled = enabled.isChecked,
-                        baseUrl = url.text.toString(),
-                        apiKey = key.text.toString(),
-                        accountName = accountName.text.toString(),
-                        accountPassword = accountPassword.text.toString(),
-                        hostAccountId = hostAccount.text.toString(),
-                        authMode = authModes[authMode.selectedItemPosition],
-                        allowHttp = allowHttp.isChecked,
-                        autoCheckUpdates = autoUpdate.isChecked,
-                    )
-                    runCatching { normalizeApiBaseUrl(next.baseUrl, next.allowHttp) }
-                        .onFailure { status.text = it.message ?: "地址无效" }
-                        .onSuccess {
-                            status.text = "正在连接……"
-                            Thread {
-                                val result = ApiServerClient(store).probe(next)
-                                activity.runOnUiThread {
-                                    status.text = if (result.success) {
-                                        "连接成功：${result.meta?.features?.joinToString().orEmpty()}"
-                                    } else result.message
-                                }
-                            }.start()
-                        }
-                }
+                setOnClickListener { probe() }
             }, settingsDialogButtonParams(activity))
             actions.addView(settingsDialogButton(activity, "保存", colors, SettingsDialogButtonRole.Primary).apply {
                 setOnClickListener {
-                    val next = current.copy(
-                        enabled = enabled.isChecked,
-                        baseUrl = url.text.toString(),
-                        apiKey = key.text.toString(),
-                        accountName = accountName.text.toString(),
-                        accountPassword = accountPassword.text.toString(),
-                        hostAccountId = hostAccount.text.toString(),
-                        authMode = authModes[authMode.selectedItemPosition],
-                        allowHttp = allowHttp.isChecked,
-                        autoCheckUpdates = autoUpdate.isChecked,
-                    )
-                    runCatching { normalizeApiBaseUrl(next.baseUrl, next.allowHttp) }
-                        .onFailure { status.text = it.message ?: "地址无效" }
-                        .onSuccess {
-                            store.save(next)
+                    if (!enabled.isChecked) {
+                        store.save(draftSettings())
+                        dialog.dismiss()
+                        showToast("API 服务器已停用")
+                    } else {
+                        probe(onSuccess = { resolved ->
+                            store.save(resolved)
                             dialog.dismiss()
                             showToast("API 服务器设置已保存")
-                        }
+                        })
+                    }
                 }
             }, settingsDialogButtonParams(activity))
             actions.addView(settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply {
@@ -147,6 +205,7 @@ internal fun ReaMicroSettingsHook.openApiServerSettingsDialog() {
             }, settingsDialogButtonParams(activity))
             card.addView(actions)
             showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
+            if (current.enabled && current.baseUrl.isNotBlank()) probe(showProgress = false)
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX api server settings dialog failed: ${it.stackTraceToString()}")
         }
@@ -157,6 +216,11 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
     val activity = activityProvider() ?: return
     activity.runOnUiThread {
         val store = ApiServerSettingsStore { activity.applicationContext }
+        val currentCredential = runCatching { accountController.currentCloudCredential() }.getOrNull()
+        currentCredential?.let { credential ->
+            val saved = store.get()
+            if (saved.hostAccountId != credential.accountId) store.save(saved.copy(hostAccountId = credential.accountId))
+        }
         val client = ApiServerClient(store)
         val colors = SettingsDialogColors(activity)
         val dialog = Dialog(activity)
@@ -165,24 +229,26 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
         val credentialIds = mutableListOf<String>()
         val loadedTasks = mutableListOf<com.reamicro.fix.cloud.api.CloudTask>()
         val credentialSpinner = Spinner(activity).apply {
-            adapter = ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, listOf("正在读取已有凭据……"))
+            adapter = apiServerStringAdapter(activity, listOf("正在读取已有凭据……"))
         }
         card.addView(credentialSpinner, apiServerRowParams(activity))
-        val token = apiServerEdit(activity, "阅微登录密钥（只传输 HTTPS）", "").apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        val currentAccount = TextView(activity).apply {
+            setTextColor(colors.body)
+            text = currentCredential?.let { "将自动上传当前阅微登录：${it.label}（账号 ${it.accountId}）" }
+                ?: "当前未检测到阅微登录，请先在阅微登录账号"
+            setPadding(24, 8, 24, 8)
         }
-        val label = apiServerEdit(activity, "凭据名称", "阅微账号")
-        val accountId = apiServerEdit(activity, "阅微账号 ID（可选）", "")
-        val time = apiServerEdit(activity, "每日执行时间，例如 00:05", "00:05")
-        val duration = apiServerEdit(activity, "云端阅读时长（分钟）", "30")
-        val customBook = apiServerEdit(activity, "自定义图书：每行 cloudBookId|书名；留空读取最近阅读", "").apply {
+        val label = apiServerEdit(activity, colors, "凭据名称", currentCredential?.label ?: "阅微账号")
+        val time = apiServerEdit(activity, colors, "每日执行时间，例如 00:05", "00:05")
+        val duration = apiServerEdit(activity, colors, "云端阅读时长（分钟）", "30")
+        val customBook = apiServerEdit(activity, colors, "自定义图书：每行 cloudBookId|书名；留空读取最近阅读", "").apply {
             minLines = 3
             setSingleLine(false)
         }
         val checkin = android.widget.Switch(activity).apply { text = "野社零点云端签到"; setTextColor(colors.title) }
         val draw = android.widget.Switch(activity).apply { text = "野社自动抽卡"; setTextColor(colors.title) }
         val read = android.widget.Switch(activity).apply { text = "云端自动阅读"; setTextColor(colors.title) }
-        listOf(token, label, accountId, time, duration, customBook, checkin, draw, read).forEach { view -> card.addView(view, apiServerRowParams(activity)) }
+        listOf(currentAccount, label, time, duration, customBook, checkin, draw, read).forEach { view -> card.addView(view, apiServerRowParams(activity)) }
         val status = TextView(activity).apply { setTextColor(colors.body); text = "凭据将在服务器端加密保存，模块设置备份不包含该密钥。" }
         card.addView(status, apiServerRowParams(activity))
         Thread {
@@ -195,11 +261,10 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
                     credentialIds.addAll(credentials.map { it.id })
                     loadedTasks.clear()
                     loadedTasks.addAll(tasks)
-                    credentialSpinner.adapter = ArrayAdapter(
+                    credentialSpinner.adapter = apiServerStringAdapter(
                         activity,
-                        android.R.layout.simple_spinner_dropdown_item,
                         credentials.map { "${it.label}${it.accountId.takeIf(String::isNotBlank)?.let { id -> " · $id" }.orEmpty()}" }
-                            .ifEmpty { listOf("没有已上传凭据，请填写登录密钥") },
+                            .ifEmpty { listOf("当前账号尚未上传凭据") },
                     )
                     fun applyCredentialTasks(position: Int) {
                         val selectedId = credentialIds.getOrNull(position).orEmpty()
@@ -212,7 +277,9 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
                         override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
                     }
                     applyCredentialTasks(credentialSpinner.selectedItemPosition)
-                    status.text = "已读取 ${credentials.size} 个凭据、${tasks.size} 个任务；留空登录密钥可复用已选凭据。"
+                    val currentIndex = credentials.indexOfFirst { it.accountId == currentCredential?.accountId }
+                    if (currentIndex >= 0) credentialSpinner.setSelection(currentIndex)
+                    status.text = "已读取 ${credentials.size} 个凭据、${tasks.size} 个任务；保存时会自动刷新当前阅微登录密钥。"
                 }
             }.onFailure { error -> activity.runOnUiThread { status.text = error.message ?: "读取云端配置失败" } }
         }.start()
@@ -223,12 +290,12 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
                 Thread {
                     runCatching {
                         val manager = CloudTaskManager(client)
-                        val enteredToken = token.text.toString().trim()
-                        val credentialId = if (enteredToken.isNotBlank()) {
-                            manager.uploadCredential(enteredToken, label.text.toString(), accountId.text.toString()).id
-                        } else {
-                            credentialIds.getOrNull(credentialSpinner.selectedItemPosition) ?: error("请先上传或选择阅微凭据")
-                        }
+                        val freshCredential = accountController.currentCloudCredential()
+                        val credentialId = manager.uploadCredential(
+                            freshCredential.token,
+                            label.text.toString().ifBlank { freshCredential.label },
+                            freshCredential.accountId,
+                        ).id
                         val selectedBooks = parseCloudReadingBooks(customBook.text.toString())
                         val readRequest = org.json.JSONObject().put("durationMinutes", duration.text.toString().toIntOrNull()?.coerceIn(1, 720) ?: 30)
                         if (selectedBooks.length() > 0) readRequest.put("books", selectedBooks)
@@ -455,7 +522,7 @@ internal fun ReaMicroSettingsHook.openCredentialBackupDialog() {
             setTextColor(colors.body)
             text = "备份在本机用口令派生密钥加密，服务器只保存密文。模块设置备份不会包含账号密钥。"
         }, apiServerRowParams(activity))
-        val password = apiServerEdit(activity, "备份口令（至少 8 位）", "").apply {
+        val password = apiServerEdit(activity, colors, "备份口令（至少 8 位）", "").apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
         val status = TextView(activity).apply { setTextColor(colors.body) }
@@ -492,13 +559,63 @@ internal fun ReaMicroSettingsHook.openCredentialBackupDialog() {
     }
 }
 
-private fun apiServerEdit(activity: android.app.Activity, hint: String, value: String): EditText =
+private fun ReaMicroSettingsHook.apiServerEdit(
+    activity: android.app.Activity,
+    colors: ReaMicroSettingsHook.SettingsDialogColors,
+    hint: String,
+    value: String,
+): EditText =
     EditText(activity).apply {
         this.hint = hint
         setText(value)
         setSingleLine(true)
+        typeface = apiServerTypeface(activity)
+        setTextColor(colors.title)
+        setHintTextColor(colors.body)
         setPadding(24, 8, 24, 8)
     }
+
+private fun ReaMicroSettingsHook.apiServerAuthAdapter(activity: android.app.Activity, modes: List<ApiAuthMode>): ArrayAdapter<String> =
+    apiServerStringAdapter(
+        activity,
+        modes.map {
+            when (it) {
+                ApiAuthMode.PUBLIC -> "公开访问"
+                ApiAuthMode.API_KEY -> "API Key"
+                ApiAuthMode.ACCOUNT -> "独立账号"
+                ApiAuthMode.HOST_ACCOUNT_ALLOWLIST -> "阅微账号白名单"
+            }
+        },
+    )
+
+private fun ReaMicroSettingsHook.apiServerStringAdapter(
+    activity: android.app.Activity,
+    values: List<String>,
+): ArrayAdapter<String> = object : ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, values) {
+    private val globalTypeface = apiServerTypeface(activity)
+
+    init {
+        setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+    }
+
+    override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
+        super.getView(position, convertView, parent).also { (it as? TextView)?.typeface = globalTypeface }
+
+    override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View =
+        super.getDropDownView(position, convertView, parent).also { (it as? TextView)?.typeface = globalTypeface }
+}
+
+private fun ReaMicroSettingsHook.apiServerTypeface(activity: android.app.Activity): Typeface {
+    val selection = settings.fontSettings().globalFamily.trim()
+    if (selection.isBlank() || selection == "system") return Typeface.DEFAULT
+    if (selection == "serif") return Typeface.SERIF
+    val direct = File(selection)
+    val file = direct.takeIf(File::isFile) ?: fontDirectories(activity)
+        .asSequence()
+        .flatMap { it.listFiles()?.asSequence() ?: emptySequence() }
+        .firstOrNull { it.isFile && it.name == direct.name }
+    return file?.let { runCatching { Typeface.createFromFile(it) }.getOrNull() } ?: Typeface.DEFAULT
+}
 
 private fun apiServerRowParams(activity: android.app.Activity): LinearLayout.LayoutParams =
     LinearLayout.LayoutParams(
