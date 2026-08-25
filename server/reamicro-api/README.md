@@ -86,6 +86,8 @@ X-ReaMicro-Api-Key: <key>
 
 云任务和阅微凭据现使用 `/data/state/reamicro.sqlite3` 的 SQLite WAL 事务库。升级时会自动导入旧的 `tasks.json` 和 `credentials.json`，并把原文件保留为 `.migrated`。后台“服务器数据保护”可以创建包含数据库和 `server.json` 的 ZIP 快照，保存于 `/data/backups/server`，最多保留 30 份。存活与就绪检查分别为 `/health/live` 和 `/health/ready`。
 
+生产部署建议启用 Compose 中的 `worker` 服务：API 设置 `REAMICRO_RUN_SCHEDULER=false`，Worker 设置为 `true`，并确保两者挂载同一个 `/data`。任务失败会指数退避并在超过重试上限后暂停；API 创建任务和凭据时可发送 `Idempotency-Key` 防止网络重试重复创建。若暂时只运行 API 容器，默认调度器仍保持兼容运行。
+
 ## 内容包目录
 
 将包放到 `data/packages/<kind>/<packageId>/`，目录中包含 `manifest.json` 和 payload 文件：

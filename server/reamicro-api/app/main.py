@@ -65,6 +65,8 @@ rate_lock = threading.RLock()
 rate_buckets: dict[str, list[float]] = {}
 RATE_LIMIT = max(int(os.getenv("REAMICRO_RATE_LIMIT", "120")), 10)
 RATE_WINDOW_SECONDS = 60
+RUN_SCHEDULER = os.getenv("REAMICRO_RUN_SCHEDULER", "true").lower() == "true"
+RUN_RELEASE_SYNC = os.getenv("REAMICRO_RUN_RELEASE_SYNC", "true").lower() == "true"
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -257,6 +259,28 @@ def next_task_run(task: dict[str, Any], now_ms: int | None = None) -> int:
     schedule = task.get("schedule", {})
     if not isinstance(schedule, dict) or not schedule.get("timeOfDay"):
         return now_ms + task_interval(task) * 1000
+
+
+def retry_delay_seconds(task: dict[str, Any]) -> int:
+    attempts = max(int(task.get("consecutiveFailures", 0)), 1)
+    return min(300 * (2 ** (attempts - 1)), 21_600)
+
+
+def recover_interrupted_tasks() -> int:
+    tasks = load_tasks()
+    recovered = 0
+    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    for task in tasks.values():
+        if task.get("status") != "running":
+            continue
+        task["status"] = "scheduled"
+        task["lastMessage"] = "服务器重启后已恢复中断任务"
+        task["nextRunAt"] = now + 60_000
+        recovered += 1
+    if recovered:
+        save_tasks(tasks)
+        audit_event("interrupted_tasks_recovered", metadata={"count": recovered})
+    return recovered
     try:
         hour_text, minute_text = str(schedule.get("timeOfDay")).split(":", 1)
         offset = int(schedule.get("timezoneOffsetMinutes", 480))
@@ -493,7 +517,23 @@ async def task_scheduler_loop() -> None:
                     task["status"] = result
                     task["lastMessage"] = message
                     task["runCount"] = int(task.get("runCount", 0)) + 1
-                    task["nextRunAt"] = next_task_run(task, now) if result != "paused" else 0
+                    if result == "success":
+                        task["consecutiveFailures"] = 0
+                        task["nextRunAt"] = next_task_run(task, now)
+                    elif result == "failed":
+                        task["consecutiveFailures"] = int(task.get("consecutiveFailures", 0)) + 1
+                        max_retries = max(0, min(int(task.get("maxRetries", 3)), 10))
+                        if task["consecutiveFailures"] <= max_retries:
+                            task["status"] = "scheduled"
+                            task["nextRunAt"] = now + retry_delay_seconds(task) * 1000
+                            task["lastMessage"] = f"{message}；将在退避后重试"
+                        else:
+                            task["status"] = "paused"
+                            task["enabled"] = False
+                            task["nextRunAt"] = 0
+                            task["lastMessage"] = f"{message}；连续失败超过上限，任务已暂停"
+                    else:
+                        task["nextRunAt"] = 0
                     changed = True
                     save_tasks(tasks)
                 finally:
@@ -595,8 +635,12 @@ async def release_sync_loop() -> None:
 
 @app.on_event("startup")
 async def start_release_sync() -> None:
-    asyncio.create_task(release_sync_loop())
-    asyncio.create_task(task_scheduler_loop())
+    get_state_store()
+    if RUN_RELEASE_SYNC:
+        asyncio.create_task(release_sync_loop())
+    if RUN_SCHEDULER:
+        recover_interrupted_tasks()
+        asyncio.create_task(task_scheduler_loop())
 
 
 def response(data: Any = None, code: str = "OK", message: str = "", request_id: str = "") -> dict[str, Any]:
@@ -1432,6 +1476,8 @@ async def admin_create_task(
             "createdAt": now,
             "nextRunAt": now,
             "runCount": 0,
+            "maxRetries": 3,
+            "consecutiveFailures": 0,
         }
         save_tasks(tasks)
         task_log(task_id, "管理员创建任务")
@@ -1570,6 +1616,13 @@ async def save_reamicro_credential(request: Request, owner: str = Depends(task_o
     except ValueError:
         raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_INVALID", message="凭据 JSON 无效"))
     token = str(payload.get("token", "")).strip() if isinstance(payload, dict) else ""
+    idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+    if idempotency_key:
+        if len(idempotency_key) > 128:
+            raise HTTPException(status_code=400, detail=response(code="IDEMPOTENCY_INVALID", message="Idempotency-Key 过长"))
+        previous = get_state_store().get_idempotency(owner, "save_credential", idempotency_key)
+        if previous:
+            return previous
     if len(token) < 16 or len(token) > 8_192:
         raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_INVALID", message="阅微登录密钥长度无效"))
     base_url = str(payload.get("baseUrl") or "https://api.reamicro.zhendong.ltd/").strip()
@@ -1603,7 +1656,10 @@ async def save_reamicro_credential(request: Request, owner: str = Depends(task_o
         "lastVerifyMessage": "验证成功",
     }
     save_credentials(credentials)
-    return response(credential_public(credentials[credential_id]))
+    result = response(credential_public(credentials[credential_id]))
+    if idempotency_key:
+        get_state_store().save_idempotency(owner, "save_credential", idempotency_key, result, now)
+    return result
 
 
 @app.delete("/v1/credentials/reamicro/{credential_id}")
@@ -1641,6 +1697,13 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
         raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务 JSON 无效"))
     if not isinstance(payload, dict) or not payload.get("taskType"):
         raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="缺少 taskType"))
+    idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+    if idempotency_key:
+        if len(idempotency_key) > 128:
+            raise HTTPException(status_code=400, detail=response(code="IDEMPOTENCY_INVALID", message="Idempotency-Key 过长"))
+        previous = get_state_store().get_idempotency(owner, "create_task", idempotency_key)
+        if previous:
+            return previous
     task_type = str(payload.get("taskType", "")).strip()
     if task_type not in {"http", "yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"}:
         raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="不支持的任务类型"))
@@ -1670,6 +1733,8 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
         "createdAt": now,
         "nextRunAt": int(payload.get("nextRunAt", now)),
         "runCount": 0,
+        "maxRetries": max(0, min(int(payload.get("maxRetries", 3) or 3), 10)),
+        "consecutiveFailures": 0,
     }
     task["credentialId"] = credential_id
     task["requestEncrypted"] = encrypt_secret(request_value)
@@ -1678,7 +1743,10 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
     tasks[task_id] = task
     save_tasks(tasks)
     task_log(task_id, "任务已创建")
-    return response(public_task(task))
+    result = response(public_task(task))
+    if idempotency_key:
+        get_state_store().save_idempotency(owner, "create_task", idempotency_key, result, now)
+    return result
 
 
 @app.get("/v1/tasks")

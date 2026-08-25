@@ -42,6 +42,28 @@ services:
       REAMICRO_SERVER_BACKUP_ROOT: /data/backups/server
       REAMICRO_AUDIT_ROOT: /data/audit
       REAMICRO_RATE_LIMIT: ${REAMICRO_RATE_LIMIT:-120}
+      REAMICRO_RUN_SCHEDULER: "false"
+      REAMICRO_RUN_RELEASE_SYNC: "true"
+
+  worker:
+    image: ghcr.io/yghfv/reamicro-extend/reamicro-api:latest
+    pull_policy: always
+    container_name: reamicro-worker
+    restart: unless-stopped
+    stop_grace_period: 60s
+    command: ["python", "-m", "app.worker"]
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    volumes:
+      - ./data:/data
+    environment:
+      REAMICRO_CONFIG_ROOT: /data/config
+      REAMICRO_TASK_ROOT: /data/tasks
+      REAMICRO_ACCOUNT_ROOT: /data/accounts
+      REAMICRO_STATE_DB: /data/state/reamicro.sqlite3
+      REAMICRO_SECRET_KEY: ${REAMICRO_SECRET_KEY:-}
+      REAMICRO_RUN_SCHEDULER: "true"
+      REAMICRO_RUN_RELEASE_SYNC: "false"
 
   watchtower:
     image: containrrr/watchtower:1.7.1

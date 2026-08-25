@@ -58,6 +58,22 @@ class CloudTaskSecurityTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             main.normalized_time_of_day("25:00")
 
+    def test_retry_delay_and_interrupted_recovery(self):
+        task = {"consecutiveFailures": 1}
+        self.assertEqual(main.retry_delay_seconds(task), 300)
+        task["consecutiveFailures"] = 4
+        self.assertEqual(main.retry_delay_seconds(task), 2400)
+        main.save_tasks({"task_1": {"id": "task_1", "status": "running", "enabled": True}})
+        self.assertEqual(main.recover_interrupted_tasks(), 1)
+        recovered = main.load_tasks()["task_1"]
+        self.assertEqual(recovered["status"], "scheduled")
+
+    def test_idempotency_storage(self):
+        store = main.get_state_store()
+        value = {"code": "OK", "data": {"id": "task_1"}}
+        store.save_idempotency("account:alice", "create_task", "request-1", value, 100_000_000)
+        self.assertEqual(store.get_idempotency("account:alice", "create_task", "request-1"), value)
+
 
 class AdminSecurityTest(unittest.TestCase):
     def setUp(self):
