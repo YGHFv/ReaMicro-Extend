@@ -456,9 +456,16 @@ def credential_for_task(task: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
     credential = credentials.get(credential_id)
     if not credential or credential.get("owner") != task.get("owner"):
         raise ValueError("阅微凭据不存在或不属于当前账号")
-    secret = decrypt_secret(str(credential.get("secretEncrypted", "")))
+    if not credential.get("enabled", True):
+        raise ValueError("阅微凭据已暂停，请重新验证后再运行任务")
+    try:
+        secret = decrypt_secret(str(credential.get("secretEncrypted", "")))
+    except Exception as error:
+        update_credential_health(str(credential.get("id", credential_id)), False, f"凭据解密失败：{error}")
+        raise ValueError("阅微凭据无法解密，请重新上传")
     if not isinstance(secret, dict) or not secret.get("token"):
         raise ValueError("阅微凭据无有效 token")
+    update_credential_health(str(credential.get("id", credential_id)), True, "任务使用成功", used=True)
     return request, secret
 
 
@@ -1402,7 +1409,8 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
     for credential in sorted(load_credentials().values(), key=lambda value: int(value.get("updatedAt", 0)), reverse=True):
         owner = str(credential.get("owner", ""))
         owner_display = owner[:12] + "…" if len(owner) > 12 else owner
-        credential_rows.append(f"<tr><td>{esc(credential.get('id', ''))}</td><td>{esc(credential.get('accountId', '') or '未提供')}</td><td>{esc(credential.get('label', '阅微账号'))}</td><td>{esc(owner_display)}</td><td>{esc(credential.get('lastVerifyMessage', ''))}</td><td>{esc(credential.get('updatedAt', ''))}</td></tr>")
+        public_credential = credential_public(credential)
+        credential_rows.append(f"<tr><td>{esc(credential.get('id', ''))}</td><td>{esc(credential.get('accountId', '') or '未提供')}</td><td>{esc(credential.get('label', '阅微账号'))}</td><td>{esc(owner_display)}</td><td><span class='status status-{esc(public_credential.get('health', 'unverified'))}'>{esc(public_credential.get('health', 'unverified'))}</span><small>{esc(credential.get('lastVerifyMessage', ''))}</small></td><td>{esc(credential.get('updatedAt', ''))}</td></tr>")
     credential_table = "".join(credential_rows) or "<tr><td colspan='6' class='empty'>暂无模块上传的阅微凭据</td></tr>"
     task_rows = []
     for task in sorted(load_tasks().values(), key=lambda value: int(value.get("createdAt", 0)), reverse=True):
@@ -2484,6 +2492,18 @@ async def download_credentials_backup(owner: str = Depends(backup_owner)) -> Fil
 
 
 def credential_public(value: dict[str, Any]) -> dict[str, Any]:
+    enabled = bool(value.get("enabled", True))
+    verify_failures = max(int(value.get("verifyFailures", 0)), 0)
+    if not enabled:
+        health = "paused"
+    elif verify_failures >= 3:
+        health = "invalid"
+    elif verify_failures:
+        health = "warning"
+    elif value.get("lastVerifiedAt"):
+        health = "valid"
+    else:
+        health = "unverified"
     return {
         "id": value.get("id", ""),
         "type": value.get("type", "reamicro"),
@@ -2493,7 +2513,47 @@ def credential_public(value: dict[str, Any]) -> dict[str, Any]:
         "updatedAt": value.get("updatedAt", 0),
         "lastVerifiedAt": value.get("lastVerifiedAt", 0),
         "lastVerifyMessage": value.get("lastVerifyMessage", ""),
+        "lastUsedAt": value.get("lastUsedAt", 0),
+        "lastFailedAt": value.get("lastFailedAt", 0),
+        "verifyFailures": verify_failures,
+        "enabled": enabled,
+        "health": health,
     }
+
+
+async def verify_reamicro_secret(token: str, base_url: str) -> tuple[bool, str]:
+    status_code, _, raw = await asyncio.to_thread(
+        json_http_request,
+        base_url,
+        token,
+        {"pageNum": 1, "pageSize": 1},
+        "rest/read/get-reader-record-list",
+    )
+    if 200 <= status_code < 300:
+        return True, "验证成功"
+    return False, f"HTTP {status_code} {redact_message(raw)}"
+
+
+def update_credential_health(credential_id: str, success: bool, message: str, used: bool = False) -> None:
+    credentials = load_credentials()
+    credential = credentials.get(credential_id)
+    if not credential:
+        return
+    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    if used:
+        credential["lastUsedAt"] = now
+    if success:
+        credential["lastVerifiedAt"] = now
+        credential["lastVerifyMessage"] = message
+        credential["verifyFailures"] = 0
+    else:
+        credential["lastFailedAt"] = now
+        credential["lastVerifyMessage"] = message
+        credential["verifyFailures"] = int(credential.get("verifyFailures", 0)) + 1
+        if credential["verifyFailures"] >= 3:
+            credential["enabled"] = False
+    credential["updatedAt"] = now
+    save_credentials(credentials)
 
 
 def owner_host_account_id(owner: str) -> str:
@@ -2533,15 +2593,9 @@ async def save_reamicro_credential(request: Request, owner: str = Depends(task_o
     base_url = str(payload.get("baseUrl") or "https://api.reamicro.zhendong.ltd/").strip()
     if not base_url.startswith("https://"):
         raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_INVALID", message="阅微 API 地址必须使用 HTTPS"))
-    status_code, _, raw = await asyncio.to_thread(
-        json_http_request,
-        base_url,
-        token,
-        {"pageNum": 1, "pageSize": 1},
-        "rest/read/get-reader-record-list",
-    )
-    if status_code < 200 or status_code >= 300:
-        raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_VERIFY_FAILED", message=f"阅微登录密钥验证失败：HTTP {status_code} {redact_message(raw)}"))
+    verified, verify_message = await verify_reamicro_secret(token, base_url)
+    if not verified:
+        raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_VERIFY_FAILED", message=f"阅微登录密钥验证失败：{verify_message}"))
     account_id = str(payload.get("accountId") or "")[:100]
     owner_account_id = owner_host_account_id(owner)
     if owner_account_id and account_id and account_id != owner_account_id:
@@ -2565,6 +2619,10 @@ async def save_reamicro_credential(request: Request, owner: str = Depends(task_o
         "updatedAt": now,
         "lastVerifiedAt": now,
         "lastVerifyMessage": "验证成功",
+        "lastUsedAt": int(existing.get("lastUsedAt", 0)),
+        "lastFailedAt": int(existing.get("lastFailedAt", 0)),
+        "verifyFailures": 0,
+        "enabled": True,
     }
     save_credentials(credentials)
     audit_event("credential_uploaded", f"owner:{owner}", metadata={"credentialId": credential_id, "accountId": account_id, "type": "reamicro"})
@@ -2599,6 +2657,43 @@ async def delete_reamicro_credential(credential_id: str, owner: str = Depends(ta
     if changed:
         save_tasks(tasks)
     return response({"deleted": True})
+
+
+@app.post("/v1/credentials/reamicro/{credential_id}/verify")
+async def verify_reamicro_credential(credential_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    credentials = load_credentials()
+    credential = credentials.get(credential_id)
+    if not credential or credential.get("owner") != owner:
+        raise HTTPException(status_code=404, detail=response(code="CREDENTIAL_NOT_FOUND", message="凭据不存在"))
+    try:
+        secret = decrypt_secret(str(credential.get("secretEncrypted", "")))
+        token = str(secret.get("token", "")) if isinstance(secret, dict) else ""
+        base_url = str(secret.get("baseUrl", "")) if isinstance(secret, dict) else ""
+        verified, message = await verify_reamicro_secret(token, base_url)
+    except Exception as error:
+        verified, message = False, str(error)
+    update_credential_health(credential_id, verified, message)
+    current = load_credentials().get(credential_id, credential)
+    if not verified:
+        raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_VERIFY_FAILED", message=message, data=credential_public(current)))
+    return response(credential_public(current))
+
+
+@app.post("/v1/credentials/reamicro/{credential_id}/toggle")
+async def toggle_reamicro_credential(credential_id: str, request: Request, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    credentials = load_credentials()
+    credential = credentials.get(credential_id)
+    if not credential or credential.get("owner") != owner:
+        raise HTTPException(status_code=404, detail=response(code="CREDENTIAL_NOT_FOUND", message="凭据不存在"))
+    try:
+        payload = await request.json()
+    except ValueError:
+        payload = {}
+    credential["enabled"] = bool(payload.get("enabled", not credential.get("enabled", True))) if isinstance(payload, dict) else not credential.get("enabled", True)
+    credential["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+    save_credentials(credentials)
+    audit_event("credential_toggled", f"owner:{owner}", metadata={"credentialId": credential_id, "enabled": credential["enabled"]})
+    return response(credential_public(credential))
 
 
 @app.post("/v1/tasks")
