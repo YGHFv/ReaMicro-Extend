@@ -67,7 +67,7 @@ X-ReaMicro-Api-Key: <key>
 
 当前实现提供：
 
-- `/v1/health`
+- `/v1/health`（公开存活检查，不需要 API Key；详细依赖状态仍使用 `/health/dependencies`）
 - `/v1/discovery`（公开能力发现，不返回密钥、账号或白名单内容）
 - `/v1/meta`
 - `/v1/diagnostics`

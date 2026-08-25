@@ -1,6 +1,7 @@
 services:
   api:
     image: ghcr.io/yghfv/reamicro-extend/reamicro-api:latest
+    pull_policy: always
     container_name: reamicro-api
     restart: unless-stopped
     stop_grace_period: 30s

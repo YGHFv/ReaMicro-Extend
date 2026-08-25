@@ -147,6 +147,11 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertEqual(modes["authModes"], ["host_account_allowlist"])
         self.assertTrue(modes["authRequired"])
 
+    def test_health_endpoint_is_public_and_returns_server_identity(self):
+        value = asyncio.run(main.health())
+        self.assertEqual(value["data"]["status"], "ok")
+        self.assertIn("serverId", value["data"])
+
     def test_api_key_records_disable_public_discovery(self):
         config = main.load_config()
         config["allowPublic"] = True
@@ -299,6 +304,12 @@ class AdminSecurityTest(unittest.TestCase):
         old_link = asyncio.run(main.admin(section="tasks", q="", actor=actor))
         self.assertEqual(old_link.status_code, 303)
         self.assertEqual(old_link.headers.get("location"), "/admin/tasks")
+
+    def test_admin_task_form_uses_responsive_grid_and_api_version(self):
+        actor = {"username": "owner", "role": "primary", "permissions": []}
+        page = main.admin_page(main.load_config(), actor=actor, section="tasks")
+        self.assertIn(".grid-2", page)
+        self.assertIn("API v1.1", page)
 
     def test_task_page_exposes_state_aware_controls_and_credential_selector(self):
         config = main.load_config()
