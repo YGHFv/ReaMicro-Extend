@@ -1543,7 +1543,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
     csrf_html = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
     records = _admin_package_records()
     can_packages = actor.get("role") == "primary" or "packages:write" in set(actor.get("permissions", []))
-    labels = [("overview", "概览"), ("packages", "全部内容"), ("online_source", "书源"), ("association_source", "关联源"), ("epub_style", "EPUB 样式"), ("highlight_style", "高亮样式"), ("theme", "主题库"), ("tasks", "云端任务"), ("settings", "服务器设置"), ("security", "安全与备份")]
+    labels = [("overview", "概览"), ("packages", "全部内容"), ("online_source", "书源"), ("association_source", "关联源"), ("epub_style", "EPUB 样式"), ("highlight_style", "高亮样式"), ("theme", "主题库"), ("tasks", "云端任务"), ("settings", "服务器设置"), ("security", "子管理员与安全")]
     credential_rows = []
     for credential in sorted(load_credentials().values(), key=lambda value: int(value.get("updatedAt", 0)), reverse=True):
         owner = str(credential.get("owner", ""))
