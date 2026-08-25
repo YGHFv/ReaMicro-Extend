@@ -30,6 +30,15 @@ docker run -d --name reamicro-api \
   ghcr.io/yghfv/reamicro-extend/reamicro-api:latest
 ```
 
+`docker-compose.yml` 已内置 Watchtower。启动编排后，它每 5 分钟检查一次 `latest` 镜像摘要；GitHub Actions 发布新镜像后，Watchtower 会自动拉取并滚动重启 API 容器，同时清理旧镜像。可通过 `.env` 中的 `REAMICRO_IMAGE_UPDATE_INTERVAL` 调整间隔：
+
+```bash
+docker compose up -d
+docker compose logs -f watchtower
+```
+
+Watchtower 只更新带有 `com.centurylinklabs.watchtower.enable=true` 标签的 API 容器。它通过 Docker Socket 管理容器；即使挂载标记为只读，对 Docker API 仍具有较高权限，因此只应使用可信的 Watchtower 镜像和受控的 1Panel 主机。若 GHCR 镜像为私有包，需要让 Docker 守护进程先登录 GHCR，或将包含登录凭据的 Docker config 以只读方式挂载给 Watchtower。
+
 配置 `REAMICRO_API_KEY` 后，客户端请求需要携带：
 
 ```text

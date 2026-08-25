@@ -1,7 +1,17 @@
 services:
   api:
-    build: .
+    image: ghcr.io/yghfv/reamicro-extend/reamicro-api:latest
+    container_name: reamicro-api
     restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5222/v1/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
     ports:
       - "5222:5222"
     volumes:
@@ -28,3 +38,11 @@ services:
       REAMICRO_TASK_ROOT: /data/tasks
       REAMICRO_SECRET_KEY: ${REAMICRO_SECRET_KEY:-}
       REAMICRO_SECRET_BACKUP_ROOT: /data/backups/secrets
+
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    container_name: reamicro-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: --label-enable --interval ${REAMICRO_IMAGE_UPDATE_INTERVAL:-300} --cleanup --rolling-restart

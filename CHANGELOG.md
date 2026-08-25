@@ -6,6 +6,7 @@
 - 镜像同时支持 `linux/amd64` 与 `linux/arm64`，发布 `latest`、分支、版本标签和提交 SHA 标签。
 - Pull Request 只执行多架构构建验证，不推送镜像；构建启用 GitHub Actions 缓存、OCI 元数据、provenance 和 SBOM。
 - 增加 Docker 构建忽略文件，排除本地环境文件、数据卷、测试缓存和 Python 字节码。
+- Docker Compose 增加 Watchtower，默认每 5 分钟检查 GHCR `latest` 镜像并自动滚动更新 API 容器、清理旧镜像；仅更新显式标记的 ReaMicro 容器。
 
 ## 云端自动化任务安全与后台配置 - 2026-08-25
 
