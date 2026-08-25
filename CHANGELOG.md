@@ -7,6 +7,7 @@
 - Pull Request 只执行多架构构建验证，不推送镜像；构建启用 GitHub Actions 缓存、OCI 元数据、provenance 和 SBOM。
 - 增加 Docker 构建忽略文件，排除本地环境文件、数据卷、测试缓存和 Python 字节码。
 - Docker Compose 增加 Watchtower，默认每 5 分钟检查 GHCR `latest` 镜像并自动滚动更新 API 容器、清理旧镜像；仅更新显式标记的 ReaMicro 容器。
+- 补充 1Panel 与私有 GHCR 部署说明：镜像仓库登录、`read:packages` 权限和 Watchtower 读取 Docker config 的挂载方式。
 
 ## 云端自动化任务安全与后台配置 - 2026-08-25
 

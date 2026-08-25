@@ -37,6 +37,22 @@ docker compose up -d
 docker compose logs -f watchtower
 ```
 
+### 1Panel 部署与私有 GHCR
+
+在 1Panel 的「容器 → 编排」中粘贴本文件的 `docker-compose.yml` 内容即可。若 GHCR Package 为私有包，先在 1Panel 的容器镜像仓库中添加 `ghcr.io` 凭据，或在服务器终端执行：
+
+```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
+```
+
+Token 至少需要 `read:packages` 权限。API 容器能否拉取镜像不代表 Watchtower 一定能拉取；Watchtower 需要读取 Docker 登录配置。在 Linux 服务器上把以下卷加入 `watchtower.volumes`（确认宿主机文件确实存在）：
+
+```yaml
+      - /root/.docker/config.json:/config.json:ro
+```
+
+若 1Panel 使用了其他系统用户登录 Docker，请将 `/root/.docker/config.json` 换成该用户的实际 Docker config 路径。也可以把 GHCR Package 设置为公开，避免在 Watchtower 容器中管理凭据。
+
 Watchtower 只更新带有 `com.centurylinklabs.watchtower.enable=true` 标签的 API 容器。它通过 Docker Socket 管理容器；即使挂载标记为只读，对 Docker API 仍具有较高权限，因此只应使用可信的 Watchtower 镜像和受控的 1Panel 主机。若 GHCR 镜像为私有包，需要让 Docker 守护进程先登录 GHCR，或将包含登录凭据的 Docker config 以只读方式挂载给 Watchtower。
 
 配置 `REAMICRO_API_KEY` 后，客户端请求需要携带：

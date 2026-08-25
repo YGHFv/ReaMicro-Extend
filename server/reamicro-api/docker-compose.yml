@@ -45,4 +45,6 @@ services:
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # 私有 GHCR 时取消下一行注释，并替换为实际 Docker config 路径。
+      # - /root/.docker/config.json:/config.json:ro
     command: --label-enable --interval ${REAMICRO_IMAGE_UPDATE_INTERVAL:-300} --cleanup --rolling-restart
