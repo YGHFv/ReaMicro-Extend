@@ -128,6 +128,17 @@ class AdminSecurityTest(unittest.TestCase):
         expected = main._hashlib.sha256(b"persisted-secret-key").digest()
         self.assertEqual(main.secret_cipher_key(), expected)
 
+    def test_admin_page_renders_after_primary_setup(self):
+        config = main.load_config()
+        config["primaryAdmin"] = {
+            "username": "owner",
+            "passwordHash": main.password_hash("owner-password-123"),
+        }
+        page = main.admin_page(config, actor={"username": "owner", "role": "primary"})
+        self.assertIn("ReaMicro API 管理后台", page)
+        self.assertIn('[{"cloudBookId":123', page)
+        self.assertIn("子管理员", page)
+
 
 if __name__ == "__main__":
     unittest.main()
