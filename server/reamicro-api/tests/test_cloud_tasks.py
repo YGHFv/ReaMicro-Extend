@@ -58,6 +58,53 @@ class CloudTaskSecurityTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不属于当前账号"):
             main.credential_for_task(task)
 
+    def test_credential_sync_merges_same_account_and_rebinds_tasks(self):
+        main.save_credentials({
+            "rea_old": {"id": "rea_old", "owner": "host:3", "type": "reamicro", "accountId": "3", "createdAt": 1, "updatedAt": 1},
+            "rea_duplicate": {"id": "rea_duplicate", "owner": "host:3", "type": "reamicro", "accountId": "3", "createdAt": 2, "updatedAt": 2},
+        })
+        main.save_tasks({
+            "task_1": {
+                "id": "task_1",
+                "owner": "host:3",
+                "taskType": "yeshe_checkin",
+                "credentialId": "rea_duplicate",
+                "requestEncrypted": main.encrypt_secret({"credentialId": "rea_duplicate"}),
+            },
+        })
+        payload = json.dumps({"token": "test-token-value-123456", "label": "更新后的账号", "accountId": "3"}).encode("utf-8")
+
+        async def receive():
+            return {"type": "http.request", "body": payload, "more_body": False}
+
+        request = Request({"type": "http", "method": "POST", "path": "/v1/credentials/reamicro", "headers": []}, receive)
+        original_verify = main.verify_reamicro_secret
+
+        async def verified(token, base_url):
+            return True, "验证成功"
+
+        main.verify_reamicro_secret = verified
+        try:
+            result = asyncio.run(main.save_reamicro_credential(request, owner="host:3"))
+        finally:
+            main.verify_reamicro_secret = original_verify
+
+        self.assertEqual(result["data"]["id"], "rea_duplicate")
+        credentials = main.load_credentials()
+        self.assertEqual(list(credentials), ["rea_duplicate"])
+        self.assertEqual(credentials["rea_duplicate"]["label"], "更新后的账号")
+        task = main.load_tasks()["task_1"]
+        self.assertEqual(task["credentialId"], "rea_duplicate")
+        self.assertEqual(main.decrypt_secret(task["requestEncrypted"])["credentialId"], "rea_duplicate")
+
+    def test_admin_read_merges_legacy_duplicate_credentials(self):
+        main.save_credentials({
+            "rea_old": {"id": "rea_old", "owner": "host:3", "type": "reamicro", "accountId": "3", "updatedAt": 1},
+            "rea_new": {"id": "rea_new", "owner": "host:3", "type": "reamicro", "accountId": "3", "updatedAt": 2},
+        })
+        self.assertEqual(main.merge_duplicate_credentials(), 1)
+        self.assertEqual(list(main.load_credentials()), ["rea_new"])
+
     def test_daily_time_validation(self):
         self.assertEqual(main.normalized_time_of_day("7:05"), "07:05")
         with self.assertRaises(ValueError):
@@ -321,6 +368,12 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertIn("value='run'", page)
         self.assertIn("value='pause'", page)
         self.assertIn("value='cancel'", page)
+
+    def test_admin_task_and_owner_labels_are_readable(self):
+        self.assertEqual(main._admin_task_label("cloud_auto_read"), "云端自动阅读")
+        self.assertEqual(main._admin_task_status_label("scheduled"), "等待执行")
+        self.assertEqual(main._admin_owner_label("host:3"), "阅微账号 3")
+        self.assertEqual(main._admin_time_label(1_787_775_994_125), "2026-08-27 04:26")
 
     def test_admin_permissions_and_csrf(self):
         config = main.load_config()

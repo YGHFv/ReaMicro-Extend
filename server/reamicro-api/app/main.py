@@ -196,6 +196,55 @@ def save_credentials(credentials: dict[str, dict[str, Any]]) -> None:
     get_state_store().save_namespace("credentials", credentials)
 
 
+def merge_duplicate_credentials() -> int:
+    """归并历史上同一所有者、同一阅微账号产生的重复同步密钥。"""
+    credentials = load_credentials()
+    groups: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
+    for key, item in credentials.items():
+        if not isinstance(item, dict) or item.get("type", "reamicro") != "reamicro":
+            continue
+        owner = str(item.get("owner", ""))
+        account_id = str(item.get("accountId", ""))
+        if owner and account_id:
+            groups.setdefault((owner, account_id), []).append((key, item))
+    removed: dict[str, str] = {}
+    for (owner, _), items in groups.items():
+        if len(items) < 2:
+            continue
+        items.sort(key=lambda pair: (bounded_config_int(pair[1].get("updatedAt", 0), 0, 0), pair[0]), reverse=True)
+        keep_id = items[0][0]
+        for duplicate_id, _ in items[1:]:
+            credentials.pop(duplicate_id, None)
+            removed[duplicate_id] = keep_id
+    if not removed:
+        return 0
+    save_credentials(credentials)
+    tasks = load_tasks()
+    rebound = False
+    for task in tasks.values():
+        task_owner_value = str(task.get("owner", ""))
+        old_id = str(task.get("credentialId", ""))
+        if old_id in removed:
+            task["credentialId"] = removed[old_id]
+            rebound = True
+        if task.get("requestEncrypted"):
+            try:
+                request_value = decrypt_secret(str(task["requestEncrypted"]))
+            except Exception:
+                request_value = None
+            if isinstance(request_value, dict) and str(request_value.get("credentialId", "")) in removed:
+                request_value["credentialId"] = removed[str(request_value["credentialId"])]
+                task["requestEncrypted"] = encrypt_secret(request_value)
+                rebound = True
+        if task_owner_value and task.get("credentialId") in removed:
+            task["credentialId"] = removed[str(task["credentialId"])]
+            rebound = True
+    if rebound:
+        save_tasks(tasks)
+    audit_event("credentials_merged", metadata={"removedCount": len(removed), "source": "admin_read"})
+    return len(removed)
+
+
 def audit_event(action: str, actor: str = "system", request_id: str = "", success: bool = True, metadata: dict[str, Any] | None = None) -> None:
     """记录不含敏感值的管理与安全事件。"""
     try:
@@ -1553,6 +1602,60 @@ def _admin_kind_label(kind: str) -> str:
     return {"online_source": "书源", "association_source": "关联源", "epub_style": "EPUB 样式", "highlight_style": "高亮样式", "theme": "主题库"}.get(kind, kind)
 
 
+def _admin_task_label(task_type: Any) -> str:
+    return {
+        "yeshe_checkin": "野社零点签到",
+        "yeshe_draw_card": "野社自动抽卡",
+        "cloud_auto_read": "云端自动阅读",
+        "http": "通用 HTTPS 请求",
+    }.get(str(task_type), str(task_type) or "未命名任务")
+
+
+def _admin_task_status_label(status: Any) -> str:
+    return {
+        "scheduled": "等待执行",
+        "running": "执行中",
+        "success": "执行成功",
+        "failed": "执行失败",
+        "paused": "已暂停",
+        "cancelled": "已取消",
+    }.get(str(status), str(status) or "未知")
+
+
+def _admin_health_label(health: Any) -> str:
+    return {
+        "valid": "有效",
+        "warning": "需要验证",
+        "invalid": "已失效",
+        "paused": "已暂停",
+        "unverified": "未验证",
+    }.get(str(health), str(health) or "未验证")
+
+
+def _admin_owner_label(owner: Any) -> str:
+    text = str(owner or "")
+    if text.startswith("host:") or ":host:" in text or text.startswith("host-public:"):
+        account_id = owner_host_account_id(text)
+        return f"阅微账号 {account_id}" if account_id else "阅微账号认证"
+    if text.startswith("account:"):
+        return f"独立账号：{text.split(':', 1)[1]}"
+    if text.startswith("key:"):
+        return "API Key 用户"
+    return text or "未标记"
+
+
+def _admin_time_label(value: Any) -> str:
+    try:
+        timestamp = float(value)
+        if timestamp <= 0:
+            return "未安排"
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000
+        return datetime.fromtimestamp(timestamp, timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return str(value) if value else "未记录"
+
+
 def admin_section_path(section: str) -> str:
     if section in PACKAGE_KINDS:
         return f"/admin/content/{section}"
@@ -1582,6 +1685,7 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
 
 def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] | None = None, secret_notice: str = "", section: str = "overview", query: str = "") -> str:
     """分类管理后台，保留原有写入路由并提供统一内容列表入口。"""
+    merge_duplicate_credentials()
     esc = lambda value: html.escape(str(value), quote=True)
     actor = actor or {"username": "", "role": "subadmin", "permissions": []}
     valid_sections = {"overview", "packages", "tasks", "settings", "security", *PACKAGE_KINDS}
@@ -1595,8 +1699,9 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
         owner = str(credential.get("owner", ""))
         owner_display = owner[:12] + "…" if len(owner) > 12 else owner
         public_credential = credential_public(credential)
-        credential_rows.append(f"<tr><td>{esc(credential.get('id', ''))}</td><td>{esc(credential.get('accountId', '') or '未提供')}</td><td>{esc(credential.get('label', '阅微账号'))}</td><td>{esc(owner_display)}</td><td><span class='status status-{esc(public_credential.get('health', 'unverified'))}'>{esc(public_credential.get('health', 'unverified'))}</span><small>{esc(credential.get('lastVerifyMessage', ''))}</small></td><td>{esc(credential.get('updatedAt', ''))}</td></tr>")
-    credential_table = "".join(credential_rows) or "<tr><td colspan='6' class='empty'>暂无模块上传的阅微凭据</td></tr>"
+        health = str(public_credential.get("health", "unverified"))
+        credential_rows.append(f"<tr><td><strong>{esc(credential.get('label', '阅微账号'))}</strong><small>同步密钥 ID：{esc(credential.get('id', ''))}</small></td><td>{esc(credential.get('accountId', '') or '未提供')}</td><td>{esc(_admin_owner_label(owner))}<small>{esc(owner_display)}</small></td><td><span class='status status-{esc(health)}'>{esc(_admin_health_label(health))}</span><small>{esc(credential.get('lastVerifyMessage', '') or '暂无验证说明')}</small></td><td>{esc(_admin_time_label(credential.get('updatedAt', 0)))}</td></tr>")
+    credential_table = "".join(credential_rows) or "<tr><td colspan='5' class='empty'>暂无模块上传的阅微同步密钥</td></tr>"
     credential_options = "<option value=''>不使用凭据</option>" + "".join(
         f"<option value='{esc(item.get('id', ''))}'>{esc(item.get('label', '阅微账号'))} · {esc(item.get('accountId', '') or item.get('owner', ''))}</option>"
         for item in sorted(load_credentials().values(), key=lambda value: str(value.get('label', '')))
@@ -1617,7 +1722,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
                 buttons.append("<button class='button subtle' name='action' value='cancel'>取消</button>")
             if buttons:
                 task_actions = f"<form class='inline' style='display:inline-flex;flex-direction:row;gap:6px' method='post' action='/admin/tasks/action'>{csrf_html}<input type='hidden' name='task_id' value='{task_id}'>{''.join(buttons)}</form>"
-        task_rows.append(f"<tr><td>{esc(task.get('taskType', ''))}</td><td>{esc(task.get('owner', ''))}</td><td>{esc(task_credential_id(task))}</td><td>{esc(task_status)}</td><td>{'启用' if task.get('enabled', True) else '停用'}</td><td>{esc(task.get('lastMessage', ''))}</td><td>{esc(task.get('nextRunAt', ''))}</td><td><a href='/admin/tasks/{task_id}/logs'>日志</a> {task_actions}</td></tr>")
+        task_rows.append(f"<tr><td><strong>{esc(_admin_task_label(task.get('taskType', '')))}</strong><small>{esc(task.get('taskType', ''))}</small></td><td>{esc(_admin_owner_label(task.get('owner', '')))}</td><td>{esc(task_credential_id(task) or '未关联')}</td><td><span class='status status-{esc(task_status)}'>{esc(_admin_task_status_label(task_status))}</span></td><td>{'已启用' if task.get('enabled', True) else '已停用'}</td><td>{esc(task.get('lastMessage', '') or '暂无执行记录')}</td><td>{esc(_admin_time_label(task.get('nextRunAt', 0)))}</td><td><a href='/admin/tasks/{task_id}/logs'>查看日志</a> {task_actions}</td></tr>")
     task_table = "".join(task_rows) or "<tr><td colspan='8' class='empty'>暂无云端任务</td></tr>"
     nav_html = "".join(f"<a class=\"{'active' if key == section else ''}\" href=\"{admin_section_path(key)}\">{label}<span>{len([x for x in records if x.get('kind') == key]) if key in PACKAGE_KINDS else ''}</span></a>" for key, label in labels)
     notice = f"<div class='notice'>{esc(message)}</div>" if message else ""
@@ -1631,12 +1736,12 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
         if section == "overview":
             content += f"<div class='stats'><div><strong>{len(records)}</strong><span>内容包</span></div><div><strong>{sum(1 for x in records if x.get('status', 'published') == 'published')}</strong><span>已发布</span></div><div><strong>{len(load_tasks())}</strong><span>云端任务</span></div><div><strong>{esc(config.get('serverId', ''))}</strong><span>服务器 ID</span></div></div>"
             content += '<template id="cloud-book-example">[{"cloudBookId":123,"bookId":123,"name":"书名"}]</template>'
-        content += f"<form class='toolbar' method='get' action='{admin_section_path(section)}'><input name='q' value='{esc(query)}' placeholder='搜索名称、包 ID、版本或别名'><button class='button' type='submit'>搜索</button></form><div class='table-wrap'><table><thead><tr><th>类型</th><th>内容</th><th>版本</th><th>状态</th><th>渠道 / 依赖</th><th>操作</th></tr></thead><tbody>{_admin_package_table(visible, can_packages, query, admin_csrf_token(config, actor))}</tbody></table></div>"
+            content += f"<form class='toolbar' method='get' action='{admin_section_path(section)}'><input name='q' value='{esc(query)}' placeholder='搜索名称、包 ID、版本或别名'><button class='button' type='submit'>搜索</button></form><div class='table-wrap'><table><thead><tr><th>类型</th><th>内容</th><th>版本</th><th>状态</th><th>渠道 / 依赖</th><th>操作</th></tr></thead><tbody>{_admin_package_table(visible, can_packages, query, admin_csrf_token(config, actor))}</tbody></table></div>"
     else:
-        task_credentials = f"<div class='stats'><div><strong>{len(load_credentials())}</strong><span>阅微凭据</span></div><div><strong>{len(load_tasks())}</strong><span>云端任务</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('enabled', True))}</strong><span>已启用</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('status') == 'failed')}</strong><span>执行失败</span></div></div><div class='panel'><h2>已上传阅微凭据</h2><p class='muted'>凭据只保存加密密文，后台不会显示登录密钥原文；账号 ID、验证状态和更新时间来自模块上传结果。</p><div class='table-wrap'><table><thead><tr><th>凭据 ID</th><th>阅微账号 ID</th><th>名称</th><th>所有者</th><th>验证状态</th><th>更新时间</th></tr></thead><tbody>{credential_table}</tbody></table></div></div><div class='panel'><h2>任务运行状态</h2><div class='table-wrap'><table><thead><tr><th>任务类型</th><th>所有者</th><th>凭据 ID</th><th>状态</th><th>开关</th><th>最近结果</th><th>下次执行</th><th>日志</th></tr></thead><tbody>{task_table}</tbody></table></div></div>" if section == "tasks" else ""
+        task_credentials = f"<div class='stats'><div><strong>{len(load_credentials())}</strong><span>同步密钥数量</span></div><div><strong>{len(load_tasks())}</strong><span>云端任务数量</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('enabled', True))}</strong><span>已启用任务</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('status') == 'failed')}</strong><span>执行失败任务</span></div></div><div class='panel'><h2>阅微同步密钥</h2><p class='muted'>密钥只保存加密密文，不显示原文。一个阅微账号 ID 对应一个同步密钥；重新同步会更新该账号的原记录。</p><div class='table-wrap'><table><thead><tr><th>名称 / 同步密钥 ID</th><th>阅微账号 ID</th><th>来源账号</th><th>验证状态</th><th>最近更新时间</th></tr></thead><tbody>{credential_table}</tbody></table></div></div><div class='panel'><h2>任务运行状态</h2><div class='table-wrap'><table><thead><tr><th>任务</th><th>来源账号</th><th>同步密钥 ID</th><th>运行状态</th><th>任务开关</th><th>最近结果</th><th>下次执行</th><th>操作 / 日志</th></tr></thead><tbody>{task_table}</tbody></table></div></div>" if section == "tasks" else ""
         if section == "tasks":
             task_form = f"<div class='panel'><h2>创建云端任务</h2><form method='post' action='/admin/tasks/create'>{csrf_html}<div class='grid-2'><label>任务类型<select name='task_type'><option value='yeshe_checkin'>野社零点签到</option><option value='yeshe_draw_card'>野社自动抽卡</option><option value='cloud_auto_read'>云端自动阅读</option><option value='http'>通用 HTTPS 请求</option></select></label><label>每日执行时间<input name='time_of_day' value='00:05'></label><label>凭据<select name='credential_id'>{credential_options}</select></label><label>所有者<input name='owner' value='admin'></label><label>阅读时长（分钟）<input name='duration_minutes' type='number' min='1' max='720' value='30'></label><label>最近阅读数量<input name='recent_limit' type='number' min='1' max='20' value='1'></label></div><label>自定义图书 JSON<textarea name='request_body' placeholder='留空则使用最近阅读记录'></textarea></label><button class='button' type='submit'>创建任务</button></form></div>"
-            content = f"<div class='page-head'><div><p class='eyebrow'>自动化</p><h1>云端任务</h1><p class='muted'>配置、查看和控制自动阅读、签到、抽卡任务。</p></div></div>{task_credentials}{task_form}"
+            content = f"<div class='page-head'><div><p class='eyebrow'>自动化</p><h1>云端任务</h1><p class='muted'>配置、查看和控制自动阅读、签到、抽卡任务。每个阅微账号只保留一个同步密钥，重新同步会更新原密钥。</p></div></div>{task_credentials}{task_form}"
         elif section == "settings":
             content = f"<div class='page-head'><div><p class='eyebrow'>系统</p><h1>服务器设置</h1><p class='muted'>认证、白名单、模块同步和快照配置。</p></div></div><div class='panel'><form method='post' action='/admin/settings'>{csrf_html}<input type='hidden' name='signing_public_key' value='{esc(config.get('signingPublicKey', ''))}'><input type='hidden' name='release_version_code' value='{esc(config.get('releaseVersionCode', 0))}'><input type='hidden' name='github_include_prerelease' value='{'on' if config.get('githubIncludePrerelease') else ''}'><input type='hidden' name='server_snapshot_enabled' value='{'on' if config.get('serverSnapshotEnabled', True) else ''}'><div class='grid-2'><label>服务器 ID<input name='server_id' value='{esc(config.get('serverId', ''))}'></label><label>最低模块版本<input name='min_module_version' value='{esc(config.get('minModuleVersion', ''))}'></label><label>GitHub 仓库<input name='github_repository' value='{esc(config.get('githubRepository', ''))}'></label><label>同步间隔（秒）<input name='release_sync_seconds' type='number' value='{esc(config.get('releaseSyncSeconds', 1800))}'></label><label>快照间隔（秒）<input name='server_snapshot_seconds' type='number' value='{esc(config.get('serverSnapshotSeconds', 86400))}'></label><label>快照保留份数<input name='server_snapshot_retention' type='number' value='{esc(config.get('serverSnapshotRetention', 30))}'></label></div><label>API Key（留空保持）<input type='password' name='api_key'></label><label><input type='checkbox' name='generate_api_key'> 生成新 API Key</label><label><input type='checkbox' name='allow_public' {'checked' if config.get('allowPublic') else ''}> 允许公开访问</label><label>阅微账号白名单<textarea name='host_account_allowlist'>{esc(chr(10).join(config.get('hostAccountAllowlist', [])))}</textarea></label><label>功能列表<textarea name='features'>{esc(','.join(config.get('features', [])))}</textarea></label><button class='button' type='submit'>保存设置</button><button class='button subtle' type='submit' formaction='/admin/sync'>立即同步模块</button></form></div>"
         else:
@@ -3146,18 +3251,26 @@ async def save_reamicro_credential(request: Request, owner: str = Depends(task_o
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     credentials = load_credentials()
     requested_id = str(payload.get("id", "")).strip()
-    matching_id = next(
-        (
-            str(item.get("id", key))
-            for key, item in credentials.items()
-            if item.get("owner") == owner
-            and item.get("type") == "reamicro"
-            and account_id
-            and str(item.get("accountId", "")) == account_id
-        ),
-        "",
-    )
-    credential_id = requested_id or matching_id or "rea_" + secrets.token_hex(10)
+    requested_existing = credentials.get(requested_id) if requested_id else None
+    # 旧客户端可能携带上一个账号的 ID，禁止因此覆盖其他账号的同步密钥。
+    if (
+        isinstance(requested_existing, dict)
+        and requested_existing.get("owner") == owner
+        and account_id
+        and str(requested_existing.get("accountId", "")) != account_id
+    ):
+        requested_id = ""
+    matching_items = [
+        (key, item) for key, item in credentials.items()
+        if item.get("owner") == owner
+        and item.get("type", "reamicro") == "reamicro"
+        and account_id
+        and str(item.get("accountId", "")) == account_id
+    ]
+    matching_items.sort(key=lambda pair: (bounded_config_int(pair[1].get("updatedAt", 0), 0, 0), pair[0]), reverse=True)
+    matching_id = matching_items[0][0] if matching_items else ""
+    # 账号 ID 是同步密钥的唯一业务键；优先复用按账号找到的记录，兼容旧客户端携带的过期 ID。
+    credential_id = matching_id or requested_id or "rea_" + secrets.token_hex(10)
     existing = credentials.get(credential_id, {})
     if existing and existing.get("owner") != owner:
         raise HTTPException(status_code=404, detail=response(code="CREDENTIAL_NOT_FOUND", message="凭据不存在"))
@@ -3177,7 +3290,37 @@ async def save_reamicro_credential(request: Request, owner: str = Depends(task_o
         "verifyFailures": 0,
         "enabled": True,
     }
+    duplicate_ids = [
+        key for key, item in credentials.items()
+        if key != credential_id
+        and item.get("owner") == owner
+        and item.get("type") == "reamicro"
+        and account_id
+        and str(item.get("accountId", "")) == account_id
+    ]
+    for duplicate_id in duplicate_ids:
+        credentials.pop(duplicate_id, None)
     save_credentials(credentials)
+    if duplicate_ids:
+        tasks = load_tasks()
+        rebound = False
+        for task in tasks.values():
+            if task.get("owner") != owner or not task.get("requestEncrypted"):
+                continue
+            try:
+                task_request = decrypt_secret(str(task["requestEncrypted"]))
+            except Exception:
+                continue
+            if not isinstance(task_request, dict) or str(task_request.get("credentialId", "")) not in duplicate_ids:
+                continue
+            task_request["credentialId"] = credential_id
+            task["credentialId"] = credential_id
+            task["requestEncrypted"] = encrypt_secret(task_request)
+            task["updatedAt"] = now
+            rebound = True
+        if rebound:
+            save_tasks(tasks)
+        audit_event("credentials_merged", f"owner:{owner}", metadata={"accountId": account_id, "keptCredentialId": credential_id, "removedCount": len(duplicate_ids)})
     audit_event("credential_uploaded", f"owner:{owner}", metadata={"credentialId": credential_id, "accountId": account_id, "type": "reamicro"})
     result = response(credential_public(credentials[credential_id]))
     if idempotency_key:
