@@ -101,14 +101,10 @@ class CloudTaskManager(private val client: ApiServerClient) {
     }
 
     fun uploadCredential(token: String, label: String, accountId: String = ""): ReaMicroCredential {
-        val existingId = accountId.takeIf(String::isNotBlank)?.let { target ->
-            credentials().firstOrNull { it.accountId == target }?.id
-        }.orEmpty()
         val root = client.saveReaMicroCredential(JSONObject()
             .put("token", token)
             .put("label", label)
-            .put("accountId", accountId)
-            .put("id", existingId))
+            .put("accountId", accountId))
         val item = root.optJSONObject("data") ?: root
         return ReaMicroCredential(
             id = item.optString("id"),

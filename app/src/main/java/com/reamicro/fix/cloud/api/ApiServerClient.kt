@@ -1,8 +1,10 @@
 package com.reamicro.fix.cloud.api
 
 import com.reamicro.fix.association.network.HttpClient
+import com.reamicro.fix.association.network.HttpResponseException
 import org.json.JSONObject
 import java.io.File
+import java.net.SocketTimeoutException
 
 /** API 服务器最小客户端。所有异常都转成结果，调用方可安全降级到本地能力。 */
 class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
@@ -261,11 +263,24 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     private fun taskRequest(method: String, path: String, body: JSONObject?): JSONObject {
         val settings = settingsStore.get()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
-        val response = if (method == "GET") {
-            HttpClient.get("$baseUrl$path", authHeaders(settings), settings.timeoutSeconds * 1_000, settings.timeoutSeconds * 1_000, false)
-        } else {
-            HttpClient.postBytes("$baseUrl$path", body?.toString()?.toByteArray(Charsets.UTF_8) ?: ByteArray(0), "application/json", authHeaders(settings), settings.timeoutSeconds * 1_000, settings.timeoutSeconds * 1_000)
+        val response = try {
+            if (method == "GET") {
+                HttpClient.get("$baseUrl$path", authHeaders(settings), settings.timeoutSeconds * 1_000, settings.timeoutSeconds * 1_000, false)
+            } else {
+                HttpClient.postBytes("$baseUrl$path", body?.toString()?.toByteArray(Charsets.UTF_8) ?: ByteArray(0), "application/json", authHeaders(settings), settings.timeoutSeconds * 1_000, maxOf(settings.timeoutSeconds * 1_000, 60_000))
+            }
+        } catch (error: HttpResponseException) {
+            throw IllegalStateException(apiErrorMessage(error.responseBody, "服务器返回 HTTP ${error.statusCode}"), error)
+        } catch (error: SocketTimeoutException) {
+            throw IllegalStateException("连接服务器超时；上传密钥验证可能需要较长时间，请稍后重试", error)
         }
         return JSONObject(response)
     }
+
+    private fun apiErrorMessage(body: String, fallback: String): String = runCatching {
+        val root = JSONObject(body)
+        root.optString("message").takeIf(String::isNotBlank)
+            ?: root.optJSONObject("detail")?.optString("message")?.takeIf(String::isNotBlank)
+            ?: fallback
+    }.getOrDefault(fallback)
 }

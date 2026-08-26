@@ -3,6 +3,8 @@ package com.reamicro.fix.hook
 import android.app.Activity
 import android.app.Dialog
 import android.content.Context
+import android.content.ComponentCallbacks
+import android.content.res.Configuration
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
@@ -500,7 +502,13 @@ internal fun ReaMicroSettingsHook.settingsDialogScroll(context: Context, card: L
         )
     }
 
-internal fun ReaMicroSettingsHook.showSettingsDialog(dialog: Dialog, content: View, activity: Activity, widthRatio: Float = 0.9f) {
+internal fun ReaMicroSettingsHook.showSettingsDialog(
+    dialog: Dialog,
+    content: View,
+    activity: Activity,
+    widthRatio: Float = 0.9f,
+    dismissOnThemeChange: Boolean = false,
+) {
     dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
     dialog.setContentView(content)
     dialog.window?.let { window ->
@@ -509,6 +517,26 @@ internal fun ReaMicroSettingsHook.showSettingsDialog(dialog: Dialog, content: Vi
         window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
     }
     dialog.show()
+    if (dismissOnThemeChange) {
+        // API 弹窗使用静态 View；主题配置改变时关闭旧实例，避免继续显示混合配色。
+        val callbacks = object : ComponentCallbacks {
+            override fun onConfigurationChanged(newConfig: Configuration) {
+                ModuleDialogTheme.invalidate()
+                runCatching { activity.unregisterComponentCallbacks(this) }
+                if (dialog.isShowing) dialog.dismiss()
+            }
+
+            override fun onLowMemory() = Unit
+        }
+        activity.registerComponentCallbacks(callbacks)
+        dialog.window?.decorView?.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(view: View) = Unit
+            override fun onViewDetachedFromWindow(view: View) {
+                runCatching { activity.unregisterComponentCallbacks(callbacks) }
+                view.removeOnAttachStateChangeListener(this)
+            }
+        })
+    }
     dialog.window?.let { window ->
         window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         window.setDimAmount(0.46f)

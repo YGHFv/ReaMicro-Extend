@@ -117,8 +117,11 @@ internal object HttpClient {
     }
 
     private fun HttpURLConnection.readTextAndClose(): String = try {
-        val stream = if (responseCode in 200..299) inputStream else errorStream ?: inputStream
-        BufferedReader(InputStreamReader(stream, StandardCharsets.UTF_8)).use { it.readText() }
+        val code = responseCode
+        val stream = if (code in 200..299) inputStream else errorStream ?: inputStream
+        val body = BufferedReader(InputStreamReader(stream, StandardCharsets.UTF_8)).use { it.readText() }
+        if (code !in 200..299) throw HttpResponseException(code, body)
+        body
     } finally {
         disconnect()
     }
@@ -136,3 +139,8 @@ internal object HttpClient {
     private const val DEFAULT_USER_AGENT =
         "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/125 Mobile Safari/537.36"
 }
+
+internal class HttpResponseException(
+    val statusCode: Int,
+    val responseBody: String,
+) : IllegalStateException("HTTP $statusCode")

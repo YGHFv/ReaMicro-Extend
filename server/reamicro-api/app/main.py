@@ -3144,8 +3144,20 @@ async def save_reamicro_credential(request: Request, owner: str = Depends(task_o
     if owner_account_id:
         account_id = owner_account_id
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    credential_id = str(payload.get("id", "")).strip() or "rea_" + secrets.token_hex(10)
     credentials = load_credentials()
+    requested_id = str(payload.get("id", "")).strip()
+    matching_id = next(
+        (
+            str(item.get("id", key))
+            for key, item in credentials.items()
+            if item.get("owner") == owner
+            and item.get("type") == "reamicro"
+            and account_id
+            and str(item.get("accountId", "")) == account_id
+        ),
+        "",
+    )
+    credential_id = requested_id or matching_id or "rea_" + secrets.token_hex(10)
     existing = credentials.get(credential_id, {})
     if existing and existing.get("owner") != owner:
         raise HTTPException(status_code=404, detail=response(code="CREDENTIAL_NOT_FOUND", message="凭据不存在"))

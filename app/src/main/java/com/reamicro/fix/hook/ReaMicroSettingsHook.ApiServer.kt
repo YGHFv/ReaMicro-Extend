@@ -52,11 +52,7 @@ internal fun ReaMicroSettingsHook.openApiServerSettingsDialog() {
             val dialog = Dialog(activity)
             val card = settingsDialogCard(activity, colors)
             card.addView(settingsDialogTitle(activity, "API 服务器", colors))
-            val enabled = android.widget.Switch(activity).apply {
-                text = "启用 API 服务器"
-                isChecked = current.enabled
-                setTextColor(colors.title)
-            }
+            val enabled = settingsDialogSwitchRow(activity, "启用 API 服务器", current.enabled, colors)
             card.addView(enabled, apiServerRowParams(activity))
             val url = apiServerEdit(activity, colors, "服务器地址，例如 https://example.com", current.baseUrl)
             card.addView(url, apiServerRowParams(activity))
@@ -204,7 +200,7 @@ internal fun ReaMicroSettingsHook.openApiServerSettingsDialog() {
                 setOnClickListener { dialog.dismiss() }
             }, settingsDialogButtonParams(activity))
             card.addView(actions)
-            showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
+            showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, dismissOnThemeChange = true)
             if (current.enabled && current.baseUrl.isNotBlank()) probe(showProgress = false)
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX api server settings dialog failed: ${it.stackTraceToString()}")
@@ -245,9 +241,9 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
             minLines = 3
             setSingleLine(false)
         }
-        val checkin = android.widget.Switch(activity).apply { text = "野社零点云端签到"; setTextColor(colors.title) }
-        val draw = android.widget.Switch(activity).apply { text = "野社自动抽卡"; setTextColor(colors.title) }
-        val read = android.widget.Switch(activity).apply { text = "云端自动阅读"; setTextColor(colors.title) }
+        val checkin = settingsDialogSwitchRow(activity, "野社零点云端签到", false, colors)
+        val draw = settingsDialogSwitchRow(activity, "野社自动抽卡", false, colors)
+        val read = settingsDialogSwitchRow(activity, "云端自动阅读", false, colors)
         listOf(currentAccount, label, time, duration, customBook, checkin, draw, read).forEach { view -> card.addView(view, apiServerRowParams(activity)) }
         val status = TextView(activity).apply { setTextColor(colors.body); text = "凭据将在服务器端加密保存，模块设置备份不包含该密钥。" }
         card.addView(status, apiServerRowParams(activity))
@@ -286,15 +282,23 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
         val actions = settingsDialogActions(activity)
         actions.addView(settingsDialogButton(activity, "保存并验证", colors, SettingsDialogButtonRole.Primary).apply {
             setOnClickListener {
+                val capturedCredential = currentCredential
+                if (capturedCredential == null) {
+                    status.text = "当前未检测到阅微登录，请先登录阅微后重试"
+                    return@setOnClickListener
+                }
+                if (capturedCredential.token.isBlank() || capturedCredential.accountId.isBlank()) {
+                    status.text = "当前阅微登录密钥不完整，请重新登录阅微后重试"
+                    return@setOnClickListener
+                }
                 status.text = "正在验证阅微登录密钥……"
                 Thread {
                     runCatching {
                         val manager = CloudTaskManager(client)
-                        val freshCredential = accountController.currentCloudCredential()
                         val credentialId = manager.uploadCredential(
-                            freshCredential.token,
-                            label.text.toString().ifBlank { freshCredential.label },
-                            freshCredential.accountId,
+                            capturedCredential.token,
+                            label.text.toString().ifBlank { capturedCredential.label },
+                            capturedCredential.accountId,
                         ).id
                         val selectedBooks = parseCloudReadingBooks(customBook.text.toString())
                         val readRequest = org.json.JSONObject().put("durationMinutes", duration.text.toString().toIntOrNull()?.coerceIn(1, 720) ?: 30)
@@ -305,7 +309,9 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
                     }.onSuccess {
                         activity.runOnUiThread { status.text = "阅微凭据与任务配置已同步" }
                     }.onFailure { error ->
-                        activity.runOnUiThread { status.text = error.message ?: "云端任务配置失败" }
+                        activity.runOnUiThread {
+                            status.text = error.message?.takeIf(String::isNotBlank) ?: "云端任务配置失败"
+                        }
                     }
                 }.start()
             }
@@ -331,7 +337,7 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
         }, settingsDialogButtonParams(activity))
         actions.addView(settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply { setOnClickListener { dialog.dismiss() } }, settingsDialogButtonParams(activity))
         card.addView(actions)
-        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
+        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, dismissOnThemeChange = true)
     }
 }
 
@@ -410,7 +416,7 @@ internal fun ReaMicroSettingsHook.openApiPackageManagementDialog() {
             setOnClickListener { dialog.dismiss() }
         }, settingsDialogButtonParams(activity))
         card.addView(actions)
-        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
+        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, dismissOnThemeChange = true)
     }
 }
 
@@ -555,7 +561,7 @@ internal fun ReaMicroSettingsHook.openCredentialBackupDialog() {
         }, settingsDialogButtonParams(activity))
         actions.addView(settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply { setOnClickListener { dialog.dismiss() } }, settingsDialogButtonParams(activity))
         card.addView(actions)
-        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
+        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, dismissOnThemeChange = true)
     }
 }
 
@@ -573,6 +579,7 @@ private fun ReaMicroSettingsHook.apiServerEdit(
         setTextColor(colors.title)
         setHintTextColor(colors.body)
         setPadding(24, 8, 24, 8)
+        background = settingsRoundedRect(colors.field, settingsDp(activity, 8), colors.border)
     }
 
 private fun ReaMicroSettingsHook.apiServerAuthAdapter(activity: android.app.Activity, modes: List<ApiAuthMode>): ArrayAdapter<String> =
@@ -599,10 +606,22 @@ private fun ReaMicroSettingsHook.apiServerStringAdapter(
     }
 
     override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
-        super.getView(position, convertView, parent).also { (it as? TextView)?.typeface = globalTypeface }
+        super.getView(position, convertView, parent).also { view ->
+            (view as? TextView)?.apply {
+                typeface = globalTypeface
+                setTextColor(SettingsDialogColors(activity).title)
+            }
+        }
 
     override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View =
-        super.getDropDownView(position, convertView, parent).also { (it as? TextView)?.typeface = globalTypeface }
+        super.getDropDownView(position, convertView, parent).also { view ->
+            (view as? TextView)?.apply {
+                typeface = globalTypeface
+                val colors = SettingsDialogColors(activity)
+                setTextColor(colors.title)
+                setBackgroundColor(colors.field)
+            }
+        }
 }
 
 private fun ReaMicroSettingsHook.apiServerTypeface(activity: android.app.Activity): Typeface {

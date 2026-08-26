@@ -19,24 +19,32 @@ internal object ModuleDialogTheme {
         cachedPalette = palette
     }
 
+    fun invalidate() {
+        cachedPalette = null
+    }
+
     fun palette(context: Context): Palette {
         val darkHint = inferDarkMode(context)
-        runCatching {
-            ApiThemeStore.palette(context, darkHint)?.let { theme ->
-                return Palette(
-                    pageBackground = theme.pageBackground,
-                    rowBackground = theme.rowBackground,
-                    border = theme.border,
-                    title = theme.title,
-                    body = theme.body,
-                    primary = theme.primary,
-                    primarySoft = theme.primarySoft,
-                    primaryText = theme.primaryText,
-                    neutralText = theme.neutralText,
-                    destructiveText = theme.destructiveText,
-                    dynamic = true,
-                )
-            }
+        val theme = runCatching { ApiThemeStore.palette(context, darkHint) }.getOrNull()
+        if (theme != null &&
+            theme.pageBackground.isUsableBackground(darkHint) &&
+            theme.rowBackground.isUsableBackground(darkHint) &&
+            theme.title.isUsableForeground(darkHint) &&
+            theme.body.isUsableForeground(darkHint)
+        ) {
+            return Palette(
+                pageBackground = theme.pageBackground,
+                rowBackground = theme.rowBackground,
+                border = theme.border,
+                title = theme.title,
+                body = theme.body,
+                primary = theme.primary,
+                primarySoft = theme.primarySoft,
+                primaryText = theme.primaryText,
+                neutralText = theme.neutralText,
+                destructiveText = theme.destructiveText,
+                dynamic = true,
+            )
         }
         cachedPalette?.let { cached ->
             if (cached.matches(darkHint)) {
