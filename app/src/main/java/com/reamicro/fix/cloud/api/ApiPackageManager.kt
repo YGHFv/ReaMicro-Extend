@@ -69,6 +69,28 @@ class ApiPackageManager(
         ApiPackageUpdateResult(contentPackage.packageId, contentPackage.version, false, it.message ?: "安装失败")
     }
 
+    /**
+     * 把本机已有内容登记成某个服务器内容包，不下载任何数据。
+     * 版本刻意写 0.0.0：下一次检查更新时一定判定为有新版本，从而用服务器内容覆盖本机内容，
+     * 同时沿用 [localContentId]（书源为源 ID、关联源为文件名）保住已下载图书与登录凭据。
+     */
+    fun link(kind: ApiPackageKind, packageId: String, localContentId: String) {
+        val packageKey = key(kind, packageId)
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("kind:$packageKey", kind.wireValue)
+            .putString("package:$packageKey", packageId)
+            .putString("version:$packageKey", LINKED_VERSION)
+            .putLong("build_time:$packageKey", 0L)
+            .putBoolean("enabled:$packageKey", true)
+            .putString("content:$packageKey", localContentId)
+            .putStringSet(KEY_INSTALLED_IDS, installedKeys() + packageKey)
+            .apply()
+    }
+
+    /** 判断某个内容包是否已经登记（无论来自安装还是关联）。 */
+    fun isRegistered(kind: ApiPackageKind, packageId: String): Boolean =
+        installed().any { it.kind == kind && it.packageId == packageId }
+
     fun installed(): List<InstalledApiPackage> {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         return installedKeys().mapNotNull { key ->
@@ -181,6 +203,16 @@ class ApiPackageManager(
                 if (target.exists()) target.setWritable(true)
                 require(temp.renameTo(target)) { "关联源文件写入失败" }
                 target.setReadOnly()
+                // 关联时登记的是本机原文件名；服务器包落地后文件名可能不同，需要删掉旧文件避免同一个源出现两份。
+                val previous = installed().firstOrNull { it.kind == contentPackage.kind && it.packageId == contentPackage.packageId }
+                    ?.contentId
+                    .orEmpty()
+                if (previous.isNotBlank() && previous != target.name) {
+                    File(root, previous).takeIf { it.isFile && it.parentFile == root }?.let { stale ->
+                        stale.setWritable(true)
+                        stale.delete()
+                    }
+                }
                 ExternalSourceLoader.invalidate()
                 target.name
             }
@@ -259,5 +291,7 @@ class ApiPackageManager(
         private const val PREFS = "reamicro_api_packages"
         private const val ROOT = "reamicro_api_packages"
         private const val KEY_INSTALLED_IDS = "installed_ids"
+        /** 仅关联、尚未从服务器安装过内容的占位版本号。 */
+        const val LINKED_VERSION = "0.0.0"
     }
 }

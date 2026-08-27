@@ -16,6 +16,7 @@ import threading
 import html
 import base64
 import binascii
+import io
 import re
 import time
 import zipfile
@@ -79,6 +80,9 @@ metrics_counters: dict[str, int] = {"requests": 0, "errors": 0, "rate_limited": 
 metrics_routes: dict[str, int] = {}
 RUN_SCHEDULER = os.getenv("REAMICRO_RUN_SCHEDULER", "true").lower() == "true"
 RUN_RELEASE_SYNC = os.getenv("REAMICRO_RUN_RELEASE_SYNC", "true").lower() == "true"
+# 模块只允许上传书源和关联源；样式与主题仍然只能由后台管理员发布。
+MODULE_UPLOAD_DEFAULT_KINDS = {"online_source", "association_source"}
+MODULE_UPLOAD_MAX_BYTES = 8 * 1024 * 1024
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -108,6 +112,9 @@ def default_config() -> dict[str, Any]:
         "primaryAdmin": {},
         "adminAccounts": {},
         "hostAccountAllowlist": [],
+        "moduleUploadEnabled": env_bool("REAMICRO_MODULE_UPLOAD_ENABLED", False),
+        "moduleUploadAllowlist": [],
+        "moduleUploadKinds": sorted(MODULE_UPLOAD_DEFAULT_KINDS),
     }
 
 
@@ -126,6 +133,16 @@ def normalized_config_list(value: Any) -> list[str]:
     else:
         values = []
     return sorted({str(item).strip() for item in values if str(item).strip()})
+
+
+def module_upload_kinds(value: Any) -> list[str]:
+    """模块可上传的内容类型。只保留白名单内的类型，配置为空时回退到默认集合。"""
+    values = {item for item in normalized_config_list(value) if item in MODULE_UPLOAD_DEFAULT_KINDS}
+    return sorted(values or MODULE_UPLOAD_DEFAULT_KINDS)
+
+
+# 后台表单字段与 module_upload_kinds 同名，另取别名避免函数被参数遮蔽。
+module_upload_kinds_form = module_upload_kinds
 
 
 def load_config() -> dict[str, Any]:
@@ -149,6 +166,9 @@ def load_config() -> dict[str, Any]:
         config["primaryAdmin"] = config.get("primaryAdmin", {}) if isinstance(config.get("primaryAdmin", {}), dict) else {}
         config["adminAccounts"] = config.get("adminAccounts", {}) if isinstance(config.get("adminAccounts", {}), dict) else {}
         config["hostAccountAllowlist"] = normalized_config_list(config.get("hostAccountAllowlist", []))
+        config["moduleUploadEnabled"] = bool(config.get("moduleUploadEnabled", False))
+        config["moduleUploadAllowlist"] = normalized_config_list(config.get("moduleUploadAllowlist", []))
+        config["moduleUploadKinds"] = module_upload_kinds(config.get("moduleUploadKinds"))
         if config.get("authMode") not in {"public", "api_key", "account", "host_account_allowlist"}:
             config["authMode"] = infer_auth_mode(config)
         config["_authModeExplicit"] = auth_mode_explicit
@@ -169,6 +189,9 @@ def save_config(next_config: dict[str, Any]) -> dict[str, Any]:
         safe["primaryAdmin"] = safe.get("primaryAdmin", {}) if isinstance(safe.get("primaryAdmin", {}), dict) else {}
         safe["adminAccounts"] = safe.get("adminAccounts", {}) if isinstance(safe.get("adminAccounts", {}), dict) else {}
         safe["hostAccountAllowlist"] = normalized_config_list(safe.get("hostAccountAllowlist", []))
+        safe["moduleUploadEnabled"] = bool(safe.get("moduleUploadEnabled", False))
+        safe["moduleUploadAllowlist"] = normalized_config_list(safe.get("moduleUploadAllowlist", []))
+        safe["moduleUploadKinds"] = module_upload_kinds(safe.get("moduleUploadKinds"))
         if safe.get("authMode") not in {"public", "api_key", "account", "host_account_allowlist"}:
             safe["authMode"] = infer_auth_mode(safe)
         safe.pop("_authModeExplicit", None)
@@ -1494,6 +1517,9 @@ def public_server_capabilities(config: dict[str, Any]) -> dict[str, Any]:
         "maxUploadSize": 50 * 1024 * 1024,
         "minModuleVersion": config["minModuleVersion"],
         "signingPublicKey": config["signingPublicKey"],
+        "moduleUploadEnabled": bool(config.get("moduleUploadEnabled", False)),
+        "moduleUploadKinds": module_upload_kinds(config.get("moduleUploadKinds")),
+        "moduleUploadMaxSize": MODULE_UPLOAD_MAX_BYTES,
     }
 
 
@@ -1519,6 +1545,53 @@ async def task_owner(
     enforce_api_scope(request, x_reamicro_api_key)
     if identity == "public":
         raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="云任务需要非公开认证"))
+    return identity
+
+
+def module_upload_policy(config: dict[str, Any], host_account_id: str | None) -> dict[str, Any]:
+    """模块上传许可：需要后台启用上传功能，且当前阅微账号 ID 在上传白名单内。"""
+    enabled = bool(config.get("moduleUploadEnabled", False))
+    account_id = str(host_account_id or "").strip()
+    allowlist = set(config.get("moduleUploadAllowlist", []))
+    allowed = enabled and bool(account_id) and account_id in allowlist
+    if not enabled:
+        reason = "服务器未启用用户模块上传功能"
+    elif not account_id:
+        reason = "请求未携带阅微账号 ID，请先在阅微登录账号"
+    elif not allowed:
+        reason = f"阅微账号 {account_id} 不在上传白名单"
+    else:
+        reason = ""
+    return {
+        "enabled": enabled,
+        "allowed": allowed,
+        "reason": reason,
+        "hostAccountId": account_id,
+        "kinds": module_upload_kinds(config.get("moduleUploadKinds")),
+        "maxSize": MODULE_UPLOAD_MAX_BYTES,
+    }
+
+
+async def module_upload_owner(
+    request: Request,
+    x_reamicro_api_key: str | None = Header(default=None),
+    x_reamicro_account: str | None = Header(default=None),
+    x_reamicro_password: str | None = Header(default=None),
+    x_reamicro_host_account_id: str | None = Header(default=None),
+) -> str:
+    """模块上传的所有者标识。先走常规认证，再校验上传白名单。"""
+    identity = resolve_identity(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
+    enforce_api_scope(request, x_reamicro_api_key)
+    policy = module_upload_policy(load_config(), x_reamicro_host_account_id)
+    if not policy["allowed"]:
+        audit_event(
+            "module_upload_denied",
+            actor=identity,
+            request_id=getattr(request.state, "request_id", ""),
+            success=False,
+            metadata={"hostAccountId": policy["hostAccountId"]},
+        )
+        raise HTTPException(status_code=403, detail=response(code="MODULE_UPLOAD_FORBIDDEN", message=policy["reason"], data=policy))
     return identity
 
 
@@ -2049,7 +2122,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
         elif section == "settings":
             selected_mode = str(config.get("authMode") or infer_auth_mode(config))
             mode_options = "".join(f"<option value='{mode}' {'selected' if mode == selected_mode else ''}>{label}</option>" for mode, label in (("public", "公开访问"), ("api_key", "API Key"), ("account", "独立账号密码"), ("host_account_allowlist", "阅微账号白名单")))
-            content = f"<div class='page-head'><div><p class='eyebrow'>系统</p><h1>服务器设置</h1><p class='muted'>认证模式为单选；只有当前选中的认证方式会对 API 生效。</p></div></div><div class='panel'><form method='post' action='/admin/settings'>{csrf_html}<input type='hidden' name='signing_public_key' value='{esc(config.get('signingPublicKey', ''))}'><input type='hidden' name='release_version_code' value='{esc(config.get('releaseVersionCode', 0))}'><input type='hidden' name='github_include_prerelease' value='{'on' if config.get('githubIncludePrerelease') else ''}'><input type='hidden' name='server_snapshot_enabled' value='{'on' if config.get('serverSnapshotEnabled', True) else ''}'><div class='grid-2'><label>服务器 ID<input name='server_id' value='{esc(config.get('serverId', ''))}'></label><label>最低模块版本<input name='min_module_version' value='{esc(config.get('minModuleVersion', ''))}'></label><label>认证类型<select name='auth_mode' id='auth-mode'>{mode_options}</select></label><label>GitHub 仓库<input name='github_repository' value='{esc(config.get('githubRepository', ''))}'></label><label>同步间隔（秒）<input name='release_sync_seconds' type='number' value='{esc(config.get('releaseSyncSeconds', 1800))}'></label><label>快照间隔（秒）<input name='server_snapshot_seconds' type='number' value='{esc(config.get('serverSnapshotSeconds', 86400))}'></label><label>快照保留份数<input name='server_snapshot_retention' type='number' value='{esc(config.get('serverSnapshotRetention', 30))}'></label></div><div data-auth-section='api_key'><label>API Key（留空保持）<input type='password' name='api_key'></label><label><input type='checkbox' name='generate_api_key'> 生成新 API Key</label></div><div data-auth-section='account'><label>独立账号名<input name='account_name'></label><label>独立账号密码<input type='password' name='account_password'></label></div><div data-auth-section='host_account_allowlist'><label>阅微账号白名单<textarea name='host_account_allowlist'>{esc(chr(10).join(config.get('hostAccountAllowlist', [])))}</textarea></label></div><label>功能列表<textarea name='features'>{esc(','.join(config.get('features', [])))}</textarea></label><button class='button' type='submit'>保存设置</button><button class='button subtle' type='submit' formaction='/admin/sync'>立即同步模块</button></form></div><script>(()=>{{const select=document.getElementById('auth-mode');if(!select)return;const sync=()=>document.querySelectorAll('[data-auth-section]').forEach(node=>{{node.hidden=node.dataset.authSection!==select.value;node.querySelectorAll('input,textarea,select').forEach(input=>input.disabled=node.hidden)}});select.addEventListener('change',sync);sync()}})();</script>"
+            content = f"<div class='page-head'><div><p class='eyebrow'>系统</p><h1>服务器设置</h1><p class='muted'>认证模式为单选；只有当前选中的认证方式会对 API 生效。</p></div></div><div class='panel'><form method='post' action='/admin/settings'>{csrf_html}<input type='hidden' name='signing_public_key' value='{esc(config.get('signingPublicKey', ''))}'><input type='hidden' name='release_version_code' value='{esc(config.get('releaseVersionCode', 0))}'><input type='hidden' name='github_include_prerelease' value='{'on' if config.get('githubIncludePrerelease') else ''}'><input type='hidden' name='server_snapshot_enabled' value='{'on' if config.get('serverSnapshotEnabled', True) else ''}'><div class='grid-2'><label>服务器 ID<input name='server_id' value='{esc(config.get('serverId', ''))}'></label><label>最低模块版本<input name='min_module_version' value='{esc(config.get('minModuleVersion', ''))}'></label><label>认证类型<select name='auth_mode' id='auth-mode'>{mode_options}</select></label><label>GitHub 仓库<input name='github_repository' value='{esc(config.get('githubRepository', ''))}'></label><label>同步间隔（秒）<input name='release_sync_seconds' type='number' value='{esc(config.get('releaseSyncSeconds', 1800))}'></label><label>快照间隔（秒）<input name='server_snapshot_seconds' type='number' value='{esc(config.get('serverSnapshotSeconds', 86400))}'></label><label>快照保留份数<input name='server_snapshot_retention' type='number' value='{esc(config.get('serverSnapshotRetention', 30))}'></label></div><div data-auth-section='api_key'><label>API Key（留空保持）<input type='password' name='api_key'></label><label><input type='checkbox' name='generate_api_key'> 生成新 API Key</label></div><div data-auth-section='account'><label>独立账号名<input name='account_name'></label><label>独立账号密码<input type='password' name='account_password'></label></div><div data-auth-section='host_account_allowlist'><label>阅微账号白名单<textarea name='host_account_allowlist'>{esc(chr(10).join(config.get('hostAccountAllowlist', [])))}</textarea></label></div><label>功能列表<textarea name='features'>{esc(','.join(config.get('features', [])))}</textarea></label><fieldset style='border:1px solid var(--line);border-radius:6px;padding:14px;margin:0;display:flex;flex-direction:column;gap:12px'><legend style='padding:0 6px;font-size:13px;font-weight:650;color:#334155'>用户模块上传</legend><p class='muted' style='margin:0;font-size:12px'>启用后，白名单内的阅微账号可以从模块上传书源和关联源。服务器已存在同名同域的源时只建立关联，不会被模块覆盖。</p><label><input type='checkbox' name='module_upload_enabled' {'checked' if config.get('moduleUploadEnabled') else ''}> 启用模块上传内容库</label><label>上传 ID 白名单（阅微账号 ID，每行一个）<textarea name='module_upload_allowlist' placeholder='例如&#10;10086&#10;20250'>{esc(chr(10).join(config.get('moduleUploadAllowlist', [])))}</textarea></label><label>允许上传的类型<input name='module_upload_kinds' value='{esc(",".join(config.get("moduleUploadKinds", [])))}' placeholder='online_source,association_source'></label></fieldset><button class='button' type='submit'>保存设置</button><button class='button subtle' type='submit' formaction='/admin/sync'>立即同步模块</button></form></div><script>(()=>{{const select=document.getElementById('auth-mode');if(!select)return;const sync=()=>document.querySelectorAll('[data-auth-section]').forEach(node=>{{node.hidden=node.dataset.authSection!==select.value;node.querySelectorAll('input,textarea,select').forEach(input=>input.disabled=node.hidden)}});select.addEventListener('change',sync);sync()}})();</script>"
         else:
             admin_block = ""
             if section == "security" and actor.get("role") == "primary":
@@ -2660,6 +2733,9 @@ async def admin_settings(
     server_snapshot_enabled: str | None = Form(None),
     server_snapshot_seconds: int = Form(86400),
     server_snapshot_retention: int = Form(30),
+    module_upload_enabled: str | None = Form(None),
+    module_upload_allowlist: str = Form(""),
+    module_upload_kinds: str = Form(""),
     csrf_token: str = Form(""),
 ) -> HTMLResponse:
     actor = require_admin(credentials)
@@ -2697,6 +2773,9 @@ async def admin_settings(
         "serverSnapshotRetention": server_snapshot_retention,
         "primaryAdmin": current.get("primaryAdmin", {}),
         "adminAccounts": current.get("adminAccounts", {}),
+        "moduleUploadEnabled": module_upload_enabled is not None and str(module_upload_enabled).lower() not in {"", "0", "false"},
+        "moduleUploadAllowlist": [item.strip() for item in module_upload_allowlist.replace(",", "\n").splitlines() if item.strip()],
+        "moduleUploadKinds": module_upload_kinds_form(module_upload_kinds),
     }
     if generated_api_key:
         records = [item for item in current.get("apiKeyRecords", []) if isinstance(item, dict) and item.get("enabled", True)]
@@ -2991,8 +3070,84 @@ def _metadata_text(value: Any) -> str:
     return text[:160].strip()
 
 
+def normalize_source_domain(value: Any) -> str:
+    """把书源地址、域名或主机名统一成可比较的小写域名，无法识别时返回空串。"""
+    text = _metadata_text(value)
+    if not text:
+        return ""
+    if "://" in text:
+        host = urllib.parse.urlsplit(text).netloc
+    elif "/" in text:
+        host = text.split("/", 1)[0]
+    else:
+        host = text
+    host = host.rsplit("@", 1)[-1].strip().strip(".").lower()
+    if host.startswith("["):
+        host = host[1:].split("]", 1)[0]
+    elif ":" in host:
+        host = host.rsplit(":", 1)[0]
+    if host.startswith("www."):
+        host = host[4:]
+    # 只有形如 example.com 或 IP 的值算域名，纯标识（youshu、qidian）不参与域名比对。
+    if not host or " " in host or "." not in host:
+        return ""
+    if not re.fullmatch(r"[a-z0-9.\-]+", host):
+        return ""
+    return host[:120]
+
+
+def normalize_match_name(value: Any) -> str:
+    """内容名称的比较形式：折叠空白并忽略大小写。"""
+    return " ".join(str(value or "").split()).casefold()
+
+
+def package_match_domains(manifest: dict[str, Any]) -> set[str]:
+    """内容包用于比对的域名集合，取自显式 domains 字段和历史 aliases、contentId。"""
+    values: list[Any] = []
+    for key in ("domains", "aliases"):
+        entry = manifest.get(key)
+        if isinstance(entry, (list, tuple, set)):
+            values.extend(entry)
+        elif entry:
+            values.append(entry)
+    values.append(manifest.get("contentId", ""))
+    return {domain for domain in (normalize_source_domain(item) for item in values) if domain}
+
+
+def package_match_identities(manifest: dict[str, Any]) -> set[str]:
+    """内容包的稳定标识集合，供没有域名的关联源退化匹配使用。"""
+    values = {str(manifest.get(key, "")).strip().casefold() for key in ("packageId", "contentId") if manifest.get(key)}
+    aliases = manifest.get("aliases")
+    if isinstance(aliases, (list, tuple, set)):
+        values.update(str(item).strip().casefold() for item in aliases if str(item).strip())
+    return {item for item in values if item}
+
+
+def find_matching_package(kind: str, name: str, domains: set[str], identities: set[str]) -> dict[str, Any] | None:
+    """按“名称 + 域名”定位服务器上的同一个源；没有域名时退化为“名称 + 稳定标识”。"""
+    target_name = normalize_match_name(name)
+    if not target_name:
+        return None
+    target_domains = {domain for domain in (normalize_source_domain(item) for item in domains) if domain}
+    target_identities = {str(item).strip().casefold() for item in identities if str(item).strip()}
+    for path, manifest in _package_manifests(kind):
+        manifest.setdefault("kind", kind)
+        manifest.setdefault("packageId", path.parent.name)
+        if normalize_match_name(manifest.get("name", "")) != target_name:
+            continue
+        manifest_domains = package_match_domains(manifest)
+        if target_domains and manifest_domains:
+            if target_domains & manifest_domains:
+                return manifest
+            continue
+        # 关联源等没有域名的内容只靠名称容易误判，要求稳定标识同时命中。
+        if target_identities & package_match_identities(manifest):
+            return manifest
+    return None
+
+
 def infer_package_metadata(kind: str, filename: str, body: bytes) -> dict[str, Any]:
-    """从书源 JSON 或样式文件中提取外显名称和稳定标识。"""
+    """从书源 JSON、归档清单或样式文件中提取外显名称、稳定标识和域名。"""
     stem = Path(filename or "payload").stem
     objects: list[dict[str, Any]] = []
     if filename.lower().endswith((".json", ".json5")):
@@ -3003,6 +3158,15 @@ def infer_package_metadata(kind: str, filename: str, body: bytes) -> dict[str, A
             elif isinstance(parsed, list):
                 objects = [item for item in parsed[:20] if isinstance(item, dict)]
         except (UnicodeDecodeError, ValueError):
+            objects = []
+    elif filename.lower().endswith((".rmsource", ".apk", ".jar", ".zip")):
+        # 关联源是 ZIP 归档，名称和 ID 写在内部的 manifest.json 里。
+        try:
+            with zipfile.ZipFile(io.BytesIO(body)) as archive:
+                parsed = json.loads(archive.read("manifest.json").decode("utf-8"))
+            if isinstance(parsed, dict):
+                objects = [parsed]
+        except (KeyError, OSError, UnicodeDecodeError, ValueError, zipfile.BadZipFile):
             objects = []
     name_keys = (
         "name", "title", "displayName", "label", "bookSourceName", "sourceName",
@@ -3034,7 +3198,17 @@ def infer_package_metadata(kind: str, filename: str, body: bytes) -> dict[str, A
     name = name or _metadata_text(stem) or _admin_kind_label(kind)
     if not identity:
         identity = [name]
-    return {"name": name[:120], "identity": identity[:12], "explicitName": explicit_name}
+    domains: list[str] = []
+    for item in identity:
+        domain = normalize_source_domain(item)
+        if domain and domain not in domains:
+            domains.append(domain)
+    return {
+        "name": name[:120],
+        "identity": identity[:12],
+        "explicitName": explicit_name,
+        "domains": domains[:12],
+    }
 
 
 def package_name_slug(name: str, kind: str) -> str:
@@ -3128,6 +3302,89 @@ def package_signature(package_id: str, kind: str, content_id: str, version: str,
     return base64.b64encode(key.sign(message)).decode("ascii")
 
 
+def persist_package_payload(
+    kind: str,
+    package_id: str,
+    version: str,
+    content_id: str,
+    filename: str,
+    body: bytes,
+    name: str,
+    description: str,
+    aliases: list[str],
+    domains: list[str],
+    status_value: str,
+    channel: str,
+    dependencies: list[dict[str, Any]],
+    signature: str = "",
+    owner: str = "",
+) -> dict[str, Any]:
+    """把内容包写入数据卷：旧版本进 history，清单与 payload 原子替换。"""
+    package_dir = (PACKAGE_ROOT / kind / package_id).resolve()
+    if PACKAGE_ROOT.resolve() not in package_dir.parents:
+        raise HTTPException(status_code=400, detail="内容包路径无效")
+    package_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = package_dir / "manifest.json"
+    old_payload_path: Path | None = None
+    if manifest_path.is_file():
+        history = package_dir / "history"
+        history.mkdir(exist_ok=True)
+        old_version = "old"
+        old_manifest: dict[str, Any] = {}
+        try:
+            old_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            old_version = safe_package_segment(old_manifest.get("version", "old"))
+        except (OSError, ValueError):
+            pass
+        archive_dir = history / f"{old_version}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(manifest_path, archive_dir / "manifest.json")
+        old_payload = package_dir / str(old_manifest.get("payload", ""))
+        if old_payload.is_file() and old_payload.parent == package_dir:
+            shutil.copy2(old_payload, archive_dir / old_payload.name)
+            old_payload_path = old_payload
+    build_time = int(datetime.now(timezone.utc).timestamp() * 1000)
+    digest = hashlib.sha256(body).hexdigest()
+    manifest = {
+        "packageId": package_id,
+        "kind": kind,
+        "version": version,
+        "buildTime": build_time,
+        "schemaVersion": 1,
+        "minModuleVersion": load_config()["minModuleVersion"],
+        "sha256": digest,
+        "signature": signature.strip() or package_signature(package_id, kind, content_id, version, build_time, digest, body),
+        "payload": filename,
+        "contentId": content_id,
+        "aliases": aliases,
+        "domains": domains,
+        "name": name,
+        "description": description,
+        "status": status_value,
+        "channel": channel,
+        "dependencies": dependencies,
+    }
+    if owner:
+        manifest["uploadOwner"] = owner
+    if status_value == "published":
+        dependency_status = package_dependency_status(manifest)
+        if not dependency_status["dependenciesSatisfied"]:
+            raise HTTPException(
+                status_code=409,
+                detail=response(code="PACKAGE_DEPENDENCIES_UNRESOLVED", message="内容包存在未满足的必需依赖，请先上传依赖或保存为草稿", data=dependency_status),
+            )
+    payload_path = package_dir / filename
+    temp_payload = package_dir / ".payload.tmp"
+    temp_payload.write_bytes(body)
+    temp_payload.replace(payload_path)
+    temp_manifest = package_dir / ".manifest.json.tmp"
+    temp_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_manifest.replace(manifest_path)
+    if old_payload_path and old_payload_path != payload_path and old_payload_path.is_file():
+        old_payload_path.unlink()
+    return manifest
+
+
 @app.post("/admin/packages/upload", response_class=HTMLResponse)
 async def admin_upload_package(
     credentials: HTTPBasicCredentials | None = Depends(basic_security),
@@ -3174,66 +3431,31 @@ async def admin_upload_package(
     if not isinstance(dependency_items, list):
         raise HTTPException(status_code=400, detail="依赖必须是 JSON 数组")
     dependency_items = normalize_package_dependencies(dependency_items, kind, package_id)
-    package_dir = (PACKAGE_ROOT / kind / package_id).resolve()
-    if PACKAGE_ROOT.resolve() not in package_dir.parents:
-        raise HTTPException(status_code=400, detail="内容包路径无效")
-    package_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = package_dir / "manifest.json"
-    old_payload_path: Path | None = None
-    if manifest_path.is_file():
-        history = package_dir / "history"
-        history.mkdir(exist_ok=True)
-        old_version = "old"
-        old_manifest = {}
-        try:
-            old_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            old_version = safe_package_segment(old_manifest.get("version", "old"))
-        except (OSError, ValueError):
-            pass
-        archive_dir = history / f"{old_version}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(manifest_path, archive_dir / "manifest.json")
-        old_payload = package_dir / str(old_manifest.get("payload", ""))
-        if old_payload.is_file() and old_payload.parent == package_dir:
-            shutil.copy2(old_payload, archive_dir / old_payload.name)
-            old_payload_path = old_payload
-    build_time = int(datetime.now(timezone.utc).timestamp() * 1000)
-    digest = hashlib.sha256(body).hexdigest()
-    effective_signature = signature.strip() or package_signature(package_id, kind, stable_id, version, build_time, digest, body)
-    manifest = {
-        "packageId": package_id,
-        "kind": kind,
-        "version": version,
-        "buildTime": build_time,
-        "schemaVersion": 1,
-        "minModuleVersion": load_config()["minModuleVersion"],
-        "sha256": digest,
-        "signature": effective_signature,
-        "payload": filename,
-        "contentId": stable_id,
-        "aliases": merge_package_aliases(existing_manifest.get("aliases", []) if existing_manifest else [], metadata.get("identity", []), aliases),
-        "name": _metadata_text(name) or (str(existing_manifest.get("name", "")) if existing_manifest and not metadata.get("explicitName") else "") or str(metadata.get("name") or package_id),
-        "description": str(existing_manifest.get("description", "")) if existing_manifest and existing_manifest.get("description") else "后台上传内容包",
-        "status": normalized_status,
-        "channel": normalized_channel,
-        "dependencies": dependency_items,
-    }
-    if normalized_status == "published":
-        dependency_status = package_dependency_status(manifest)
-        if not dependency_status["dependenciesSatisfied"]:
-            raise HTTPException(
-                status_code=409,
-                detail=response(code="PACKAGE_DEPENDENCIES_UNRESOLVED", message="内容包存在未满足的必需依赖，请先上传依赖或保存为草稿", data=dependency_status),
-            )
-    payload_path = package_dir / filename
-    temp_payload = package_dir / ".payload.tmp"
-    temp_payload.write_bytes(body)
-    temp_payload.replace(payload_path)
-    temp_manifest = package_dir / ".manifest.json.tmp"
-    temp_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_manifest.replace(manifest_path)
-    if old_payload_path and old_payload_path != payload_path and old_payload_path.is_file():
-        old_payload_path.unlink()
+    merged_domains = sorted({
+        domain
+        for domain in (
+            normalize_source_domain(item)
+            for item in list(metadata.get("domains", [])) + list(existing_manifest.get("domains", []) if existing_manifest else [])
+        )
+        if domain
+    })
+    manifest = persist_package_payload(
+        kind=kind,
+        package_id=package_id,
+        version=version,
+        content_id=stable_id,
+        filename=filename,
+        body=body,
+        name=_metadata_text(name) or (str(existing_manifest.get("name", "")) if existing_manifest and not metadata.get("explicitName") else "") or str(metadata.get("name") or package_id),
+        description=str(existing_manifest.get("description", "")) if existing_manifest and existing_manifest.get("description") else "后台上传内容包",
+        aliases=merge_package_aliases(existing_manifest.get("aliases", []) if existing_manifest else [], metadata.get("identity", []), aliases),
+        domains=merged_domains,
+        status_value=normalized_status,
+        channel=normalized_channel,
+        dependencies=dependency_items,
+        signature=signature,
+        owner=str(existing_manifest.get("uploadOwner", "")) if existing_manifest else "",
+    )
     audit_event("package_uploaded", audit_actor(actor), success=True, metadata={"kind": kind, "packageId": package_id, "version": version, "status": normalized_status})
     return admin_html(admin_page(load_config(), f"已保存 {_admin_kind_label(kind)}“{manifest['name']}” · {package_id} · {version}", actor=actor, section=kind))
 
@@ -4073,6 +4295,147 @@ async def packages(kind: str = Query(...), _: None = Depends(authenticated)) -> 
         except (OSError, ValueError, HTTPException):
             continue
     return response({"kind": kind, "items": items})
+
+
+@app.get("/v1/packages/upload/policy")
+async def module_upload_policy_endpoint(
+    request: Request,
+    x_reamicro_api_key: str | None = Header(default=None),
+    x_reamicro_account: str | None = Header(default=None),
+    x_reamicro_password: str | None = Header(default=None),
+    x_reamicro_host_account_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """模块查询是否允许上传内容库；未获许可也返回 200，由客户端提示原因。"""
+    check_request_auth(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
+    enforce_api_scope(request, x_reamicro_api_key)
+    return response(module_upload_policy(load_config(), x_reamicro_host_account_id))
+
+
+def parse_module_upload_item(item: Any) -> dict[str, Any]:
+    """解析模块提交的单个源描述：类型、名称、域名和本地稳定标识。"""
+    if not isinstance(item, dict):
+        raise HTTPException(status_code=400, detail=response(code="INVALID_PAYLOAD", message="内容描述必须是对象"))
+    kind = str(item.get("kind", "")).strip()
+    if kind not in MODULE_UPLOAD_DEFAULT_KINDS:
+        raise HTTPException(status_code=400, detail=response(code="INVALID_KIND", message="模块只能上传书源和关联源"))
+    name = _metadata_text(item.get("name"))
+    if not name:
+        raise HTTPException(status_code=400, detail=response(code="INVALID_PAYLOAD", message="内容名称不能为空"))
+    raw_domains = item.get("domains")
+    if not isinstance(raw_domains, (list, tuple, set)):
+        raw_domains = [raw_domains] if raw_domains else []
+    domains = {domain for domain in (normalize_source_domain(value) for value in list(raw_domains)[:12]) if domain}
+    raw_identities = item.get("identities")
+    if not isinstance(raw_identities, (list, tuple, set)):
+        raw_identities = [raw_identities] if raw_identities else []
+    identities = {
+        text
+        for text in (_metadata_text(value)[:240] for value in list(raw_identities)[:12] + [item.get("contentId", "")])
+        if text
+    }
+    return {"kind": kind, "name": name, "domains": domains, "identities": identities, "contentId": _metadata_text(item.get("contentId"))[:240]}
+
+
+def module_package_summary(manifest: dict[str, Any], kind: str) -> dict[str, Any]:
+    """回给模块的内容包摘要，只包含关联和后续更新需要的字段。"""
+    package_id = str(manifest.get("packageId", ""))
+    return {
+        "kind": str(manifest.get("kind", kind)),
+        "packageId": package_id,
+        "contentId": str(manifest.get("contentId", "") or package_id),
+        "version": str(manifest.get("version", "")),
+        "buildTime": bounded_config_int(manifest.get("buildTime", 0), 0, 0),
+        "name": str(manifest.get("name", "")),
+        "status": str(manifest.get("status", "published")),
+        "aliases": [str(value) for value in manifest.get("aliases", []) if str(value).strip()][:50],
+        "domains": sorted(package_match_domains(manifest)),
+        "downloadUrl": f"/v1/packages/{manifest.get('kind', kind)}/{package_id}/download",
+    }
+
+
+@app.post("/v1/packages/match")
+async def match_packages(request: Request, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    """按“名称 + 域名”把本地书源和关联源与服务器内容库比对，返回可关联的内容包。"""
+    payload = await request.json()
+    items = payload.get("items") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail=response(code="INVALID_PAYLOAD", message="items 必须是数组"))
+    if len(items) > 500:
+        raise HTTPException(status_code=400, detail=response(code="INVALID_PAYLOAD", message="单次最多比对 500 个源"))
+    results = []
+    for item in items:
+        parsed = parse_module_upload_item(item)
+        manifest = find_matching_package(parsed["kind"], parsed["name"], parsed["domains"], parsed["identities"])
+        entry: dict[str, Any] = {"kind": parsed["kind"], "name": parsed["name"], "contentId": parsed["contentId"], "matched": manifest is not None}
+        if manifest is not None:
+            entry["package"] = module_package_summary(manifest, parsed["kind"])
+        results.append(entry)
+    return response({"items": results, "matched": sum(1 for item in results if item["matched"])})
+
+
+@app.post("/v1/packages/upload")
+async def module_upload_package(request: Request, owner: str = Depends(module_upload_owner)) -> dict[str, Any]:
+    """模块上传单个书源或关联源。服务器已存在同名同域的源时只关联，不覆盖内容。"""
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail=response(code="INVALID_PAYLOAD", message="请求体必须是对象"))
+    config = load_config()
+    parsed = parse_module_upload_item(payload)
+    kind = parsed["kind"]
+    if kind not in module_upload_kinds(config.get("moduleUploadKinds")):
+        raise HTTPException(status_code=403, detail=response(code="MODULE_UPLOAD_FORBIDDEN", message=f"服务器未开放上传{_admin_kind_label(kind)}"))
+    try:
+        body = base64.b64decode(str(payload.get("payload", "")), validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail=response(code="INVALID_PAYLOAD", message="内容文件必须是 base64 编码"))
+    if not body:
+        raise HTTPException(status_code=400, detail=response(code="INVALID_PAYLOAD", message="内容文件为空"))
+    if len(body) > MODULE_UPLOAD_MAX_BYTES:
+        raise HTTPException(status_code=413, detail=response(code="PAYLOAD_TOO_LARGE", message=f"内容文件超过 {MODULE_UPLOAD_MAX_BYTES // (1024 * 1024)} MB"))
+    filename = safe_payload_filename(str(payload.get("payloadName", "")) or f"{kind}.json")
+    validate_package_payload(kind, filename, body)
+    existing = find_matching_package(kind, parsed["name"], parsed["domains"], parsed["identities"])
+    if existing is not None:
+        # 同名同域视为同一个源：不覆盖服务器内容，只把关联信息回给模块用于后续更新。
+        audit_event("module_upload_linked", actor=owner, success=True, metadata={"kind": kind, "packageId": existing.get("packageId", "")})
+        return response(
+            {"uploaded": False, "linked": True, "package": module_package_summary(existing, kind)},
+            message="服务器已存在同名同域的源，已自动关联",
+        )
+    metadata = infer_package_metadata(kind, filename, body)
+    detected_domains = sorted(parsed["domains"] | {
+        domain for domain in (normalize_source_domain(value) for value in metadata.get("domains", [])) if domain
+    })
+    package_id, existing_manifest = resolve_package_identity(kind, "", parsed["contentId"], metadata)
+    if existing_manifest is not None:
+        # 标识命中旧包但名称或域名不同，同样只关联，避免模块改写他人内容。
+        audit_event("module_upload_linked", actor=owner, success=True, metadata={"kind": kind, "packageId": package_id})
+        return response(
+            {"uploaded": False, "linked": True, "package": module_package_summary(existing_manifest, kind)},
+            message="服务器已存在同一标识的源，已自动关联",
+        )
+    stable_id = normalize_content_id(parsed["contentId"], package_id)
+    manifest = persist_package_payload(
+        kind=kind,
+        package_id=package_id,
+        version="1.0.0",
+        content_id=stable_id,
+        filename=filename,
+        body=body,
+        name=parsed["name"],
+        description=f"模块上传内容包 · 阅微账号 {module_upload_policy(config, request.headers.get('X-ReaMicro-Host-Account-Id'))['hostAccountId']}",
+        aliases=merge_package_aliases([], list(metadata.get("identity", [])) + sorted(parsed["identities"]), ""),
+        domains=detected_domains,
+        status_value="published",
+        channel="stable",
+        dependencies=[],
+        owner=owner,
+    )
+    audit_event("module_upload_created", actor=owner, success=True, metadata={"kind": kind, "packageId": package_id, "version": manifest.get("version", "")})
+    return response(
+        {"uploaded": True, "linked": True, "package": module_package_summary(manifest, kind)},
+        message="内容已上传并关联",
+    )
 
 
 @app.get("/v1/packages/dependency-graph")

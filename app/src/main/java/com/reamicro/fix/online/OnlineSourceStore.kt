@@ -218,6 +218,35 @@ object OnlineSourceStore {
         return importBytes(context, payload, displayName, "api:$packageId")
     }
 
+    /**
+     * 把服务器内容包标识就地写回本地书源文件，不改动书源规则本身。
+     * 写入后 [importPackageBytes] 能通过 packageId 找到这份本地源，
+     * 后续服务器更新会覆盖同一个文件而不是新建一条重复书源。
+     */
+    fun linkPackage(
+        context: Context,
+        sourceId: String,
+        packageId: String,
+        aliases: Set<String>,
+    ): Boolean {
+        val dir = sourceDir(context)
+        val file = dir.listFiles()
+            ?.firstOrNull { candidate ->
+                candidate.isFile && candidate.extension.lowercase() in sourceExtensions && runCatching {
+                    parseSingleSource(candidate.readBytes(), candidate.nameWithoutExtension, candidate.name).id == sourceId
+                }.getOrDefault(false)
+            }
+            ?: return false
+        return runCatching {
+            val merged = (aliases + sourceId).filterTo(linkedSetOf()) { it.isNotBlank() }
+            val payload = injectPackageIdentity(file.readBytes(), sourceId, packageId, merged)
+            val temp = File(dir, ".${file.name}.tmp")
+            FileOutputStream(temp).use { it.write(payload) }
+            if (file.exists()) file.setWritable(true)
+            temp.renameTo(file)
+        }.getOrDefault(false)
+    }
+
     fun matchesIdentity(source: OnlineSourceEntry, candidate: String): Boolean =
         candidate.isNotBlank() && (source.id == candidate || candidate in source.aliases)
 

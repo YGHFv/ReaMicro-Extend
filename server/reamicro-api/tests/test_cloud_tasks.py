@@ -1,8 +1,11 @@
 import tempfile
 import unittest
+import base64
 import hashlib
 import hmac
+import io
 import json
+import zipfile
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
@@ -632,6 +635,163 @@ class AdminSecurityTest(unittest.TestCase):
         metadata = {"versionName": "2.0.0", "channel": "stable"}
         (main.RELEASE_ROOT / "latest.json").write_text(json.dumps(metadata), encoding="utf-8")
         self.assertEqual("2.0.0", asyncio.run(main.latest_release(channel="beta"))["data"]["versionName"])
+
+
+class ModuleContentLibraryUploadTest(unittest.TestCase):
+    """模块上传内容库：白名单校验、同名同域只关联、以及本地源比对。"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        main.CONFIG_ROOT = root / "config"
+        main.CONFIG_PATH = main.CONFIG_ROOT / "server.json"
+        main.PACKAGE_ROOT = root / "packages"
+        main.AUDIT_ROOT = root / "audit"
+        main.AUDIT_PATH = main.AUDIT_ROOT / "events.jsonl"
+        main.SIGNING_PRIVATE_KEY_FILE = ""
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def write_package(self, kind, package_id, name, domains=(), aliases=(), content_id=""):
+        package_dir = main.PACKAGE_ROOT / kind / package_id
+        package_dir.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "packageId": package_id,
+            "kind": kind,
+            "version": "1.0.0",
+            "name": name,
+            "contentId": content_id or package_id,
+            "domains": list(domains),
+            "aliases": list(aliases),
+            "status": "published",
+            "payload": "payload.json",
+        }
+        (package_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (package_dir / "payload.json").write_text("{}", encoding="utf-8")
+        return manifest
+
+    def test_normalize_source_domain(self):
+        # 协议、端口、www 前缀和大小写都要归一化，便于跨来源比对同一个站点。
+        self.assertEqual("example.com", main.normalize_source_domain("https://www.Example.com/search?q=1"))
+        self.assertEqual("example.com", main.normalize_source_domain("example.com:8080"))
+        self.assertEqual("a.example.com", main.normalize_source_domain("http://a.example.com"))
+        # 纯标识不含点，不能当成域名，否则关联源会按名称误判。
+        self.assertEqual("", main.normalize_source_domain("youshu"))
+        self.assertEqual("", main.normalize_source_domain(""))
+
+    def test_upload_links_existing_package_with_same_name_and_domain(self):
+        main.save_config({**main.default_config(), "moduleUploadEnabled": True, "moduleUploadAllowlist": ["10086"], "allowPublic": True, "authMode": "public"})
+        self.write_package("online_source", "example-com", "示例书源", domains=["example.com"])
+        payload = json.dumps({
+            "kind": "online_source",
+            "name": "示例书源",
+            "contentId": "online_local_1",
+            "domains": ["https://www.example.com/"],
+            "payloadName": "source.json",
+            "payload": base64.b64encode(json.dumps({"bookSourceName": "示例书源", "bookSourceUrl": "https://example.com"}).encode("utf-8")).decode("ascii"),
+        }).encode("utf-8")
+
+        async def receive():
+            return {"type": "http.request", "body": payload, "more_body": False}
+
+        request = Request({"type": "http", "method": "POST", "path": "/v1/packages/upload", "headers": []}, receive)
+        result = asyncio.run(main.module_upload_package(request, owner="host:10086"))
+        # 同名同域视为同一个源：不覆盖服务器内容，只回关联信息。
+        self.assertFalse(result["data"]["uploaded"])
+        self.assertTrue(result["data"]["linked"])
+        self.assertEqual("example-com", result["data"]["package"]["packageId"])
+        self.assertEqual("1.0.0", result["data"]["package"]["version"])
+
+    def test_upload_creates_package_when_no_match(self):
+        main.save_config({**main.default_config(), "moduleUploadEnabled": True, "moduleUploadAllowlist": ["10086"], "allowPublic": True, "authMode": "public"})
+        payload = json.dumps({
+            "kind": "online_source",
+            "name": "新书源",
+            "contentId": "online_local_2",
+            "domains": ["novel.test"],
+            "payloadName": "source.json",
+            "payload": base64.b64encode(json.dumps({"bookSourceName": "新书源", "bookSourceUrl": "https://novel.test"}).encode("utf-8")).decode("ascii"),
+        }).encode("utf-8")
+
+        async def receive():
+            return {"type": "http.request", "body": payload, "more_body": False}
+
+        request = Request({"type": "http", "method": "POST", "path": "/v1/packages/upload", "headers": []}, receive)
+        result = asyncio.run(main.module_upload_package(request, owner="host:10086"))
+        self.assertTrue(result["data"]["uploaded"])
+        self.assertTrue(result["data"]["linked"])
+        created = main.PACKAGE_ROOT / "online_source" / result["data"]["package"]["packageId"] / "manifest.json"
+        manifest = json.loads(created.read_text(encoding="utf-8"))
+        # 上传者写入 uploadOwner，域名落盘，供后续按名称+域名比对。
+        self.assertEqual("host:10086", manifest["uploadOwner"])
+        self.assertIn("novel.test", manifest["domains"])
+        self.assertEqual("online_local_2", manifest["contentId"])
+
+    def test_upload_policy_requires_enabled_and_allowlist(self):
+        config = {**main.default_config(), "moduleUploadEnabled": False, "moduleUploadAllowlist": ["10086"]}
+        blocked = main.module_upload_policy(config, "10086")
+        self.assertFalse(blocked["allowed"])
+        self.assertIn("未启用", blocked["reason"])
+        config["moduleUploadEnabled"] = True
+        # 白名单外的阅微账号必须被拒绝，并在原因里点明具体账号。
+        outsider = main.module_upload_policy(config, "20250")
+        self.assertFalse(outsider["allowed"])
+        self.assertIn("20250", outsider["reason"])
+        # 未携带阅微账号 ID 同样拒绝，提示先登录。
+        anonymous = main.module_upload_policy(config, "")
+        self.assertFalse(anonymous["allowed"])
+        self.assertIn("阅微账号 ID", anonymous["reason"])
+        self.assertTrue(main.module_upload_policy(config, "10086")["allowed"])
+
+    def test_upload_rejected_without_allowlist(self):
+        main.save_config({**main.default_config(), "moduleUploadEnabled": True, "moduleUploadAllowlist": ["10086"], "allowPublic": True, "authMode": "public"})
+
+        async def receive():
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+
+        request = Request({"type": "http", "method": "POST", "path": "/v1/packages/upload", "headers": [(b"x-reamicro-host-account-id", b"20250")]}, receive)
+        with self.assertRaises(HTTPException) as denied:
+            asyncio.run(main.module_upload_owner(request, x_reamicro_host_account_id="20250"))
+        self.assertEqual(403, denied.exception.status_code)
+
+    def test_match_packages_by_name_and_domain(self):
+        main.save_config({**main.default_config(), "allowPublic": True, "authMode": "public"})
+        self.write_package("online_source", "example-com", "示例书源", domains=["example.com"])
+        self.write_package("association_source", "youshu", "YouShu", aliases=["youshu"])
+        payload = json.dumps({"items": [
+            {"kind": "online_source", "name": "示例书源", "contentId": "local_1", "domains": ["http://example.com/x"]},
+            {"kind": "online_source", "name": "示例书源", "contentId": "local_2", "domains": ["other.test"]},
+            {"kind": "association_source", "name": "YouShu", "contentId": "youshu", "identities": ["youshu"]},
+        ]}).encode("utf-8")
+
+        async def receive():
+            return {"type": "http.request", "body": payload, "more_body": False}
+
+        request = Request({"type": "http", "method": "POST", "path": "/v1/packages/match", "headers": []}, receive)
+        items = asyncio.run(main.match_packages(request, owner="host:10086"))["data"]["items"]
+        # 同名但域名不同的源不算同一个，避免误关联到别人的书源。
+        self.assertTrue(items[0]["matched"])
+        self.assertFalse(items[1]["matched"])
+        # 关联源没有域名，靠名称 + 稳定标识命中。
+        self.assertTrue(items[2]["matched"])
+        self.assertEqual("youshu", items[2]["package"]["packageId"])
+
+    def test_infer_metadata_reads_archive_manifest(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("manifest.json", json.dumps({"apiVersion": 1, "id": "youshu", "name": "YouShu", "entryClass": "com.example.Y"}))
+        metadata = main.infer_package_metadata("association_source", "youshu.rmsource", buffer.getvalue())
+        # 关联源的名称和 ID 写在归档内部的清单里，必须能读出来。
+        self.assertEqual("YouShu", metadata["name"])
+        self.assertIn("youshu", metadata["identity"])
+        self.assertEqual([], metadata["domains"])
+
+    def test_module_upload_kinds_limited_to_sources(self):
+        # 模块只能上传书源和关联源；样式、主题即便写进配置也要被过滤掉。
+        self.assertEqual(["association_source", "online_source"], main.module_upload_kinds(["theme", "online_source", "association_source"]))
+        self.assertEqual(["association_source", "online_source"], main.module_upload_kinds([]))
+        self.assertEqual(["online_source"], main.module_upload_kinds("online_source"))
 
 
 if __name__ == "__main__":

@@ -149,6 +149,55 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
         )
     }
 
+    /** 查询服务器是否允许当前阅微账号从模块上传内容库。 */
+    fun uploadPolicy(): ApiUploadPolicy {
+        val settings = settingsStore.get()
+        val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
+        val body = try {
+            HttpClient.get(
+                "$baseUrl/v1/packages/upload/policy",
+                authHeaders(settings),
+                settings.timeoutSeconds * 1_000,
+                settings.timeoutSeconds * 1_000,
+                false,
+            )
+        } catch (error: HttpResponseException) {
+            if (error.statusCode == 404) {
+                return ApiUploadPolicy(enabled = false, allowed = false, reason = "服务器版本不支持模块上传内容库")
+            }
+            throw IllegalStateException(apiErrorMessage(error.responseBody, "服务器返回 HTTP ${error.statusCode}"), error)
+        }
+        val root = JSONObject(body)
+        return ApiUploadPolicy.fromJson(root.optJSONObject("data") ?: root)
+    }
+
+    /** 按名称和域名批量比对本地源与服务器内容库。 */
+    fun matchPackages(items: List<ApiLibraryItem>): List<ApiLibraryMatch> {
+        if (items.isEmpty()) return emptyList()
+        val payload = JSONObject().put("items", org.json.JSONArray(items.map(ApiLibraryItem::toDescriptorJson)))
+        val root = taskRequest("POST", "/v1/packages/match", payload)
+        val data = root.optJSONObject("data") ?: root
+        val array = data.optJSONArray("items") ?: return emptyList()
+        return (0 until array.length()).mapNotNull { index ->
+            array.optJSONObject(index)?.let(ApiLibraryMatch::fromJson)
+        }
+    }
+
+    /** 上传单个书源或关联源；服务器已有同名同域的源时只回关联信息。 */
+    fun uploadPackage(item: ApiLibraryItem): ApiUploadResult {
+        val payload = item.toDescriptorJson()
+            .put("payloadName", item.payloadName)
+            .put("payload", android.util.Base64.encodeToString(item.payload, android.util.Base64.NO_WRAP))
+        val root = taskRequest("POST", "/v1/packages/upload", payload)
+        val data = root.optJSONObject("data") ?: root
+        return ApiUploadResult(
+            uploaded = data.optBoolean("uploaded", false),
+            linked = data.optBoolean("linked", false),
+            message = root.optString("message"),
+            summary = data.optJSONObject("package")?.let(ApiPackageSummary::fromJson),
+        )
+    }
+
     fun latestModuleRelease(): ApiModuleRelease? {
         val settings = settingsStore.get()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)

@@ -983,6 +983,18 @@ internal fun ReaMicroSettingsHook.renderApiServerSettingsContent(innerPaddings: 
                 onClick = { checkApiPackageUpdates() },
             ),
             ActionRow(
+                key = "api_library_upload",
+                title = "上传内容库",
+                subtitle = "把本机书源、关联源上传到服务器，需后台开放上传并配置阅微 ID 白名单",
+                onClick = { openApiLibraryUploadDialog() },
+            ),
+            ActionRow(
+                key = "api_library_link",
+                title = "关联内容库",
+                subtitle = "本机书源、关联源与服务器比对，名称和域名一致即可由服务器更新",
+                onClick = { openApiLibraryLinkDialog() },
+            ),
+            ActionRow(
                 key = "api_package_management",
                 title = "已安装内容包",
                 subtitle = "查看版本、启用主题、回滚或卸载",

@@ -74,6 +74,7 @@ X-ReaMicro-Api-Key: <key>
 - `/v1/releases/module/latest`
 - `/v1/packages?kind=online_source|epub_style|highlight_style|association_source|theme`
 - `/v1/packages/{kind}/{packageId}/download`
+- `/v1/packages/upload/policy`、`/v1/packages/upload` 与 `/v1/packages/match`（模块上传与关联内容库）
 - `/v1/backups/module` 与 `/v1/backups/module/latest`
 - `/v1/backups/credentials` 与 `/v1/backups/credentials/latest`
 - `/v1/credentials/reamicro`
@@ -111,6 +112,16 @@ X-ReaMicro-Api-Key: <key>
   "name": "示例书源"
 }
 ```
+
+## 用户模块上传内容库
+
+后台「服务器设置 → 用户模块上传」勾选启用，并把允许上传的阅微账号 ID 逐行填入上传白名单后，模块端「API 服务器 → 上传内容库」即可把本机书源和关联源提交到服务器内容库。模块只能上传 `online_source` 和 `association_source`，单个内容上限 8 MB；样式和主题仍然只能由后台管理员发布。
+
+同一个源的判定口径是**名称 + 域名**：书源的域名取自 `bookSourceUrl` 等字段的主机名，忽略协议、端口、`www.` 前缀和大小写。关联源是 ZIP 归档、清单里通常没有站点地址，此时退化为**名称 + 稳定标识**（`id`、`contentId` 或历史 `aliases`）比对，避免仅凭名称误判。
+
+上传时服务器命中已有同名同域的源，不会覆盖服务器内容，只把 `packageId`、`contentId` 和当前版本回给模块建立关联；未命中才新建内容包，并写入 `uploadOwner` 记录上传者。新建的包同样立即回关联信息，因此两种情况模块都能在后续「检查内容库更新」时收到该源的更新。
+
+模块端「关联内容库」调用 `/v1/packages/match` 批量比对，命中的源全量登记关联。关联只写映射不下载内容，登记版本为 `0.0.0`，因此下一次检查更新一定判定为有新版本，用服务器版本覆盖本机内容；书源沿用原有源 ID、关联源沿用原有文件名，已下载图书、登录凭据和下载策略不会失联。
 
 内容包支持 `status`（`draft`、`testing`、`published`、`unpublished`）、`channel`（`stable`、`beta`、`nightly`）和依赖数组 `dependencies`。客户端公共列表和下载仅返回 `published` 内容。后台上传会检查 JSON/CSS 编码与结构，旧版本自动进入 `history`；管理接口可查询历史、切换发布状态和回滚指定版本。书源应长期保持同一 `contentId`，把旧域名和旧书源 ID 加入 `aliases`，模块更新时即可保留既有图书关联。
 

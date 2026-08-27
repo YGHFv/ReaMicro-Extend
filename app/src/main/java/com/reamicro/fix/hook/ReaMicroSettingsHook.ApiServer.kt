@@ -422,6 +422,187 @@ internal fun ReaMicroSettingsHook.openApiPackageManagementDialog() {
     }
 }
 
+// 上传本地书源和关联源到服务器内容库。服务器已有同名同域的源时只关联，不覆盖服务器内容。
+internal fun ReaMicroSettingsHook.openApiLibraryUploadDialog() {
+    val activity = activityProvider() ?: return
+    activity.runOnUiThread {
+        val store = ApiServerSettingsStore { activity.applicationContext }
+        val colors = SettingsDialogColors(activity)
+        val dialog = Dialog(activity)
+        val card = settingsDialogCard(activity, colors)
+        card.addView(settingsDialogTitle(activity, "上传内容库", colors))
+        card.addView(
+            settingsDialogHint(
+                activity,
+                "把本机的书源和关联源上传到服务器内容库。需要服务器后台启用“用户模块上传”" +
+                    "并把当前阅微账号 ID 加入上传白名单。服务器已存在名称和域名相同的源时不会重复上传，" +
+                    "只自动建立关联；新上传的源也会一并关联，用于后续更新。",
+                colors,
+            ),
+            apiServerRowParams(activity),
+        )
+        val status = TextView(activity).apply { setTextColor(colors.body); text = "正在读取本机内容库和服务器上传许可……" }
+        card.addView(status, apiServerRowParams(activity))
+        val upload = settingsDialogButton(activity, "开始上传", colors, SettingsDialogButtonRole.Primary).apply { isEnabled = false }
+        var pending: List<com.reamicro.fix.cloud.api.ApiLibraryItem> = emptyList()
+        var policy: com.reamicro.fix.cloud.api.ApiUploadPolicy? = null
+
+        fun renderSummary(result: com.reamicro.fix.cloud.api.ApiLibrarySyncSummary) {
+            status.text = buildString {
+                append("共处理 ${result.total} 个源：新上传 ${result.uploaded} 个，自动关联 ${result.linked} 个")
+                if (result.failed > 0) append("，失败 ${result.failed} 个")
+                append("。")
+                if (result.changed > 0) append("\n可回到上一页执行“检查内容库更新”，让服务器版本接管这些源。")
+                result.messages.forEach { append("\n$it") }
+            }
+        }
+
+        if (!store.get().enabled) {
+            status.text = "请先启用并配置 API 服务器"
+        } else {
+            Thread {
+                val loaded = runCatching {
+                    val sync = com.reamicro.fix.cloud.api.ApiContentLibrarySync(activity.applicationContext, ApiServerClient(store), settings)
+                    ApiServerClient(store).uploadPolicy() to sync.collect()
+                }
+                activity.runOnUiThread {
+                    loaded.onSuccess { (loadedPolicy, items) ->
+                        policy = loadedPolicy
+                        val allowed = loadedPolicy.kinds
+                        pending = items.filter { allowed.isEmpty() || it.kind in allowed }
+                        val online = pending.count { it.kind == ApiPackageKind.ONLINE_SOURCE }
+                        val association = pending.count { it.kind == ApiPackageKind.ASSOCIATION_SOURCE }
+                        status.text = when {
+                            !loadedPolicy.allowed -> loadedPolicy.reason.ifBlank { "服务器未允许当前账号上传内容库" }
+                            pending.isEmpty() -> "本机没有可上传的书源或关联源"
+                            else -> "本机可上传 $online 个书源、$association 个关联源；当前阅微账号 ${loadedPolicy.hostAccountId} 已在上传白名单。"
+                        }
+                        upload.isEnabled = loadedPolicy.allowed && pending.isNotEmpty()
+                    }.onFailure { error -> status.text = error.message ?: "读取上传许可失败" }
+                }
+            }.start()
+        }
+        upload.setOnClickListener {
+            if (!upload.isEnabled) return@setOnClickListener
+            upload.isEnabled = false
+            status.text = "正在上传……"
+            val targets = pending
+            val kinds = policy?.kinds.orEmpty()
+            Thread {
+                val result = runCatching {
+                    com.reamicro.fix.cloud.api.ApiContentLibrarySync(activity.applicationContext, ApiServerClient(store), settings)
+                        .upload(targets, kinds) { index, total, name ->
+                            activity.runOnUiThread { status.text = "正在上传 $index/$total：$name" }
+                        }
+                }
+                activity.runOnUiThread {
+                    result.onSuccess(::renderSummary)
+                        .onFailure { error -> status.text = error.message ?: "上传内容库失败" }
+                    upload.isEnabled = true
+                }
+            }.start()
+        }
+        val actions = settingsDialogActions(activity)
+        actions.addView(upload, settingsDialogButtonParams(activity))
+        actions.addView(settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply {
+            setOnClickListener { dialog.dismiss() }
+        }, settingsDialogButtonParams(activity))
+        card.addView(actions)
+        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, dismissOnThemeChange = true)
+    }
+}
+
+// 把本地书源和关联源与服务器内容库比对，名称和域名一致的视为同一个源并全量关联。
+internal fun ReaMicroSettingsHook.openApiLibraryLinkDialog() {
+    val activity = activityProvider() ?: return
+    activity.runOnUiThread {
+        val store = ApiServerSettingsStore { activity.applicationContext }
+        val colors = SettingsDialogColors(activity)
+        val dialog = Dialog(activity)
+        val card = settingsDialogCard(activity, colors)
+        card.addView(settingsDialogTitle(activity, "关联内容库", colors))
+        card.addView(
+            settingsDialogHint(
+                activity,
+                "把本机的书源和关联源与服务器内容库比对。源的名称和域名一致即视为同一个源，" +
+                    "关联后即可通过 API 服务器更新。关联本身不改动本机内容；" +
+                    "执行“检查内容库更新”时会用服务器版本覆盖已关联的源。",
+                colors,
+            ),
+            apiServerRowParams(activity),
+        )
+        val status = TextView(activity).apply { setTextColor(colors.body); text = "正在比对本机内容库与服务器内容库……" }
+        card.addView(status, apiServerRowParams(activity))
+        val link = settingsDialogButton(activity, "全部关联", colors, SettingsDialogButtonRole.Primary).apply { isEnabled = false }
+        var pairs: List<Pair<com.reamicro.fix.cloud.api.ApiLibraryItem, com.reamicro.fix.cloud.api.ApiPackageSummary>> = emptyList()
+
+        if (!store.get().enabled) {
+            status.text = "请先启用并配置 API 服务器"
+        } else {
+            Thread {
+                val loaded = runCatching {
+                    val sync = com.reamicro.fix.cloud.api.ApiContentLibrarySync(activity.applicationContext, ApiServerClient(store), settings)
+                    val items = sync.collect()
+                    Triple(items.size, sync.match(items), sync.linkedCount())
+                }
+                activity.runOnUiThread {
+                    loaded.onSuccess { (total, matched, alreadyLinked) ->
+                        pairs = matched
+                        val online = matched.count { it.first.kind == ApiPackageKind.ONLINE_SOURCE }
+                        val association = matched.count { it.first.kind == ApiPackageKind.ASSOCIATION_SOURCE }
+                        status.text = when {
+                            total == 0 -> "本机没有书源或关联源"
+                            matched.isEmpty() -> "本机 $total 个源在服务器内容库中没有名称和域名一致的匹配项"
+                            else -> buildString {
+                                append("本机 $total 个源中有 ${matched.size} 个可关联：$online 个书源、$association 个关联源。")
+                                if (alreadyLinked > 0) append("\n其中已登记关联 $alreadyLinked 个，重复关联不会产生副作用。")
+                                matched.take(10).forEach { (item, summary) ->
+                                    append("\n· ${item.name} → ${summary.packageId} ${summary.version}")
+                                }
+                                if (matched.size > 10) append("\n· 其余 ${matched.size - 10} 个略")
+                            }
+                        }
+                        link.isEnabled = matched.isNotEmpty()
+                    }.onFailure { error -> status.text = error.message ?: "比对内容库失败" }
+                }
+            }.start()
+        }
+        link.setOnClickListener {
+            if (!link.isEnabled) return@setOnClickListener
+            link.isEnabled = false
+            status.text = "正在关联……"
+            val targets = pairs
+            Thread {
+                val result = runCatching {
+                    com.reamicro.fix.cloud.api.ApiContentLibrarySync(activity.applicationContext, ApiServerClient(store), settings)
+                        .link(targets) { index, total, name ->
+                            activity.runOnUiThread { status.text = "正在关联 $index/$total：$name" }
+                        }
+                }
+                activity.runOnUiThread {
+                    result.onSuccess { summary ->
+                        status.text = buildString {
+                            append("已关联 ${summary.linked} 个源")
+                            if (summary.failed > 0) append("，失败 ${summary.failed} 个")
+                            append("。")
+                            if (summary.linked > 0) append("\n现在执行“检查内容库更新”即可通过 API 服务器更新这些源。")
+                            summary.messages.forEach { append("\n$it") }
+                        }
+                    }.onFailure { error -> status.text = error.message ?: "关联内容库失败" }
+                    link.isEnabled = true
+                }
+            }.start()
+        }
+        val actions = settingsDialogActions(activity)
+        actions.addView(link, settingsDialogButtonParams(activity))
+        actions.addView(settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply {
+            setOnClickListener { dialog.dismiss() }
+        }, settingsDialogButtonParams(activity))
+        card.addView(actions)
+        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, dismissOnThemeChange = true)
+    }
+}
+
 internal fun ReaMicroSettingsHook.checkApiPackageUpdates() {
     val activity = activityProvider() ?: return
     val store = ApiServerSettingsStore { activity.applicationContext }
