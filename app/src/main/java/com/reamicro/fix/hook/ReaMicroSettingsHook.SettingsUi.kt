@@ -639,7 +639,7 @@ internal fun ReaMicroSettingsHook.renderReaderSelectionMenuSettingsContent(inner
 internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: Any, composer: Any) {
     val listContent = functionProxy("AboutCompletionList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
-        aboutVersionState()
+        aboutVersionValue()
         val snapshot = settings.snapshot()
         val toggleRows = listOf(
             ToggleRow(

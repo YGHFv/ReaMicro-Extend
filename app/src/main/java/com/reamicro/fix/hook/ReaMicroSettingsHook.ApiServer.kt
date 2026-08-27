@@ -649,12 +649,12 @@ internal fun ReaMicroSettingsHook.confirmApiDebugUnlock() {
         val dialog = Dialog(activity)
         val colors = SettingsDialogColors(activity)
         val card = settingsDialogCard(activity, colors)
-        card.addView(settingsDialogTitle(activity, "是否启用调试模式", colors))
+        card.addView(settingsDialogTitle(activity, "测试配置", colors))
         card.addView(
             settingsDialogHint(
                 activity,
-                "启用后将显示 API 服务器设置入口，可使用 API 服务器等测试配置。" +
-                    "该配置将允许三方服务器收集您的个人数据和阅微账号数据等敏感高危数据，请确认是否启用。",
+                "启用后将允许使用自建 API 服务器进行模块调试与服务联调，并显示 API 服务器设置入口。" +
+                    "连接非官方服务器可能收集您的个人数据和阅微账号数据等敏感高危信息，请确认是否启用。",
                 colors,
             ),
         )
@@ -663,7 +663,7 @@ internal fun ReaMicroSettingsHook.confirmApiDebugUnlock() {
             settingsDialogButton(activity, "取消", colors, SettingsDialogButtonRole.Neutral).apply {
                 setOnClickListener {
                     dialog.dismiss()
-                    showToast("已取消启用调试模式")
+                    showToast("已取消启用测试配置")
                 }
             },
             settingsDialogButtonParams(activity),
@@ -674,7 +674,7 @@ internal fun ReaMicroSettingsHook.confirmApiDebugUnlock() {
                     settings.setApiDebugUnlocked(true)
                     bumpAboutVersion()
                     dialog.dismiss()
-                    showToast("已启用调试模式，API 服务器设置入口已显示")
+                    showToast("已启用测试配置")
                 }
             },
             settingsDialogButtonParams(activity),
