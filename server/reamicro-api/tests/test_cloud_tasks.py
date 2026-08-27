@@ -121,6 +121,11 @@ class CloudTaskSecurityTest(unittest.TestCase):
         self.assertEqual(item["owner"], "host:3")
         self.assertEqual(item["deliveredAt"], 0)
 
+    def test_presence_storage_records_online_lease(self):
+        main.save_presence({"host:3": {"owner": "host:3", "lastSeenAt": 1000, "onlineUntil": 601000}})
+        item = main.load_presence()["host:3"]
+        self.assertGreater(item["onlineUntil"], item["lastSeenAt"])
+
     def test_task_detail_hides_raw_json_and_shows_reading_book(self):
         task = {
             "taskType": "cloud_auto_read",

@@ -5,6 +5,8 @@ import android.app.Application
 import android.content.ComponentCallbacks2
 import android.content.res.Configuration
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Toast
 import com.reamicro.fix.association.model.BookSource
 import com.reamicro.fix.association.provider.ExternalFeatureApi
@@ -13,6 +15,8 @@ import com.reamicro.fix.association.provider.YouShuWebSearchBridge
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.cloud.api.ApiPackageAutoUpdater
 import com.reamicro.fix.cloud.api.CloudTaskNotificationPoller
+import com.reamicro.fix.cloud.api.ApiServerSettingsStore
+import com.reamicro.fix.cloud.api.mirrorToModule
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.settings.XposedModuleSettings
@@ -38,6 +42,17 @@ class ReaMicroHookEntry {
     private val settingsProvider: () -> ModuleSettingsSnapshot = moduleSettings::snapshot
     private val installedFeatureIds = linkedSetOf<String>()
     @Volatile private var memoryCallbacksInstalled: Boolean = false
+    @Volatile private var apiSettingsMirrored: Boolean = false
+    private val heartbeatHandler = Handler(Looper.getMainLooper())
+    private val heartbeatRunnable = object : Runnable {
+        override fun run() {
+            val activity = currentActivityRef?.get()
+            if (activity != null) {
+                CloudTaskNotificationPoller.poll(activity.applicationContext, source = "foreground-heartbeat")
+                heartbeatHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS)
+            }
+        }
+    }
 
     fun handleLoadedPackage(packageName: String, classLoader: ClassLoader) {
         if (packageName !in REAMICRO_PACKAGES) return
@@ -235,6 +250,7 @@ class ReaMicroHookEntry {
                         currentActivityRef = WeakReference(activity)
                         currentActivityResumed = false
                         moduleSettings.attachContext(activity)
+                        mirrorApiSettings(activity)
                         installExternalFeatures(classLoader)
                         installMemoryCallbacks(
                             application = activity.application,
@@ -248,6 +264,7 @@ class ReaMicroHookEntry {
                         profileBackgroundHook.refreshRandomImageFor(activity)
                         ApiPackageAutoUpdater.checkIfDue(activity.applicationContext, moduleSettings)
                         CloudTaskNotificationPoller.poll(activity.applicationContext)
+                        startForegroundHeartbeat()
                         XposedBridge.log("$LOG_PREFIX MainActivity.onCreate hooked")
                     }
 
@@ -274,6 +291,7 @@ class ReaMicroHookEntry {
                             RotationOrientationController.apply(activity, moduleSettings.snapshot())
                             profileBackgroundHook.refreshRandomImageFor(activity)
                             CloudTaskNotificationPoller.poll(activity.applicationContext)
+                            startForegroundHeartbeat()
                         }
                     },
                 )
@@ -348,12 +366,24 @@ class ReaMicroHookEntry {
                     if (currentActivityRef?.get() === activity) {
                         currentActivityRef = null
                         currentActivityResumed = false
+                        heartbeatHandler.removeCallbacks(heartbeatRunnable)
                     }
                 }
             })
             memoryCallbacksInstalled = true
             XposedBridge.log("$LOG_PREFIX memory callbacks installed")
         }
+    }
+
+    private fun startForegroundHeartbeat() {
+        heartbeatHandler.removeCallbacks(heartbeatRunnable)
+        heartbeatHandler.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS)
+    }
+
+    private fun mirrorApiSettings(activity: Activity) {
+        if (apiSettingsMirrored) return
+        ApiServerSettingsStore { activity.applicationContext }.get().mirrorToModule(activity.applicationContext)
+        apiSettingsMirrored = true
     }
 
     private fun installExternalFeatures(classLoader: ClassLoader) {
@@ -382,6 +412,7 @@ class ReaMicroHookEntry {
     private companion object {
         val REAMICRO_PACKAGES = setOf("app.zhendong.reamicro", "app.zhendong.reamicro.fix")
         const val LOG_PREFIX = "ReaMicro LSP"
+        const val HEARTBEAT_INTERVAL_MS = 5 * 60_000L
         const val ENTRY_FEATURE_ID = "Entry"
         const val GLOBAL_FONT_RECREATE_DELAY_MS = 180L
     }

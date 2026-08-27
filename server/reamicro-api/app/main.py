@@ -223,6 +223,14 @@ def save_notifications(items: dict[str, dict[str, Any]]) -> None:
     get_state_store().save_namespace("notifications", items)
 
 
+def load_presence() -> dict[str, dict[str, Any]]:
+    return get_state_store().load_namespace("presence")
+
+
+def save_presence(items: dict[str, dict[str, Any]]) -> None:
+    get_state_store().save_namespace("presence", items)
+
+
 def enqueue_task_notification(task: dict[str, Any], result: str, message: str, finished_at: int) -> str:
     notification_id = "msg_" + secrets.token_hex(10)
     items = load_notifications()
@@ -1110,6 +1118,8 @@ def required_api_scope(request: Request) -> str | None:
         return "tasks:write" if request.method not in {"GET", "HEAD"} else "tasks:read"
     if path.startswith("/v1/notifications"):
         return "tasks:write" if request.method not in {"GET", "HEAD"} else "tasks:read"
+    if path.startswith("/v1/presence"):
+        return "tasks:write"
     if path.startswith("/v1/credentials"):
         return "credentials:write" if request.method not in {"GET", "HEAD"} else "credentials:read"
     if path.startswith("/v1/backups"):
@@ -3671,6 +3681,33 @@ async def list_notifications(owner: str = Depends(task_owner)) -> dict[str, Any]
     items = [item for item in load_notifications().values() if item.get("owner") == owner and not item.get("deliveredAt")]
     items.sort(key=lambda item: int(item.get("createdAt", 0)))
     return response({"items": items[-50:]})
+
+
+@app.post("/v1/presence/heartbeat")
+async def presence_heartbeat(request: Request, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    """记录模块在线租约，并返回下次应唤醒的时间。"""
+    try:
+        payload = await request.json()
+    except ValueError:
+        payload = {}
+    payload = payload if isinstance(payload, dict) else {}
+    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    lease_until = now + 10 * 60_000
+    presence = load_presence()
+    presence[owner] = {
+        "owner": owner,
+        "lastSeenAt": now,
+        "onlineUntil": lease_until,
+        "moduleVersion": str(payload.get("moduleVersion", ""))[:64],
+        "buildTime": str(payload.get("buildTime", ""))[:64],
+        "source": str(payload.get("source", "module"))[:32],
+    }
+    save_presence(presence)
+    tasks = [task for task in load_tasks().values() if task.get("owner") == owner and task.get("enabled", True) and task.get("status") not in {"paused", "cancelled"}]
+    next_task_at = min((bounded_config_int(task.get("nextRunAt", 0), 0, 0) for task in tasks if bounded_config_int(task.get("nextRunAt", 0), 0, 0) > now), default=0)
+    pending = [item for item in load_notifications().values() if item.get("owner") == owner and not item.get("deliveredAt")]
+    pending.sort(key=lambda item: int(item.get("createdAt", 0)))
+    return response({"onlineUntil": lease_until, "nextTaskAt": next_task_at, "pendingCount": len(pending), "notifications": pending[-50:]})
 
 
 @app.post("/v1/notifications/ack")

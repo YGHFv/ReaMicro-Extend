@@ -247,6 +247,14 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     fun listNotifications(): JSONObject = taskRequest("GET", "/v1/notifications", null)
     fun acknowledgeNotifications(ids: List<String>): JSONObject =
         taskRequest("POST", "/v1/notifications/ack", JSONObject().put("ids", org.json.JSONArray(ids)))
+    fun heartbeat(source: String): JSONObject = taskRequest(
+        "POST",
+        "/v1/presence/heartbeat",
+        JSONObject()
+            .put("source", source)
+            .put("moduleVersion", com.reamicro.fix.BuildConfig.VERSION_NAME)
+            .put("buildTime", com.reamicro.fix.BuildConfig.BUILD_TIME),
+    )
 
     fun listReaMicroCredentials(): JSONObject = taskRequest("GET", "/v1/credentials/reamicro", null)
 

@@ -27,6 +27,7 @@ import com.reamicro.fix.cloud.api.CloudTaskManager
 import com.reamicro.fix.cloud.api.ApiThemeStore
 import com.reamicro.fix.cloud.api.CredentialBackupCrypto
 import com.reamicro.fix.cloud.api.normalizeApiBaseUrl
+import com.reamicro.fix.cloud.api.mirrorToModule
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 import com.reamicro.fix.hook.settings.*
 import de.robv.android.xposed.XposedBridge
@@ -184,12 +185,16 @@ internal fun ReaMicroSettingsHook.openApiServerSettingsDialog() {
             actions.addView(settingsDialogButton(activity, "保存", colors, SettingsDialogButtonRole.Primary).apply {
                 setOnClickListener {
                     if (!enabled.isChecked) {
-                        store.save(draftSettings())
+                        draftSettings().also {
+                            store.save(it)
+                            it.mirrorToModule(activity.applicationContext)
+                        }
                         dialog.dismiss()
                         showToast("API 服务器已停用")
                     } else {
                         probe(onSuccess = { resolved ->
                             store.save(resolved)
+                            resolved.mirrorToModule(activity.applicationContext)
                             dialog.dismiss()
                             showToast("API 服务器设置已保存")
                         })
@@ -215,7 +220,10 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
         val currentCredential = runCatching { accountController.currentCloudCredential() }.getOrNull()
         currentCredential?.let { credential ->
             val saved = store.get()
-            if (saved.hostAccountId != credential.accountId) store.save(saved.copy(hostAccountId = credential.accountId))
+            if (saved.hostAccountId != credential.accountId) saved.copy(hostAccountId = credential.accountId).also {
+                store.save(it)
+                it.mirrorToModule(activity.applicationContext)
+            }
         }
         val client = ApiServerClient(store)
         val colors = SettingsDialogColors(activity)
