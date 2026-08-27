@@ -92,6 +92,7 @@ def default_config() -> dict[str, Any]:
         "apiKeyRecords": [],
         "secretKey": os.getenv("REAMICRO_SECRET_KEY", ""),
         "allowPublic": env_bool("REAMICRO_ALLOW_PUBLIC", True),
+        "authMode": os.getenv("REAMICRO_AUTH_MODE", ""),
         "features": sorted(DEFAULT_FEATURES),
         "minModuleVersion": os.getenv("REAMICRO_MIN_MODULE_VERSION", "2.0.0"),
         "signingPublicKey": os.getenv("REAMICRO_SIGNING_PUBLIC_KEY", ""),
@@ -130,11 +131,13 @@ def normalized_config_list(value: Any) -> list[str]:
 def load_config() -> dict[str, Any]:
     with config_lock:
         config = default_config()
+        auth_mode_explicit = False
         try:
             if CONFIG_PATH.is_file():
                 stored = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
                 if isinstance(stored, dict):
                     config.update(stored)
+                    auth_mode_explicit = str(stored.get("authMode", "")).strip() in {"public", "api_key", "account", "host_account_allowlist"}
         except (OSError, ValueError):
             pass
         config["features"] = normalized_config_list(config.get("features", []))
@@ -146,6 +149,9 @@ def load_config() -> dict[str, Any]:
         config["primaryAdmin"] = config.get("primaryAdmin", {}) if isinstance(config.get("primaryAdmin", {}), dict) else {}
         config["adminAccounts"] = config.get("adminAccounts", {}) if isinstance(config.get("adminAccounts", {}), dict) else {}
         config["hostAccountAllowlist"] = normalized_config_list(config.get("hostAccountAllowlist", []))
+        if config.get("authMode") not in {"public", "api_key", "account", "host_account_allowlist"}:
+            config["authMode"] = infer_auth_mode(config)
+        config["_authModeExplicit"] = auth_mode_explicit
         return config
 
 
@@ -163,10 +169,31 @@ def save_config(next_config: dict[str, Any]) -> dict[str, Any]:
         safe["primaryAdmin"] = safe.get("primaryAdmin", {}) if isinstance(safe.get("primaryAdmin", {}), dict) else {}
         safe["adminAccounts"] = safe.get("adminAccounts", {}) if isinstance(safe.get("adminAccounts", {}), dict) else {}
         safe["hostAccountAllowlist"] = normalized_config_list(safe.get("hostAccountAllowlist", []))
+        if safe.get("authMode") not in {"public", "api_key", "account", "host_account_allowlist"}:
+            safe["authMode"] = infer_auth_mode(safe)
+        safe.pop("_authModeExplicit", None)
         temp = CONFIG_PATH.with_suffix(".tmp")
         temp.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
         temp.replace(CONFIG_PATH)
         return safe
+
+
+def infer_auth_mode(config: dict[str, Any]) -> str:
+    """从旧版多认证配置迁移到单选认证模式。"""
+    if config.get("hostAccountAllowlist"):
+        return "host_account_allowlist"
+    if config.get("accounts"):
+        return "account"
+    if api_key_auth_configured(config):
+        return "api_key"
+    return "public"
+
+
+def active_auth_mode(config: dict[str, Any]) -> str:
+    mode = str(config.get("authMode") or infer_auth_mode(config))
+    if mode == "public" and not config.get("_authModeExplicit") and (api_key_auth_configured(config) or config.get("accounts") or config.get("hostAccountAllowlist")):
+        return infer_auth_mode(config)
+    return mode if mode in {"public", "api_key", "account", "host_account_allowlist"} else "api_key"
 
 
 def get_state_store() -> StateStore:
@@ -186,6 +213,81 @@ def load_tasks() -> dict[str, dict[str, Any]]:
 
 def save_tasks(tasks: dict[str, dict[str, Any]]) -> None:
     get_state_store().save_namespace("tasks", tasks)
+
+
+def load_notifications() -> dict[str, dict[str, Any]]:
+    return get_state_store().load_namespace("notifications")
+
+
+def save_notifications(items: dict[str, dict[str, Any]]) -> None:
+    get_state_store().save_namespace("notifications", items)
+
+
+def enqueue_task_notification(task: dict[str, Any], result: str, message: str, finished_at: int) -> str:
+    notification_id = "msg_" + secrets.token_hex(10)
+    items = load_notifications()
+    items[notification_id] = {
+        "id": notification_id,
+        "owner": str(task.get("owner", "")),
+        "taskId": str(task.get("id", "")),
+        "taskType": str(task.get("taskType", "")),
+        "result": result,
+        "title": _admin_task_label(task.get("taskType", "")) + ("执行完成" if result == "success" else "执行异常"),
+        "message": message,
+        "createdAt": finished_at,
+        "deliveredAt": 0,
+    }
+    # 每个用户最多保留最近 200 条，防止长期离线无限增长。
+    owned = sorted((item for item in items.values() if item.get("owner") == task.get("owner")), key=lambda item: int(item.get("createdAt", 0)), reverse=True)
+    for expired in owned[200:]:
+        items.pop(str(expired.get("id", "")), None)
+    save_notifications(items)
+    return notification_id
+
+
+def merge_duplicate_tasks() -> int:
+    """同一所有者、同一同步密钥、同一任务类型只保留最新任务。"""
+    tasks = load_tasks()
+    groups: dict[tuple[str, str, str], list[tuple[str, dict[str, Any]]]] = {}
+    for key, task in tasks.items():
+        if not isinstance(task, dict):
+            continue
+        task_type = str(task.get("taskType", ""))
+        credential_id = task_credential_id(task)
+        if task_type and credential_id and task_type != "http":
+            groups.setdefault((str(task.get("owner", "")), task_type, credential_id), []).append((key, task))
+    removed = 0
+    for items in groups.values():
+        if len(items) < 2:
+            continue
+        items.sort(key=lambda pair: (bounded_config_int(pair[1].get("updatedAt", 0), 0, 0), bounded_config_int(pair[1].get("createdAt", 0), 0, 0), pair[0]), reverse=True)
+        for duplicate_id, _ in items[1:]:
+            tasks.pop(duplicate_id, None)
+            removed += 1
+    if removed:
+        save_tasks(tasks)
+        audit_event("tasks_merged", metadata={"removedCount": removed, "source": "dedupe"})
+    return removed
+
+
+def task_unique_key(task: dict[str, Any]) -> tuple[str, str, str] | None:
+    """返回需要幂等的任务键；通用 HTTP 任务允许多个并存。"""
+    task_type = str(task.get("taskType", "")).strip()
+    credential_id = task_credential_id(task)
+    owner = str(task.get("owner", "")).strip()
+    if not owner or not credential_id or not task_type or task_type == "http":
+        return None
+    return owner, credential_id, task_type
+
+
+def find_duplicate_task(tasks: dict[str, dict[str, Any]], task: dict[str, Any], exclude_id: str = "") -> tuple[str, dict[str, Any]] | None:
+    key = task_unique_key(task)
+    if not key:
+        return None
+    candidates = [(task_id, item) for task_id, item in tasks.items() if task_id != exclude_id and task_unique_key(item) == key]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda pair: (bounded_config_int(pair[1].get("updatedAt", 0), 0, 0), bounded_config_int(pair[1].get("createdAt", 0), 0, 0), pair[0]))
 
 
 def load_credentials() -> dict[str, dict[str, Any]]:
@@ -405,6 +507,9 @@ def task_interval(task: dict[str, Any]) -> int:
 
 def next_task_run(task: dict[str, Any], now_ms: int | None = None) -> int:
     now_ms = now_ms or int(datetime.now(timezone.utc).timestamp() * 1000)
+    override = bounded_config_int(task.pop("nextRunAtOverride", 0), 0, 0)
+    if override > now_ms:
+        return override
     schedule = task.get("schedule", {})
     if not isinstance(schedule, dict) or not schedule.get("timeOfDay"):
         return now_ms + task_interval(task) * 1000
@@ -580,6 +685,9 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
         task["dailyCounter"] = int(task.get("dailyCounter", 0)) + 1 if previous_date == today else 1
         return "success", f"野社抽卡完成（今日 {task['dailyCounter']}/{daily_limit}）：{redact_message(json.dumps(body, ensure_ascii=False)[:300])}"
     if task_type == "yeshe_checkin":
+        china_zone = timezone(timedelta(hours=8))
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        today = datetime.fromtimestamp(now_ms / 1000, china_zone).date().isoformat()
         status_code, lore, raw = json_http_request(base_url, token, configured_body, str(request.get("endpoint") or "rest/community/get-daily-lore"))
         if status_code in (401, 403, 429):
             return "paused", f"阅微认证/风控响应 HTTP {status_code}"
@@ -587,16 +695,56 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             return "failed", f"获取野社每日轶闻失败 HTTP {status_code}: {redact_message(raw)}"
         lore_id = nested_value(lore, "data", "id") or nested_value(lore, "data", "loreId") or nested_value(lore, "id")
         claimed = bool(nested_value(lore, "data", "isFinish") or nested_value(lore, "data", "claimed"))
-        if claimed:
-            return "success", "野社零点签到已完成，无需重复提交"
-        if not lore_id:
-            return "failed", "阅微每日轶闻响应缺少 userLoreId"
-        status_code, body, raw = json_http_request(base_url, token, {"userLoreId": int(lore_id)}, str(request.get("completeEndpoint") or "rest/community/complete-daily-lore"))
-        if status_code in (401, 403, 429):
-            return "paused", f"阅微认证/风控响应 HTTP {status_code}"
-        if status_code < 200 or status_code >= 300:
-            return "failed", f"野社签到提交失败 HTTP {status_code}: {redact_message(raw)}"
-        return "success", f"野社零点签到完成：{redact_message(json.dumps(body, ensure_ascii=False)[:300])}"
+        checkin_message = "野社零点签到已完成" if claimed else ""
+        if not claimed:
+            if not lore_id:
+                return "failed", "阅微每日轶闻响应缺少 userLoreId"
+            status_code, body, raw = json_http_request(base_url, token, {"userLoreId": int(lore_id)}, str(request.get("completeEndpoint") or "rest/community/complete-daily-lore"))
+            if status_code in (401, 403, 429):
+                return "paused", f"阅微认证/风控响应 HTTP {status_code}"
+            if status_code < 200 or status_code >= 300:
+                return "failed", f"野社签到提交失败 HTTP {status_code}: {redact_message(raw)}"
+            checkin_message = "野社零点签到完成"
+        if task.get("lastCheckinDate") != today:
+            task["lastCheckinDate"] = today
+            task["lastCheckinAt"] = now_ms
+            task["claimDueAt"] = now_ms + 8 * 3_600_000
+            task["claimRetryCount"] = 0
+            task["claimFinalAttemptDate"] = ""
+            task["claimCompletedDate"] = ""
+        if task.get("claimCompletedDate") == today:
+            return "success", f"{checkin_message or '野社签到状态已检查'}，签到奖励今日已领取"
+        claim_due_at = bounded_config_int(task.get("claimDueAt", 0), now_ms + 8 * 3_600_000, 0)
+        if now_ms < claim_due_at:
+            task["nextRunAtOverride"] = claim_due_at
+            return "success", f"{checkin_message or '野社签到状态已检查'}，奖励将在签到 8 小时后自动领取"
+
+        claim_status, claim_body, claim_raw = json_http_request(base_url, token, {}, "rest/community/claim-literary-society-weekly-reward")
+        if claim_status in (401, 403, 429):
+            return "paused", f"阅微认证/风控响应 HTTP {claim_status}"
+        success = 200 <= claim_status < 300 and nested_value(claim_body, "data", "success") is not False
+        claim_message = nested_value(claim_body, "data", "message") or nested_value(claim_body, "message") or redact_message(claim_raw)
+        if success:
+            task["lastClaimAt"] = now_ms
+            task["claimCompletedDate"] = today
+            task["claimRetryCount"] = 0
+            return "success", f"{checkin_message or '野社签到状态已检查'}，签到奖励领取成功" + (f"：{redact_message(str(claim_message))}" if claim_message else "")
+
+        retry_count = bounded_config_int(task.get("claimRetryCount", 0), 0, 0) + 1
+        task["claimRetryCount"] = retry_count
+        local_now = datetime.fromtimestamp(now_ms / 1000, china_zone)
+        if retry_count <= 3:
+            task["nextRunAtOverride"] = now_ms + 5 * 60_000
+            return "success", f"签到奖励领取失败（第 {retry_count}/3 次），5 分钟后自动重试：{redact_message(str(claim_message))}"
+        if task.get("claimFinalAttemptDate") != today:
+            final_at = local_now.replace(hour=23, minute=59, second=0, microsecond=0)
+            if final_at <= local_now:
+                final_at = local_now + timedelta(minutes=1)
+            task["claimFinalAttemptDate"] = today
+            task["nextRunAtOverride"] = int(final_at.timestamp() * 1000)
+            return "success", f"签到奖励连续领取失败，已安排今日 23:59 最后重试：{redact_message(str(claim_message))}"
+        task["claimFinalFailedDate"] = today
+        return "success", f"签到奖励今日最终领取仍失败：{redact_message(str(claim_message))}"
     if task_type == "cloud_auto_read":
         books = request.get("books") if isinstance(request.get("books"), list) else []
         if not books:
@@ -756,6 +904,7 @@ async def task_scheduler_loop() -> None:
                     else:
                         task["nextRunAt"] = 0
                     record_task_execution(task, result, message, started_at, finished_at)
+                    enqueue_task_notification(task, result, message, finished_at)
                     changed = True
                     save_tasks(tasks)
                 finally:
@@ -959,6 +1108,8 @@ def required_api_scope(request: Request) -> str | None:
         return "packages:write" if request.method not in {"GET", "HEAD"} else "packages:read"
     if path.startswith("/v1/tasks"):
         return "tasks:write" if request.method not in {"GET", "HEAD"} else "tasks:read"
+    if path.startswith("/v1/notifications"):
+        return "tasks:write" if request.method not in {"GET", "HEAD"} else "tasks:read"
     if path.startswith("/v1/credentials"):
         return "credentials:write" if request.method not in {"GET", "HEAD"} else "credentials:read"
     if path.startswith("/v1/backups"):
@@ -1161,54 +1312,47 @@ def check_request_auth(
     host_account_id: str | None,
 ) -> None:
     config = load_config()
+    mode = active_auth_mode(config)
     api_key = str(config.get("apiKey", ""))
-    key_record = configured_api_key(config, api_key_value)
+    key_record = configured_api_key(config, api_key_value) if mode == "api_key" else None
     if key_record:
         if key_record.get("id") != "legacy":
             save_config(config)
         return
     accounts = config.get("accounts", {})
-    if account_name and account_password and isinstance(accounts, dict):
+    if mode == "account" and account_name and account_password and isinstance(accounts, dict):
         encoded = accounts.get(account_name)
         if encoded and password_matches(account_password, str(encoded)):
             return
     allowlist = set(config.get("hostAccountAllowlist", []))
-    if host_account_id and host_account_id in allowlist:
+    if mode == "host_account_allowlist" and host_account_id and host_account_id in allowlist:
         return
-    if config.get("allowPublic", True) and not api_key_auth_configured(config) and not accounts and not allowlist:
+    if mode == "public":
         return
     raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="认证信息无效"))
 
 
 def resolve_identity(api_key_value: str | None, account_name: str | None, account_password: str | None, host_account_id: str | None) -> str:
     config = load_config()
+    mode = active_auth_mode(config)
     api_key = str(config.get("apiKey", ""))
-    key_record = configured_api_key(config, api_key_value)
+    key_record = configured_api_key(config, api_key_value) if mode == "api_key" else None
     if key_record:
         identity = "key:" + hashlib.sha256(api_key_value.encode()).hexdigest()[:24]
         return identity + (":host:" + host_account_id if host_account_id else "")
     encoded = str(config.get("accounts", {}).get(account_name or "", ""))
-    if account_name and account_password and encoded and password_matches(account_password, encoded):
+    if mode == "account" and account_name and account_password and encoded and password_matches(account_password, encoded):
         identity = "account:" + account_name
         return identity + (":host:" + host_account_id if host_account_id else "")
-    if host_account_id and host_account_id in set(config.get("hostAccountAllowlist", [])):
+    if mode == "host_account_allowlist" and host_account_id and host_account_id in set(config.get("hostAccountAllowlist", [])):
         return "host:" + host_account_id
-    if config.get("allowPublic", True) and not api_key_auth_configured(config) and not config.get("accounts") and not config.get("hostAccountAllowlist"):
+    if mode == "public":
         return "host-public:" + host_account_id if host_account_id else "public"
     raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="认证信息无效"))
 
 
 def configured_auth_modes(config: dict[str, Any]) -> list[str]:
-    modes: list[str] = []
-    if config.get("allowPublic", True) and not api_key_auth_configured(config) and not config.get("accounts") and not config.get("hostAccountAllowlist"):
-        modes.append("public")
-    if api_key_auth_configured(config):
-        modes.append("api_key")
-    if config.get("accounts"):
-        modes.append("account")
-    if config.get("hostAccountAllowlist"):
-        modes.append("host_account_allowlist")
-    return modes or ["api_key"]
+    return [active_auth_mode(config)]
 
 
 def public_server_capabilities(config: dict[str, Any]) -> dict[str, Any]:
@@ -1264,17 +1408,18 @@ async def backup_owner(
 ) -> str:
     enforce_api_scope(request, x_reamicro_api_key)
     config = load_config()
+    mode = active_auth_mode(config)
     api_key = str(config.get("apiKey", ""))
-    if configured_api_key(config, x_reamicro_api_key):
+    if mode == "api_key" and configured_api_key(config, x_reamicro_api_key):
         identity = "key:" + x_reamicro_api_key + (":host:" + x_reamicro_host_account_id if x_reamicro_host_account_id else "")
-    elif x_reamicro_account and x_reamicro_password and password_matches(
+    elif mode == "account" and x_reamicro_account and x_reamicro_password and password_matches(
         x_reamicro_password,
         str(config.get("accounts", {}).get(x_reamicro_account, "")),
     ):
         identity = "account:" + x_reamicro_account + (":host:" + x_reamicro_host_account_id if x_reamicro_host_account_id else "")
-    elif x_reamicro_host_account_id and x_reamicro_host_account_id in set(config.get("hostAccountAllowlist", [])):
+    elif mode == "host_account_allowlist" and x_reamicro_host_account_id and x_reamicro_host_account_id in set(config.get("hostAccountAllowlist", [])):
         identity = "host:" + x_reamicro_host_account_id
-    elif x_reamicro_host_account_id and config.get("allowPublic", True) and not api_key_auth_configured(config) and not config.get("accounts") and not config.get("hostAccountAllowlist"):
+    elif mode == "public":
         identity = "host-public:" + x_reamicro_host_account_id
     else:
         raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="备份功能需要非公开认证"))
@@ -1668,6 +1813,41 @@ def admin_section_path(section: str) -> str:
     }.get(section, "/admin")
 
 
+def _admin_task_detail(task: dict[str, Any]) -> str:
+    """将任务内部配置转换为后台可读的简短说明。"""
+    task_type = str(task.get("taskType", ""))
+    schedule = task.get("schedule") if isinstance(task.get("schedule"), dict) else {}
+    time_of_day = str(schedule.get("timeOfDay", "")).strip()
+    parts: list[str] = []
+    if time_of_day:
+        parts.append(f"执行时间：每日 {time_of_day}")
+    try:
+        request = decrypt_secret(str(task.get("requestEncrypted", ""))) if task.get("requestEncrypted") else {}
+    except Exception:
+        request = {}
+    if not isinstance(request, dict):
+        request = {}
+    if task_type == "yeshe_checkin":
+        parts.append("奖励领取：签到后 8 小时")
+        if task.get("lastCheckinAt"):
+            parts.append(f"上次签到：{_admin_time_label(task.get('lastCheckinAt'))}")
+        if task.get("lastClaimAt"):
+            parts.append(f"上次领取：{_admin_time_label(task.get('lastClaimAt'))}")
+    elif task_type == "yeshe_draw_card":
+        parts.append(f"每日抽卡：{int(request.get('dailyLimit', 1) or 1)} 次")
+    elif task_type == "cloud_auto_read":
+        parts.append(f"阅读时长：{int(request.get('durationMinutes', 30) or 30)} 分钟")
+        books = request.get("books") if isinstance(request.get("books"), list) else []
+        if books:
+            names = [str(item.get("name") or item.get("bookName") or item.get("title") or item.get("bookId") or "未命名") for item in books if isinstance(item, dict)]
+            parts.append("阅读图书：" + "、".join(names[:3]) + (" 等" if len(names) > 3 else ""))
+        else:
+            parts.append(f"阅读图书：最近阅读记录（{int(request.get('recentLimit', 1) or 1)} 本）")
+    elif task_type == "http":
+        parts.append(f"请求：{str(request.get('method', 'GET')).upper()} {str(request.get('url', ''))[:80]}")
+    return "；".join(parts) or "未配置详细参数"
+
+
 def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: str = "", csrf_token: str = "") -> str:
     esc = lambda value: html.escape(str(value), quote=True)
     needle = query.strip().lower()
@@ -1686,6 +1866,7 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
 def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] | None = None, secret_notice: str = "", section: str = "overview", query: str = "") -> str:
     """分类管理后台，保留原有写入路由并提供统一内容列表入口。"""
     merge_duplicate_credentials()
+    merge_duplicate_tasks()
     esc = lambda value: html.escape(str(value), quote=True)
     actor = actor or {"username": "", "role": "subadmin", "permissions": []}
     valid_sections = {"overview", "packages", "tasks", "settings", "security", *PACKAGE_KINDS}
@@ -1700,7 +1881,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
         owner_display = owner[:12] + "…" if len(owner) > 12 else owner
         public_credential = credential_public(credential)
         health = str(public_credential.get("health", "unverified"))
-        credential_rows.append(f"<tr><td><strong>{esc(credential.get('label', '阅微账号'))}</strong><small>同步密钥 ID：{esc(credential.get('id', ''))}</small></td><td>{esc(credential.get('accountId', '') or '未提供')}</td><td>{esc(_admin_owner_label(owner))}<small>{esc(owner_display)}</small></td><td><span class='status status-{esc(health)}'>{esc(_admin_health_label(health))}</span><small>{esc(credential.get('lastVerifyMessage', '') or '暂无验证说明')}</small></td><td>{esc(_admin_time_label(credential.get('updatedAt', 0)))}</td></tr>")
+        credential_rows.append(f"<tr><td><strong>{esc(credential.get('id', ''))}</strong></td><td>{esc(credential.get('accountId', '') or '未提供')}</td><td>{esc(_admin_owner_label(owner))}<small>{esc(owner_display)}</small></td><td><span class='status status-{esc(health)}'>{esc(_admin_health_label(health))}</span><small>{esc(credential.get('lastVerifyMessage', '') or '暂无验证说明')}</small></td><td>{esc(_admin_time_label(credential.get('updatedAt', 0)))}</td></tr>")
     credential_table = "".join(credential_rows) or "<tr><td colspan='5' class='empty'>暂无模块上传的阅微同步密钥</td></tr>"
     credential_options = "<option value=''>不使用凭据</option>" + "".join(
         f"<option value='{esc(item.get('id', ''))}'>{esc(item.get('label', '阅微账号'))} · {esc(item.get('accountId', '') or item.get('owner', ''))}</option>"
@@ -1722,7 +1903,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
                 buttons.append("<button class='button subtle' name='action' value='cancel'>取消</button>")
             if buttons:
                 task_actions = f"<form class='inline' style='display:inline-flex;flex-direction:row;gap:6px' method='post' action='/admin/tasks/action'>{csrf_html}<input type='hidden' name='task_id' value='{task_id}'>{''.join(buttons)}</form>"
-        task_rows.append(f"<tr><td><strong>{esc(_admin_task_label(task.get('taskType', '')))}</strong><small>{esc(task.get('taskType', ''))}</small></td><td>{esc(_admin_owner_label(task.get('owner', '')))}</td><td>{esc(task_credential_id(task) or '未关联')}</td><td><span class='status status-{esc(task_status)}'>{esc(_admin_task_status_label(task_status))}</span></td><td>{'已启用' if task.get('enabled', True) else '已停用'}</td><td>{esc(task.get('lastMessage', '') or '暂无执行记录')}</td><td>{esc(_admin_time_label(task.get('nextRunAt', 0)))}</td><td><a href='/admin/tasks/{task_id}/logs'>查看日志</a> {task_actions}</td></tr>")
+        task_rows.append(f"<tr><td><strong>{esc(_admin_task_label(task.get('taskType', '')))}</strong></td><td>{esc(_admin_owner_label(task.get('owner', '')))}</td><td>{esc(task_credential_id(task) or '未关联')}</td><td>{esc(_admin_task_detail(task))}</td><td><span class='status status-{esc(task_status)}'>{esc(_admin_task_status_label(task_status))}</span><small>{'已启用' if task.get('enabled', True) else '已停用'}</small></td><td>{esc(task.get('lastMessage', '') or '暂无执行记录')}</td><td>{esc(_admin_time_label(task.get('nextRunAt', 0)))}</td><td><a href='/admin/tasks/{task_id}/logs'>查看日志</a> {task_actions}</td></tr>")
     task_table = "".join(task_rows) or "<tr><td colspan='8' class='empty'>暂无云端任务</td></tr>"
     nav_html = "".join(f"<a class=\"{'active' if key == section else ''}\" href=\"{admin_section_path(key)}\">{label}<span>{len([x for x in records if x.get('kind') == key]) if key in PACKAGE_KINDS else ''}</span></a>" for key, label in labels)
     notice = f"<div class='notice'>{esc(message)}</div>" if message else ""
@@ -1738,12 +1919,14 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
             content += '<template id="cloud-book-example">[{"cloudBookId":123,"bookId":123,"name":"书名"}]</template>'
             content += f"<form class='toolbar' method='get' action='{admin_section_path(section)}'><input name='q' value='{esc(query)}' placeholder='搜索名称、包 ID、版本或别名'><button class='button' type='submit'>搜索</button></form><div class='table-wrap'><table><thead><tr><th>类型</th><th>内容</th><th>版本</th><th>状态</th><th>渠道 / 依赖</th><th>操作</th></tr></thead><tbody>{_admin_package_table(visible, can_packages, query, admin_csrf_token(config, actor))}</tbody></table></div>"
     else:
-        task_credentials = f"<div class='stats'><div><strong>{len(load_credentials())}</strong><span>同步密钥数量</span></div><div><strong>{len(load_tasks())}</strong><span>云端任务数量</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('enabled', True))}</strong><span>已启用任务</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('status') == 'failed')}</strong><span>执行失败任务</span></div></div><div class='panel'><h2>阅微同步密钥</h2><p class='muted'>密钥只保存加密密文，不显示原文。一个阅微账号 ID 对应一个同步密钥；重新同步会更新该账号的原记录。</p><div class='table-wrap'><table><thead><tr><th>名称 / 同步密钥 ID</th><th>阅微账号 ID</th><th>来源账号</th><th>验证状态</th><th>最近更新时间</th></tr></thead><tbody>{credential_table}</tbody></table></div></div><div class='panel'><h2>任务运行状态</h2><div class='table-wrap'><table><thead><tr><th>任务</th><th>来源账号</th><th>同步密钥 ID</th><th>运行状态</th><th>任务开关</th><th>最近结果</th><th>下次执行</th><th>操作 / 日志</th></tr></thead><tbody>{task_table}</tbody></table></div></div>" if section == "tasks" else ""
+        task_credentials = f"<div class='stats'><div><strong>{len(load_credentials())}</strong><span>同步密钥数量</span></div><div><strong>{len(load_tasks())}</strong><span>云端任务数量</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('enabled', True))}</strong><span>已启用任务</span></div><div><strong>{sum(1 for value in load_tasks().values() if value.get('status') == 'failed')}</strong><span>执行失败任务</span></div></div><div class='panel'><h2>阅微同步密钥</h2><p class='muted'>密钥只保存加密密文，不显示原文。一个阅微账号 ID 对应一个同步密钥；重新同步会更新该账号的原记录。</p><div class='table-wrap'><table><thead><tr><th>同步密钥 ID</th><th>阅微账号 ID</th><th>来源账号</th><th>验证状态</th><th>最近更新时间</th></tr></thead><tbody>{credential_table}</tbody></table></div></div><div class='panel'><h2>任务运行状态</h2><div class='table-wrap'><table><thead><tr><th>任务</th><th>来源账号</th><th>同步密钥 ID</th><th>任务详情</th><th>运行状态</th><th>最近结果</th><th>下次执行</th><th>操作 / 日志</th></tr></thead><tbody>{task_table}</tbody></table></div></div>" if section == "tasks" else ""
         if section == "tasks":
             task_form = f"<div class='panel'><h2>创建云端任务</h2><form method='post' action='/admin/tasks/create'>{csrf_html}<div class='grid-2'><label>任务类型<select name='task_type'><option value='yeshe_checkin'>野社零点签到</option><option value='yeshe_draw_card'>野社自动抽卡</option><option value='cloud_auto_read'>云端自动阅读</option><option value='http'>通用 HTTPS 请求</option></select></label><label>每日执行时间<input name='time_of_day' value='00:05'></label><label>凭据<select name='credential_id'>{credential_options}</select></label><label>所有者<input name='owner' value='admin'></label><label>阅读时长（分钟）<input name='duration_minutes' type='number' min='1' max='720' value='30'></label><label>最近阅读数量<input name='recent_limit' type='number' min='1' max='20' value='1'></label></div><label>自定义图书 JSON<textarea name='request_body' placeholder='留空则使用最近阅读记录'></textarea></label><button class='button' type='submit'>创建任务</button></form></div>"
             content = f"<div class='page-head'><div><p class='eyebrow'>自动化</p><h1>云端任务</h1><p class='muted'>配置、查看和控制自动阅读、签到、抽卡任务。每个阅微账号只保留一个同步密钥，重新同步会更新原密钥。</p></div></div>{task_credentials}{task_form}"
         elif section == "settings":
-            content = f"<div class='page-head'><div><p class='eyebrow'>系统</p><h1>服务器设置</h1><p class='muted'>认证、白名单、模块同步和快照配置。</p></div></div><div class='panel'><form method='post' action='/admin/settings'>{csrf_html}<input type='hidden' name='signing_public_key' value='{esc(config.get('signingPublicKey', ''))}'><input type='hidden' name='release_version_code' value='{esc(config.get('releaseVersionCode', 0))}'><input type='hidden' name='github_include_prerelease' value='{'on' if config.get('githubIncludePrerelease') else ''}'><input type='hidden' name='server_snapshot_enabled' value='{'on' if config.get('serverSnapshotEnabled', True) else ''}'><div class='grid-2'><label>服务器 ID<input name='server_id' value='{esc(config.get('serverId', ''))}'></label><label>最低模块版本<input name='min_module_version' value='{esc(config.get('minModuleVersion', ''))}'></label><label>GitHub 仓库<input name='github_repository' value='{esc(config.get('githubRepository', ''))}'></label><label>同步间隔（秒）<input name='release_sync_seconds' type='number' value='{esc(config.get('releaseSyncSeconds', 1800))}'></label><label>快照间隔（秒）<input name='server_snapshot_seconds' type='number' value='{esc(config.get('serverSnapshotSeconds', 86400))}'></label><label>快照保留份数<input name='server_snapshot_retention' type='number' value='{esc(config.get('serverSnapshotRetention', 30))}'></label></div><label>API Key（留空保持）<input type='password' name='api_key'></label><label><input type='checkbox' name='generate_api_key'> 生成新 API Key</label><label><input type='checkbox' name='allow_public' {'checked' if config.get('allowPublic') else ''}> 允许公开访问</label><label>阅微账号白名单<textarea name='host_account_allowlist'>{esc(chr(10).join(config.get('hostAccountAllowlist', [])))}</textarea></label><label>功能列表<textarea name='features'>{esc(','.join(config.get('features', [])))}</textarea></label><button class='button' type='submit'>保存设置</button><button class='button subtle' type='submit' formaction='/admin/sync'>立即同步模块</button></form></div>"
+            selected_mode = str(config.get("authMode") or infer_auth_mode(config))
+            mode_options = "".join(f"<option value='{mode}' {'selected' if mode == selected_mode else ''}>{label}</option>" for mode, label in (("public", "公开访问"), ("api_key", "API Key"), ("account", "独立账号密码"), ("host_account_allowlist", "阅微账号白名单")))
+            content = f"<div class='page-head'><div><p class='eyebrow'>系统</p><h1>服务器设置</h1><p class='muted'>认证模式为单选；只有当前选中的认证方式会对 API 生效。</p></div></div><div class='panel'><form method='post' action='/admin/settings'>{csrf_html}<input type='hidden' name='signing_public_key' value='{esc(config.get('signingPublicKey', ''))}'><input type='hidden' name='release_version_code' value='{esc(config.get('releaseVersionCode', 0))}'><input type='hidden' name='github_include_prerelease' value='{'on' if config.get('githubIncludePrerelease') else ''}'><input type='hidden' name='server_snapshot_enabled' value='{'on' if config.get('serverSnapshotEnabled', True) else ''}'><div class='grid-2'><label>服务器 ID<input name='server_id' value='{esc(config.get('serverId', ''))}'></label><label>最低模块版本<input name='min_module_version' value='{esc(config.get('minModuleVersion', ''))}'></label><label>认证类型<select name='auth_mode' id='auth-mode'>{mode_options}</select></label><label>GitHub 仓库<input name='github_repository' value='{esc(config.get('githubRepository', ''))}'></label><label>同步间隔（秒）<input name='release_sync_seconds' type='number' value='{esc(config.get('releaseSyncSeconds', 1800))}'></label><label>快照间隔（秒）<input name='server_snapshot_seconds' type='number' value='{esc(config.get('serverSnapshotSeconds', 86400))}'></label><label>快照保留份数<input name='server_snapshot_retention' type='number' value='{esc(config.get('serverSnapshotRetention', 30))}'></label></div><div data-auth-section='api_key'><label>API Key（留空保持）<input type='password' name='api_key'></label><label><input type='checkbox' name='generate_api_key'> 生成新 API Key</label></div><div data-auth-section='account'><label>独立账号名<input name='account_name'></label><label>独立账号密码<input type='password' name='account_password'></label></div><div data-auth-section='host_account_allowlist'><label>阅微账号白名单<textarea name='host_account_allowlist'>{esc(chr(10).join(config.get('hostAccountAllowlist', [])))}</textarea></label></div><label>功能列表<textarea name='features'>{esc(','.join(config.get('features', [])))}</textarea></label><button class='button' type='submit'>保存设置</button><button class='button subtle' type='submit' formaction='/admin/sync'>立即同步模块</button></form></div><script>(()=>{{const select=document.getElementById('auth-mode');if(!select)return;const sync=()=>document.querySelectorAll('[data-auth-section]').forEach(node=>{{node.hidden=node.dataset.authSection!==select.value;node.querySelectorAll('input,textarea,select').forEach(input=>input.disabled=node.hidden)}});select.addEventListener('change',sync);sync()}})();</script>"
         else:
             admin_block = ""
             if section == "security" and actor.get("role") == "primary":
@@ -2343,6 +2526,7 @@ async def admin_settings(
     signing_public_key: str = Form(""),
     github_repository: str = Form("YGHFv/ReaMicro-Extend"),
     github_token: str = Form(""),
+    auth_mode: str = Form(""),
     clear_api_key: str | None = Form(None),
     generate_api_key: str | None = Form(None),
     generate_secret_key: str | None = Form(None),
@@ -2369,13 +2553,15 @@ async def admin_settings(
             secret_key_message = "服务器加密密钥已存在，本次未覆盖，避免历史阅微凭据失效"
         else:
             generated_secret_key = generate_long_secret()
+    selected_auth_mode = auth_mode.strip() if auth_mode.strip() in {"public", "api_key", "account", "host_account_allowlist"} else infer_auth_mode(current)
     next_config = {
         "serverId": server_id.strip() or current["serverId"],
         "minModuleVersion": min_module_version.strip() or current["minModuleVersion"],
         "apiKey": "" if clear_api_key is not None else (generated_api_key or api_key or current.get("apiKey", "")),
         "secretKey": generated_secret_key or current.get("secretKey", "") or SECRET_KEY,
-        "allowPublic": allow_public is not None,
-        "hostAccountAllowlist": [item.strip() for item in host_account_allowlist.splitlines() if item.strip()],
+        "allowPublic": selected_auth_mode == "public",
+        "authMode": selected_auth_mode,
+        "hostAccountAllowlist": ([item.strip() for item in host_account_allowlist.splitlines() if item.strip()] if selected_auth_mode == "host_account_allowlist" else current.get("hostAccountAllowlist", [])),
         "features": [item.strip() for item in features.split(",") if item.strip()],
         "signingPublicKey": signing_public_key.strip(),
         "githubRepository": github_repository.strip() or current["githubRepository"],
@@ -2980,7 +3166,7 @@ async def admin_create_task(
         task_id = "task_" + secrets.token_hex(10)
         now = int(datetime.now(timezone.utc).timestamp() * 1000)
         tasks = load_tasks()
-        tasks[task_id] = {
+        new_task = {
             "id": task_id,
             "owner": owner,
             "taskType": task_type,
@@ -2999,9 +3185,20 @@ async def admin_create_task(
             "maxRetries": 3,
             "consecutiveFailures": 0,
         }
+        duplicate = find_duplicate_task(tasks, new_task)
+        if duplicate:
+            task_id = duplicate[0]
+            previous = duplicate[1]
+            new_task["id"] = task_id
+            new_task["createdAt"] = previous.get("createdAt", now)
+            new_task["updatedAt"] = now
+            for field in ("executionHistory", "lastExecution", "runCount", "consecutiveFailures", "dailyCounterDate", "dailyCounter", "dailyReadDate", "dailyReadMinutes", "bookRotation", "lastCheckinDate", "lastCheckinAt", "claimDueAt", "claimRetryCount", "claimFinalAttemptDate", "claimCompletedDate", "claimFinalFailedDate", "lastClaimAt"):
+                if field in previous:
+                    new_task[field] = previous[field]
+        tasks[task_id] = new_task
         save_tasks(tasks)
-        task_log(task_id, "管理员创建任务")
-        return HTMLResponse(admin_page(load_config(), f"任务 {task_id} 已创建", actor=actor, section="tasks"))
+        task_log(task_id, "管理员更新任务" if duplicate else "管理员创建任务")
+        return HTMLResponse(admin_page(load_config(), f"任务 {task_id} {'已更新' if duplicate else '已创建'}", actor=actor, section="tasks"))
     except Exception as error:
         return HTMLResponse(admin_page(load_config(), f"创建任务失败：{error}", actor=actor, section="tasks"), status_code=400)
 
@@ -3443,6 +3640,16 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
     task["requestEncrypted"] = encrypt_secret(request_value)
     task.pop("request", None)
     tasks = load_tasks()
+    duplicate = find_duplicate_task(tasks, task)
+    if duplicate:
+        task_id = duplicate[0]
+        previous = duplicate[1]
+        task["id"] = task_id
+        task["createdAt"] = previous.get("createdAt", now)
+        task["updatedAt"] = now
+        for field in ("executionHistory", "lastExecution", "runCount", "consecutiveFailures", "dailyCounterDate", "dailyCounter", "dailyReadDate", "dailyReadMinutes", "bookRotation", "lastCheckinDate", "lastCheckinAt", "claimDueAt", "claimRetryCount", "claimFinalAttemptDate", "claimCompletedDate", "claimFinalFailedDate", "lastClaimAt"):
+            if field in previous:
+                task[field] = previous[field]
     tasks[task_id] = task
     save_tasks(tasks)
     task_log(task_id, "任务已创建")
@@ -3454,8 +3661,35 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
 
 @app.get("/v1/tasks")
 async def list_tasks(owner: str = Depends(task_owner)) -> dict[str, Any]:
+    merge_duplicate_tasks()
     tasks = [public_task(task, include_request=False) for task in load_tasks().values() if task.get("owner") == owner]
     return response({"items": tasks})
+
+
+@app.get("/v1/notifications")
+async def list_notifications(owner: str = Depends(task_owner)) -> dict[str, Any]:
+    items = [item for item in load_notifications().values() if item.get("owner") == owner and not item.get("deliveredAt")]
+    items.sort(key=lambda item: int(item.get("createdAt", 0)))
+    return response({"items": items[-50:]})
+
+
+@app.post("/v1/notifications/ack")
+async def acknowledge_notifications(request: Request, owner: str = Depends(task_owner)) -> dict[str, Any]:
+    payload = await request.json()
+    ids = payload.get("ids", []) if isinstance(payload, dict) else []
+    if not isinstance(ids, list) or len(ids) > 100:
+        raise HTTPException(status_code=400, detail=response(code="NOTIFICATION_INVALID", message="消息 ID 列表无效"))
+    items = load_notifications()
+    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    updated = 0
+    for notification_id in {str(item) for item in ids}:
+        item = items.get(notification_id)
+        if item and item.get("owner") == owner and not item.get("deliveredAt"):
+            item["deliveredAt"] = now
+            updated += 1
+    if updated:
+        save_notifications(items)
+    return response({"acknowledged": updated})
 
 
 def public_task(task: dict[str, Any], include_request: bool = False) -> dict[str, Any]:
@@ -3582,6 +3816,10 @@ async def configure_task(task_id: str, request: Request, owner: str = Depends(ta
         task["status"] = "scheduled" if task["enabled"] else "paused"
         task["nextRunAt"] = next_task_run(task) if task["enabled"] else 0
     task["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+    duplicate = find_duplicate_task(tasks, task, exclude_id=task_id)
+    if duplicate:
+        tasks.pop(duplicate[0], None)
+        audit_event("task_merged", f"owner:{owner}", metadata={"keptTaskId": task_id, "removedTaskId": duplicate[0], "reason": "unique_task_key"})
     save_tasks(tasks)
     task_log(task_id, "任务配置已更新")
     return response(public_task(task))

@@ -244,6 +244,9 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     fun listTasks(): JSONObject = taskRequest("GET", "/v1/tasks", null)
     fun taskAction(taskId: String, action: String): JSONObject = taskRequest("POST", "/v1/tasks/${java.net.URLEncoder.encode(taskId, "UTF-8")}/$action", JSONObject())
     fun configureTask(taskId: String, body: JSONObject): JSONObject = taskRequest("POST", "/v1/tasks/${java.net.URLEncoder.encode(taskId, "UTF-8")}/configure", body)
+    fun listNotifications(): JSONObject = taskRequest("GET", "/v1/notifications", null)
+    fun acknowledgeNotifications(ids: List<String>): JSONObject =
+        taskRequest("POST", "/v1/notifications/ack", JSONObject().put("ids", org.json.JSONArray(ids)))
 
     fun listReaMicroCredentials(): JSONObject = taskRequest("GET", "/v1/credentials/reamicro", null)
 

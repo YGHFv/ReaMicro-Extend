@@ -12,6 +12,7 @@ import com.reamicro.fix.association.provider.ExternalSourceLoader
 import com.reamicro.fix.association.provider.YouShuWebSearchBridge
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.cloud.api.ApiPackageAutoUpdater
+import com.reamicro.fix.cloud.api.CloudTaskNotificationPoller
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.settings.XposedModuleSettings
@@ -246,6 +247,7 @@ class ReaMicroHookEntry {
                         webDavDriveHook.cleanupStartupCacheIfNeeded(activity)
                         profileBackgroundHook.refreshRandomImageFor(activity)
                         ApiPackageAutoUpdater.checkIfDue(activity.applicationContext, moduleSettings)
+                        CloudTaskNotificationPoller.poll(activity.applicationContext)
                         XposedBridge.log("$LOG_PREFIX MainActivity.onCreate hooked")
                     }
 
@@ -271,6 +273,7 @@ class ReaMicroHookEntry {
                             installExternalFeatures(classLoader)
                             RotationOrientationController.apply(activity, moduleSettings.snapshot())
                             profileBackgroundHook.refreshRandomImageFor(activity)
+                            CloudTaskNotificationPoller.poll(activity.applicationContext)
                         }
                     },
                 )

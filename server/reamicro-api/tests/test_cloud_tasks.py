@@ -105,6 +105,33 @@ class CloudTaskSecurityTest(unittest.TestCase):
         self.assertEqual(main.merge_duplicate_credentials(), 1)
         self.assertEqual(list(main.load_credentials()), ["rea_new"])
 
+    def test_duplicate_tasks_are_merged_by_owner_credential_and_type(self):
+        main.save_tasks({
+            "task_old": {"id": "task_old", "owner": "host:3", "taskType": "cloud_auto_read", "credentialId": "rea_1", "updatedAt": 1},
+            "task_new": {"id": "task_new", "owner": "host:3", "taskType": "cloud_auto_read", "credentialId": "rea_1", "updatedAt": 2},
+            "task_other": {"id": "task_other", "owner": "host:3", "taskType": "yeshe_checkin", "credentialId": "rea_1", "updatedAt": 3},
+        })
+        self.assertEqual(main.merge_duplicate_tasks(), 1)
+        self.assertEqual(set(main.load_tasks()), {"task_new", "task_other"})
+
+    def test_task_notification_waits_for_acknowledgement(self):
+        task = {"id": "task_1", "owner": "host:3", "taskType": "yeshe_checkin"}
+        notification_id = main.enqueue_task_notification(task, "success", "签到完成", 1000)
+        item = main.load_notifications()[notification_id]
+        self.assertEqual(item["owner"], "host:3")
+        self.assertEqual(item["deliveredAt"], 0)
+
+    def test_task_detail_hides_raw_json_and_shows_reading_book(self):
+        task = {
+            "taskType": "cloud_auto_read",
+            "schedule": {"timeOfDay": "01:05"},
+            "requestEncrypted": main.encrypt_secret({"durationMinutes": 45, "books": [{"bookId": 7, "name": "测试图书"}]}),
+        }
+        detail = main._admin_task_detail(task)
+        self.assertIn("45 分钟", detail)
+        self.assertIn("测试图书", detail)
+        self.assertNotIn("{", detail)
+
     def test_daily_time_validation(self):
         self.assertEqual(main.normalized_time_of_day("7:05"), "07:05")
         with self.assertRaises(ValueError):
@@ -207,6 +234,23 @@ class AdminSecurityTest(unittest.TestCase):
         config["accounts"] = {}
         config["hostAccountAllowlist"] = []
         self.assertEqual(main.public_server_capabilities(config)["authModes"], ["api_key"])
+
+    def test_selected_auth_mode_is_the_only_active_mode(self):
+        config = main.load_config()
+        config.update({
+            "authMode": "host_account_allowlist",
+            "_authModeExplicit": True,
+            "apiKey": "still-stored",
+            "accounts": {"alice": main.password_hash("account-password-123")},
+            "hostAccountAllowlist": ["1001"],
+        })
+        main.save_config(config)
+        self.assertEqual(main.configured_auth_modes(main.load_config()), ["host_account_allowlist"])
+        main.check_request_auth(None, None, None, "1001")
+        with self.assertRaises(HTTPException):
+            main.check_request_auth("still-stored", None, None, None)
+        with self.assertRaises(HTTPException):
+            main.check_request_auth(None, "alice", "account-password-123", None)
 
     def test_owner_host_account_id_isolated(self):
         self.assertEqual(main.owner_host_account_id("host:1001"), "1001")
