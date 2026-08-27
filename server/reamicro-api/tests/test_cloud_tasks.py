@@ -368,11 +368,15 @@ class AdminSecurityTest(unittest.TestCase):
             "username": "owner",
             "passwordHash": main.password_hash("owner-password-123"),
         }
-        page = main.admin_page(config, actor={"username": "owner", "role": "primary"})
+        actor = {"username": "owner", "role": "primary"}
+        page = main.admin_page(config, actor=actor)
         self.assertIn("ReaMicro API 管理后台", page)
-        self.assertIn('[{"cloudBookId":123', page)
         self.assertIn("子管理员", page)
         self.assertIn("csrf_token", page)
+        # 自定义图书示例属于任务表单，此前是概览页上一段没有任何引用的隐藏 template。
+        tasks_page = main.admin_page(config, actor=actor, section="tasks")
+        self.assertIn("cloudBookId", tasks_page)
+        self.assertNotIn("cloud-book-example", page)
 
     def test_admin_navigation_uses_stable_clickable_paths(self):
         config = main.load_config()
