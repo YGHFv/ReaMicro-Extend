@@ -116,4 +116,8 @@ X-ReaMicro-Api-Key: <key>
 
 可选配置 `REAMICRO_GITHUB_WEBHOOK_SECRET` 后，将 GitHub Release Webhook 指向 `/v1/webhooks/github`，Content type 选择 `application/json`，Secret 填写相同值，服务器会在 Release 发布后立即同步。模块 APK 下载支持 ETag 和 HTTP Range 断点续传；更新检查可通过 `/v1/releases/module/latest?channel=stable|beta|nightly` 选择渠道。
 
+渠道语义：预发布 Release 同步为 `beta`，正式 Release 同步为 `stable`。只有请求 `channel=stable` 时会拒绝 `beta` 版本并返回 404 `RELEASE_NOT_FOUND`；请求 `beta` 或 `nightly` 时正式版和预发布版都会返回。若仓库只发布预发布 Release，必须在后台勾选“包含预发布 Release”，否则 GitHub 的 `/releases/latest` 找不到正式版，同步会失败。模块端“模块更新渠道”默认选择预发布，与本项目 CI 的发布方式一致。
+
+Release 的 `versionName` 优先取 tag，tag 不是语义版本号时（例如 CI 的 `ci-123-1`）从 Release 标题中提取，便于客户端按版本号比较新旧。
+
 运维监控可使用认证请求访问 `/metrics` 获取 Prometheus 指标。主管理员可通过 `/admin/api-keys` 查看密钥元数据，并使用带 `X-Admin-CSRF` 的 POST `/admin/api-keys/{keyId}/revoke` 吊销泄露密钥。GitHub Actions 会先运行服务端单元测试和编译检查，只有通过后才构建并发布 GHCR 镜像。

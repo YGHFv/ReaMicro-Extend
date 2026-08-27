@@ -30,6 +30,7 @@ class ApiServerSettingsStore(private val contextProvider: () -> Context?) {
             allowHttp = prefs.getBoolean(KEY_ALLOW_HTTP, false),
             timeoutSeconds = prefs.getInt(KEY_TIMEOUT_SECONDS, 8).coerceIn(5, 60),
             autoCheckUpdates = prefs.getBoolean(KEY_AUTO_CHECK_UPDATES, true),
+            updateChannel = ApiUpdateChannel.fromWireValue(prefs.getString(KEY_UPDATE_CHANNEL, null)),
         )
     }
 
@@ -46,6 +47,7 @@ class ApiServerSettingsStore(private val contextProvider: () -> Context?) {
             ?.putBoolean(KEY_ALLOW_HTTP, settings.allowHttp)
             ?.putInt(KEY_TIMEOUT_SECONDS, settings.timeoutSeconds.coerceIn(5, 60))
             ?.putBoolean(KEY_AUTO_CHECK_UPDATES, settings.autoCheckUpdates)
+            ?.putString(KEY_UPDATE_CHANNEL, settings.updateChannel.wireValue)
             ?.commit()
     }
 
@@ -142,6 +144,7 @@ class ApiServerSettingsStore(private val contextProvider: () -> Context?) {
         private const val KEY_ALLOW_HTTP = "allow_http"
         private const val KEY_TIMEOUT_SECONDS = "timeout_seconds"
         private const val KEY_AUTO_CHECK_UPDATES = "auto_check_updates"
+        private const val KEY_UPDATE_CHANNEL = "update_channel"
         private const val KEY_CACHED_META = "cached_meta"
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val KEY_ALIAS = "reamicro-api-server-credentials"

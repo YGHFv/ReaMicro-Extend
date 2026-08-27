@@ -1029,6 +1029,30 @@ def release_timestamp(value: str) -> int:
     return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
 
 
+def is_semantic_version(value: str) -> bool:
+    core = value.strip().split("-", 1)[0]
+    if not core:
+        return False
+    return all(part.isdigit() for part in core.split("."))
+
+
+def release_version_name(tag: str, title: str) -> str:
+    """从 tag 或 Release 标题里取出语义版本号。
+
+    客户端按语义版本号比较新旧，无法解析的字符串会被当成 0.0.0 并永远判定"已是最新版本"。
+    CI 的 tag 形如 ``ci-123-1``，但标题里带着真实版本号（``CI 2.0.0 #123``），
+    因此 tag 不是语义版本号时回退到标题。
+    """
+    candidate = tag.strip().lstrip("vV").split("+")[0]
+    if is_semantic_version(candidate):
+        return candidate
+    # 至少要带一个小数点，避免把标题里的构建号（#123）误当成版本号。
+    match = re.search(r"\d+(?:\.\d+)+", title or "")
+    if match:
+        return match.group(0)
+    return candidate
+
+
 def sync_module_release() -> dict[str, Any] | None:
     config = load_config()
     repository = config["githubRepository"]
@@ -1036,7 +1060,16 @@ def sync_module_release() -> dict[str, Any] | None:
         releases = github_json(f"https://api.github.com/repos/{repository}/releases?per_page=20")
         release = next((item for item in releases if not item.get("draft")), None)
     else:
-        release = github_json(f"https://api.github.com/repos/{repository}/releases/latest")
+        try:
+            release = github_json(f"https://api.github.com/repos/{repository}/releases/latest")
+        except urllib.error.HTTPError as error:
+            # GitHub 的 /releases/latest 会跳过预发布。仓库里只有预发布 Release 时返回 404，
+            # 这不是网络故障，直接提示需要在后台勾选"包含预发布 Release"。
+            if error.code == 404:
+                raise RuntimeError(
+                    f"仓库 {repository} 没有正式 Release；如果只发布预发布版本，请在后台勾选“包含预发布 Release”"
+                ) from error
+            raise
     if not release:
         return None
     assets = [asset for asset in release.get("assets", []) if asset.get("name", "").lower().endswith(".apk")]
@@ -1066,7 +1099,7 @@ def sync_module_release() -> dict[str, Any] | None:
         temp.replace(apk_path)
     sha256 = hashlib.sha256(apk_path.read_bytes()).hexdigest()
     tag = str(release.get("tag_name") or release.get("name") or "").strip()
-    version_name = tag.lstrip("vV").split("+")[0]
+    version_name = release_version_name(tag, str(release.get("name") or ""))
     metadata = {
         "versionName": version_name,
         "versionCode": int(config.get("releaseVersionCode", 0)),

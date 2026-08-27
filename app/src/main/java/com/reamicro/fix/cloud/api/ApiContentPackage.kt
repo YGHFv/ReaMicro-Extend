@@ -72,6 +72,17 @@ internal fun isPackageUpdateAvailable(
     return versionComparison > 0 || (versionComparison == 0 && remoteBuildTime > installedBuildTime)
 }
 
+/**
+ * 判断版本号是否能被 [comparePackageVersions] 有意义地比较。
+ * `comparePackageVersions` 会把无法解析的段当成 0，所以 `ci-123-1` 这类标签
+ * 会被解析成 0.0.0 并被判定为比任何正式版本旧，调用方需要先用本函数排除。
+ */
+internal fun isSemanticVersion(value: String): Boolean {
+    val core = value.trim().substringBefore('-')
+    if (core.isBlank()) return false
+    return core.split('.').all { it.isNotBlank() && it.toIntOrNull() != null }
+}
+
 internal fun comparePackageVersions(left: String, right: String): Int {
     fun parts(value: String): List<Int> = value.substringBefore('-').split('.').map { it.toIntOrNull() ?: 0 }
     val a = parts(left)

@@ -2,6 +2,7 @@ package com.reamicro.fix.cloud.api
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -11,6 +12,18 @@ class ApiContentPackageTest {
         assertTrue(comparePackageVersions("1.2.0", "1.1.9") > 0)
         assertEquals(0, comparePackageVersions("1.2", "1.2.0"))
         assertTrue(comparePackageVersions("2.0.0", "10.0.0") < 0)
+    }
+
+    @Test
+    fun `detects comparable semantic versions`() {
+        assertTrue(isSemanticVersion("2.0.0"))
+        assertTrue(isSemanticVersion("2.0.0-beta1"))
+        assertTrue(isSemanticVersion("49"))
+        // CI 的 tag 会被 comparePackageVersions 解析成 0.0.0，必须能识别出来单独处理。
+        assertFalse(isSemanticVersion("ci-123-1"))
+        assertFalse(isSemanticVersion(""))
+        // CI tag 会被判定成比任何正式版本都旧，只按版本号比较必然得出"已是最新版本"。
+        assertTrue(comparePackageVersions("ci-123-1", "2.0.0") < 0)
     }
 
     @Test

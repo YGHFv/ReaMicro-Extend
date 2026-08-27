@@ -44,6 +44,7 @@ fun ApiServerSettings.mirrorToModule(context: android.content.Context) {
         putBoolean("allowHttp", allowHttp)
         putInt("timeoutSeconds", timeoutSeconds)
         putBoolean("autoCheckUpdates", autoCheckUpdates)
+        putString("updateChannel", updateChannel.wireValue)
     }
     runCatching { context.contentResolver.call(ApiServerSettingsBridgeProvider.URI, ApiServerSettingsBridgeProvider.METHOD_SAVE, null, bundle) }
 }
@@ -59,4 +60,5 @@ private fun Bundle.toSettings(): ApiServerSettings = ApiServerSettings(
     allowHttp = getBoolean("allowHttp"),
     timeoutSeconds = getInt("timeoutSeconds", 8),
     autoCheckUpdates = getBoolean("autoCheckUpdates", true),
+    updateChannel = ApiUpdateChannel.fromWireValue(getString("updateChannel")),
 )

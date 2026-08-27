@@ -152,14 +152,29 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     fun latestModuleRelease(): ApiModuleRelease? {
         val settings = settingsStore.get()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
-        val root = JSONObject(HttpClient.get(
-            "$baseUrl/v1/releases/module/latest",
-            authHeaders(settings),
-            settings.timeoutSeconds * 1_000,
-            settings.timeoutSeconds * 1_000,
-            false,
-        ))
-        return ApiModuleRelease.fromJson(root.optJSONObject("data") ?: return null)
+        // 必须显式带上渠道：服务器默认按 stable 过滤，而本模块 CI 发布的都是预发布 Release，
+        // 不带 channel 会稳定命中服务端的 404 RELEASE_NOT_FOUND。
+        val channel = java.net.URLEncoder.encode(settings.updateChannel.wireValue, "UTF-8")
+        val body = try {
+            HttpClient.get(
+                "$baseUrl/v1/releases/module/latest?channel=$channel",
+                authHeaders(settings),
+                settings.timeoutSeconds * 1_000,
+                settings.timeoutSeconds * 1_000,
+                false,
+            )
+        } catch (error: HttpResponseException) {
+            val fallback = if (error.statusCode == 404) {
+                "服务器没有 ${settings.updateChannel.wireValue} 渠道的模块版本"
+            } else {
+                "服务器返回 HTTP ${error.statusCode}"
+            }
+            throw IllegalStateException(apiErrorMessage(error.responseBody, fallback), error)
+        }
+        val root = JSONObject(body)
+        val data = root.optJSONObject("data")
+            ?: error(root.optString("message").ifBlank { "服务器没有可用模块版本" })
+        return ApiModuleRelease.fromJson(data)
     }
 
     fun downloadModuleRelease(release: ApiModuleRelease): ByteArray {

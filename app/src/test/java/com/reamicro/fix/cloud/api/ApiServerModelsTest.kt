@@ -51,6 +51,16 @@ class ApiServerModelsTest {
         assertNull(selectApiAuthMode(meta, ApiServerSettings()))
     }
 
+    @Test
+    fun `update channel defaults to beta`() {
+        // 本模块 CI 只发布预发布 Release，默认值若是 stable，更新检查会稳定拿到 404。
+        assertEquals(ApiUpdateChannel.BETA, ApiServerSettings().updateChannel)
+        assertEquals(ApiUpdateChannel.BETA, ApiUpdateChannel.fromWireValue(null))
+        assertEquals(ApiUpdateChannel.BETA, ApiUpdateChannel.fromWireValue("nightly"))
+        assertEquals(ApiUpdateChannel.STABLE, ApiUpdateChannel.fromWireValue("stable"))
+        assertEquals("beta", ApiUpdateChannel.BETA.wireValue)
+    }
+
     private fun expectIllegalArgument(block: () -> Unit) {
         try {
             block()

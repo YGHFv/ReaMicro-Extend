@@ -14,6 +14,22 @@ enum class ApiAuthMode(val wireValue: String) {
     }
 }
 
+/**
+ * 模块更新渠道。服务器把 GitHub 预发布 Release 标成 beta，正式 Release 标成 stable，
+ * 并且只在请求 stable 时拒绝 beta 版本，所以 BETA 表示"预发布和正式版都接收"。
+ * 本模块的 CI 发布的全部是预发布，因此默认值必须是 BETA，否则更新检查一定拿到 404。
+ */
+enum class ApiUpdateChannel(val wireValue: String) {
+    STABLE("stable"),
+    BETA("beta"),
+    ;
+
+    companion object {
+        fun fromWireValue(value: String?): ApiUpdateChannel =
+            entries.firstOrNull { it.wireValue == value } ?: BETA
+    }
+}
+
 data class ApiServerSettings(
     val enabled: Boolean = false,
     val baseUrl: String = "",
@@ -25,6 +41,7 @@ data class ApiServerSettings(
     val allowHttp: Boolean = false,
     val timeoutSeconds: Int = 8,
     val autoCheckUpdates: Boolean = true,
+    val updateChannel: ApiUpdateChannel = ApiUpdateChannel.BETA,
 )
 
 data class ApiServerMeta(

@@ -595,6 +595,44 @@ class AdminSecurityTest(unittest.TestCase):
         (main.RELEASE_ROOT / "latest.json").write_text(json.dumps({"etag": digest}), encoding="utf-8")
         self.assertEqual(digest, hashlib.sha256(apk.read_bytes()).hexdigest())
 
+    def test_release_version_name_falls_back_to_title(self):
+        # CI 的 tag 不是语义版本号，必须从标题里取出真实版本号，否则客户端无法比较新旧。
+        self.assertEqual("2.0.0", main.release_version_name("ci-123-1", "CI 2.0.0 #123"))
+        self.assertEqual("2.0.0", main.release_version_name("ci-9-1", "CI 2.0.0 #9 signed release"))
+        # tag 本身是语义版本号时优先用 tag，并去掉 v 前缀和构建元数据。
+        self.assertEqual("2.1.0", main.release_version_name("v2.1.0", "任意标题"))
+        self.assertEqual("2.1.0", main.release_version_name("v2.1.0+build7", ""))
+        # 标题里没有版本号时保留原始 tag，不要臆造版本号。
+        self.assertEqual("ci-123-1", main.release_version_name("ci-123-1", "CI build #123"))
+
+    def test_is_semantic_version(self):
+        self.assertTrue(main.is_semantic_version("2.0.0"))
+        self.assertTrue(main.is_semantic_version("2.0.0-beta1"))
+        self.assertFalse(main.is_semantic_version("ci-123-1"))
+        self.assertFalse(main.is_semantic_version(""))
+
+    def test_latest_release_channel_filter(self):
+        main.RELEASE_ROOT.mkdir(parents=True, exist_ok=True)
+        metadata = {"versionName": "2.0.0", "channel": "beta", "apkUrl": "/v1/releases/module/download"}
+        (main.RELEASE_ROOT / "latest.json").write_text(json.dumps(metadata), encoding="utf-8")
+        # 默认渠道是 stable，预发布版本会被拒绝——这正是客户端不带 channel 时出现 404 的原因。
+        with self.assertRaises(HTTPException) as stable:
+            asyncio.run(main.latest_release(channel="stable"))
+        self.assertEqual(404, stable.exception.status_code)
+        # 客户端显式请求 beta 时应当拿到该版本。
+        result = asyncio.run(main.latest_release(channel="beta"))
+        self.assertEqual("2.0.0", result["data"]["versionName"])
+        # 非法渠道返回 400，便于区分"渠道写错"和"没有该渠道的版本"。
+        with self.assertRaises(HTTPException) as invalid:
+            asyncio.run(main.latest_release(channel="weekly"))
+        self.assertEqual(400, invalid.exception.status_code)
+
+    def test_latest_release_accepts_stable_when_asking_beta(self):
+        main.RELEASE_ROOT.mkdir(parents=True, exist_ok=True)
+        metadata = {"versionName": "2.0.0", "channel": "stable"}
+        (main.RELEASE_ROOT / "latest.json").write_text(json.dumps(metadata), encoding="utf-8")
+        self.assertEqual("2.0.0", asyncio.run(main.latest_release(channel="beta"))["data"]["versionName"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,7 +26,7 @@ object ApiPackageAutoUpdater {
                     ApiPackageKind.ASSOCIATION_SOURCE,
                     ApiPackageKind.THEME,
                 ).flatMap(manager::check).map(manager::install)
-                val moduleUpdate = checkModuleUpdate(context.applicationContext, ApiServerClient(store))
+                val moduleUpdate = checkModuleUpdate(ApiServerClient(store))
                 prefs.edit().putLong(KEY_LAST_CHECK, now).apply()
                 val installed = results.count { it.installed }
                 val failed = results.count { !it.installed }

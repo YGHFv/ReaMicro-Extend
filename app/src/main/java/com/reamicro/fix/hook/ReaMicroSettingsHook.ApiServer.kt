@@ -18,6 +18,7 @@ import com.reamicro.fix.cloud.api.ApiAuthMode
 import com.reamicro.fix.cloud.api.ApiServerClient
 import com.reamicro.fix.cloud.api.ApiServerSettings
 import com.reamicro.fix.cloud.api.ApiServerSettingsStore
+import com.reamicro.fix.cloud.api.ApiUpdateChannel
 import com.reamicro.fix.cloud.api.ApiPackageKind
 import com.reamicro.fix.cloud.api.ApiPackageManager
 import com.reamicro.fix.cloud.api.checkModuleUpdate
@@ -82,6 +83,17 @@ internal fun ReaMicroSettingsHook.openApiServerSettingsDialog() {
             card.addView(allowHttp)
             val autoUpdate = settingsDialogSwitchRow(activity, "自动检查内容库更新", current.autoCheckUpdates, colors)
             card.addView(autoUpdate)
+            val channels = listOf(ApiUpdateChannel.BETA, ApiUpdateChannel.STABLE)
+            val channelSpinner = Spinner(activity).apply {
+                adapter = apiServerStringAdapter(activity, channels.map {
+                    when (it) {
+                        ApiUpdateChannel.BETA -> "模块更新渠道：预发布（含正式版）"
+                        ApiUpdateChannel.STABLE -> "模块更新渠道：仅正式版"
+                    }
+                })
+                setSelection(channels.indexOf(current.updateChannel).coerceAtLeast(0))
+            }
+            card.addView(channelSpinner, apiServerRowParams(activity))
             val status = TextView(activity).apply {
                 text = "输入服务器地址后自动识别认证模式"
                 setTextColor(colors.body)
@@ -109,6 +121,7 @@ internal fun ReaMicroSettingsHook.openApiServerSettingsDialog() {
                 authMode = mode,
                 allowHttp = allowHttp.isChecked,
                 autoCheckUpdates = autoUpdate.isChecked,
+                updateChannel = channels.getOrElse(channelSpinner.selectedItemPosition) { current.updateChannel },
             )
 
             fun applyDiscovery(meta: com.reamicro.fix.cloud.api.ApiServerMeta) {
@@ -449,7 +462,7 @@ internal fun ReaMicroSettingsHook.checkApiModuleUpdate() {
     val activity = activityProvider() ?: return
     val store = ApiServerSettingsStore { activity.applicationContext }
     Thread {
-        val result = checkModuleUpdate(activity.applicationContext, ApiServerClient(store))
+        val result = checkModuleUpdate(ApiServerClient(store))
         activity.runOnUiThread { showToast(result.message) }
     }.start()
 }
