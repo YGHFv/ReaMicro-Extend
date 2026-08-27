@@ -35,6 +35,7 @@ object ModuleSettings {
     const val KEY_ACCOUNT_CACHE_CLEANUP_ENABLED = "account_cache_cleanup_enabled"
     const val KEY_EDIT_ENABLED = "edit_enabled"
     const val KEY_EDIT_FILE_ENABLED = "edit_file_enabled"
+    const val KEY_API_DEBUG_UNLOCKED = "api_debug_unlocked"
     const val KEY_CLOUD_ENABLED = "cloud_enabled"
     const val KEY_CLOUD_WEBDAV_ENABLED = "cloud_webdav_enabled"
     const val KEY_CLOUD_LOCAL_LIBRARY_ENABLED = "cloud_local_library_enabled"
@@ -99,6 +100,7 @@ object ModuleSettings {
     const val DEFAULT_EDIT_FILE_ENABLED = false
     const val DEFAULT_CLOUD_ENABLED = true
     const val DEFAULT_CLOUD_WEBDAV_ENABLED = true
+    const val DEFAULT_API_DEBUG_UNLOCKED = false
     const val DEFAULT_CLOUD_LOCAL_LIBRARY_ENABLED = true
     const val DEFAULT_CLOUD_EXTENDED_DISPLAY_ENABLED = false
     const val DEFAULT_CLOUD_DOWNLOAD_CANCEL_ENABLED = false
@@ -203,6 +205,7 @@ data class SearchSourceGroup(
 
 data class ModuleSettingsSnapshot(
     val moduleEnabled: Boolean = ModuleSettings.DEFAULT_MODULE_ENABLED,
+    val apiDebugUnlocked: Boolean = ModuleSettings.DEFAULT_API_DEBUG_UNLOCKED,
     val associationEnabled: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_ENABLED,
     val associationManualEditEnabled: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_MANUAL_EDIT_ENABLED,
     val associationUnlinkEnabled: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_UNLINK_ENABLED,

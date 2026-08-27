@@ -1582,6 +1582,38 @@ internal fun ReaMicroSettingsHook.bumpAccountListVersion() {
         ?.invoke(state, value + 1)
 }
 
+// 关于补全页"构建版本"行的版本号状态，解锁调试模式后 bump 触发页面重组。
+internal fun ReaMicroSettingsHook.aboutVersionState(): Any {
+    aboutVersionUiState?.let { return it }
+    return mutableState(0).also { aboutVersionUiState = it }
+}
+
+internal fun ReaMicroSettingsHook.aboutVersionValue(): Int =
+    (aboutVersionState().method0("getValue") as? Number)?.toInt() ?: 0
+
+internal fun ReaMicroSettingsHook.bumpAboutVersion() {
+    val state = aboutVersionState()
+    val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
+    state.javaClass.methods
+        .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+        ?.invoke(state, value + 1)
+}
+
+// 关于补全页"构建版本"行显示文本：版本号 + 构建时间。
+internal fun ReaMicroSettingsHook.moduleBuildVersionLine(): String {
+    val (versionName, buildTime) = moduleBuildInfo()
+    return "v$versionName${if (buildTime.isNotBlank()) " · $buildTime" else ""}"
+}
+
+// 关于补全页"构建版本"行点击计数，连续 6 次触发调试模式解锁确认。
+internal fun ReaMicroSettingsHook.registerAboutVersionTap() {
+    aboutVersionTapCount += 1
+    if (aboutVersionTapCount >= 6) {
+        aboutVersionTapCount = 0
+        confirmApiDebugUnlock()
+    }
+}
+
 internal fun ReaMicroSettingsHook.mutableBooleanState(initialValue: Boolean): Any =
     method(SNAPSHOT_STATE_KT_CLASS, MUTABLE_STATE_OF_DEFAULT_METHOD, 4).invoke(
         null,

@@ -647,6 +647,36 @@ def nested_value(value: Any, *keys: str) -> Any:
     return current
 
 
+def lottery_result_summary(body: Any) -> str:
+    """从阅微抽卡响应中提取适合通知展示的结果。"""
+    result = nested_value(body, "data", "result") or nested_value(body, "result") or nested_value(body, "data")
+    if isinstance(result, str):
+        text = result.strip()
+        if text.startswith(("{", "[")):
+            try:
+                result = json.loads(text)
+            except ValueError:
+                return redact_message(text)
+        else:
+            return redact_message(text)
+    items = result if isinstance(result, list) else [result] if isinstance(result, dict) else []
+    summaries: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("cardName") or item.get("propName") or item.get("title") or item.get("result")
+        quality = item.get("quality") or item.get("cardQuality") or item.get("propQuality") or item.get("rarity")
+        count = item.get("count") or item.get("quantity") or item.get("num")
+        if name:
+            summary = str(name)
+            if quality:
+                summary += f"（{quality}）"
+            if count not in (None, "", 1, "1"):
+                summary += f" ×{count}"
+            summaries.append(summary)
+    return "、".join(summaries[:10]) or redact_message(json.dumps(result if result is not None else body, ensure_ascii=False)[:300])
+
+
 def credential_for_task(task: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     request = decrypt_secret(str(task.get("requestEncrypted", ""))) if task.get("requestEncrypted") else {}
     credential_id = str(request.get("credentialId", "")).strip()
@@ -679,6 +709,9 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
         except ValueError:
             configured_body = {}
     if task_type == "yeshe_draw_card":
+        if not task.pop("triggeredByCheckinReward", False):
+            task["waitingForCheckinReward"] = True
+            return "success", "野社自动抽卡等待签到奖励领取完成后触发"
         daily_limit = max(1, min(int(request.get("dailyLimit", 1) or 1), 20))
         today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
         if task.get("dailyCounterDate") == today and int(task.get("dailyCounter", 0)) >= daily_limit:
@@ -691,7 +724,11 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
         previous_date = task.get("dailyCounterDate")
         task["dailyCounterDate"] = today
         task["dailyCounter"] = int(task.get("dailyCounter", 0)) + 1 if previous_date == today else 1
-        return "success", f"野社抽卡完成（今日 {task['dailyCounter']}/{daily_limit}）：{redact_message(json.dumps(body, ensure_ascii=False)[:300])}"
+        summary = lottery_result_summary(body)
+        task["lastDrawResult"] = summary
+        task["lastDrawAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+        task["waitingForCheckinReward"] = False
+        return "success", f"野社自动抽卡完成（今日 {task['dailyCounter']}/{daily_limit}）：{summary}"
     if task_type == "yeshe_checkin":
         china_zone = timezone(timedelta(hours=8))
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -736,6 +773,7 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             task["lastClaimAt"] = now_ms
             task["claimCompletedDate"] = today
             task["claimRetryCount"] = 0
+            task["claimJustCompleted"] = True
             return "success", f"{checkin_message or '野社签到状态已检查'}，签到奖励领取成功" + (f"：{redact_message(str(claim_message))}" if claim_message else "")
 
         retry_count = bounded_config_int(task.get("claimRetryCount", 0), 0, 0) + 1
@@ -823,6 +861,39 @@ def execute_task(task: dict[str, Any]) -> tuple[str, str]:
     return "failed", f"未知任务类型：{task.get('taskType')}"
 
 
+def execute_linked_draw_task(tasks: dict[str, dict[str, Any]], checkin_task: dict[str, Any], started_at: int) -> tuple[str, str] | None:
+    """签到奖励领取成功后，立即运行同账号已启用的抽卡任务。"""
+    if not checkin_task.pop("claimJustCompleted", False):
+        return None
+    owner = str(checkin_task.get("owner", ""))
+    credential_id = task_credential_id(checkin_task)
+    candidates = [
+        task for task in tasks.values()
+        if task.get("owner") == owner
+        and task.get("taskType") == "yeshe_draw_card"
+        and task_credential_id(task) == credential_id
+        and task.get("enabled", True)
+        and task.get("status") not in {"paused", "cancelled"}
+    ]
+    if not candidates:
+        return None
+    draw_task = max(candidates, key=lambda item: bounded_config_int(item.get("updatedAt", item.get("createdAt", 0)), 0, 0))
+    draw_task["triggeredByCheckinReward"] = True
+    draw_task["status"] = "running"
+    draw_task["lastRunAt"] = started_at
+    result, message = execute_reamicro_task(draw_task)
+    finished_at = int(datetime.now(timezone.utc).timestamp() * 1000)
+    draw_task["status"] = result
+    draw_task["lastMessage"] = message
+    draw_task["runCount"] = int(draw_task.get("runCount", 0)) + 1
+    draw_task["consecutiveFailures"] = 0 if result == "success" else int(draw_task.get("consecutiveFailures", 0)) + 1
+    draw_task["nextRunAt"] = 0
+    record_task_execution(draw_task, result, message, started_at, finished_at)
+    task_log(str(draw_task.get("id", "")), message, "ERROR" if result == "failed" else "WARN" if result == "paused" else "INFO")
+    enqueue_task_notification(draw_task, result, message, finished_at)
+    return result, message
+
+
 def record_task_execution(task: dict[str, Any], result: str, message: str, started_at: int, finished_at: int) -> None:
     history = task.get("executionHistory", [])
     if not isinstance(history, list):
@@ -845,6 +916,8 @@ def apply_task_action(task: dict[str, Any], action: str, now: int | None = None)
     now = now or int(datetime.now(timezone.utc).timestamp() * 1000)
     task_id = str(task.get("id", ""))
     if action == "run":
+        if task.get("taskType") == "yeshe_draw_card":
+            task["triggeredByCheckinReward"] = True
         task["status"] = "scheduled"
         task["enabled"] = True
         task["nextRunAt"] = now
@@ -876,6 +949,10 @@ async def task_scheduler_loop() -> None:
             changed = False
             for task_id, task in tasks.items():
                 if not task.get("enabled", True) or task.get("status") in {"paused", "cancelled", "running"}:
+                    continue
+                if task.get("taskType") == "yeshe_draw_card" and not task.get("triggeredByCheckinReward"):
+                    task["status"] = "scheduled"
+                    task["nextRunAt"] = 0
                     continue
                 next_run = int(task.get("nextRunAt", 0))
                 if next_run > now:
@@ -913,6 +990,9 @@ async def task_scheduler_loop() -> None:
                         task["nextRunAt"] = 0
                     record_task_execution(task, result, message, started_at, finished_at)
                     enqueue_task_notification(task, result, message, finished_at)
+                    linked_draw = await asyncio.to_thread(execute_linked_draw_task, tasks, task, finished_at)
+                    if linked_draw:
+                        task["lastMessage"] = f"{message}；{linked_draw[1]}"
                     changed = True
                     save_tasks(tasks)
                 finally:
@@ -3816,6 +3896,8 @@ async def cancel_task(task_id: str, owner: str = Depends(task_owner)) -> dict[st
 @app.post("/v1/tasks/{task_id}/run")
 async def run_task_now(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
     tasks, task = find_owned_task(task_id, owner)
+    if task.get("taskType") == "yeshe_draw_card":
+        task["triggeredByCheckinReward"] = True
     task["status"] = "scheduled"
     task["enabled"] = True
     task["nextRunAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)

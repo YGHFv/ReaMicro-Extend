@@ -58,6 +58,10 @@ class ReaMicroSettingsHook(
     // ReaderHook 在进入高亮界面前设置的入口点击回调（打开三段式高亮规则 sheet）。
     @Volatile internal var highlightScreenEntryOnClick: (() -> Unit)? = null
     internal var lazyItemDefaultMethod: Method? = null
+    // 关于补全页"构建版本"行的连续点击计数，累计 6 次弹出调试模式解锁确认。
+    @Volatile internal var aboutVersionTapCount: Int = 0
+    // 关于补全页版本号，解锁调试模式后 bump 触发页面重组以显示 API 服务器设置入口。
+    @Volatile internal var aboutVersionUiState: Any? = null
     @Volatile internal var currentSettingsNavGraphScope: Any? = null
     @Volatile internal var currentSettingsNavController: Any? = null
     // 全 app 唯一的 NavGraphScope（setup() 里 new 一次，reader/设置共用）。
@@ -269,6 +273,7 @@ class ReaMicroSettingsHook(
         InjectedRoute.AssociationCompletionSettings,
         InjectedRoute.ReaderCompletionSettings,
         InjectedRoute.CloudCompletionSettings,
+        InjectedRoute.ApiServerSettings,
         InjectedRoute.RotationCompletionSettings,
         InjectedRoute.OnlineCompletionSettings,
         InjectedRoute.OnlineDownloadStyleSettings,

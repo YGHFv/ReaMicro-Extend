@@ -324,25 +324,6 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
                 }.start()
             }
         }, settingsDialogButtonParams(activity))
-        actions.addView(settingsDialogButton(activity, "立即执行", colors, SettingsDialogButtonRole.Neutral).apply {
-            setOnClickListener {
-                val credentialId = credentialIds.getOrNull(credentialSpinner.selectedItemPosition)
-                if (credentialId == null) {
-                    status.text = "请先上传或选择阅微凭据"
-                    return@setOnClickListener
-                }
-                status.text = "正在安排已启用任务立即执行……"
-                Thread {
-                    runCatching {
-                        val manager = CloudTaskManager(client)
-                        val runnable = manager.list().filter { it.credentialId == credentialId && it.enabled }
-                        runnable.forEach { manager.runNow(it.id) }
-                        runnable.size
-                    }.onSuccess { count -> activity.runOnUiThread { status.text = "已安排 $count 个任务立即执行" } }
-                        .onFailure { error -> activity.runOnUiThread { status.text = error.message ?: "立即执行失败" } }
-                }.start()
-            }
-        }, settingsDialogButtonParams(activity))
         actions.addView(settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply { setOnClickListener { dialog.dismiss() } }, settingsDialogButtonParams(activity))
         card.addView(actions)
         showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, dismissOnThemeChange = true)
@@ -649,3 +630,56 @@ private fun apiServerRowParams(activity: android.app.Activity): LinearLayout.Lay
         android.view.ViewGroup.LayoutParams.MATCH_PARENT,
         android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
     ).apply { bottomMargin = activity.resources.displayMetrics.density.times(8).toInt() }
+
+// 关于补全页"构建版本"的来源：版本号 + 构建时间。
+internal fun ReaMicroSettingsHook.moduleBuildInfo(): Pair<String, String> {
+    val version = com.reamicro.fix.BuildConfig.VERSION_NAME
+    val buildTime = runCatching {
+        val millis = com.reamicro.fix.BuildConfig.BUILD_TIME
+        java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+            .format(java.util.Date(millis))
+    }.getOrElse { "" }
+    return version to buildTime
+}
+
+// 关于补全页"构建版本"连续点击 6 次后弹出的调试模式解锁确认。
+internal fun ReaMicroSettingsHook.confirmApiDebugUnlock() {
+    val activity = activityProvider() ?: return
+    activity.runOnUiThread {
+        val dialog = Dialog(activity)
+        val colors = SettingsDialogColors(activity)
+        val card = settingsDialogCard(activity, colors)
+        card.addView(settingsDialogTitle(activity, "是否启用调试模式", colors))
+        card.addView(
+            settingsDialogHint(
+                activity,
+                "启用后将显示 API 服务器设置入口，可使用 API 服务器等测试配置。" +
+                    "该配置将允许三方服务器收集您的个人数据和阅微账号数据等敏感高危数据，请确认是否启用。",
+                colors,
+            ),
+        )
+        val actions = settingsDialogActions(activity)
+        actions.addView(
+            settingsDialogButton(activity, "取消", colors, SettingsDialogButtonRole.Neutral).apply {
+                setOnClickListener {
+                    dialog.dismiss()
+                    showToast("已取消启用调试模式")
+                }
+            },
+            settingsDialogButtonParams(activity),
+        )
+        actions.addView(
+            settingsDialogButton(activity, "确认启用", colors, SettingsDialogButtonRole.Primary).apply {
+                setOnClickListener {
+                    settings.setApiDebugUnlocked(true)
+                    bumpAboutVersion()
+                    dialog.dismiss()
+                    showToast("已启用调试模式，API 服务器设置入口已显示")
+                }
+            },
+            settingsDialogButtonParams(activity),
+        )
+        card.addView(actions)
+        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
+    }
+}

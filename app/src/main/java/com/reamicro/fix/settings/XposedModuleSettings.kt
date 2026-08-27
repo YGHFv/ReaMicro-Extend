@@ -50,6 +50,10 @@ class XposedModuleSettings(
         putBoolean(ModuleSettings.KEY_MODULE_ENABLED, enabled)
     }
 
+    fun setApiDebugUnlocked(unlocked: Boolean) {
+        putBoolean(ModuleSettings.KEY_API_DEBUG_UNLOCKED, unlocked)
+    }
+
     fun setAssociationEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_ASSOCIATION_ENABLED, enabled)
     }
@@ -734,6 +738,10 @@ class XposedModuleSettings(
             moduleEnabled = prefs.getBoolean(
                 ModuleSettings.KEY_MODULE_ENABLED,
                 ModuleSettings.DEFAULT_MODULE_ENABLED,
+            ),
+            apiDebugUnlocked = prefs.getBoolean(
+                ModuleSettings.KEY_API_DEBUG_UNLOCKED,
+                ModuleSettings.DEFAULT_API_DEBUG_UNLOCKED,
             ),
             associationEnabled = prefs.getBoolean(
                 ModuleSettings.KEY_ASSOCIATION_ENABLED,

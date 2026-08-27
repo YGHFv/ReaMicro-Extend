@@ -216,6 +216,7 @@ internal fun ReaMicroSettingsHook.renderInjectedSettingsScreen(route: InjectedRo
             InjectedRoute.ReaderHighlightColorPicker -> renderReaderHighlightColorPickerContent(innerPaddings, innerComposer)
             InjectedRoute.ProfileBackgroundSettings -> renderProfileBackgroundSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.CloudCompletionSettings -> renderCloudCompletionSettingsContent(innerPaddings, innerComposer)
+            InjectedRoute.ApiServerSettings -> renderApiServerSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.RotationCompletionSettings -> renderRotationCompletionSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.AccountSwitch -> renderAccountSwitchContent(innerPaddings, innerComposer)
             InjectedRoute.OnlineCompletionSettings -> renderOnlineCompletionSettingsContent(innerPaddings, innerComposer)
@@ -638,6 +639,7 @@ internal fun ReaMicroSettingsHook.renderReaderSelectionMenuSettingsContent(inner
 internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: Any, composer: Any) {
     val listContent = functionProxy("AboutCompletionList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+        aboutVersionState()
         val snapshot = settings.snapshot()
         val toggleRows = listOf(
             ToggleRow(
@@ -668,7 +670,20 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
                 },
             ),
         )
-        val actionRows = listOf(
+        // API 服务器设置入口只在调试模式解锁后显示，位置在"模块自检"上方。
+        val debugRows = if (snapshot.apiDebugUnlocked) {
+            listOf(
+                ActionRow(
+                    key = "about_completion_api_server_settings",
+                    title = "API 服务器设置",
+                    subtitle = "服务器地址、API Key、内容库更新、云端签到抽卡等",
+                    onClick = { openNestedInjectedRoute(InjectedRoute.ApiServerSettings) },
+                ),
+            )
+        } else {
+            emptyList()
+        }
+        val actionRows = debugRows + listOf(
             ActionRow(
                 key = "about_completion_hook_report",
                 title = "\u6a21\u5757\u81ea\u68c0",
@@ -682,8 +697,16 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
                 onClick = { exportModuleLog() },
             ),
         )
-        // \u9879\u76ee\u5730\u5740\u5355\u72ec\u4e00\u5f20\u5361\u7247\u653e\u5728\u6700\u4e0b\u9762\uff0c\u526f\u6807\u9898\u76f4\u63a5\u662f\u94fe\u63a5\u672c\u8eab\uff0c\u70b9\u51fb\u8df3\u6d4f\u89c8\u5668\u3002
+        // 项目地址单独一张卡片放在最下面，副标题直接是链接本身，点击跳浏览器。
+        val versionLine = moduleBuildVersionLine()
         val projectRows = listOf(
+            ActionRow(
+                key = "about_completion_build_version",
+                title = "\u6784\u5efa\u7248\u672c",
+                subtitle = versionLine,
+                singleLineSubtitle = true,
+                onClick = { registerAboutVersionTap() },
+            ),
             ActionRow(
                 key = "about_completion_project_url",
                 title = "\u9879\u76ee\u5730\u5740",
@@ -888,10 +911,68 @@ internal fun ReaMicroSettingsHook.renderCloudCompletionSettingsContent(innerPadd
     val listContent = functionProxy("CloudCompletionList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
         val snapshot = settings.snapshot()
+        val rows = listOf(
+            ToggleRow(
+                key = ModuleSettings.KEY_CLOUD_WEBDAV_ENABLED,
+                title = "WebDAV",
+                checked = snapshot.cloudWebDavEnabled,
+                onChanged = { checked, _ ->
+                    settings.setCloudWebDavEnabled(checked)
+                    checked
+                },
+            ),
+            ToggleRow(
+                key = ModuleSettings.KEY_CLOUD_LOCAL_LIBRARY_ENABLED,
+                title = "\u672c\u5730\u4e66\u5e93",
+                checked = snapshot.cloudLocalLibraryEnabled,
+                onChanged = { checked, _ ->
+                    settings.setCloudLocalLibraryEnabled(checked)
+                    checked
+                },
+            ),
+            ToggleRow(
+                key = ModuleSettings.KEY_CLOUD_EXTENDED_DISPLAY_ENABLED,
+                title = "\u6269\u5c55\u663e\u793a",
+                checked = snapshot.cloudExtendedDisplayEnabled,
+                onChanged = { checked, _ ->
+                    settings.setCloudExtendedDisplayEnabled(checked)
+                    checked
+                },
+            ),
+            ToggleRow(
+                key = ModuleSettings.KEY_CLOUD_DOWNLOAD_CANCEL_ENABLED,
+                title = "\u5141\u8bb8\u53d6\u6d88",
+                checked = snapshot.cloudDownloadCancelEnabled,
+                onChanged = { checked, _ ->
+                    settings.setCloudDownloadCancelEnabled(checked)
+                    checked
+                },
+            ),
+            ToggleRow(
+                key = ModuleSettings.KEY_ACCOUNT_EXPORT_ENABLED,
+                title = "\u5bfc\u51fa\u8865\u5168",
+                checked = snapshot.accountExportEnabled,
+                onChanged = { checked, _ ->
+                    settings.setAccountExportEnabled(checked)
+                    checked
+                },
+            ),
+        )
+        addLazyItem(lazyListScope, CLOUD_SWITCHES_ITEM_KEY) { itemComposer ->
+            renderHostSettingsCard(rows, itemComposer)
+        }
+        targetUnit()
+    }
+    renderHostLazyColumn(innerPaddings, listContent, composer)
+}
+
+internal fun ReaMicroSettingsHook.renderApiServerSettingsContent(innerPaddings: Any, composer: Any) {
+    val listContent = functionProxy("ApiServerSettingsList", FUNCTION1_CLASS) { args ->
+        val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
         val apiRows = listOf(
             ActionRow(
                 key = "api_server_settings",
-                title = "API 服务器",
+                title = "API 服务器配置",
                 subtitle = apiServerSettingsSubtitle(),
                 onClick = { openApiServerSettingsDialog() },
             ),
@@ -944,58 +1025,8 @@ internal fun ReaMicroSettingsHook.renderCloudCompletionSettingsContent(innerPadd
                 onClick = { openCloudAutomationDialog() },
             ),
         )
-        val rows = listOf(
-            ToggleRow(
-                key = ModuleSettings.KEY_CLOUD_WEBDAV_ENABLED,
-                title = "WebDAV",
-                checked = snapshot.cloudWebDavEnabled,
-                onChanged = { checked, _ ->
-                    settings.setCloudWebDavEnabled(checked)
-                    checked
-                },
-            ),
-            ToggleRow(
-                key = ModuleSettings.KEY_CLOUD_LOCAL_LIBRARY_ENABLED,
-                title = "\u672c\u5730\u4e66\u5e93",
-                checked = snapshot.cloudLocalLibraryEnabled,
-                onChanged = { checked, _ ->
-                    settings.setCloudLocalLibraryEnabled(checked)
-                    checked
-                },
-            ),
-            ToggleRow(
-                key = ModuleSettings.KEY_CLOUD_EXTENDED_DISPLAY_ENABLED,
-                title = "\u6269\u5c55\u663e\u793a",
-                checked = snapshot.cloudExtendedDisplayEnabled,
-                onChanged = { checked, _ ->
-                    settings.setCloudExtendedDisplayEnabled(checked)
-                    checked
-                },
-            ),
-            ToggleRow(
-                key = ModuleSettings.KEY_CLOUD_DOWNLOAD_CANCEL_ENABLED,
-                title = "\u5141\u8bb8\u53d6\u6d88",
-                checked = snapshot.cloudDownloadCancelEnabled,
-                onChanged = { checked, _ ->
-                    settings.setCloudDownloadCancelEnabled(checked)
-                    checked
-                },
-            ),
-            ToggleRow(
-                key = ModuleSettings.KEY_ACCOUNT_EXPORT_ENABLED,
-                title = "\u5bfc\u51fa\u8865\u5168",
-                checked = snapshot.accountExportEnabled,
-                onChanged = { checked, _ ->
-                    settings.setAccountExportEnabled(checked)
-                    checked
-                },
-            ),
-        )
         addLazyItem(lazyListScope, "api_server_settings_card".hashCode()) { itemComposer ->
             renderHostActionCard(apiRows, itemComposer)
-        }
-        addLazyItem(lazyListScope, CLOUD_SWITCHES_ITEM_KEY) { itemComposer ->
-            renderHostSettingsCard(rows, itemComposer)
         }
         targetUnit()
     }
