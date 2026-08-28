@@ -22,6 +22,7 @@ from app.admin.format import (
     admin_section_path,
 )
 from app.admin.layout import _admin_layout, admin_csrf_token
+from app.admin.paging import paginate, pager_html
 from app.backups import list_server_snapshots
 from app.config_store import (
     api_key_auth_configured,
@@ -32,6 +33,7 @@ from app.config_store import (
 )
 from app.crypto import api_key_digest, decrypt_secret
 from app.labels import (
+    status_tone,
     _admin_action_label,
     _admin_channel_label,
     _admin_health_label,
@@ -148,7 +150,7 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
         # 上次检测结果直接读清单缓存，渲染列表不会触发任何网络请求。
         health = stored_health(item)
         health_status = health["status"]
-        health_class = {STATUS_OK: "valid", STATUS_SLOW: "warning", STATUS_UNREACHABLE: "invalid"}.get(health_status, "unverified")
+        health_class = status_tone(health_status)
         health_detail = (
             _admin_time_label(health["checkedAt"], "从未检测")
             if health["checkedAt"] else "从未检测"
@@ -175,8 +177,8 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
             f"<td><strong>{esc(item.get('name', package_id))}</strong>"
             f"<small>包 ID {esc(package_id)}{(' · ' + esc(domains)) if domains else ''}</small></td>"
             f"<td>{esc(item.get('version', ''))}<small>{esc(_admin_time_label(item.get('buildTime'), '未记录'))}</small></td>"
-            f"<td><span class='status status-{esc(status_value)}'>{esc(_admin_status_label(status_value))}</span></td>"
-            f"<td><span class='status status-{health_class}'>{esc(STATUS_LABELS.get(health_status, health_status))}</span>"
+            f"<td><span class='status tone-{status_tone(status_value)}'>{esc(_admin_status_label(status_value))}</span></td>"
+            f"<td><span class='status tone-{health_class}'>{esc(STATUS_LABELS.get(health_status, health_status))}</span>"
             f"<small>{esc(health_detail)}</small></td>"
             f"<td>{esc(_admin_channel_label(item.get('channel', 'stable')))}<small>{esc(dependency)}</small></td>"
             f"<td class='actions'>{actions}</td></tr>"
@@ -205,16 +207,16 @@ def _admin_release_panel() -> str:
     apk_path = runtime.RELEASE_ROOT / "latest.apk"
     apk_note = _admin_size_label(apk_path.stat().st_size) if apk_path.is_file() else "尚未下载"
     success = sync_status.get("success")
-    status_class = "success" if success else ("failed" if success is False else "unverified")
+    status_class = "ok" if success else ("bad" if success is False else "warn")
     status_text = "同步成功" if success else ("同步失败" if success is False else "尚未同步")
     rows = "".join(
-        f"<tr><th style='width:170px'>{esc(label)}</th><td>{value}</td></tr>"
+        f"<tr><th class='col-mid'>{esc(label)}</th><td>{value}</td></tr>"
         for label, value in (
             ("当前版本", esc(metadata.get("versionName", "") or "未同步")),
             ("发布渠道", esc(_admin_channel_label(metadata.get("channel", "")) if metadata.get("channel") else "未同步")),
             ("发布时间", esc(_admin_time_label(metadata.get("publishedAt"), "未记录"))),
             ("APK 文件", esc(apk_note)),
-            ("同步状态", f"<span class='status status-{status_class}'>{esc(status_text)}</span>"),
+            ("同步状态", f"<span class='status tone-{status_class}'>{esc(status_text)}</span>"),
             ("最近同步", esc(_admin_time_detail(sync_status.get("at") or sync_status.get("checkedAt"), "未记录"))),
             ("同步说明", esc(sync_status.get("message", "") or "无附加说明")),
         )
@@ -223,7 +225,7 @@ def _admin_release_panel() -> str:
         f"<div class='panel'><h2>模块 Release 同步</h2>"
         f"<p class='muted'>服务器定时从 GitHub 拉取模块 Release 供客户端更新。"
         f"若仓库只发布预发布 Release，必须勾选下方的“包含预发布 Release”，否则 GitHub 找不到正式版会导致同步失败。</p>"
-        f"<div class='table-wrap'><table style='min-width:auto'><tbody>{rows}</tbody></table></div></div>"
+        f"<div class='table-wrap'><table class='table-plain'><tbody>{rows}</tbody></table></div></div>"
     )
 
 
@@ -259,12 +261,12 @@ def _admin_settings_content(config: dict[str, Any], actor: dict[str, Any], csrf_
     )
     auth_blocks = (
         f"<div data-auth-section='api_key'>"
-        f"<p class='muted' style='margin:0 0 10px'>{esc(api_key_note)}。明细管理请到“子管理员与安全”。</p>"
+        f"<p class='muted hint'>{esc(api_key_note)}。明细管理请到“子管理员与安全”。</p>"
         f"<label>API Key（留空保持当前值）<input type='password' name='api_key' autocomplete='new-password'></label>"
         f"<label><input type='checkbox' name='generate_api_key'> 生成新的随机 API Key（保存后显示一次）</label>"
         f"<label><input type='checkbox' name='clear_api_key'> 清空全部 API Key</label></div>"
         f"<div data-auth-section='account'>"
-        f"<p class='muted' style='margin:0 0 10px'>{account_note}。</p>"
+        f"<p class='muted hint'>{account_note}。</p>"
         f"<div class='grid-2'><label>新增或更新账号名<input name='account_name' autocomplete='off'></label>"
         f"<label>账号密码<input type='password' name='account_password' autocomplete='new-password'></label></div>"
         f"<label>要删除的账号名<input name='remove_account' autocomplete='off'></label></div>"
@@ -298,16 +300,16 @@ def _admin_settings_content(config: dict[str, Any], actor: dict[str, Any], csrf_
         f"<label>保留份数（最少 3）<input name='server_snapshot_retention' type='number' min='3' value='{esc(config.get('serverSnapshotRetention', 30))}'></label>"
         f"</div></fieldset>"
         f"<fieldset><legend>用户模块上传</legend>"
-        f"<p class='muted' style='margin:0;font-size:12px'>启用后，白名单内的阅微账号可以从模块上传书源和关联源。"
+        f"<p class='muted hint-tight'>启用后，白名单内的阅微账号可以从模块上传书源和关联源。"
         f"服务器已存在名称和域名相同的源时只建立关联，不会被模块覆盖。</p>"
         f"<label><input type='checkbox' name='module_upload_enabled' {'checked' if config.get('moduleUploadEnabled') else ''}> 启用模块上传内容库</label>"
         f"<label>上传 ID 白名单（阅微账号 ID，每行一个）"
         f"<textarea name='module_upload_allowlist' placeholder='例如&#10;10086&#10;20250'>{esc(newline.join(config.get('moduleUploadAllowlist', [])))}</textarea></label>"
-        f"<div><p class='muted' style='margin:0 0 8px;font-size:12px'>允许上传的类型（全部取消则回退到默认的书源和关联源）</p>{kind_checkboxes}</div>"
+        f"<div><p class='muted hint'>允许上传的类型（全部取消则回退到默认的书源和关联源）</p>{kind_checkboxes}</div>"
         f"</fieldset>"
         f"<fieldset><legend>内容包签名</legend>"
         f"<label>Ed25519 签名公钥（Base64，留空表示不校验签名）"
-        f"<textarea name='signing_public_key' style='min-height:70px'>{esc(config.get('signingPublicKey', ''))}</textarea></label>"
+        f"<textarea name='signing_public_key' class='textarea-sm'>{esc(config.get('signingPublicKey', ''))}</textarea></label>"
         f"</fieldset>"
         f"<div class='inline'><button class='button' type='submit'>保存设置</button>"
         f"<button class='button subtle' type='submit' formaction='/admin/sync'>立即同步模块 Release</button></div>"
@@ -353,7 +355,7 @@ def _admin_overview_stats(config: dict[str, Any], records: list[dict[str, Any]])
         ("已开放" if config.get("moduleUploadEnabled") else "未开放", "用户模块上传"),
     ]
     return (
-        "<div class='stats' style='grid-template-columns:repeat(4,minmax(0,1fr))'>"
+        "<div class='stats'>"
         + "".join(f"<div><strong>{esc(value)}</strong><span>{esc(label)}</span></div>" for value, label in cards)
         + "</div>"
     )
@@ -378,7 +380,7 @@ def _admin_presence_panel() -> str:
         online = online_until > now
         presence_rows.append(
             f"<tr><td>{esc(_admin_owner_label(item.get('owner', '')))}</td>"
-            f"<td><span class='status status-{'online' if online else 'offline'}'>{'在线' if online else '离线'}</span>"
+            f"<td><span class='status tone-{'ok' if online else 'idle'}'>{'在线' if online else '离线'}</span>"
             f"<small>租约至 {esc(_admin_time_label(online_until, '未记录'))}</small></td>"
             f"<td>{esc(item.get('moduleVersion', '') or '未上报')}"
             f"<small>构建 {esc(_admin_time_label(item.get('buildTime'), '未记录'))}</small></td>"
@@ -400,8 +402,8 @@ def _admin_presence_panel() -> str:
             f"<tr><td>{esc(item.get('title', '') or '任务消息')}"
             f"<small>{esc(item.get('message', '') or '无消息内容')}</small></td>"
             f"<td>{esc(_admin_owner_label(item.get('owner', '')))}</td>"
-            f"<td><span class='status status-{esc(result)}'>{esc(_admin_result_label(result))}</span></td>"
-            f"<td><span class='status status-{'success' if delivered else 'unverified'}'>{'已送达' if delivered else '待发送'}</span>"
+            f"<td><span class='status tone-{status_tone(result)}'>{esc(_admin_result_label(result))}</span></td>"
+            f"<td><span class='status tone-{'ok' if delivered else 'warn'}'>{'已送达' if delivered else '待发送'}</span>"
             f"<small>{esc(_admin_time_label(delivered, '模块下次在线时发送'))}</small></td>"
             f"<td>{esc(_admin_time_label(item.get('createdAt'), '未记录'))}</td></tr>"
         )
@@ -447,7 +449,7 @@ def _admin_subadmin_table(config: dict[str, Any], csrf_html: str) -> str:
         )
         rows.append(
             f"<tr><td><strong>{esc(username)}</strong><small>由 {esc(record.get('createdBy', '未知'))} 创建</small></td>"
-            f"<td><span class='status status-{'valid' if enabled else 'paused'}'>{'已启用' if enabled else '已停用'}</span></td>"
+            f"<td><span class='status tone-{'ok' if enabled else 'idle'}'>{'已启用' if enabled else '已停用'}</span></td>"
             f"<td>{esc(permission_labels)}</td>"
             f"<td>{esc(_admin_time_label(record.get('updatedAt'), '未记录'))}"
             f"<small>创建于 {esc(_admin_time_label(record.get('createdAt'), '未记录'))}</small></td>"
@@ -462,7 +464,7 @@ def _admin_subadmin_table(config: dict[str, Any], csrf_html: str) -> str:
     return (
         f"<div class='panel'><h2>子管理员</h2>"
         f"<p class='muted'>子管理员使用同一个登录地址，只能执行被授予的操作。重置密码、停用和删除会立即清空该账号的全部后台会话。</p>"
-        f"<div class='table-wrap' style='margin-bottom:16px'><table><thead><tr><th>用户名</th><th>状态</th><th>权限</th><th>最近变更</th><th>操作</th></tr></thead>"
+        f"<div class='table-wrap mb-lg'><table><thead><tr><th>用户名</th><th>状态</th><th>权限</th><th>最近变更</th><th>操作</th></tr></thead>"
         f"<tbody>{table}</tbody></table></div>"
         f"<h3>创建子管理员</h3>"
         f"<form method='post' action='/admin/admins/create'>{csrf_html}"
@@ -492,7 +494,7 @@ def _admin_api_key_table(config: dict[str, Any], csrf_html: str) -> str:
         action_cell = actions or "<span class='muted'>无可用操作</span>"
         rows.append(
             f"<tr><td><strong>{esc(record.get('name', ''))}</strong><small><code>{esc(record.get('id', ''))}</code></small></td>"
-            f"<td><span class='status status-{'valid' if enabled else 'invalid'}'>{'生效中' if enabled else '已吊销'}</span>{revoked_note}</td>"
+            f"<td><span class='status tone-{'ok' if enabled else 'bad'}'>{'生效中' if enabled else '已吊销'}</span>{revoked_note}</td>"
             f"<td>{esc(permission_text)}</td>"
             f"<td>{esc(_admin_time_label(record.get('createdAt'), '未记录'))}</td>"
             f"<td>{esc(_admin_time_label(record.get('lastUsedAt'), '从未使用'))}</td>"
@@ -506,7 +508,7 @@ def _admin_api_key_table(config: dict[str, Any], csrf_html: str) -> str:
     return (
         f"<div class='panel'><h2>API Key</h2>"
         f"<p class='muted'>供脚本或第三方客户端调用 API 使用。密钥只保存哈希，明文仅在创建时显示一次；泄露后请立即吊销。</p>"
-        f"<div class='table-wrap' style='margin-bottom:16px'><table><thead><tr><th>名称</th><th>状态</th><th>权限范围</th><th>创建时间</th><th>最近使用</th><th>操作</th></tr></thead>"
+        f"<div class='table-wrap mb-lg'><table><thead><tr><th>名称</th><th>状态</th><th>权限范围</th><th>创建时间</th><th>最近使用</th><th>操作</th></tr></thead>"
         f"<tbody>{table}</tbody></table></div>"
         f"<h3>创建 API Key</h3>"
         f"<form method='post' action='/admin/security/api-keys/create'>{csrf_html}"
@@ -557,9 +559,9 @@ def _admin_snapshot_table(config: dict[str, Any], actor: dict[str, Any], csrf_ht
         f"<div class='panel'><h2>服务器快照</h2>"
         f"<p class='muted'>快照包含 SQLite 数据库与服务器配置，最多保留 {retention} 份。"
         f"快照内含加密后的阅微凭据，请与服务器加密密钥分开保存。</p>"
-        f"<form class='inline' method='post' action='/admin/backups/server' style='margin-bottom:14px'>{csrf_html}"
+        f"<form class='inline mb' method='post' action='/admin/backups/server'>{csrf_html}"
         f"<button class='button' type='submit'>立即创建快照</button></form>"
-        f"<div class='table-wrap' style='margin-bottom:16px'><table><thead><tr><th>文件名</th><th>大小</th><th>创建时间</th><th>操作</th></tr></thead>"
+        f"<div class='table-wrap mb-lg'><table><thead><tr><th>文件名</th><th>大小</th><th>创建时间</th><th>操作</th></tr></thead>"
         f"<tbody>{table}</tbody></table></div>{restore_block}</div>"
     )
 
@@ -613,7 +615,7 @@ def _admin_security_content(config: dict[str, Any], actor: dict[str, Any], csrf_
     return "".join(blocks)
 
 
-def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] | None = None, secret_notice: str = "", section: str = "overview", query: str = "") -> str:
+def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] | None = None, secret_notice: str = "", section: str = "overview", query: str = "", page: int = 1) -> str:
     """分类管理后台，保留原有写入路由并提供统一内容列表入口。"""
     merge_duplicate_credentials()
     merge_duplicate_tasks()
@@ -649,7 +651,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
             f"<tr><td><strong>{esc(credential.get('label', '阅微账号'))}</strong><small><code>{esc(credential_id)}</code></small></td>"
             f"<td>{esc(credential.get('accountId', '') or '未提供')}</td>"
             f"<td>{esc(_admin_owner_label(owner))}<small>{esc(owner_display)}</small></td>"
-            f"<td><span class='status status-{esc(health)}'>{esc(_admin_health_label(health))}</span>"
+            f"<td><span class='status tone-{status_tone(health)}'>{esc(_admin_health_label(health))}</span>"
             f"<small>{esc(credential.get('lastVerifyMessage', '') or '暂无验证说明')}</small></td>"
             f"<td>{esc(_admin_time_label(credential.get('updatedAt', 0), '未记录'))}"
             f"<small>最近使用 {esc(_admin_time_label(credential.get('lastUsedAt', 0), '从未使用'))}</small></td>"
@@ -686,7 +688,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
             f"<td>{esc(_admin_owner_label(task.get('owner', '')))}</td>"
             f"<td>{esc(task_credential_id(task) or '未关联')}</td>"
             f"<td>{esc(_admin_task_detail(task))}</td>"
-            f"<td><span class='status status-{esc(task_status)}'>{esc(_admin_task_status_label(task_status))}</span>"
+            f"<td><span class='status tone-{status_tone(task_status)}'>{esc(_admin_task_status_label(task_status))}</span>"
             f"<small>{'已启用' if task.get('enabled', True) else '已停用'}</small></td>"
             f"<td>{esc(task.get('lastMessage', '') or '暂无执行记录')}{result_note}</td>"
             f"<td>{esc(_admin_time_label(task.get('nextRunAt', 0)))}"
@@ -705,7 +707,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
             )
             content += _admin_overview_stats(config, records)
             content += _admin_presence_panel()
-            content += "<h2 style='margin:26px 0 14px'>全部内容</h2>"
+            content += "<h2 class='section-head'>全部内容</h2>"
         else:
             title = "内容管理" if section == "packages" else _admin_kind_label(section)
             description = (
@@ -721,6 +723,8 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
             f"<a class='button subtle' href='{admin_section_path(section)}'>清除搜索</a>" if query.strip() else ""
         )
         # 内容表格对概览、全部内容和各类型分区都要渲染，此前被误缩进导致分区页只有标题。
+        # 长列表分页：一次渲染上千个内容包会让页面无法使用。
+        page_items, page_info = paginate(visible, page)
         # 批量检测只对具体类型分区提供：全部内容一起检测会打太多站点。
         batch_check = ""
         if can_packages and section in runtime.PACKAGE_KINDS:
@@ -736,7 +740,8 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
             f"</form>"
             f"<div class='table-wrap'><table><thead><tr><th>类型 / 来源</th><th>内容</th>"
             f"<th>版本 / 构建时间</th><th>状态</th><th>可用性</th><th>渠道 / 依赖</th><th>操作</th></tr></thead>"
-            f"<tbody>{_admin_package_table(visible, can_packages, query, admin_csrf_token(config, actor))}</tbody></table></div>"
+            f"<tbody>{_admin_package_table(page_items, can_packages, query, admin_csrf_token(config, actor))}</tbody></table></div>"
+            + pager_html(page_info, admin_section_path(section), {"q": query})
         )
     else:
         task_credentials = ""
@@ -778,7 +783,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
                 f"</div>"
                 f"<label>自定义图书 JSON（留空则读取阅微最近阅读记录）"
                 f"<textarea name='request_body' placeholder='{html.escape(book_example, quote=True)}'></textarea></label>"
-                f"<p class='muted' style='margin:0'>自定义图书格式示例：<code>{html.escape(book_example)}</code></p>"
+                f"<p class='muted flush'>自定义图书格式示例：<code>{html.escape(book_example)}</code></p>"
                 f"<button class='button' type='submit'>创建任务</button></form></div>"
             )
             content = f"<div class='page-head'><div><p class='eyebrow'>自动化</p><h1>云端任务</h1><p class='muted'>配置、查看和控制自动阅读、签到、抽卡任务。每个阅微账号只保留一个同步密钥，重新同步会更新原密钥。</p></div></div>{task_credentials}{task_form}"

@@ -60,14 +60,14 @@ def admin_users_page(
         capabilities = set(user.get("capabilities", [])) if user else set()
         if stats["online"]:
             online_count += 1
-        state_class = "online" if stats["online"] else ("offline" if enabled else "invalid")
+        state_class = "ok" if stats["online"] else ("idle" if enabled else "bad")
         state_text = "在线" if stats["online"] else ("离线" if enabled else "已停用")
         failed_note = f"（失败 {stats['failedTasks']}）" if stats["failedTasks"] else ""
         rows.append(
             f"<tr><td><strong>阅微账号 {esc(account_id)}</strong>"
             f"<small>{esc(user.get('note', '') or '未填备注')}</small>"
             f"{'' if user else '<small>尚未建档，保存后自动创建</small>'}</td>"
-            f"<td><span class='status status-{state_class}'>{state_text}</span>"
+            f"<td><span class='status tone-{state_class}'>{state_text}</span>"
             f"<small>{esc(_admin_time_detail(stats['lastSeenAt'], '从未上报'))}</small></td>"
             f"<td>{esc(stats['moduleVersion'] or '未上报')}</td>"
             f"<td>密钥 {stats['credentials']} · 任务 {stats['tasks']}{failed_note}"
@@ -80,7 +80,7 @@ def admin_users_page(
             f"<fieldset><legend>可用功能</legend>{_capability_checkboxes('capabilities', capabilities)}</fieldset>"
             f"<label>备注<input name='note' value='{esc(user.get('note', ''))}' placeholder='例如 自用主力机'></label>"
             f"<button class='button subtle' type='submit'>保存</button></form>"
-            f"<form class='inline' method='post' action='/admin/users/delete' style='margin-top:8px'>{csrf_html}"
+            f"<form class='inline mt' method='post' action='/admin/users/delete'>{csrf_html}"
             f"<input type='hidden' name='account_id' value='{esc(account_id)}'>"
             f"<button class='button subtle danger' type='submit'>删除档案</button></form></td></tr>"
         )
@@ -109,9 +109,9 @@ def admin_users_page(
         + "</form>"
         f"<div class='panel'><form class='inline' method='post' action='/admin/users/sync'>{csrf_html}"
         f"<button class='button subtle' type='submit'>从白名单与活动记录补建档案</button></form>"
-        f"<p class='muted' style='margin:10px 0 0'>已在白名单或已产生数据、但还没有档案的阅微账号会被补齐。</p></div>"
+        f"<p class='muted mt'>已在白名单或已产生数据、但还没有档案的阅微账号会被补齐。</p></div>"
         f"<div class='table-wrap'><table><thead><tr>"
-        f"<th>账号</th><th>状态</th><th>模块版本</th><th>使用情况</th><th style='min-width:320px'>设置</th>"
+        f"<th>账号</th><th>状态</th><th>模块版本</th><th>使用情况</th><th class='col-wide'>设置</th>"
         f"</tr></thead><tbody>{table}</tbody></table></div>"
     )
     return _admin_layout(config, actor, section="users", content=content, message=message)

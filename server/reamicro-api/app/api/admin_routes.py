@@ -72,6 +72,7 @@ from app.executors import (
     verify_reamicro_secret,
 )
 from app.labels import (
+    status_badge,
     _admin_action_label,
     _admin_channel_label,
     _admin_kind_label,
@@ -82,6 +83,7 @@ from app.labels import (
     _admin_task_label,
     _admin_task_status_label,
 )
+from app.admin.paging import paginate, pager_html, read_tail_lines
 from app.admin.users_view import admin_users_page
 from app.source_check import STATUS_LABELS, check_kind, check_package
 from app.security import normalized_admin_permissions
@@ -149,6 +151,9 @@ from app.state import (
 
 router = APIRouter()
 
+# 审计页最多回扫的行数。再往前的记录直接看 /data/audit/events.jsonl。
+AUDIT_SCAN_LINES = 5000
+
 
 @router.get("/admin/legacy", response_class=HTMLResponse)
 async def admin_legacy(actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
@@ -192,14 +197,14 @@ async def admin_preview_package(package_kind: str, package_id: str, actor: dict[
             pass
     esc = lambda value: html.escape(str(value), quote=True)
     meta_rows = "".join(
-        f"<tr><th style='width:150px'>{esc(label)}</th><td>{value}</td></tr>"
+        f"<tr><th class='col-narrow'>{esc(label)}</th><td>{value}</td></tr>"
         for label, value in (
             ("显示名称", esc(manifest.get("name", package_id))),
             ("包 ID", f"<code>{esc(package_id)}</code>"),
             ("稳定内容 ID", f"<code>{esc(manifest.get('contentId', '') or package_id)}</code>"),
             ("版本", esc(manifest.get("version", ""))),
             ("构建时间", esc(_admin_time_detail(manifest.get("buildTime"), "未记录"))),
-            ("发布状态", f"<span class='status status-{esc(manifest.get('status', 'published'))}'>{esc(_admin_status_label(manifest.get('status', 'published')))}</span>"),
+            ("发布状态", status_badge(manifest.get('status', 'published'), _admin_status_label(manifest.get('status', 'published')))),
             ("发布渠道", esc(_admin_channel_label(manifest.get("channel", "stable")))),
             ("内容文件", f"<code>{esc(filename)}</code> · {esc(_admin_size_label(len(payload)))}"),
             ("内容摘要", f"<code title='{esc(manifest.get('sha256', ''))}'>{esc(_admin_digest_label(manifest.get('sha256')))}</code>"),
@@ -208,7 +213,7 @@ async def admin_preview_package(package_kind: str, package_id: str, actor: dict[
             ("上传来源", esc(_admin_owner_label(manifest.get("uploadOwner", "")) if manifest.get("uploadOwner") else "后台管理员")),
         )
     )
-    body = f"<div class='table-wrap' style='margin-bottom:18px'><table style='min-width:auto'><tbody>{meta_rows}</tbody></table></div><div class='panel'><h2>内容文件</h2><pre>{html.escape(text)}</pre></div>"
+    body = f"<div class='table-wrap mb-lg'><table class='table-plain'><tbody>{meta_rows}</tbody></table></div><div class='panel'><h2>内容文件</h2><pre>{html.escape(text)}</pre></div>"
     return HTMLResponse(_admin_shell(
         "预览 · " + str(manifest.get("name", package_id)),
         body,
@@ -233,7 +238,7 @@ async def admin_edit_package_get(package_kind: str, package_id: str, actor: dict
     csrf = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
     status_options = "".join(f"<option value='{status}' {'selected' if manifest.get('status', 'published') == status else ''}>{_admin_status_label(status)}</option>" for status in ('published', 'draft', 'testing', 'unpublished'))
     channel_options = "".join(f"<option value='{channel}' {'selected' if manifest.get('channel', 'stable') == channel else ''}>{_admin_channel_label(channel)}</option>" for channel in ('stable', 'beta', 'nightly'))
-    body = f"<div class='panel'><p class='muted'>当前版本 {esc(manifest.get('version', ''))}，构建于 {esc(_admin_time_label(manifest.get('buildTime'), '未记录'))}。保存后旧版本自动归档到历史，可随时回滚。</p><form method='post' action='/admin/packages/{esc(package_kind)}/{esc(package_id)}/edit'>{csrf}<div class='grid-2'><label>版本号<input name='version' value='{esc(manifest.get('version', ''))}' required></label><label>内容文件名<input name='filename' value='{esc(filename)}' required></label><label>稳定内容 ID<input name='content_id' value='{esc(manifest.get('contentId', ''))}'></label><label>名称<input name='name' value='{esc(manifest.get('name', package_id))}'></label><label>发布状态<select name='status_value'>{status_options}</select></label><label>发布渠道<select name='channel'>{channel_options}</select></label></div><label>访问地址（每行一个，支持多地址）<textarea name='domains' style='min-height:90px' placeholder='example.com&#10;mirror.example.net'>{esc(chr(10).join(ordered_domains(manifest)))}</textarea></label><label>主地址（留空则用第一行）<input name='primary_domain' value='{esc(primary_domain(manifest))}' placeholder='example.com'></label><label>历史名称（每行一个。源改名后旧名要留着，用旧名的客户端才能继续关联）<textarea name='names' style='min-height:70px'>{esc(chr(10).join(sorted(package_match_names(manifest))))}</textarea></label><label>别名（逗号分隔）<input name='aliases' value='{esc(','.join(str(item) for item in manifest.get('aliases', [])))}'></label><label>依赖 JSON<textarea name='dependencies'>{esc(json.dumps(manifest.get('dependencies', []), ensure_ascii=False, indent=2))}</textarea></label><label>内容<textarea name='payload_text' style='min-height:320px'>{esc(text)}</textarea></label><div class='inline'><button class='button' type='submit'>保存新版本</button> <a class='button subtle' href='/admin/packages/{esc(package_kind)}/{esc(package_id)}/preview'>取消</a></div></form></div>"
+    body = f"<div class='panel'><p class='muted'>当前版本 {esc(manifest.get('version', ''))}，构建于 {esc(_admin_time_label(manifest.get('buildTime'), '未记录'))}。保存后旧版本自动归档到历史，可随时回滚。</p><form method='post' action='/admin/packages/{esc(package_kind)}/{esc(package_id)}/edit'>{csrf}<div class='grid-2'><label>版本号<input name='version' value='{esc(manifest.get('version', ''))}' required></label><label>内容文件名<input name='filename' value='{esc(filename)}' required></label><label>稳定内容 ID<input name='content_id' value='{esc(manifest.get('contentId', ''))}'></label><label>名称<input name='name' value='{esc(manifest.get('name', package_id))}'></label><label>发布状态<select name='status_value'>{status_options}</select></label><label>发布渠道<select name='channel'>{channel_options}</select></label></div><label>访问地址（每行一个，支持多地址）<textarea name='domains' class='textarea-md' placeholder='example.com&#10;mirror.example.net'>{esc(chr(10).join(ordered_domains(manifest)))}</textarea></label><label>主地址（留空则用第一行）<input name='primary_domain' value='{esc(primary_domain(manifest))}' placeholder='example.com'></label><label>历史名称（每行一个。源改名后旧名要留着，用旧名的客户端才能继续关联）<textarea name='names' class='textarea-sm'>{esc(chr(10).join(sorted(package_match_names(manifest))))}</textarea></label><label>别名（逗号分隔）<input name='aliases' value='{esc(','.join(str(item) for item in manifest.get('aliases', [])))}'></label><label>依赖 JSON<textarea name='dependencies'>{esc(json.dumps(manifest.get('dependencies', []), ensure_ascii=False, indent=2))}</textarea></label><label>内容<textarea name='payload_text' class='textarea-lg'>{esc(text)}</textarea></label><div class='inline'><button class='button' type='submit'>保存新版本</button> <a class='button subtle' href='/admin/packages/{esc(package_kind)}/{esc(package_id)}/preview'>取消</a></div></form></div>"
     return HTMLResponse(_admin_shell(
         "编辑 · " + str(manifest.get("name", package_id)),
         body,
@@ -346,7 +351,7 @@ async def admin_history_package(package_kind: str, package_id: str, actor: dict[
             f"<tr><td><strong>{version_value}</strong></td>"
             f"<td>{esc(_admin_time_label(item.get('buildTime'), '未记录'))}<small>{esc(_admin_time_detail(item.get('buildTime'), '未记录'))}</small></td>"
             f"<td><code title='{esc(item.get('sha256', ''))}'>{esc(_admin_digest_label(item.get('sha256')))}</code></td>"
-            f"<td><span class='status status-{esc(item.get('status', 'published'))}'>{esc(_admin_status_label(item.get('status', 'published')))}</span>"
+            f"<td>{status_badge(item.get('status', 'published'), _admin_status_label(item.get('status', 'published')))}"
             f"<small>{esc(_admin_channel_label(item.get('channel', 'stable')))}</small></td>"
             f"<td class='actions'>{' '.join(actions)}</td></tr>"
         )
@@ -507,7 +512,7 @@ async def admin_logout(request: Request, csrf_token: str = Form("")) -> Redirect
 
 
 @router.get("/admin", response_class=HTMLResponse)
-async def admin(section: str = Query("overview"), q: str = Query(""), actor: dict[str, Any] = Depends(admin_actor)) -> Response:
+async def admin(section: str = Query("overview"), q: str = Query(""), page: int = Query(1), actor: dict[str, Any] = Depends(admin_actor)) -> Response:
     if actor.get("needsSetup"):
         return admin_html(admin_setup_page(actor=actor))
     if section != "overview":
@@ -515,19 +520,19 @@ async def admin(section: str = Query("overview"), q: str = Query(""), actor: dic
         if q:
             target += "?q=" + urllib.parse.quote(q, safe="")
         return RedirectResponse(target, status_code=303, headers={"Cache-Control": "no-store"})
-    return admin_html(admin_page(load_config(), actor=actor, section="overview", query=q))
+    return admin_html(admin_page(load_config(), actor=actor, section="overview", query=q, page=page))
 
 
 @router.get("/admin/content", response_class=HTMLResponse)
-async def admin_content(q: str = Query(""), actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
-    return admin_html(admin_page(load_config(), actor=actor, section="packages", query=q))
+async def admin_content(q: str = Query(""), page: int = Query(1), actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+    return admin_html(admin_page(load_config(), actor=actor, section="packages", query=q, page=page))
 
 
 @router.get("/admin/content/{package_kind}", response_class=HTMLResponse)
-async def admin_content_kind(package_kind: str, q: str = Query(""), actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+async def admin_content_kind(package_kind: str, q: str = Query(""), page: int = Query(1), actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
     if package_kind not in runtime.PACKAGE_KINDS:
         raise HTTPException(status_code=404, detail="内容分类不存在")
-    return admin_html(admin_page(load_config(), actor=actor, section=package_kind, query=q))
+    return admin_html(admin_page(load_config(), actor=actor, section=package_kind, query=q, page=page))
 
 
 @router.get("/admin/tasks", response_class=HTMLResponse)
@@ -548,49 +553,64 @@ async def admin_security_page(actor: dict[str, Any] = Depends(admin_actor)) -> H
 @router.get("/admin/audit", response_class=HTMLResponse)
 async def admin_audit(
     q: str = Query(""),
+    page: int = Query(1),
     credentials: HTTPBasicCredentials | None = Depends(basic_security),
 ) -> HTMLResponse:
     actor = require_admin(credentials)
     require_admin_permission(actor, "audit:read")
     esc = lambda value: html.escape(str(value), quote=True)
     needle = q.strip().lower()
-    rows = []
     total = 0
     failures = 0
-    if runtime.AUDIT_PATH.is_file():
-        for line in runtime.AUDIT_PATH.read_text(encoding="utf-8").splitlines()[-800:][::-1]:
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            total += 1
-            success = bool(event.get("success"))
-            if not success:
-                failures += 1
-            action = str(event.get("action", ""))
-            action_label = _admin_action_label(action)
-            actor_label = _admin_owner_label(event.get("actor", "")) if str(event.get("actor", "")).startswith(("host:", "account:", "key:", "host-public:")) else str(event.get("actor", "")) or "系统"
-            metadata_label = _admin_metadata_label(event.get("metadata"))
-            if needle and needle not in " ".join((action, action_label, actor_label, metadata_label)).lower():
-                continue
-            if len(rows) >= 400:
-                continue
-            request_id = str(event.get("requestId", ""))
-            request_note = f"<small>请求 ID {esc(request_id)}</small>" if request_id else ""
-            rows.append(
-                f"<tr><td>{esc(_admin_time_label(event.get('at'), '未记录'))}"
-                f"<small>{esc(_admin_time_detail(event.get('at'), '未记录'))}</small></td>"
-                f"<td>{esc(actor_label)}</td>"
-                f"<td><strong>{esc(action_label)}</strong><small><code>{esc(action)}</code></small></td>"
-                f"<td><span class='status status-{'success' if success else 'failed'}'>{'成功' if success else '失败'}</span></td>"
-                f"<td>{esc(metadata_label)}{request_note}</td></tr>"
-            )
+    matched: list[dict[str, Any]] = []
+    # 从文件尾部按块回读，不把整个日志读进内存。
+    for line in read_tail_lines(runtime.AUDIT_PATH, AUDIT_SCAN_LINES)[::-1]:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        total += 1
+        success = bool(event.get("success"))
+        if not success:
+            failures += 1
+        action = str(event.get("action", ""))
+        action_label = _admin_action_label(action)
+        raw_actor = str(event.get("actor", ""))
+        actor_label = (
+            _admin_owner_label(raw_actor)
+            if raw_actor.startswith(("host:", "account:", "key:", "host-public:"))
+            else raw_actor or "系统"
+        )
+        metadata_label = _admin_metadata_label(event.get("metadata"))
+        if needle and needle not in " ".join((action, action_label, actor_label, metadata_label)).lower():
+            continue
+        matched.append({
+            "at": event.get("at"),
+            "actor": actor_label,
+            "action": action,
+            "actionLabel": action_label,
+            "success": success,
+            "metadata": metadata_label,
+            "requestId": str(event.get("requestId", "")),
+        })
+    visible, page_info = paginate(matched, page)
+    rows = []
+    for item in visible:
+        request_note = f"<small>请求 ID {esc(item['requestId'])}</small>" if item["requestId"] else ""
+        rows.append(
+            f"<tr><td>{esc(_admin_time_label(item['at'], '未记录'))}"
+            f"<small>{esc(_admin_time_detail(item['at'], '未记录'))}</small></td>"
+            f"<td>{esc(item['actor'])}</td>"
+            f"<td><strong>{esc(item['actionLabel'])}</strong><small><code>{esc(item['action'])}</code></small></td>"
+            f"<td>{status_badge('success' if item['success'] else 'failed', '成功' if item['success'] else '失败')}</td>"
+            f"<td>{esc(item['metadata'])}{request_note}</td></tr>"
+        )
     table = "".join(rows) or "<tr><td colspan='5' class='empty'>没有匹配的审计记录</td></tr>"
     stats = (
         f"<div class='stats'>"
         f"<div><strong>{total}</strong><span>最近记录条数</span></div>"
         f"<div><strong>{failures}</strong><span>其中失败事件</span></div>"
-        f"<div><strong>{len(rows)}</strong><span>当前显示</span></div>"
+        f"<div><strong>{page_info['total']}</strong><span>匹配记录</span></div>"
         f"<div><strong>{_admin_size_label(runtime.AUDIT_PATH.stat().st_size) if runtime.AUDIT_PATH.is_file() else '0 B'}</strong><span>日志文件大小</span></div>"
         f"</div>"
     )
@@ -598,9 +618,12 @@ async def admin_audit(
         f"{stats}"
         f"<form class='toolbar' method='get' action='/admin/audit'>"
         f"<input name='q' value='{esc(q)}' placeholder='搜索操作、操作者或详情'>"
-        f"<button class='button' type='submit'>搜索</button></form>"
+        f"<button class='button' type='submit'>搜索</button>"
+        + (f"<a class='button subtle' href='/admin/audit'>清除</a>" if q.strip() else "")
+        + f"</form>"
         f"<div class='table-wrap'><table><thead><tr><th>时间</th><th>操作者</th><th>操作</th><th>结果</th><th>详情</th></tr></thead>"
         f"<tbody>{table}</tbody></table></div>"
+        + pager_html(page_info, "/admin/audit", {"q": q})
     )
     return admin_html(_admin_shell(
         "审计日志",
@@ -609,7 +632,7 @@ async def admin_audit(
         actor,
         section="security",
         eyebrow="保护",
-        description="按时间倒序显示最近 800 条事件，最多渲染 400 条。",
+        description=f"按时间倒序分页显示，最多回扫最近 {AUDIT_SCAN_LINES} 条事件。更早的记录见 /data/audit/events.jsonl。",
         back_href="/admin/security",
         back_label="返回安全设置",
     ))
@@ -959,12 +982,13 @@ async def admin_setup(
         save_config(current)
         runtime.get_state_store().delete_admin_sessions_for_user(str(actor.get("username", "")))
         audit_event("primary_admin_initialized", f"admin:{username}", success=True)
-        return HTMLResponse(
-            "<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>初始化完成</title>"
-            "<body style='font-family:system-ui;max-width:560px;margin:48px auto;padding:18px'>"
-            "<h1>主管理员初始化完成</h1><p>初始环境变量密码已经停用。请关闭当前浏览器登录窗口，使用刚设置的新账号密码重新进入后台。</p>"
-            "<p><a href='/admin'>重新进入后台</a></p></body></html>"
-        )
+        # 走统一的认证页外壳，与登录、初始化页同一套配色与控件。
+        return HTMLResponse(_admin_auth_shell(
+            "主管理员初始化完成",
+            "初始环境变量密码已经停用",
+            "<p class='mt'>请关闭当前浏览器登录窗口，使用刚设置的新账号密码重新进入后台。</p>"
+            "<p class='mt'><a class='button' href='/admin'>重新进入后台</a></p>",
+        ))
     except ValueError as error:
         return HTMLResponse(admin_setup_page(str(error), actor=actor), status_code=400)
 
@@ -1385,13 +1409,13 @@ async def admin_task_logs(task_id: str, actor: dict[str, Any] = Depends(admin_ac
         rows.append(
             f"<tr><td>{esc(_admin_time_label(item.get('finishedAt'), '未记录'))}"
             f"<small>{esc(_admin_time_detail(item.get('finishedAt'), '未记录'))}</small></td>"
-            f"<td><span class='status status-{esc(result)}'>{esc(_admin_result_label(result))}</span></td>"
+            f"<td>{status_badge(result, _admin_result_label(result))}</td>"
             f"<td>{esc(_admin_duration_label(item.get('durationMs')))}</td>"
             f"<td>{esc(item.get('message', '') or '无执行说明')}</td></tr>"
         )
     table = "".join(rows) or "<tr><td colspan='4' class='empty'>暂无执行记录</td></tr>"
     summary_rows = "".join(
-        f"<tr><th style='width:150px'>{esc(label)}</th><td>{esc(value)}</td></tr>"
+        f"<tr><th class='col-narrow'>{esc(label)}</th><td>{esc(value)}</td></tr>"
         for label, value in (
             ("任务类型", _admin_task_label(task.get("taskType", ""))),
             ("任务 ID", task_id),
@@ -1414,16 +1438,16 @@ async def admin_task_logs(task_id: str, actor: dict[str, Any] = Depends(admin_ac
             except ValueError:
                 continue
             level = str(entry.get("level", "INFO"))
-            level_class = {"ERROR": "failed", "WARN": "warning"}.get(level, "success")
+            level_class = {"ERROR": "bad", "WARN": "warn"}.get(level, "ok")
             log_rows.append(
                 f"<tr><td>{esc(_admin_time_label(entry.get('at'), '未记录'))}"
                 f"<small>{esc(_admin_time_detail(entry.get('at'), '未记录'))}</small></td>"
-                f"<td><span class='status status-{level_class}'>{esc(level)}</span></td>"
+                f"<td>{status_badge(level_class, level)}</td>"
                 f"<td>{esc(entry.get('message', '') or '无内容')}</td></tr>"
             )
     log_table = "".join(log_rows) or "<tr><td colspan='3' class='empty'>暂无运行日志</td></tr>"
     body = (
-        f"<div class='table-wrap' style='margin-bottom:18px'><table style='min-width:auto'><tbody>{summary_rows}</tbody></table></div>"
+        f"<div class='table-wrap mb-lg'><table class='table-plain'><tbody>{summary_rows}</tbody></table></div>"
         f"<div class='panel'><h2>执行记录</h2><div class='table-wrap'><table><thead><tr><th>完成时间</th><th>结果</th><th>耗时</th><th>执行说明</th></tr></thead><tbody>{table}</tbody></table></div></div>"
         f"<div class='panel'><h2>运行日志</h2><p class='muted'>最近 200 条逐行日志，最新的在前。</p>"
         f"<div class='table-wrap'><table><thead><tr><th>时间</th><th>级别</th><th>内容</th></tr></thead><tbody>{log_table}</tbody></table></div></div>"

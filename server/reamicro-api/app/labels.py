@@ -138,3 +138,62 @@ def _admin_metadata_label(metadata: Any) -> str:
             text = str(value)
         parts.append(f"{label}：{text}")
     return "；".join(parts)
+
+
+# 语义色调。后台所有状态徽标都通过 status_tone 归到这五种之一，
+# 而不是把原始枚举值当 CSS 类名——那样新增一个枚举值就会渲染成无样式的灰块，
+# 而且很难发现（不报错，只是看起来没上色）。
+TONE_OK = "ok"
+TONE_WARN = "warn"
+TONE_BAD = "bad"
+TONE_IDLE = "idle"
+TONE_INFO = "info"
+
+_STATUS_TONES = {
+    # 内容包发布状态
+    "published": TONE_OK,
+    "draft": TONE_WARN,
+    "testing": TONE_WARN,
+    "unpublished": TONE_IDLE,
+    # 任务与执行结果
+    "success": TONE_OK,
+    "running": TONE_INFO,
+    "scheduled": TONE_INFO,
+    "failed": TONE_BAD,
+    "paused": TONE_IDLE,
+    "cancelled": TONE_IDLE,
+    "skipped": TONE_IDLE,
+    # 凭据健康
+    "valid": TONE_OK,
+    "invalid": TONE_BAD,
+    "unverified": TONE_WARN,
+    # 在线状态
+    "online": TONE_OK,
+    "offline": TONE_IDLE,
+    # 书源可用性
+    "ok": TONE_OK,
+    "slow": TONE_WARN,
+    "unreachable": TONE_BAD,
+    "blocked": TONE_BAD,
+    # 发布渠道
+    "stable": TONE_OK,
+    "beta": TONE_WARN,
+    "nightly": TONE_INFO,
+    # 通用
+    "warning": TONE_WARN,
+    "enabled": TONE_OK,
+    "disabled": TONE_IDLE,
+}
+
+
+def status_tone(value: Any) -> str:
+    """把任意状态值归到一种语义色调。未收录的值走中性色，不会变成无样式的灰块。"""
+    return _STATUS_TONES.get(str(value or "").strip().casefold(), TONE_INFO)
+
+
+def status_badge(value: Any, text: Any = None) -> str:
+    """渲染一个状态徽标。所有徽标都该走这里，保证配色与圆角一致。"""
+    import html
+
+    label = str(text if text is not None else value)
+    return f"<span class='status tone-{status_tone(value)}'>{html.escape(label, quote=True)}</span>"

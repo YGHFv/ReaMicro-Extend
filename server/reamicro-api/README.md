@@ -35,7 +35,9 @@ curl http://127.0.0.1:5222/v1/health
 | `executors.py` | 云端任务的实际执行 |
 | `scheduler.py` | 调度循环与执行记账 |
 | `admin/format.py` | 时间、耗时、大小、摘要的显示格式化 |
-| `admin/layout.py` | 统一外壳与样式、按 Accept 分流的错误页 |
+| `admin/style.py` | 样式表：设计令牌、语义色调、语义间距类 |
+| `admin/layout.py` | 统一外壳、按 Accept 分流的错误页 |
+| `admin/paging.py` | 列表分页与大文件尾部读取 |
 | `admin/views.py` | 各分区 HTML 拼装 |
 | `api/*.py` | 路由，按域分文件，只做校验与调用 |
 | `main.py` | 应用装配：中间件、异常处理、router 注册、启动钩子 |
@@ -70,6 +72,14 @@ curl http://127.0.0.1:5222/v1/health
 - **子管理员与安全**：子管理员列表与重置密码、停用、删除；API Key 列表与创建、吊销；服务器快照列表与创建、下载、校验、恢复；服务器加密密钥轮换；审计日志入口。
 
 时间统一按北京时间显示，并附带相对时间；状态、渠道、任务类型和审计动作均显示中文说明。后台页面出错时返回可读的提示页而不是 JSON。
+
+样式约定：**状态徽标只走 `.tone-ok` / `.tone-warn` / `.tone-bad` / `.tone-idle` / `.tone-info`
+五种语义色调**（由 `labels.status_tone` 映射），不要把原始枚举值当 CSS 类名——那样新增一个
+枚举值就会渲染成无样式的灰块，且不报错、很难发现。**间距用 `--gap-*` 变量与 `.stack` /
+`.mt` / `.mb` 等语义类**，不写内联 style，否则同一种间距会在各处漂移。深色模式跟随系统
+`prefers-color-scheme`，仅覆盖 `:root` 变量实现。
+
+内容列表与审计日志分页显示，每页 50 条。审计日志从文件尾部按块回读，不把整个文件读进内存。
 
 ## GitHub Actions 镜像
 
