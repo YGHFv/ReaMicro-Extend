@@ -3,6 +3,7 @@
 此前 87 个路由里有 57 个完全没有测试引用，这个文件真实驱动 /v1 全链路：
 能力发现、内容包读取与下载、同步密钥增删验证、任务生命周期、心跳与消息回执、备份往返。
 """
+import hashlib
 import json
 import tempfile
 import unittest
@@ -22,6 +23,9 @@ from tests.conftest_support import (
     unwrap,
 )
 from app import main, runtime
+from app.api import releases as api_releases
+from app import releases
+from app import state
 
 
 class ApiDiscoveryTest(unittest.TestCase):
@@ -114,7 +118,7 @@ class ApiPackageTest(unittest.TestCase):
             headers=module_headers(),
         )
         self.assertEqual(200, response.status_code)
-        digest = main.hashlib.sha256(response.content).hexdigest()
+        digest = hashlib.sha256(response.content).hexdigest()
         self.assertEqual(self.manifest["sha256"], digest, "下载内容摘要必须与清单一致")
 
     def test_package_download_rejects_traversal(self):
@@ -262,11 +266,11 @@ class ApiCredentialTest(unittest.TestCase):
             json={"enabled": False},
         )
         self.assertEqual(200, toggled.status_code)
-        self.assertFalse(main.load_credentials()[credential_id]["enabled"])
+        self.assertFalse(state.load_credentials()[credential_id]["enabled"])
 
         deleted = self.client.delete(f"/v1/credentials/reamicro/{credential_id}", headers=module_headers())
         self.assertEqual(200, deleted.status_code)
-        self.assertNotIn(credential_id, main.load_credentials())
+        self.assertNotIn(credential_id, state.load_credentials())
 
     def test_credential_isolation_across_accounts(self):
         base_config(hostAccountAllowlist=[HOST_ACCOUNT_ID, "7"])
@@ -277,7 +281,7 @@ class ApiCredentialTest(unittest.TestCase):
         # 不能删除别人的凭据。
         response = self.client.delete("/v1/credentials/reamicro/rea_theirs", headers=module_headers())
         self.assertEqual(404, response.status_code)
-        self.assertIn("rea_theirs", main.load_credentials())
+        self.assertIn("rea_theirs", state.load_credentials())
 
     def test_credential_requires_token(self):
         response = self.client.post("/v1/credentials/reamicro", headers=module_headers(), json={"label": "无密钥"})
@@ -318,7 +322,7 @@ class ApiTaskLifecycleTest(unittest.TestCase):
         for action, expected in (("pause", "paused"), ("resume", "scheduled"), ("cancel", "cancelled")):
             response = self.client.post(f"/v1/tasks/{task_id}/{action}", headers=module_headers())
             self.assertEqual(200, response.status_code, f"{action} 失败：{response.text}")
-            self.assertEqual(expected, main.load_tasks()[task_id]["status"], f"{action} 后状态不符")
+            self.assertEqual(expected, state.load_tasks()[task_id]["status"], f"{action} 后状态不符")
 
         configured = self.client.post(
             f"/v1/tasks/{task_id}/configure",
@@ -326,14 +330,14 @@ class ApiTaskLifecycleTest(unittest.TestCase):
             json={"enabled": True, "schedule": {"intervalSeconds": 43200, "timeOfDay": "06:30"}},
         )
         self.assertEqual(200, configured.status_code)
-        self.assertEqual(43200, main.load_tasks()[task_id]["schedule"]["intervalSeconds"])
+        self.assertEqual(43200, state.load_tasks()[task_id]["schedule"]["intervalSeconds"])
 
         logs = self.client.get(f"/v1/tasks/{task_id}/logs", headers=module_headers())
         self.assertEqual(200, logs.status_code)
 
         deleted = self.client.delete(f"/v1/tasks/{task_id}", headers=module_headers())
         self.assertEqual(200, deleted.status_code)
-        self.assertNotIn(task_id, main.load_tasks())
+        self.assertNotIn(task_id, state.load_tasks())
 
     def test_task_isolation_across_accounts(self):
         base_config(hostAccountAllowlist=[HOST_ACCOUNT_ID, "7"])
@@ -380,7 +384,7 @@ class ApiPresenceTest(unittest.TestCase):
 
     def test_heartbeat_delivers_and_acks_notifications(self):
         task = seed_task("task_1")
-        notification_id = main.enqueue_task_notification(task, "success", "签到完成", 1750000000000)
+        notification_id = state.enqueue_task_notification(task, "success", "签到完成", 1750000000000)
 
         heartbeat = self.client.post(
             "/v1/presence/heartbeat",
@@ -399,7 +403,7 @@ class ApiPresenceTest(unittest.TestCase):
         acked = self.client.post("/v1/notifications/ack", headers=module_headers(), json={"ids": [notification_id]})
         self.assertEqual(200, acked.status_code)
         self.assertEqual(1, unwrap(acked)["acknowledged"])
-        self.assertTrue(main.load_notifications()[notification_id]["deliveredAt"])
+        self.assertTrue(state.load_notifications()[notification_id]["deliveredAt"])
 
         # 回执后不再重复下发。
         again = unwrap(self.client.post("/v1/presence/heartbeat", headers=module_headers(), json={"source": "alarm"}))
@@ -408,13 +412,13 @@ class ApiPresenceTest(unittest.TestCase):
     def test_notifications_isolated_across_accounts(self):
         base_config(hostAccountAllowlist=[HOST_ACCOUNT_ID, "7"])
         other_task = seed_task("task_theirs", owner="host:7")
-        foreign_id = main.enqueue_task_notification(other_task, "success", "别人的消息", 1750000000000)
+        foreign_id = state.enqueue_task_notification(other_task, "success", "别人的消息", 1750000000000)
         listed = unwrap(self.client.get("/v1/notifications", headers=module_headers()))
         self.assertEqual([], listed["items"])
         # 也不能替别人回执。
         acked = self.client.post("/v1/notifications/ack", headers=module_headers(), json={"ids": [foreign_id]})
         self.assertEqual(0, unwrap(acked)["acknowledged"])
-        self.assertFalse(main.load_notifications()[foreign_id]["deliveredAt"])
+        self.assertFalse(state.load_notifications()[foreign_id]["deliveredAt"])
 
     def test_ack_rejects_oversized_list(self):
         response = self.client.post(
@@ -509,7 +513,7 @@ class ApiReleaseTest(unittest.TestCase):
             "channel": channel,
             "apkUrl": "/v1/releases/module/download",
             "apkName": apk.name,
-            "sha256": main.hashlib.sha256(apk.read_bytes()).hexdigest(),
+            "sha256": hashlib.sha256(apk.read_bytes()).hexdigest(),
             "size": apk.stat().st_size,
             "publishedAt": 1750000000000,
         }, ensure_ascii=False), encoding="utf-8")
@@ -528,19 +532,19 @@ class ApiReleaseTest(unittest.TestCase):
         response = self.client.get("/v1/releases/module/download", headers=module_headers())
         self.assertEqual(200, response.status_code)
         expected = json.loads((runtime.RELEASE_ROOT / "latest.json").read_text(encoding="utf-8"))["sha256"]
-        self.assertEqual(expected, main.hashlib.sha256(response.content).hexdigest())
+        self.assertEqual(expected, hashlib.sha256(response.content).hexdigest())
 
     def test_missing_release_reports_not_configured(self):
         """没有已同步版本时返回 200 + NOT_CONFIGURED，模块端按 message 报错。
 
         这里必须打桩 sync_module_release：latest.json 缺失会触发一次真实 GitHub 调用。
         """
-        original = main.sync_module_release
-        main.sync_module_release = lambda: None
+        original = releases.sync_module_release
+        releases.sync_module_release = lambda: None
         try:
             response = self.client.get("/v1/releases/module/latest", params={"channel": "beta"}, headers=module_headers())
         finally:
-            main.sync_module_release = original
+            releases.sync_module_release = original
         self.assertEqual(200, response.status_code)
         body = response.json()
         self.assertEqual("NOT_CONFIGURED", body["code"])

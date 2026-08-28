@@ -15,6 +15,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import main, runtime
+from app.admin import views as admin_views
+from app import config_store
+from app import crypto
+from app import security
+from app import state
 from tests.conftest_support import isolate
 
 
@@ -31,23 +36,23 @@ class OwnerIdentityTest(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _configure(self, mode: str, **extra):
-        config = {**main.default_config(), "authMode": mode, **extra}
-        return main.save_config(config)
+        config = {**config_store.default_config(), "authMode": mode, **extra}
+        return config_store.save_config(config)
 
     def test_identity_is_account_scoped_in_every_auth_mode(self):
         """同一个阅微账号在四种认证模式下都必须解析成同一个归属。"""
         api_key = "k" * 40
         self._configure("public")
-        public_identity = main.resolve_identity(None, None, None, ACCOUNT_ID)
+        public_identity = security.resolve_identity(None, None, None, ACCOUNT_ID)
 
         self._configure("host_account_allowlist", hostAccountAllowlist=[ACCOUNT_ID])
-        allowlist_identity = main.resolve_identity(None, None, None, ACCOUNT_ID)
+        allowlist_identity = security.resolve_identity(None, None, None, ACCOUNT_ID)
 
         self._configure("api_key", apiKey=api_key)
-        key_identity = main.resolve_identity(api_key, None, None, ACCOUNT_ID)
+        key_identity = security.resolve_identity(api_key, None, None, ACCOUNT_ID)
 
-        self._configure("account", accounts={"user": main.password_hash("user-password-1")})
-        account_identity = main.resolve_identity(None, "user", "user-password-1", ACCOUNT_ID)
+        self._configure("account", accounts={"user": crypto.password_hash("user-password-1")})
+        account_identity = security.resolve_identity(None, "user", "user-password-1", ACCOUNT_ID)
 
         self.assertEqual(f"host:{ACCOUNT_ID}", public_identity)
         self.assertEqual(public_identity, allowlist_identity)
@@ -58,31 +63,31 @@ class OwnerIdentityTest(unittest.TestCase):
         """没有阅微账号时才按认证方式区分归属。"""
         api_key = "k" * 40
         self._configure("api_key", apiKey=api_key)
-        self.assertTrue(main.resolve_identity(api_key, None, None, None).startswith("key:"))
-        self._configure("account", accounts={"user": main.password_hash("user-password-1")})
-        self.assertEqual("account:user", main.resolve_identity(None, "user", "user-password-1", None))
+        self.assertTrue(security.resolve_identity(api_key, None, None, None).startswith("key:"))
+        self._configure("account", accounts={"user": crypto.password_hash("user-password-1")})
+        self.assertEqual("account:user", security.resolve_identity(None, "user", "user-password-1", None))
         self._configure("public")
-        self.assertEqual("public", main.resolve_identity(None, None, None, None))
+        self.assertEqual("public", security.resolve_identity(None, None, None, None))
 
     def test_invalid_credentials_still_rejected(self):
         """归属统一不能放松认证：白名单外的账号和错误密钥必须仍然 401。"""
         self._configure("host_account_allowlist", hostAccountAllowlist=["999"])
         with self.assertRaises(main.HTTPException) as caught:
-            main.resolve_identity(None, None, None, ACCOUNT_ID)
+            security.resolve_identity(None, None, None, ACCOUNT_ID)
         self.assertEqual(401, caught.exception.status_code)
         self._configure("api_key", apiKey="k" * 40)
         with self.assertRaises(main.HTTPException):
-            main.resolve_identity("wrong-key", None, None, ACCOUNT_ID)
-        self._configure("account", accounts={"user": main.password_hash("user-password-1")})
+            security.resolve_identity("wrong-key", None, None, ACCOUNT_ID)
+        self._configure("account", accounts={"user": crypto.password_hash("user-password-1")})
         with self.assertRaises(main.HTTPException):
-            main.resolve_identity(None, "user", "wrong-password", ACCOUNT_ID)
+            security.resolve_identity(None, "user", "wrong-password", ACCOUNT_ID)
 
     def test_backup_dir_is_stable_across_auth_modes(self):
         """备份目录名跟着归属走，改认证模式后不能失联。"""
         self._configure("public")
-        first = main.backup_owner_dir_name(main.resolve_identity(None, None, None, ACCOUNT_ID))
+        first = state.backup_owner_dir_name(security.resolve_identity(None, None, None, ACCOUNT_ID))
         self._configure("host_account_allowlist", hostAccountAllowlist=[ACCOUNT_ID])
-        second = main.backup_owner_dir_name(main.resolve_identity(None, None, None, ACCOUNT_ID))
+        second = state.backup_owner_dir_name(security.resolve_identity(None, None, None, ACCOUNT_ID))
         self.assertEqual(first, second)
 
     def test_migration_folds_legacy_owners_and_merges_presence(self):
@@ -90,37 +95,37 @@ class OwnerIdentityTest(unittest.TestCase):
         self._configure("host_account_allowlist", hostAccountAllowlist=[ACCOUNT_ID])
         legacy = f"host-public:{ACCOUNT_ID}"
         canonical = f"host:{ACCOUNT_ID}"
-        main.save_credentials({
+        state.save_credentials({
             "rea_old": {
                 "id": "rea_old", "owner": legacy, "type": "reamicro", "label": "阅微账号",
-                "accountId": ACCOUNT_ID, "secretEncrypted": main.encrypt_secret({"token": "t"}),
+                "accountId": ACCOUNT_ID, "secretEncrypted": crypto.encrypt_secret({"token": "t"}),
                 "createdAt": 1, "updatedAt": 1, "enabled": True,
             },
         })
-        main.save_tasks({
+        state.save_tasks({
             "task_old": {
                 "id": "task_old", "owner": legacy, "taskType": "yeshe_checkin",
                 "credentialId": "rea_old", "schedule": {"intervalSeconds": 86400},
                 "status": "success", "enabled": True, "createdAt": 1, "nextRunAt": 0,
             },
         })
-        main.save_notifications({
+        state.save_notifications({
             "msg_old": {
                 "id": "msg_old", "owner": legacy, "taskId": "task_old", "result": "success",
                 "title": "野社零点签到执行完成", "message": "签到完成", "createdAt": 1, "deliveredAt": 0,
             },
         })
-        main.save_presence({
+        state.save_presence({
             legacy: {"owner": legacy, "lastSeenAt": 1000, "onlineUntil": 2000, "moduleVersion": "2.0.0", "source": "foreground"},
             canonical: {"owner": canonical, "lastSeenAt": 9000, "onlineUntil": 99999999999999, "moduleVersion": "2.0.0", "source": "foreground"},
         })
 
-        stats = main.canonicalize_owner_identities()
+        stats = state.canonicalize_owner_identities()
 
-        self.assertEqual(canonical, main.load_credentials()["rea_old"]["owner"])
-        self.assertEqual(canonical, main.load_tasks()["task_old"]["owner"])
-        self.assertEqual(canonical, main.load_notifications()["msg_old"]["owner"])
-        presence = main.load_presence()
+        self.assertEqual(canonical, state.load_credentials()["rea_old"]["owner"])
+        self.assertEqual(canonical, state.load_tasks()["task_old"]["owner"])
+        self.assertEqual(canonical, state.load_notifications()["msg_old"]["owner"])
+        presence = state.load_presence()
         self.assertEqual([canonical], list(presence))
         self.assertEqual(9000, presence[canonical]["lastSeenAt"], "应保留最近一次心跳")
         self.assertEqual(1, stats["presence"])
@@ -128,21 +133,21 @@ class OwnerIdentityTest(unittest.TestCase):
     def test_notifications_reach_module_after_auth_mode_change(self):
         """端到端：任务在公开模式下建立，管理员改成白名单模式后消息仍能推送并回执。"""
         self._configure("public")
-        owner_before = main.resolve_identity(None, None, None, ACCOUNT_ID)
+        owner_before = security.resolve_identity(None, None, None, ACCOUNT_ID)
         task = {
             "id": "task_1", "owner": owner_before, "taskType": "yeshe_checkin",
             "credentialId": "rea_1", "schedule": {"intervalSeconds": 86400},
             "status": "success", "enabled": True, "createdAt": 1, "nextRunAt": 0,
         }
-        main.save_tasks({"task_1": task})
-        notification_id = main.enqueue_task_notification(task, "success", "签到完成", 1)
+        state.save_tasks({"task_1": task})
+        notification_id = state.enqueue_task_notification(task, "success", "签到完成", 1)
 
         # 管理员切换认证模式，随后模块重新上报心跳。
         self._configure("host_account_allowlist", hostAccountAllowlist=[ACCOUNT_ID])
-        main.canonicalize_owner_identities()
-        owner_after = main.resolve_identity(None, None, None, ACCOUNT_ID)
+        state.canonicalize_owner_identities()
+        owner_after = security.resolve_identity(None, None, None, ACCOUNT_ID)
 
-        pending = [item for item in main.load_notifications().values() if item.get("owner") == owner_after and not item.get("deliveredAt")]
+        pending = [item for item in state.load_notifications().values() if item.get("owner") == owner_after and not item.get("deliveredAt")]
         self.assertEqual(1, len(pending), "改认证模式后消息必须仍然属于同一归属，否则永远推不出去")
         self.assertEqual(notification_id, pending[0]["id"])
 
@@ -150,31 +155,31 @@ class OwnerIdentityTest(unittest.TestCase):
         """即使存量数据未折叠，后台在线列表也只显示同一账号一行。"""
         self._configure("host_account_allowlist", hostAccountAllowlist=[ACCOUNT_ID])
         now = int(datetime.now(timezone.utc).timestamp() * 1000)
-        main.save_presence({
+        state.save_presence({
             f"host-public:{ACCOUNT_ID}": {"owner": f"host-public:{ACCOUNT_ID}", "lastSeenAt": now - 86_400_000, "onlineUntil": now - 80_000_000, "moduleVersion": "2.0.0", "source": "foreground"},
             f"host:{ACCOUNT_ID}": {"owner": f"host:{ACCOUNT_ID}", "lastSeenAt": now, "onlineUntil": now + 600_000, "moduleVersion": "2.0.0", "source": "foreground"},
         })
-        panel = main.__dict__["_admin_presence_panel"]()
+        panel = admin_views._admin_presence_panel()
         self.assertEqual(1, panel.count("阅微账号 3"), "同一个阅微账号只能显示一行")
         self.assertIn("在线", panel)
 
     def test_overview_online_count_dedupes_by_account(self):
         self._configure("host_account_allowlist", hostAccountAllowlist=[ACCOUNT_ID])
         now = int(datetime.now(timezone.utc).timestamp() * 1000)
-        main.save_presence({
+        state.save_presence({
             f"host-public:{ACCOUNT_ID}": {"owner": f"host-public:{ACCOUNT_ID}", "lastSeenAt": now, "onlineUntil": now + 600_000, "moduleVersion": "2.0.0", "source": "alarm"},
             f"host:{ACCOUNT_ID}": {"owner": f"host:{ACCOUNT_ID}", "lastSeenAt": now, "onlineUntil": now + 600_000, "moduleVersion": "2.0.0", "source": "foreground"},
         })
-        stats = main.__dict__["_admin_overview_stats"](main.load_config(), [])
+        stats = admin_views._admin_overview_stats(config_store.load_config(), [])
         self.assertIn(">1</strong><span>模块在线设备", stats.replace("<strong", ">").replace(">>", ">"))
 
     def test_canonical_owner_of_handles_every_legacy_form(self):
-        self.assertEqual("host:3", main.canonical_owner_of("host:3"))
-        self.assertEqual("host:3", main.canonical_owner_of("host-public:3"))
-        self.assertEqual("host:3", main.canonical_owner_of("key:abcdef:host:3"))
-        self.assertEqual("host:3", main.canonical_owner_of("account:user:host:3"))
-        self.assertEqual("key:abcdef", main.canonical_owner_of("key:abcdef"))
-        self.assertEqual("public", main.canonical_owner_of("public"))
+        self.assertEqual("host:3", state.canonical_owner_of("host:3"))
+        self.assertEqual("host:3", state.canonical_owner_of("host-public:3"))
+        self.assertEqual("host:3", state.canonical_owner_of("key:abcdef:host:3"))
+        self.assertEqual("host:3", state.canonical_owner_of("account:user:host:3"))
+        self.assertEqual("key:abcdef", state.canonical_owner_of("key:abcdef"))
+        self.assertEqual("public", state.canonical_owner_of("public"))
 
 
 if __name__ == "__main__":

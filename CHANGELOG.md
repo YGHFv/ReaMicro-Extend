@@ -1,5 +1,41 @@
 # 更新记录
 
+## 服务端代码拆分为标准分层结构 - 2026-08-28
+
+`main.py` 原先 6049 行，全部逻辑堆在一个文件里。现按依赖分层拆成 20 个模块，
+`main.py` 只剩 169 行，只做应用装配（中间件、异常处理、router 注册、启动钩子）。
+
+底层（无业务依赖）：`runtime` 运行期状态、`responses` 响应包裹、`audit` 审计与任务日志、
+`config_store` 配置、`crypto` 加密与口令、`state` 持久化与归属迁移、`labels` 中文显示名。
+
+业务层：`security` 认证授权、`packages` 内容包、`releases` 发布同步、`backups` 快照与
+密钥轮换、`executors` 任务执行、`scheduler` 调度。
+
+展示与路由：`admin/format` 格式化、`admin/layout` 外壳、`admin/views` 分区 HTML、
+`api/*` 按域分文件的路由。
+
+拆分中确立并写进代码注释的两条约定：
+
+1. **可变全局集中在 `runtime`**，各模块调用时读 `runtime.X`。写 `from app.runtime import X`
+   拿到的是导入时快照，测试重定向数据目录会失效。
+2. **跨模块调用可被打桩的函数要通过模块引用**。`app/api/releases.py` 原先
+   `from app.releases import sync_module_release`，持有自己的引用，导致测试打桩源模块
+   不生效——测试真去连了 GitHub，全套耗时从 27 秒涨到 164 秒。改为
+   `releases_module.sync_module_release()` 后恢复。
+
+顺手消掉一处设计倒置：可分配给子管理员的权限键原先定义在 `admin/views`（展示层），
+安全层要用就得反向导入。现在键定义在 `security` 作为事实来源，`views` 只按键配中文说明。
+
+已确认 20 个模块之间无顶层循环依赖。仅剩两处必要的延迟导入，代码里都注明了原因：
+`layout` 要渲染 CSRF 隐藏域而 `security` 要用 `layout` 渲染错误页；`state` 的消息标题
+要用任务类型中文名而 `labels` 要读 `state` 的归属解析。
+
+测试同步指向真正的归属模块（`config_store.load_config` 而非 `main.load_config`），
+不再依赖 `main` 做门面。README 补充结构表与上述两条约定。
+
+验证：173 项测试全通过，91 条路由数量不变。
+
+
 ## 修复精确闹钟未申请导致通知延迟，新增后台唤醒自检 - 2026-08-28
 
 manifest 里没有申请 `SCHEDULE_EXACT_ALARM`，Android 12+ 上 `canScheduleExactAlarms()`

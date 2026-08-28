@@ -15,6 +15,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import main, runtime
+from app.admin import format as admin_format
+from app import labels
+from app.admin import layout as admin_layout
+from app.admin import views as admin_views
+from app import config_store
+from app import crypto
+from app import state
 from tests.conftest_support import isolate
 
 
@@ -28,12 +35,12 @@ class AdminPageRenderTest(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
         isolate(root, secret_key="test-secret-key-for-admin-pages")
-        self.config = main.save_config({
-            **main.default_config(),
-            "primaryAdmin": {"username": "owner", "passwordHash": main.password_hash("owner-password-123")},
+        self.config = config_store.save_config({
+            **config_store.default_config(),
+            "primaryAdmin": {"username": "owner", "passwordHash": crypto.password_hash("owner-password-123")},
             "adminAccounts": {
                 "helper": {
-                    "passwordHash": main.password_hash("helper-password-123"),
+                    "passwordHash": crypto.password_hash("helper-password-123"),
                     "enabled": True,
                     "permissions": ["packages:write", "tasks:write"],
                     "createdAt": RAW_TIMESTAMP,
@@ -46,7 +53,7 @@ class AdminPageRenderTest(unittest.TestCase):
             "apiKeyRecords": [{
                 "id": "key_test",
                 "name": "测试密钥",
-                "digest": main.api_key_digest("test-key-value"),
+                "digest": crypto.api_key_digest("test-key-value"),
                 "permissions": ["read"],
                 "enabled": True,
                 "createdAt": int(RAW_TIMESTAMP),
@@ -92,27 +99,27 @@ class AdminPageRenderTest(unittest.TestCase):
         (history / "source.json").write_text(json.dumps({"bookSourceName": "旧版示例书源"}, ensure_ascii=False), encoding="utf-8")
 
     def _seed_task_data(self):
-        main.save_credentials({
+        state.save_credentials({
             "rea_1": {
                 "id": "rea_1",
                 "owner": "host:10086",
                 "type": "reamicro",
                 "label": "阅微账号",
                 "accountId": "10086",
-                "secretEncrypted": main.encrypt_secret({"token": "token-value"}),
+                "secretEncrypted": crypto.encrypt_secret({"token": "token-value"}),
                 "createdAt": int(RAW_TIMESTAMP),
                 "updatedAt": int(RAW_TIMESTAMP),
                 "enabled": True,
             },
         })
-        main.save_tasks({
+        state.save_tasks({
             "task_1": {
                 "id": "task_1",
                 "owner": "host:10086",
                 "taskType": "yeshe_checkin",
                 "credentialId": "rea_1",
                 "schedule": {"intervalSeconds": 86400, "timeOfDay": "00:05", "timezoneOffsetMinutes": 480},
-                "requestEncrypted": main.encrypt_secret({"credentialId": "rea_1"}),
+                "requestEncrypted": crypto.encrypt_secret({"credentialId": "rea_1"}),
                 "status": "success",
                 "enabled": True,
                 "createdAt": int(RAW_TIMESTAMP),
@@ -125,7 +132,7 @@ class AdminPageRenderTest(unittest.TestCase):
                 ],
             },
         })
-        main.save_presence({
+        state.save_presence({
             "host:10086": {
                 "owner": "host:10086",
                 "lastSeenAt": int(RAW_TIMESTAMP),
@@ -135,7 +142,7 @@ class AdminPageRenderTest(unittest.TestCase):
                 "source": "module",
             },
         })
-        main.save_notifications({
+        state.save_notifications({
             "msg_1": {
                 "id": "msg_1",
                 "owner": "host:10086",
@@ -187,21 +194,21 @@ class AdminPageRenderTest(unittest.TestCase):
     def test_every_section_renders_content_table(self):
         # 历史问题：内容表格被误缩进在概览分支，导致分区页只有标题没有表格。
         for section in ("overview", "packages", "online_source", "association_source", "epub_style", "highlight_style", "theme"):
-            page = main.admin_page(self.config, actor=PRIMARY, section=section)
+            page = admin_views.admin_page(self.config, actor=PRIMARY, section=section)
             self.assert_unified_shell(page, section)
             self.assertIn("<table>", page, f"{section} 缺少内容表格")
             self.assertIn("搜索名称、包 ID、版本或别名", page, f"{section} 缺少搜索框")
-        online = main.admin_page(self.config, actor=PRIMARY, section="online_source")
+        online = admin_views.admin_page(self.config, actor=PRIMARY, section="online_source")
         self.assertIn("示例书源", online)
         self.assertIn("example.com", online)
 
     def test_all_sections_share_one_shell(self):
         for section in ("overview", "packages", "tasks", "settings", "security"):
-            self.assert_unified_shell(main.admin_page(self.config, actor=PRIMARY, section=section), section)
+            self.assert_unified_shell(admin_views.admin_page(self.config, actor=PRIMARY, section=section), section)
 
     def test_overview_shows_presence_and_notifications(self):
         # 历史问题：模块在线状态和离线消息队列在后台完全没有视图。
-        page = main.admin_page(self.config, actor=PRIMARY, section="overview")
+        page = admin_views.admin_page(self.config, actor=PRIMARY, section="overview")
         self.assertIn("模块在线状态", page)
         self.assertIn("任务消息队列", page)
         self.assertIn("2.4.0", page)
@@ -211,7 +218,7 @@ class AdminPageRenderTest(unittest.TestCase):
 
     def test_security_page_exposes_every_managed_action(self):
         # 历史问题：重置密码、停用、删除、密钥轮换、API Key 和快照恢复都没有界面入口。
-        page = main.admin_page(self.config, actor=PRIMARY, section="security")
+        page = admin_views.admin_page(self.config, actor=PRIMARY, section="security")
         for action in (
             "/admin/admins/create",
             "/admin/admins/reset",
@@ -231,7 +238,7 @@ class AdminPageRenderTest(unittest.TestCase):
         self.assert_no_raw_values(page, "security")
 
     def test_subadmin_security_page_hides_primary_only_blocks(self):
-        page = main.admin_page(self.config, actor=SUBADMIN, section="security")
+        page = admin_views.admin_page(self.config, actor=SUBADMIN, section="security")
         self.assert_unified_shell(page, "security-subadmin")
         # 子管理员不能管理其他管理员和 API Key，也不能恢复快照。
         self.assertNotIn("/admin/admins/create", page)
@@ -241,7 +248,7 @@ class AdminPageRenderTest(unittest.TestCase):
 
     def test_subadmin_with_backup_permission_sees_snapshot_actions(self):
         actor = {**SUBADMIN, "permissions": ["backup:admin"]}
-        page = main.admin_page(self.config, actor=actor, section="security")
+        page = admin_views.admin_page(self.config, actor=actor, section="security")
         self.assertIn("/admin/security/backups/verify", page)
         self.assertIn("立即创建快照", page)
         # 恢复仍然仅限主管理员。
@@ -250,7 +257,7 @@ class AdminPageRenderTest(unittest.TestCase):
 
     def test_settings_page_exposes_prerelease_and_signing_fields(self):
         # 历史问题：包含预发布 Release、签名公钥等做成隐藏字段，界面上无法修改。
-        page = main.admin_page(self.config, actor=PRIMARY, section="settings")
+        page = admin_views.admin_page(self.config, actor=PRIMARY, section="settings")
         self.assertIn("包含预发布 Release", page)
         self.assertIn("name='github_include_prerelease'", page)
         self.assertIn("name='signing_public_key'", page)
@@ -263,7 +270,7 @@ class AdminPageRenderTest(unittest.TestCase):
 
     def test_tasks_page_exposes_task_and_credential_actions(self):
         # 历史问题：任务无法删除，凭据表只读，没有验证、停用和删除操作。
-        page = main.admin_page(self.config, actor=PRIMARY, section="tasks")
+        page = admin_views.admin_page(self.config, actor=PRIMARY, section="tasks")
         self.assertIn("/admin/credentials/action", page)
         self.assertIn("value='delete'", page)
         self.assertIn("value='verify'", page)
@@ -273,37 +280,37 @@ class AdminPageRenderTest(unittest.TestCase):
 
     def test_time_and_enum_labels_are_readable(self):
         # 1750000000000 毫秒 = UTC 2025-06-15 15:06:40 = 北京时间 23:06。
-        self.assertEqual("2025-06-15 23:06", main.__dict__["_admin_time_label"](1750000000000))
-        self.assertEqual("未安排", main.__dict__["_admin_time_label"](0))
-        self.assertEqual("已发布", main.__dict__["_admin_status_label"]("published"))
-        self.assertEqual("正式版", main.__dict__["_admin_channel_label"]("stable"))
-        self.assertEqual("成功", main.__dict__["_admin_result_label"]("success"))
-        self.assertEqual("1.2 秒", main.__dict__["_admin_duration_label"](1234))
-        self.assertEqual("3 分 20 秒", main.__dict__["_admin_duration_label"](200_000))
-        self.assertEqual("1.5 KB", main.__dict__["_admin_size_label"](1536))
-        self.assertEqual("上传内容包", main.__dict__["_admin_action_label"]("package_uploaded"))
+        self.assertEqual("2025-06-15 23:06", admin_format._admin_time_label(1750000000000))
+        self.assertEqual("未安排", admin_format._admin_time_label(0))
+        self.assertEqual("已发布", labels._admin_status_label("published"))
+        self.assertEqual("正式版", labels._admin_channel_label("stable"))
+        self.assertEqual("成功", labels._admin_result_label("success"))
+        self.assertEqual("1.2 秒", admin_format._admin_duration_label(1234))
+        self.assertEqual("3 分 20 秒", admin_format._admin_duration_label(200_000))
+        self.assertEqual("1.5 KB", admin_format._admin_size_label(1536))
+        self.assertEqual("上传内容包", labels._admin_action_label("package_uploaded"))
         self.assertEqual(
             "类型：书源；内容包：example-com",
-            main.__dict__["_admin_metadata_label"]({"kind": "online_source", "packageId": "example-com"}),
+            labels._admin_metadata_label({"kind": "online_source", "packageId": "example-com"}),
         )
         # ISO 字符串也要能解析成北京时间，审计日志用的就是 ISO。
-        self.assertEqual("2026-08-28 09:02", main.__dict__["_admin_time_label"]("2026-08-28T01:02:03+00:00"))
+        self.assertEqual("2026-08-28 09:02", admin_format._admin_time_label("2026-08-28T01:02:03+00:00"))
 
     def test_admin_error_page_replaces_raw_json(self):
         # 历史问题：后台抛异常时返回裸 JSON，浏览器里无法阅读。
-        page = main.admin_error_page(403, "当前子管理员缺少权限：packages:write", "req_abc")
+        page = admin_layout.admin_error_page(403, "当前子管理员缺少权限：packages:write", "req_abc")
         self.assertIn("操作未完成（HTTP 403）", page)
         self.assertIn("缺少权限", page)
         self.assertIn("req_abc", page)
         self.assertIn("返回后台首页", page)
         self.assertNotIn('{"code"', page)
-        self.assertIn("重新登录", main.admin_error_page(401, "后台会话已失效"))
+        self.assertIn("重新登录", admin_layout.admin_error_page(401, "后台会话已失效"))
 
     def test_login_and_setup_pages_share_auth_style(self):
-        for page in (main.admin_login_page(), main.admin_setup_page()):
+        for page in (admin_layout.admin_login_page(), admin_layout.admin_setup_page()):
             self.assertIn("ReaMicro API 管理后台", page)
             self.assertIn("--line:#e5e9f0", page)
-        self.assertIn("用户名或密码错误", main.admin_login_page("用户名或密码错误"))
+        self.assertIn("用户名或密码错误", admin_layout.admin_login_page("用户名或密码错误"))
 
     def test_legacy_admin_page_helper_removed(self):
         # _legacy_admin_page 是 121 行没有任何调用点的死代码，已删除。

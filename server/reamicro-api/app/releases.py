@@ -4,6 +4,7 @@
 渠道标记规则：预发布标 beta，正式标 stable，只有请求 stable 时才拒绝 beta。
 """
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -131,3 +132,8 @@ def sync_module_release() -> dict[str, Any] | None:
     runtime.RELEASE_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
     runtime.RELEASE_STATUS_PATH.write_text(json.dumps({"status": "ok", "syncedAt": int(datetime.now(timezone.utc).timestamp() * 1000), "versionName": version_name, "assetId": asset.get("id")}, ensure_ascii=False, indent=2), encoding="utf-8")
     return metadata
+
+
+def github_webhook_signature(body: bytes) -> str:
+    """按当前配置的 Webhook Secret 计算期望签名。抽出来便于单测覆盖比对逻辑。"""
+    return "sha256=" + hmac.new(runtime.GITHUB_WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()

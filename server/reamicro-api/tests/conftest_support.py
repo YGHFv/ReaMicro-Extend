@@ -3,6 +3,7 @@
 所有路径常量都是模块级全局，直接改 main 上的属性即可把一整个服务器实例
 重定向到临时目录，互不干扰。
 """
+import hashlib
 import base64
 import importlib
 import json
@@ -14,6 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient
 
 from app import main, runtime
+from app import config_store
+from app import crypto
+from app import security
+from app import state
 
 ADMIN_USER = "owner"
 ADMIN_PASSWORD = "owner-password-12345"
@@ -55,18 +60,18 @@ def isolate(root: Path, secret_key: str = "test-secret-key-for-end-to-end-suite"
 
 def base_config(**overrides) -> dict:
     config = {
-        **main.default_config(),
+        **config_store.default_config(),
         "authMode": "host_account_allowlist",
         "hostAccountAllowlist": [HOST_ACCOUNT_ID],
         "primaryAdmin": {
             "username": ADMIN_USER,
-            "passwordHash": main.password_hash(ADMIN_PASSWORD),
+            "passwordHash": crypto.password_hash(ADMIN_PASSWORD),
         },
         "adminAccounts": {},
         "minModuleVersion": "2.0.0",
     }
     config.update(overrides)
-    return main.save_config(config)
+    return config_store.save_config(config)
 
 
 def client() -> TestClient:
@@ -86,7 +91,7 @@ def admin_auth() -> tuple[str, str]:
 
 def admin_csrf(actor_role: str = "primary", username: str = ADMIN_USER) -> str:
     actor = {"username": username, "role": actor_role, "permissions": [], "needsSetup": False}
-    return main.admin_csrf_token(main.load_config(), actor)
+    return security.admin_csrf_token(config_store.load_config(), actor)
 
 
 def seed_package(kind: str = "online_source", package_id: str = "example-com", **manifest_overrides) -> dict:
@@ -102,7 +107,7 @@ def seed_package(kind: str = "online_source", package_id: str = "example-com", *
         "buildTime": 1750000000000,
         "schemaVersion": 1,
         "minModuleVersion": "2.0.0",
-        "sha256": main.hashlib.sha256(payload).hexdigest(),
+        "sha256": hashlib.sha256(payload).hexdigest(),
         "signature": "",
         "payload": "source.json",
         "contentId": "online_example",
@@ -121,7 +126,7 @@ def seed_package(kind: str = "online_source", package_id: str = "example-com", *
     old_payload = json.dumps({"bookSourceName": "旧版示例书源"}, ensure_ascii=False).encode("utf-8")
     (history / "source.json").write_bytes(old_payload)
     (history / "manifest.json").write_text(
-        json.dumps({**manifest, "version": "1.1.0", "sha256": main.hashlib.sha256(old_payload).hexdigest()}, ensure_ascii=False),
+        json.dumps({**manifest, "version": "1.1.0", "sha256": hashlib.sha256(old_payload).hexdigest()}, ensure_ascii=False),
         encoding="utf-8",
     )
     return manifest
@@ -134,13 +139,13 @@ def seed_credential(credential_id: str = "rea_1", owner: str = f"host:{HOST_ACCO
         "type": "reamicro",
         "label": "阅微账号",
         "accountId": HOST_ACCOUNT_ID,
-        "secretEncrypted": main.encrypt_secret({"token": "token-value", "baseUrl": "https://example.invalid/"}),
+        "secretEncrypted": crypto.encrypt_secret({"token": "token-value", "baseUrl": "https://example.invalid/"}),
         "createdAt": 1750000000000,
         "updatedAt": 1750000000000,
         "enabled": True,
         "health": "unverified",
     }
-    main.save_credentials({**main.load_credentials(), credential_id: credential})
+    state.save_credentials({**state.load_credentials(), credential_id: credential})
     return credential
 
 
@@ -150,7 +155,7 @@ def seed_task(task_id: str = "task_1", owner: str = f"host:{HOST_ACCOUNT_ID}", t
         "owner": owner,
         "taskType": task_type,
         "credentialId": "rea_1",
-        "requestEncrypted": main.encrypt_secret({"credentialId": "rea_1"}),
+        "requestEncrypted": crypto.encrypt_secret({"credentialId": "rea_1"}),
         "schedule": {"intervalSeconds": 86400, "timeOfDay": "00:05", "timezoneOffsetMinutes": 480},
         "status": "scheduled",
         "enabled": True,
@@ -159,7 +164,7 @@ def seed_task(task_id: str = "task_1", owner: str = f"host:{HOST_ACCOUNT_ID}", t
         "runCount": 0,
     }
     task.update(overrides)
-    main.save_tasks({**main.load_tasks(), task_id: task})
+    state.save_tasks({**state.load_tasks(), task_id: task})
     return task
 
 

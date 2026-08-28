@@ -20,7 +20,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from app import runtime
-from app.config_store import load_config
+from app.config_store import bounded_config_int, load_config
 from app.labels import _admin_kind_label
 from app.responses import response
 
@@ -513,3 +513,45 @@ def package_match_identities(manifest: dict[str, Any]) -> set[str]:
     if isinstance(aliases, (list, tuple, set)):
         values.update(str(item).strip().casefold() for item in aliases if str(item).strip())
     return {item for item in values if item}
+
+
+def parse_module_upload_item(item: Any) -> dict[str, Any]:
+    """解析模块提交的单个源描述：类型、名称、域名和本地稳定标识。"""
+    if not isinstance(item, dict):
+        raise HTTPException(status_code=400, detail=response(code="INVALID_PAYLOAD", message="内容描述必须是对象"))
+    kind = str(item.get("kind", "")).strip()
+    if kind not in runtime.MODULE_UPLOAD_DEFAULT_KINDS:
+        raise HTTPException(status_code=400, detail=response(code="INVALID_KIND", message="模块只能上传书源和关联源"))
+    name = _metadata_text(item.get("name"))
+    if not name:
+        raise HTTPException(status_code=400, detail=response(code="INVALID_PAYLOAD", message="内容名称不能为空"))
+    raw_domains = item.get("domains")
+    if not isinstance(raw_domains, (list, tuple, set)):
+        raw_domains = [raw_domains] if raw_domains else []
+    domains = {domain for domain in (normalize_source_domain(value) for value in list(raw_domains)[:12]) if domain}
+    raw_identities = item.get("identities")
+    if not isinstance(raw_identities, (list, tuple, set)):
+        raw_identities = [raw_identities] if raw_identities else []
+    identities = {
+        text
+        for text in (_metadata_text(value)[:240] for value in list(raw_identities)[:12] + [item.get("contentId", "")])
+        if text
+    }
+    return {"kind": kind, "name": name, "domains": domains, "identities": identities, "contentId": _metadata_text(item.get("contentId"))[:240]}
+
+
+def module_package_summary(manifest: dict[str, Any], kind: str) -> dict[str, Any]:
+    """回给模块的内容包摘要，只包含关联和后续更新需要的字段。"""
+    package_id = str(manifest.get("packageId", ""))
+    return {
+        "kind": str(manifest.get("kind", kind)),
+        "packageId": package_id,
+        "contentId": str(manifest.get("contentId", "") or package_id),
+        "version": str(manifest.get("version", "")),
+        "buildTime": bounded_config_int(manifest.get("buildTime", 0), 0, 0),
+        "name": str(manifest.get("name", "")),
+        "status": str(manifest.get("status", "published")),
+        "aliases": [str(value) for value in manifest.get("aliases", []) if str(value).strip()][:50],
+        "domains": sorted(package_match_domains(manifest)),
+        "downloadUrl": f"/v1/packages/{manifest.get('kind', kind)}/{package_id}/download",
+    }

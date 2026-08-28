@@ -31,6 +31,18 @@ from app.crypto import api_key_digest, generate_long_secret, password_hash, pass
 from app.responses import response
 from app.state import backup_owner_dir_name, owner_host_account_id
 
+# 可分配给子管理员的权限键。这里是事实来源，后台勾选框的中文说明在 admin/views
+# 里按这个顺序配文案——反过来会造成 security → admin.views 的反向依赖。
+ADMIN_ASSIGNABLE_PERMISSIONS = (
+    "settings:write",
+    "packages:write",
+    "tasks:write",
+    "module:sync",
+    "audit:read",
+    "backup:admin",
+    "security:write",
+)
+
 API_KEY_PERMISSIONS = (
     "read", "write", "packages:read", "packages:write", "tasks:read", "tasks:write",
     "credentials:read", "credentials:write", "backup:read",
@@ -459,3 +471,14 @@ def revoke_api_key_record(config: dict[str, Any], key_id: str) -> None:
     if not found:
         raise HTTPException(status_code=404, detail=response(code="API_KEY_NOT_FOUND", message="API Key 不存在"))
     config["apiKeyRecords"] = records
+
+
+def normalized_admin_permissions(values: Any) -> list[str]:
+    """把复选框的多值或逗号分隔字符串统一成受支持的权限列表。"""
+    if isinstance(values, str):
+        values = values.replace(",", "\n").splitlines()
+    if not isinstance(values, (list, tuple, set)):
+        values = []
+    allowed = set(ADMIN_ASSIGNABLE_PERMISSIONS)
+    return sorted({str(item).strip() for item in values if str(item).strip() in allowed})
+

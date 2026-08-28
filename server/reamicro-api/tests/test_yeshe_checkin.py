@@ -13,6 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import executors, main, releases, runtime
+from app import crypto
+from app import state
 from tests.conftest_support import isolate
 
 
@@ -24,10 +26,10 @@ class YesheCheckinClaimTest(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
         isolate(root, secret_key="test-secret-key-for-yeshe")
-        main.save_credentials({
+        state.save_credentials({
             "rea_1": {
                 "id": "rea_1", "owner": "host:3", "type": "reamicro", "accountId": "3",
-                "secretEncrypted": main.encrypt_secret({"token": "token-value", "baseUrl": "https://example.invalid/"}),
+                "secretEncrypted": crypto.encrypt_secret({"token": "token-value", "baseUrl": "https://example.invalid/"}),
                 "enabled": True,
             },
         })
@@ -42,7 +44,7 @@ class YesheCheckinClaimTest(unittest.TestCase):
         task = {
             "id": "task_1", "owner": "host:3", "taskType": "yeshe_checkin",
             "credentialId": "rea_1",
-            "requestEncrypted": main.encrypt_secret({"credentialId": "rea_1"}),
+            "requestEncrypted": crypto.encrypt_secret({"credentialId": "rea_1"}),
             "schedule": {"intervalSeconds": 86400, "timeOfDay": "00:05"},
             "status": "scheduled", "enabled": True, "createdAt": 1, "nextRunAt": 0,
         }

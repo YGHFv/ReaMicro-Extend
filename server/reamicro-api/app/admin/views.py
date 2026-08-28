@@ -50,6 +50,7 @@ from app.packages import (
 )
 from app.scheduler import task_credential_id
 from app.security import API_KEY_PERMISSIONS
+from app.security import ADMIN_ASSIGNABLE_PERMISSIONS as SECURITY_ASSIGNABLE_PERMISSIONS
 from app.state import (
     credential_public,
     merge_duplicate_credentials,
@@ -62,14 +63,19 @@ from app.state import (
 )
 
 
+ADMIN_PERMISSION_LABELS = {
+    "settings:write": "修改服务器设置",
+    "packages:write": "管理内容包",
+    "tasks:write": "管理云端任务",
+    "module:sync": "同步模块 Release",
+    "audit:read": "查看审计日志",
+    "backup:admin": "创建和校验快照",
+    "security:write": "轮换密钥等安全操作",
+}
+
+# 权限键的事实来源在 app.security；这里只负责配中文说明。
 ADMIN_ASSIGNABLE_PERMISSIONS = [
-    ("settings:write", "修改服务器设置"),
-    ("packages:write", "管理内容包"),
-    ("tasks:write", "管理云端任务"),
-    ("module:sync", "同步模块 Release"),
-    ("audit:read", "查看审计日志"),
-    ("backup:admin", "创建和校验快照"),
-    ("security:write", "轮换密钥等安全操作"),
+    (key, ADMIN_PERMISSION_LABELS.get(key, key)) for key in SECURITY_ASSIGNABLE_PERMISSIONS
 ]
 
 

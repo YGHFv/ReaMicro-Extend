@@ -15,6 +15,39 @@ curl http://127.0.0.1:5222/v1/health
 
 后台修改操作带有 CSRF 校验；每个请求会返回 `X-Request-Id`，异常和限流事件写入 `/data/audit/events.jsonl`，主管理员或具备 `audit:read` 权限的管理员可以通过 `/admin/audit` 查看。子管理员创建时可以分配 `settings:write`、`packages:write`、`tasks:write`、`module:sync`、`audit:read`、`backup:admin` 和 `security:write` 权限；未分配的操作会返回 403。`backup:admin` 允许创建和校验服务器快照，但**恢复快照始终只有主管理员可以执行**。
 
+## 代码结构
+
+按依赖分层，下层不引用上层：
+
+| 模块 | 职责 |
+|---|---|
+| `runtime.py` | 路径、环境变量、锁与可变全局 |
+| `responses.py` | 统一响应包裹 |
+| `audit.py` | 审计事件与任务日志 |
+| `config_store.py` | 配置读写、认证模式推断、模块上传许可 |
+| `crypto.py` | 密钥派生、对称加密、口令哈希与强度校验 |
+| `state.py` | 任务/消息/在线/凭据持久化，归属折叠迁移 |
+| `labels.py` | 枚举与标识的中文显示名 |
+| `security.py` | 认证、授权、会话、CSRF、限流、归属解析 |
+| `packages.py` | 内容包清单、身份复用、元数据推断、域名归一、签名 |
+| `releases.py` | GitHub Release 同步 |
+| `backups.py` | 服务器快照与加密密钥轮换 |
+| `executors.py` | 云端任务的实际执行 |
+| `scheduler.py` | 调度循环与执行记账 |
+| `admin/format.py` | 时间、耗时、大小、摘要的显示格式化 |
+| `admin/layout.py` | 统一外壳与样式、按 Accept 分流的错误页 |
+| `admin/views.py` | 各分区 HTML 拼装 |
+| `api/*.py` | 路由，按域分文件，只做校验与调用 |
+| `main.py` | 应用装配：中间件、异常处理、router 注册、启动钩子 |
+
+两条约定值得注意：
+
+- **可变全局都住在 `runtime`**，各模块在调用时读 `runtime.X`，不要 `from app.runtime import X`
+  （那样拿到的是导入时快照）。测试重定向数据目录就是改 `runtime` 的属性。
+- **跨模块调用可被打桩的函数时通过模块引用**，例如 `releases_module.sync_module_release()`
+  而不是 `from app.releases import sync_module_release`，否则测试打桩源模块不生效，
+  会真去连外部服务。
+
 ## 管理后台
 
 后台分为概览、内容管理（按类型分区）、云端任务、服务器设置、子管理员与安全五个部分，所有页面共用同一套侧栏与样式，内容编辑、预览、历史版本、版本差异、任务日志和审计日志都在同一外壳内。

@@ -23,6 +23,11 @@ from tests.conftest_support import (
     seed_task,
 )
 from app import main, runtime
+from app import audit
+from app import config_store
+from app import crypto
+from app import security
+from app import state
 
 # 真实浏览器的 Accept 头。后台错误页按它决定返回 HTML 还是 JSON。
 BROWSER_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
@@ -252,7 +257,7 @@ class AdminTaskOperationTest(unittest.TestCase):
                 data={"csrf_token": self.csrf, "task_id": "task_1", "action": action},
             )
             self.assertEqual(200, response.status_code, f"{action}: {response.text[:300]}")
-            self.assertEqual(expected, main.load_tasks()["task_1"]["status"], f"{action} 后状态不符")
+            self.assertEqual(expected, state.load_tasks()["task_1"]["status"], f"{action} 后状态不符")
 
     def test_task_delete(self):
         response = self.client.post(
@@ -261,10 +266,10 @@ class AdminTaskOperationTest(unittest.TestCase):
             data={"csrf_token": self.csrf, "task_id": "task_1", "action": "delete"},
         )
         self.assertEqual(200, response.status_code, response.text[:300])
-        self.assertNotIn("task_1", main.load_tasks())
+        self.assertNotIn("task_1", state.load_tasks())
 
     def test_task_logs_page(self):
-        main.task_log("task_1", "测试日志行")
+        audit.task_log("task_1", "测试日志行")
         response = self.client.get("/admin/tasks/task_1/logs", auth=admin_auth())
         self.assertEqual(200, response.status_code)
         self.assertIn("测试日志行", response.text)
@@ -277,7 +282,7 @@ class AdminTaskOperationTest(unittest.TestCase):
             data={"csrf_token": self.csrf, "credential_id": "rea_1", "action": "toggle"},
         )
         self.assertEqual(200, toggled.status_code, toggled.text[:300])
-        self.assertFalse(main.load_credentials()["rea_1"]["enabled"])
+        self.assertFalse(state.load_credentials()["rea_1"]["enabled"])
 
         deleted = self.client.post(
             "/admin/credentials/action",
@@ -285,7 +290,7 @@ class AdminTaskOperationTest(unittest.TestCase):
             data={"csrf_token": self.csrf, "credential_id": "rea_1", "action": "delete"},
         )
         self.assertEqual(200, deleted.status_code, deleted.text[:300])
-        self.assertNotIn("rea_1", main.load_credentials())
+        self.assertNotIn("rea_1", state.load_credentials())
 
     def test_deleting_credential_pauses_dependent_tasks(self):
         self.client.post(
@@ -293,7 +298,7 @@ class AdminTaskOperationTest(unittest.TestCase):
             auth=admin_auth(),
             data={"csrf_token": self.csrf, "credential_id": "rea_1", "action": "delete"},
         )
-        task = main.load_tasks().get("task_1")
+        task = state.load_tasks().get("task_1")
         self.assertIsNotNone(task)
         self.assertEqual("paused", task["status"], "删除密钥后依赖任务必须暂停，否则会反复失败")
 
@@ -310,7 +315,7 @@ class AdminTaskOperationTest(unittest.TestCase):
             },
         )
         self.assertEqual(200, response.status_code, response.text[:400])
-        checkins = [t for t in main.load_tasks().values() if t.get("taskType") == "yeshe_checkin"]
+        checkins = [t for t in state.load_tasks().values() if t.get("taskType") == "yeshe_checkin"]
         self.assertGreaterEqual(len(checkins), 1)
 
 
@@ -332,7 +337,7 @@ class AdminSecurityTest(unittest.TestCase):
             data={"csrf_token": self.csrf, "username": "helper", "password": "helper-password-123", "permissions": ["packages:write", "tasks:write"]},
         )
         self.assertEqual(200, created.status_code, created.text[:400])
-        self.assertIn("helper", main.load_config()["adminAccounts"])
+        self.assertIn("helper", config_store.load_config()["adminAccounts"])
 
         toggled = self.client.post(
             "/admin/admins/toggle",
@@ -340,7 +345,7 @@ class AdminSecurityTest(unittest.TestCase):
             data={"csrf_token": self.csrf, "username": "helper"},
         )
         self.assertEqual(200, toggled.status_code)
-        self.assertFalse(main.load_config()["adminAccounts"]["helper"]["enabled"])
+        self.assertFalse(config_store.load_config()["adminAccounts"]["helper"]["enabled"])
 
         reset = self.client.post(
             "/admin/admins/reset",
@@ -349,7 +354,7 @@ class AdminSecurityTest(unittest.TestCase):
         )
         self.assertEqual(200, reset.status_code)
         # 重置后必须展示一次新口令，且不能是明文存储。
-        self.assertNotIn(main.load_config()["adminAccounts"]["helper"]["passwordHash"], reset.text)
+        self.assertNotIn(config_store.load_config()["adminAccounts"]["helper"]["passwordHash"], reset.text)
 
         deleted = self.client.post(
             "/admin/admins/delete",
@@ -357,28 +362,28 @@ class AdminSecurityTest(unittest.TestCase):
             data={"csrf_token": self.csrf, "username": "helper"},
         )
         self.assertEqual(200, deleted.status_code)
-        self.assertNotIn("helper", main.load_config()["adminAccounts"])
+        self.assertNotIn("helper", config_store.load_config()["adminAccounts"])
 
     def test_subadmin_cannot_manage_admins(self):
-        main.save_config({
-            **main.load_config(),
+        config_store.save_config({
+            **config_store.load_config(),
             "adminAccounts": {
                 "helper": {
-                    "passwordHash": main.password_hash("helper-password-123"),
+                    "passwordHash": crypto.password_hash("helper-password-123"),
                     "enabled": True,
                     "permissions": ["packages:write"],
                 },
             },
         })
         actor = {"username": "helper", "role": "subadmin", "permissions": ["packages:write"], "needsSetup": False}
-        token = main.admin_csrf_token(main.load_config(), actor)
+        token = security.admin_csrf_token(config_store.load_config(), actor)
         response = self.client.post(
             "/admin/admins/create",
             auth=("helper", "helper-password-123"),
             data={"csrf_token": token, "username": "another", "password": "another-password-1"},
         )
         self.assertEqual(403, response.status_code)
-        self.assertNotIn("another", main.load_config()["adminAccounts"])
+        self.assertNotIn("another", config_store.load_config()["adminAccounts"])
 
     def test_api_key_create_and_revoke_via_forms(self):
         created = self.client.post(
@@ -387,7 +392,7 @@ class AdminSecurityTest(unittest.TestCase):
             data={"csrf_token": self.csrf, "name": "同步脚本", "permissions": ["read"]},
         )
         self.assertEqual(200, created.status_code, created.text[:400])
-        records = main.load_config()["apiKeyRecords"]
+        records = config_store.load_config()["apiKeyRecords"]
         self.assertEqual(1, len(records))
         # 明文密钥只展示一次，不能落盘。
         self.assertNotIn("plaintext", json.dumps(records))
@@ -399,7 +404,7 @@ class AdminSecurityTest(unittest.TestCase):
             data={"csrf_token": self.csrf, "key_id": records[0]["id"]},
         )
         self.assertEqual(200, revoked.status_code, revoked.text[:400])
-        self.assertFalse(main.load_config()["apiKeyRecords"][0]["enabled"])
+        self.assertFalse(config_store.load_config()["apiKeyRecords"][0]["enabled"])
 
     def test_snapshot_create_verify_download(self):
         created = self.client.post(
@@ -445,7 +450,7 @@ class AdminSecurityTest(unittest.TestCase):
 
     def test_rotate_secret_reencrypts_credentials(self):
         seed_credential()
-        original = main.decrypt_secret(main.load_credentials()["rea_1"]["secretEncrypted"])
+        original = crypto.decrypt_secret(state.load_credentials()["rea_1"]["secretEncrypted"])
         response = self.client.post(
             "/admin/security/rotate-secret",
             auth=admin_auth(),
@@ -453,7 +458,7 @@ class AdminSecurityTest(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code, response.text[:400])
         # 轮换后旧密文必须能用新密钥解出同样内容。
-        self.assertEqual(original, main.decrypt_secret(main.load_credentials()["rea_1"]["secretEncrypted"]))
+        self.assertEqual(original, crypto.decrypt_secret(state.load_credentials()["rea_1"]["secretEncrypted"]))
 
     def test_settings_update_persists_module_upload_config(self):
         response = self.client.post(
@@ -480,7 +485,7 @@ class AdminSecurityTest(unittest.TestCase):
             },
         )
         self.assertEqual(200, response.status_code, response.text[:500])
-        config = main.load_config()
+        config = config_store.load_config()
         self.assertTrue(config["moduleUploadEnabled"])
         self.assertEqual({HOST_ACCOUNT_ID, "10086"}, set(config["moduleUploadAllowlist"]))
         self.assertTrue(config["githubIncludePrerelease"], "预发布开关必须能真正保存")
