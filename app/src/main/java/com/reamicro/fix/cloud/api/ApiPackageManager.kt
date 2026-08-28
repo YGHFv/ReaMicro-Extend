@@ -181,16 +181,9 @@ class ApiPackageManager(
                 val json = JSONObject(bytes.toString(Charsets.UTF_8))
                 val styleRoot = json.optJSONObject("style") ?: json
                 val id = styleRoot.optString("id").trim().ifBlank { error("高亮样式缺少 ID") }
-                val style = ReaderHighlightStyle(
-                    id = id,
-                    name = styleRoot.optString("name").ifBlank { id },
-                    color = styleRoot.optString("color").ifBlank { ModuleSettings.DEFAULT_READER_DIALOGUE_HIGHLIGHT_COLOR },
-                    fontFamily = styleRoot.optString("fontFamily"),
-                    css = styleRoot.optString("css"),
-                    ninePatchPath = styleRoot.optString("ninePatchPath"),
-                    ninePatchSlice = styleRoot.optString("ninePatchSlice"),
-                )
-                settings.setReaderHighlightStyle(style)
+                // 深色字段必须一并还原：漏掉它们会让下载来的样式丢失整套深色配置，
+                // 且因为 darkUsesLight 默认 true，深色下会静默回落到浅色外观。
+                settings.setReaderHighlightStyle(readHighlightStylePayload(styleRoot, id))
                 id
             }
             ApiPackageKind.ASSOCIATION_SOURCE -> {

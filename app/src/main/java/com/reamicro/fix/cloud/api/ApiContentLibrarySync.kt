@@ -3,6 +3,8 @@ package com.reamicro.fix.cloud.api
 import android.content.Context
 import com.reamicro.fix.association.provider.ExternalSourceLoader
 import com.reamicro.fix.online.OnlineSourceStore
+import com.reamicro.fix.settings.ModuleSettings
+import com.reamicro.fix.settings.ReaderHighlightStyle
 import com.reamicro.fix.settings.XposedModuleSettings
 import java.io.File
 import java.util.zip.ZipFile
@@ -22,12 +24,17 @@ class ApiContentLibrarySync(
 ) {
     private val manager by lazy { ApiPackageManager(context, client, settings) }
 
-    /** 收集本地书源和关联源，供上传或比对使用。 */
-    fun collect(): List<ApiLibraryItem> = collectOnlineSources() + collectAssociationSources()
+    /** 随模块分发的内置样式 ID，不参与上传。 */
+    private val builtInHighlightStyleIds: Set<String> by lazy {
+        ReaderHighlightStyle.builtIns().mapTo(mutableSetOf()) { it.id }
+    }
 
-    /** 已经关联到服务器内容包的本地源数量。 */
-    fun linkedCount(): Int = manager.installed()
-        .count { it.kind == ApiPackageKind.ONLINE_SOURCE || it.kind == ApiPackageKind.ASSOCIATION_SOURCE }
+    /** 收集本地书源、关联源和高亮样式，供上传或比对使用。 */
+    fun collect(): List<ApiLibraryItem> =
+        collectOnlineSources() + collectAssociationSources() + collectHighlightStyles()
+
+    /** 已经关联到服务器内容包的本地内容数量。 */
+    fun linkedCount(): Int = manager.installed().count { it.kind in UPLOADABLE_KINDS }
 
     /**
      * 上传本地内容库。服务器已有同名同域的源时只关联不上传，
@@ -119,6 +126,31 @@ class ApiContentLibrarySync(
         manager.link(summary.kind, summary.packageId, item.localContentId)
     }
 
+    /**
+     * 收集可上传的高亮样式。
+     *
+     * 内置样式不上传：它们随模块分发，每台设备都有，传上去只会在内容库里堆一堆重复项。
+     * 高亮样式没有域名可比，服务器按"名称 + 稳定标识"匹配，所以标识里要带上样式 ID。
+     */
+    private fun collectHighlightStyles(): List<ApiLibraryItem> =
+        settings.highlightSettings().styles
+            .filterNot { it.id in builtInHighlightStyleIds }
+            .map { style ->
+                ApiLibraryItem(
+                    kind = ApiPackageKind.HIGHLIGHT_STYLE,
+                    name = style.name.ifBlank { style.id },
+                    names = linkedSetOf(style.name, style.id).filterTo(linkedSetOf()) { it.isNotBlank() },
+                    contentId = style.id,
+                    domains = emptySet(),
+                    identities = linkedSetOf(style.id, style.name).filterTo(linkedSetOf()) { it.isNotBlank() },
+                    payloadName = "${safeName(style.id)}.json",
+                    payload = writeHighlightStylePayload(style),
+                    localContentId = style.id,
+                    // 依赖本机图片的样式对方拿不到图，界面上提示用户。
+                    usesLocalAssets = highlightStyleUsesLocalAssets(style),
+                )
+            }
+
     private fun collectOnlineSources(): List<ApiLibraryItem> =
         OnlineSourceStore.list(context).mapNotNull { source ->
             val file = File(File(context.filesDir, ONLINE_SOURCE_DIR), source.fileName)
@@ -191,7 +223,14 @@ class ApiContentLibrarySync(
     private fun safeName(value: String): String =
         value.replace(Regex("[^A-Za-z0-9_.-]+"), "_").ifBlank { "source" }
 
-    private companion object {
+    internal companion object {
+        /** 模块可上传的内容类型，需与服务端 MODULE_UPLOAD_DEFAULT_KINDS 保持一致。 */
+        val UPLOADABLE_KINDS = setOf(
+            ApiPackageKind.ONLINE_SOURCE,
+            ApiPackageKind.ASSOCIATION_SOURCE,
+            ApiPackageKind.HIGHLIGHT_STYLE,
+        )
+
         const val ONLINE_SOURCE_DIR = "reamicro_online_sources"
         const val ASSOCIATION_SOURCE_DIR = "reamicro_sources"
         val ASSOCIATION_EXTENSIONS = setOf("rmsource", "apk", "jar", "dex")

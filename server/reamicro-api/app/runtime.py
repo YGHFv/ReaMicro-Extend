@@ -71,7 +71,8 @@ RUN_SCHEDULER = env_bool("REAMICRO_RUN_SCHEDULER", True)
 RUN_RELEASE_SYNC = env_bool("REAMICRO_RUN_RELEASE_SYNC", True)
 
 MODULE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
-MODULE_UPLOAD_DEFAULT_KINDS = frozenset({"online_source", "association_source"})
+# 模块可上传的内容类型，需与模块端 ApiContentLibrarySync.UPLOADABLE_KINDS 保持一致。
+MODULE_UPLOAD_DEFAULT_KINDS = frozenset({"online_source", "association_source", "highlight_style"})
 
 PACKAGE_KINDS = frozenset({
     "online_source",

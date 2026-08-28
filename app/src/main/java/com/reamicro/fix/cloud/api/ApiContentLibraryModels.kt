@@ -48,6 +48,8 @@ data class ApiLibraryItem(
     val payload: ByteArray,
     /** 本地落地标识：书源为源 ID，关联源为文件名，安装时用于复用同一份本地内容。 */
     val localContentId: String,
+    /** 内容是否引用了本机图片等资源。这类内容上传后对方拿不到资源，界面上要提示。 */
+    val usesLocalAssets: Boolean = false,
 ) {
     fun toDescriptorJson(): JSONObject = JSONObject()
         .put("kind", kind.wireValue)

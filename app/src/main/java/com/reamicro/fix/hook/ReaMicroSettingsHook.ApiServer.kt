@@ -549,12 +549,26 @@ internal fun ReaMicroSettingsHook.openApiLibraryUploadDialog() {
                         policy = loadedPolicy
                         val allowed = loadedPolicy.kinds
                         pending = items.filter { allowed.isEmpty() || it.kind in allowed }
-                        val online = pending.count { it.kind == ApiPackageKind.ONLINE_SOURCE }
-                        val association = pending.count { it.kind == ApiPackageKind.ASSOCIATION_SOURCE }
+                        val breakdown = listOf(
+                            ApiPackageKind.ONLINE_SOURCE to "书源",
+                            ApiPackageKind.ASSOCIATION_SOURCE to "关联源",
+                            ApiPackageKind.HIGHLIGHT_STYLE to "高亮样式",
+                        ).mapNotNull { (kind, label) ->
+                            pending.count { it.kind == kind }.takeIf { it > 0 }?.let { "$it 个$label" }
+                        }
+                        // 引用本机图片的样式传上去，对方拿不到图片，先说清楚。
+                        val localAssets = pending.count { it.usesLocalAssets }
                         status.text = when {
                             !loadedPolicy.allowed -> loadedPolicy.reason.ifBlank { "服务器未允许当前账号上传内容库" }
-                            pending.isEmpty() -> "本机没有可上传的书源或关联源"
-                            else -> "本机可上传 $online 个书源、$association 个关联源；当前阅微账号 ${loadedPolicy.hostAccountId} 已在上传白名单。"
+                            pending.isEmpty() -> "本机没有可上传的内容"
+                            else -> buildString {
+                                append("本机可上传 ")
+                                append(breakdown.joinToString("、"))
+                                append("；当前阅微账号 ${loadedPolicy.hostAccountId} 已在上传白名单。")
+                                if (localAssets > 0) {
+                                    append("\n其中 $localAssets 个样式引用了本机图片，上传后其他设备只会得到颜色与 CSS，不含图片。")
+                                }
+                            }
                         }
                         upload.isEnabled = loadedPolicy.allowed && pending.isNotEmpty()
                     }.onFailure { error -> status.text = error.message ?: "读取上传许可失败" }

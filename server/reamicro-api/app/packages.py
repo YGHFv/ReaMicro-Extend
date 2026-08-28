@@ -194,7 +194,10 @@ def infer_package_metadata(kind: str, filename: str, body: bytes) -> dict[str, A
         try:
             parsed = json.loads(body.decode("utf-8"))
             if isinstance(parsed, dict):
-                objects = [parsed]
+                # 样式包把内容裹在 style 里（{"schemaVersion":1,"style":{...}}）。
+                # 不下钻的话名称会退化成文件名，标识也取不到样式 ID。
+                nested = parsed.get("style")
+                objects = [nested, parsed] if isinstance(nested, dict) else [parsed]
             elif isinstance(parsed, list):
                 objects = [item for item in parsed[:20] if isinstance(item, dict)]
         except (UnicodeDecodeError, ValueError):
@@ -605,7 +608,7 @@ def parse_module_upload_item(item: Any) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=response(code="INVALID_PAYLOAD", message="内容描述必须是对象"))
     kind = str(item.get("kind", "")).strip()
     if kind not in runtime.MODULE_UPLOAD_DEFAULT_KINDS:
-        raise HTTPException(status_code=400, detail=response(code="INVALID_KIND", message="模块只能上传书源和关联源"))
+        raise HTTPException(status_code=400, detail=response(code="INVALID_KIND", message="模块只能上传书源、关联源和高亮样式"))
     name = _metadata_text(item.get("name"))
     if not name:
         raise HTTPException(status_code=400, detail=response(code="INVALID_PAYLOAD", message="内容名称不能为空"))

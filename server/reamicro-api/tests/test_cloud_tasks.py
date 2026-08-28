@@ -783,11 +783,18 @@ class ModuleContentLibraryUploadTest(unittest.TestCase):
         self.assertIn("youshu", metadata["identity"])
         self.assertEqual([], metadata["domains"])
 
-    def test_module_upload_kinds_limited_to_sources(self):
-        # 模块只能上传书源和关联源；样式、主题即便写进配置也要被过滤掉。
-        self.assertEqual(["association_source", "online_source"], config_store.module_upload_kinds(["theme", "online_source", "association_source"]))
-        self.assertEqual(["association_source", "online_source"], config_store.module_upload_kinds([]))
+    def test_module_upload_kinds_limited_to_allowed_set(self):
+        """模块只能上传书源、关联源和高亮样式；主题等即便写进配置也要被过滤掉。
+
+        这个集合必须与模块端 ApiContentLibrarySync.UPLOADABLE_KINDS 一致。
+        """
+        allowed = ["association_source", "highlight_style", "online_source"]
+        self.assertEqual(allowed, config_store.module_upload_kinds(["theme", "epub_style", *allowed]))
+        self.assertEqual(allowed, config_store.module_upload_kinds([]), "留空回落到全部允许类型")
         self.assertEqual(["online_source"], config_store.module_upload_kinds("online_source"))
+        self.assertEqual(["highlight_style"], config_store.module_upload_kinds("highlight_style"))
+        # 只写不允许的类型时回落到默认集合，而不是变成空集合把上传全禁掉。
+        self.assertEqual(allowed, config_store.module_upload_kinds(["theme"]))
 
 
 if __name__ == "__main__":
