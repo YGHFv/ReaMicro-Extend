@@ -70,3 +70,9 @@ def generate_long_secret(byte_length: int = 48) -> str:
 
 def api_key_digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def validate_admin_password(value: str) -> str:
+    if len(value) < 12:
+        raise ValueError("管理员密码至少需要 12 位")
+    return value

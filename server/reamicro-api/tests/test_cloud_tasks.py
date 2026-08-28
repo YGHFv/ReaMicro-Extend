@@ -15,7 +15,7 @@ from fastapi import HTTPException, Request
 from fastapi.security import HTTPBasicCredentials
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app import main, runtime
+from app import executors, main, releases, runtime
 from tests.conftest_support import isolate
 
 
@@ -75,16 +75,16 @@ class CloudTaskSecurityTest(unittest.TestCase):
             return {"type": "http.request", "body": payload, "more_body": False}
 
         request = Request({"type": "http", "method": "POST", "path": "/v1/credentials/reamicro", "headers": []}, receive)
-        original_verify = main.verify_reamicro_secret
+        original_verify = executors.verify_reamicro_secret
 
         async def verified(token, base_url):
             return True, "验证成功"
 
-        main.verify_reamicro_secret = verified
+        executors.verify_reamicro_secret = verified
         try:
             result = asyncio.run(main.save_reamicro_credential(request, owner="host:3"))
         finally:
-            main.verify_reamicro_secret = original_verify
+            executors.verify_reamicro_secret = original_verify
 
         self.assertEqual(result["data"]["id"], "rea_duplicate")
         credentials = main.load_credentials()

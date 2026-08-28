@@ -35,6 +35,87 @@ from fastapi.responses import JSONResponse
 from fastapi.responses import Response
 from app.storage import StateStore
 from app import runtime
+from app.packages import (
+    _admin_package_payload,
+    _admin_package_records,
+    _metadata_text,
+    _package_manifests,
+    comparable_version,
+    find_matching_package,
+    infer_package_metadata,
+    merge_package_aliases,
+    next_package_version,
+    normalize_content_id,
+    normalize_match_name,
+    normalize_package_dependencies,
+    normalize_source_domain,
+    package_dependency_status,
+    package_manifest,
+    package_match_domains,
+    package_match_identities,
+    package_name_slug,
+    package_signature,
+    persist_package_payload,
+    published_package_manifests,
+    resolve_package_identity,
+    safe_package_segment,
+    safe_payload_filename,
+    validate_package_payload,
+    version_satisfies,
+)
+from app.releases import (
+    github_json,
+    github_request,
+    is_semantic_version,
+    release_timestamp,
+    release_version_name,
+    sync_module_release,
+)
+from app.backups import (
+    create_server_snapshot,
+    list_server_snapshots,
+    prune_server_snapshots,
+    resolve_snapshot_path,
+    restore_server_snapshot,
+    rotate_secret_key,
+    verify_server_snapshot,
+)
+from app.crypto import (
+    validate_admin_password,
+)
+from app.executors import (
+    CLAIM_ALREADY_GRANTED_PATTERNS,
+    DAILY_TASK_QUERY_TYPE,
+    DAILY_TASK_STATUS_CLAIMABLE,
+    DAILY_TASK_STATUS_CLAIMED,
+    claim_daily_task_rewards,
+    claim_reward_already_granted,
+    credential_for_task,
+    execute_http_task,
+    execute_reamicro_task,
+    execute_task,
+    json_http_request,
+    lottery_result_summary,
+    nested_value,
+    redact_message,
+    update_credential_health,
+    verify_reamicro_secret,
+)
+from app.scheduler import (
+    apply_task_action,
+    execute_linked_draw_task,
+    find_owned_task,
+    next_task_run,
+    normalized_time_of_day,
+    public_task,
+    record_task_execution,
+    recover_interrupted_tasks,
+    release_sync_loop,
+    retry_delay_seconds,
+    server_snapshot_loop,
+    task_interval,
+    task_scheduler_loop,
+)
 from app.config_store import (
     active_auth_mode,
     api_key_auth_configured,
@@ -162,68 +243,12 @@ from app.labels import (
 
 
 
-def create_server_snapshot() -> Path:
-    runtime.SERVER_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    database_copy = runtime.SERVER_BACKUP_ROOT / f"state-{timestamp}.sqlite3"
-    archive = runtime.SERVER_BACKUP_ROOT / f"reamicro-server-{timestamp}.zip"
-    runtime.get_state_store().backup(database_copy)
-    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as stream:
-        stream.write(database_copy, "state/reamicro.sqlite3")
-        if runtime.CONFIG_PATH.is_file():
-            stream.write(runtime.CONFIG_PATH, "config/server.json")
-        manifest = {"createdAt": int(datetime.now(timezone.utc).timestamp() * 1000), "files": []}
-        source_map = {"state/reamicro.sqlite3": database_copy, "config/server.json": runtime.CONFIG_PATH}
-        for name, source in source_map.items():
-            if source.is_file():
-                manifest["files"].append({"path": name, "size": source.stat().st_size, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()})
-        stream.writestr("snapshot-manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-    database_copy.unlink(missing_ok=True)
-    prune_server_snapshots(int(load_config().get("serverSnapshotRetention", 30)))
-    return archive
 
 
-def prune_server_snapshots(retention: int) -> int:
-    snapshots = sorted(runtime.SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"), reverse=True)
-    removed = 0
-    for expired in snapshots[max(int(retention), 3):]:
-        expired.unlink(missing_ok=True)
-        removed += 1
-    return removed
 
 
-def list_server_snapshots() -> list[dict[str, Any]]:
-    items = []
-    for path in sorted(runtime.SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"), reverse=True):
-        try:
-            items.append({"name": path.name, "size": path.stat().st_size, "modifiedAt": int(path.stat().st_mtime * 1000), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
-        except OSError:
-            continue
-    return items
 
 
-def rotate_secret_key(new_key: str) -> int:
-    validate_admin_password(new_key)
-    credentials = load_credentials()
-    tasks = load_tasks()
-    decrypted_credentials: dict[str, Any] = {}
-    for key, value in credentials.items():
-        if value.get("secretEncrypted"):
-            decrypted_credentials[key] = decrypt_secret(str(value["secretEncrypted"]))
-    decrypted_tasks: dict[str, Any] = {}
-    for key, value in tasks.items():
-        if value.get("requestEncrypted"):
-            decrypted_tasks[key] = decrypt_secret(str(value["requestEncrypted"]))
-    config = load_config()
-    config["secretKey"] = new_key
-    save_config(config)
-    for key, secret in decrypted_credentials.items():
-        credentials[key]["secretEncrypted"] = encrypt_secret(secret)
-    for key, request in decrypted_tasks.items():
-        tasks[key]["requestEncrypted"] = encrypt_secret(request)
-    save_credentials(credentials)
-    save_tasks(tasks)
-    return len(decrypted_credentials) + len(decrypted_tasks)
 
 
 def allow_rate_limit(key: str) -> bool:
@@ -252,745 +277,66 @@ def allow_rate_limit(key: str) -> bool:
 
 
 
-def task_interval(task: dict[str, Any]) -> int:
-    schedule = task.get("schedule", {})
-    if isinstance(schedule, dict):
-        try:
-            return max(int(schedule.get("intervalSeconds", 86_400)), 60)
-        except (TypeError, ValueError):
-            return 86_400
-    if schedule == "@hourly":
-        return 3_600
-    if schedule == "@daily":
-        return 86_400
-    return 86_400
-
-
-def next_task_run(task: dict[str, Any], now_ms: int | None = None) -> int:
-    now_ms = now_ms or int(datetime.now(timezone.utc).timestamp() * 1000)
-    override = bounded_config_int(task.pop("nextRunAtOverride", 0), 0, 0)
-    if override > now_ms:
-        return override
-    schedule = task.get("schedule", {})
-    if not isinstance(schedule, dict) or not schedule.get("timeOfDay"):
-        return now_ms + task_interval(task) * 1000
-    try:
-        hour_text, minute_text = str(schedule.get("timeOfDay")).split(":", 1)
-        offset = int(schedule.get("timezoneOffsetMinutes", 480))
-        local_zone = timezone(timedelta(minutes=max(-720, min(offset, 840))))
-        local_now = datetime.fromtimestamp(now_ms / 1000, local_zone)
-        candidate = local_now.replace(hour=int(hour_text), minute=int(minute_text), second=0, microsecond=0)
-        if candidate <= local_now:
-            candidate += timedelta(days=1)
-        return int(candidate.timestamp() * 1000)
-    except (ValueError, TypeError, OverflowError):
-        return now_ms + task_interval(task) * 1000
-
-
-def retry_delay_seconds(task: dict[str, Any]) -> int:
-    attempts = max(int(task.get("consecutiveFailures", 0)), 1)
-    return min(300 * (2 ** (attempts - 1)), 21_600)
-
-
-def recover_interrupted_tasks() -> int:
-    tasks = load_tasks()
-    recovered = 0
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    for task in tasks.values():
-        if task.get("status") != "running":
-            continue
-        task["status"] = "scheduled"
-        task["lastMessage"] = "服务器重启后已恢复中断任务"
-        task["nextRunAt"] = now + 60_000
-        recovered += 1
-    if recovered:
-        save_tasks(tasks)
-        audit_event("interrupted_tasks_recovered", metadata={"count": recovered})
-    return recovered
-
-
-def normalized_time_of_day(value: Any) -> str:
-    text = str(value or "").strip()
-    try:
-        hour_text, minute_text = text.split(":", 1)
-        hour = int(hour_text)
-        minute = int(minute_text)
-        if hour not in range(24) or minute not in range(60):
-            raise ValueError
-        return f"{hour:02d}:{minute:02d}"
-    except (ValueError, TypeError):
-        raise ValueError("每日执行时间必须使用 HH:MM 格式")
 
 
 
 
-def execute_http_task(task: dict[str, Any]) -> tuple[str, str]:
-    request = decrypt_secret(str(task.get("requestEncrypted", ""))) if task.get("requestEncrypted") else {}
-    url = str(request.get("url", "")).strip()
-    if not url.startswith(("https://", "http://")):
-        return "failed", "任务 URL 无效"
-    method = str(request.get("method", "GET")).upper()
-    body = request.get("body", "")
-    if isinstance(body, str):
-        body_bytes = body.encode("utf-8")
-    else:
-        body_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    request_obj = urllib.request.Request(url, data=body_bytes if method != "GET" else None, method=method)
-    for key, value in dict(request.get("headers", {})).items():
-        request_obj.add_header(str(key), str(value))
-    try:
-        with urllib.request.urlopen(request_obj, timeout=30) as stream:
-            response_body = stream.read(4_096).decode("utf-8", errors="replace")
-            if any(word in response_body.lower() for word in ("captcha", "验证码", "risk-control", "风控")):
-                return "paused", "检测到验证码或风控响应，任务已暂停"
-            return "success", f"HTTP {stream.status}: {response_body[:300]}"
-    except urllib.error.HTTPError as error:
-        body_text = error.read(2_000).decode("utf-8", errors="replace")
-        if error.code in (401, 403, 429) or any(word in body_text.lower() for word in ("captcha", "验证码", "风控")):
-            return "paused", f"HTTP {error.code} 触发认证/风控，任务已暂停"
-        return "failed", f"HTTP {error.code}: {body_text[:300]}"
-    except Exception as error:
-        return "failed", str(error)
 
 
-def redact_message(value: str) -> str:
-    return value.replace("Bearer ", "Bearer ***").replace("token", "token=***")[:500]
 
 
-def json_http_request(url: str, token: str, payload: Any, endpoint: str = "", timeout: int = 45) -> tuple[int, Any, str]:
-    target = url.rstrip("/") + "/" + endpoint.lstrip("/")
-    body = json.dumps(payload if payload is not None else {}, ensure_ascii=False).encode("utf-8")
-    request_obj = urllib.request.Request(target, data=body, method="POST", headers={
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "platform": "android",
-        "User-Agent": "ReaMicro-Cloud-Worker/1.0",
-    })
-    try:
-        with urllib.request.urlopen(request_obj, timeout=timeout) as stream:
-            raw = stream.read(128_000).decode("utf-8", errors="replace")
-            try:
-                parsed = json.loads(raw)
-            except ValueError:
-                parsed = {"raw": raw}
-            return stream.status, parsed, raw
-    except urllib.error.HTTPError as error:
-        raw = error.read(16_000).decode("utf-8", errors="replace")
-        return error.code, {}, raw
 
 
-# 每日任务状态（取自阅微 2.3.1 DailyTask.status 的界面分支）：
-# 2 = 已完成待领取，1 = 已领取，0 = 未完成。
-DAILY_TASK_STATUS_CLAIMABLE = 2
-DAILY_TASK_STATUS_CLAIMED = 1
-# get-my-task-list 的 queryType：日常任务传 1。
-DAILY_TASK_QUERY_TYPE = 1
 
 
-def claim_daily_task_rewards(base_url: str, token: str, request: dict[str, Any]) -> tuple[str, str, str]:
-    """领取野社每日签到任务奖励（签到 8 小时后解锁）。
-
-    返回 (结果, 面向用户的说明, 明细)。结果取值：
-    - granted：本次领到了奖励
-    - already：奖励此前已领取
-    - locked：奖励还没解锁，等下一轮定时执行，不算失败
-    - paused：命中认证或风控，任务应暂停
-    - failed：真实错误，交由调用方走重试逻辑
-    """
-    list_endpoint = str(request.get("taskListEndpoint") or "rest/task/get-my-task-list")
-    claim_endpoint = str(request.get("claimEndpoint") or "rest/task/receive-reward")
-    query_type = bounded_config_int(request.get("taskQueryType", DAILY_TASK_QUERY_TYPE), DAILY_TASK_QUERY_TYPE, 0)
-    status_code, body, raw = json_http_request(
-        base_url, token, {"pageNum": 1, "pageSize": 50, "queryType": query_type}, list_endpoint,
-    )
-    if status_code in (401, 403, 429):
-        return "paused", f"阅微认证/风控响应 HTTP {status_code}", ""
-    if status_code < 200 or status_code >= 300:
-        return "failed", f"获取野社任务列表失败 HTTP {status_code}: {redact_message(raw)}", ""
-    tasks = nested_value(body, "data", "tasks")
-    if not isinstance(tasks, list):
-        tasks = nested_value(body, "data", "list") or nested_value(body, "data") or []
-    if isinstance(tasks, dict):
-        tasks = [tasks]
-    if not isinstance(tasks, list):
-        tasks = []
-    claimable, claimed = [], []
-    for item in tasks:
-        if not isinstance(item, dict):
-            continue
-        item_id = item.get("id") or item.get("taskId")
-        if not item_id:
-            continue
-        item_status = bounded_config_int(item.get("status", 0), 0, 0)
-        if item_status == DAILY_TASK_STATUS_CLAIMABLE:
-            claimable.append((str(item_id), _metadata_text(item.get("content")) or str(item_id)))
-        elif item_status == DAILY_TASK_STATUS_CLAIMED:
-            claimed.append(_metadata_text(item.get("content")) or str(item_id))
-    if not claimable:
-        if claimed:
-            return "already", "签到奖励此前已领取", "、".join(claimed[:5])
-        # 既没有待领取也没有已领取：奖励还没解锁，下一轮再看。
-        return "locked", "暂无可领取的签到奖励，等待下一次检查", ""
-    granted, errors = [], []
-    for item_id, label in claimable[:20]:
-        claim_status, claim_body, claim_raw = json_http_request(base_url, token, {"id": item_id}, claim_endpoint)
-        if claim_status in (401, 403, 429):
-            return "paused", f"阅微认证/风控响应 HTTP {claim_status}", ""
-        message = nested_value(claim_body, "data", "message") or nested_value(claim_body, "message") or ""
-        ok = 200 <= claim_status < 300 and nested_value(claim_body, "data", "success") is not False
-        # 单项回"已领取"不中断整批，继续领其余项。
-        if ok or (200 <= claim_status < 300 and claim_reward_already_granted(message, claim_body)):
-            granted.append(label)
-            continue
-        errors.append(f"{label}：{redact_message(str(message) or claim_raw)}")
-    if granted and not errors:
-        return "granted", f"签到奖励领取成功（{len(granted)} 项）", "、".join(granted[:5])
-    if granted:
-        return "granted", f"签到奖励部分领取成功（{len(granted)} 项）", "；".join(errors[:3])
-    return "failed", "、".join(errors[:3]) or "签到奖励领取失败", ""
 
 
-# 阅微对重复领取的回复文案。命中任意一条即视为奖励已到账的终态，不再重试。
-CLAIM_ALREADY_GRANTED_PATTERNS = (
-    "已领取",
-    "已经领取",
-    "已领过",
-    "重复领取",
-    "已发放",
-    "已到账",
-    "already claimed",
-    "already received",
-)
 
 
-def claim_reward_already_granted(message: Any, body: Any = None) -> bool:
-    """判断领取周奖励的失败回复是否其实表示"早就领过了"。
-
-    阅微在重复领取时返回 HTTP 200 + `data.success=false` + "上一周奖励已领取"。
-    这是终态而非可重试错误，必须和真正的领取失败区分开。
-    """
-    text = str(message or "")
-    if any(pattern in text for pattern in CLAIM_ALREADY_GRANTED_PATTERNS):
-        return True
-    if any(pattern in text.lower() for pattern in ("already claimed", "already received")):
-        return True
-    for key in ("claimed", "isClaimed", "received", "hasClaimed"):
-        if nested_value(body, "data", key) is True:
-            return True
-    return False
 
 
-def nested_value(value: Any, *keys: str) -> Any:
-    current = value
-    for key in keys:
-        if isinstance(current, dict):
-            current = current.get(key)
-        else:
-            return None
-    return current
 
 
-def lottery_result_summary(body: Any) -> str:
-    """从阅微抽卡响应中提取适合通知展示的结果。"""
-    result = nested_value(body, "data", "result") or nested_value(body, "result") or nested_value(body, "data")
-    if isinstance(result, str):
-        text = result.strip()
-        if text.startswith(("{", "[")):
-            try:
-                result = json.loads(text)
-            except ValueError:
-                return redact_message(text)
-        else:
-            return redact_message(text)
-    items = result if isinstance(result, list) else [result] if isinstance(result, dict) else []
-    summaries: list[str] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        name = item.get("name") or item.get("cardName") or item.get("propName") or item.get("title") or item.get("result")
-        quality = item.get("quality") or item.get("cardQuality") or item.get("propQuality") or item.get("rarity")
-        count = item.get("count") or item.get("quantity") or item.get("num")
-        if name:
-            summary = str(name)
-            if quality:
-                summary += f"（{quality}）"
-            if count not in (None, "", 1, "1"):
-                summary += f" ×{count}"
-            summaries.append(summary)
-    return "、".join(summaries[:10]) or redact_message(json.dumps(result if result is not None else body, ensure_ascii=False)[:300])
 
 
-def credential_for_task(task: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    request = decrypt_secret(str(task.get("requestEncrypted", ""))) if task.get("requestEncrypted") else {}
-    credential_id = str(request.get("credentialId", "")).strip()
-    credentials = load_credentials()
-    credential = credentials.get(credential_id)
-    if not credential or credential.get("owner") != task.get("owner"):
-        raise ValueError("阅微凭据不存在或不属于当前账号")
-    if not credential.get("enabled", True):
-        raise ValueError("阅微凭据已暂停，请重新验证后再运行任务")
-    try:
-        secret = decrypt_secret(str(credential.get("secretEncrypted", "")))
-    except Exception as error:
-        update_credential_health(str(credential.get("id", credential_id)), False, f"凭据解密失败：{error}")
-        raise ValueError("阅微凭据无法解密，请重新上传")
-    if not isinstance(secret, dict) or not secret.get("token"):
-        raise ValueError("阅微凭据无有效 token")
-    update_credential_health(str(credential.get("id", credential_id)), True, "任务使用成功", used=True)
-    return request, secret
 
 
-def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
-    request, secret = credential_for_task(task)
-    base_url = str(secret.get("baseUrl") or "https://api.reamicro.zhendong.ltd/").strip()
-    token = str(secret.get("token"))
-    task_type = str(task.get("taskType"))
-    configured_body = request.get("body", {})
-    if isinstance(configured_body, str):
-        try:
-            configured_body = json.loads(configured_body or "{}")
-        except ValueError:
-            configured_body = {}
-    if task_type == "yeshe_draw_card":
-        if not task.pop("triggeredByCheckinReward", False):
-            task["waitingForCheckinReward"] = True
-            return "success", "野社自动抽卡等待签到奖励领取完成后触发"
-        daily_limit = max(1, min(int(request.get("dailyLimit", 1) or 1), 20))
-        today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
-        if task.get("dailyCounterDate") == today and int(task.get("dailyCounter", 0)) >= daily_limit:
-            return "success", f"野社今日抽卡已达到上限 {daily_limit} 次"
-        status_code, body, raw = json_http_request(base_url, token, configured_body, str(request.get("endpoint") or "rest/lottery/lottery-v2"))
-        if status_code in (401, 403, 429):
-            return "paused", f"阅微认证/风控响应 HTTP {status_code}"
-        if status_code < 200 or status_code >= 300:
-            return "failed", f"抽卡请求 HTTP {status_code}: {redact_message(raw)}"
-        previous_date = task.get("dailyCounterDate")
-        task["dailyCounterDate"] = today
-        task["dailyCounter"] = int(task.get("dailyCounter", 0)) + 1 if previous_date == today else 1
-        summary = lottery_result_summary(body)
-        task["lastDrawResult"] = summary
-        task["lastDrawAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
-        task["waitingForCheckinReward"] = False
-        return "success", f"野社自动抽卡完成（今日 {task['dailyCounter']}/{daily_limit}）：{summary}"
-    if task_type == "yeshe_checkin":
-        china_zone = timezone(timedelta(hours=8))
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        today = datetime.fromtimestamp(now_ms / 1000, china_zone).date().isoformat()
-        status_code, lore, raw = json_http_request(base_url, token, configured_body, str(request.get("endpoint") or "rest/community/get-daily-lore"))
-        if status_code in (401, 403, 429):
-            return "paused", f"阅微认证/风控响应 HTTP {status_code}"
-        if status_code < 200 or status_code >= 300:
-            return "failed", f"获取野社每日轶闻失败 HTTP {status_code}: {redact_message(raw)}"
-        lore_id = nested_value(lore, "data", "id") or nested_value(lore, "data", "loreId") or nested_value(lore, "id")
-        claimed = bool(nested_value(lore, "data", "isFinish") or nested_value(lore, "data", "claimed"))
-        checkin_message = "野社零点签到已完成" if claimed else ""
-        if not claimed:
-            if not lore_id:
-                return "failed", "阅微每日轶闻响应缺少 userLoreId"
-            status_code, body, raw = json_http_request(base_url, token, {"userLoreId": int(lore_id)}, str(request.get("completeEndpoint") or "rest/community/complete-daily-lore"))
-            if status_code in (401, 403, 429):
-                return "paused", f"阅微认证/风控响应 HTTP {status_code}"
-            if status_code < 200 or status_code >= 300:
-                return "failed", f"野社签到提交失败 HTTP {status_code}: {redact_message(raw)}"
-            checkin_message = "野社零点签到完成"
-        if task.get("lastCheckinDate") != today:
-            task["lastCheckinDate"] = today
-            task["lastCheckinAt"] = now_ms
-            task["claimDueAt"] = now_ms + 8 * 3_600_000
-            task["claimRetryCount"] = 0
-            task["claimFinalAttemptDate"] = ""
-            task["claimCompletedDate"] = ""
-        if task.get("claimCompletedDate") == today:
-            return "success", f"{checkin_message or '野社签到状态已检查'}，签到奖励今日已领取"
-        claim_due_at = bounded_config_int(task.get("claimDueAt", 0), now_ms + 8 * 3_600_000, 0)
-        if now_ms < claim_due_at:
-            task["nextRunAtOverride"] = claim_due_at
-            return "success", f"{checkin_message or '野社签到状态已检查'}，奖励将在签到 8 小时后自动领取"
-
-        # 要领的是每日签到任务奖励（签到 8 小时后解锁），走 rest/task 那套接口：
-        # 先取任务列表，再对 status=2（已完成待领取）的项逐个 receive-reward。
-        claim_result, claim_message, claim_detail = claim_daily_task_rewards(base_url, token, request)
-        if claim_result == "paused":
-            return "paused", claim_message
-        if claim_result in {"granted", "already", "locked"}:
-            task["claimRetryCount"] = 0
-            task["claimFinalAttemptDate"] = ""
-            if claim_result == "locked":
-                # 奖励尚未解锁不是失败，等下一轮定时执行即可，不进重试循环。
-                return "success", f"{checkin_message or '野社签到状态已检查'}，{claim_message}"
-            task["lastClaimAt"] = now_ms
-            task["claimCompletedDate"] = today
-            # 已领取状态同样放行联动抽卡，否则抽卡会一直等在"等待签到奖励领取完成"。
-            task["claimJustCompleted"] = True
-            detail = f"：{claim_detail}" if claim_detail else ""
-            return "success", f"{checkin_message or '野社签到状态已检查'}，{claim_message}{detail}"
-
-        retry_count = bounded_config_int(task.get("claimRetryCount", 0), 0, 0) + 1
-        task["claimRetryCount"] = retry_count
-        local_now = datetime.fromtimestamp(now_ms / 1000, china_zone)
-        if retry_count <= 3:
-            task["nextRunAtOverride"] = now_ms + 5 * 60_000
-            return "success", f"签到奖励领取失败（第 {retry_count}/3 次），5 分钟后自动重试：{redact_message(str(claim_message))}"
-        if task.get("claimFinalAttemptDate") != today:
-            final_at = local_now.replace(hour=23, minute=59, second=0, microsecond=0)
-            if final_at <= local_now:
-                final_at = local_now + timedelta(minutes=1)
-            task["claimFinalAttemptDate"] = today
-            task["nextRunAtOverride"] = int(final_at.timestamp() * 1000)
-            return "success", f"签到奖励连续领取失败，已安排今日 23:59 最后重试：{redact_message(str(claim_message))}"
-        task["claimFinalFailedDate"] = today
-        return "success", f"签到奖励今日最终领取仍失败：{redact_message(str(claim_message))}"
-    if task_type == "cloud_auto_read":
-        books = request.get("books") if isinstance(request.get("books"), list) else []
-        if not books:
-            status_code, record_body, raw = json_http_request(
-                base_url,
-                token,
-                {"pageNum": 1, "pageSize": int(request.get("recentLimit", 1) or 1)},
-                "rest/read/get-reader-record-list",
-            )
-            if status_code < 200 or status_code >= 300:
-                return ("paused", f"读取最近阅读记录失败 HTTP {status_code}") if status_code in (401, 403, 429) else ("failed", f"读取最近阅读记录失败 HTTP {status_code}: {redact_message(raw)}")
-            books = nested_value(record_body, "data", "list") or nested_value(record_body, "data") or []
-        if isinstance(books, dict):
-            books = [books]
-        books = books[: max(1, min(int(request.get("bookLimit", 1) or 1), 10))]
-        duration_minutes = max(1, min(int(request.get("durationMinutes", 30) or 30), 720))
-        daily_limit_minutes = max(duration_minutes, min(int(request.get("dailyLimitMinutes", 720) or 720), 1440))
-        today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
-        used_today = int(task.get("dailyReadMinutes", 0)) if task.get("dailyReadDate") == today else 0
-        duration_minutes = min(duration_minutes, max(daily_limit_minutes - used_today, 0))
-        if duration_minutes <= 0:
-            return "success", f"云端阅读今日已达到 {daily_limit_minutes} 分钟上限"
-        duration_seconds = duration_minutes * 60
-        rotation = int(task.get("bookRotation", 0)) % max(len(books), 1)
-        books = books[rotation:] + books[:rotation]
-        completed = 0
-        for book in books:
-            if not isinstance(book, dict):
-                continue
-            cloud_id = book.get("cloudBookId") or book.get("bookId") or book.get("id")
-            if not cloud_id:
-                continue
-            progress_payload = {
-                "objectId": str(book.get("objectId") or cloud_id),
-                "bookId": str(book.get("bookId") or cloud_id),
-                "bookName": str(book.get("name") or book.get("bookName") or ""),
-                "chapterNum": int(book.get("chapterNum") or 0),
-                "cursorIndex": str(book.get("cursorIndex") or ""),
-                "title": str(book.get("name") or book.get("bookName") or ""),
-                "progress": min(0.999, float(book.get("progress") or 0.0) + 0.01),
-            }
-            progress_status, _, progress_raw = json_http_request(base_url, token, progress_payload, "rest/read/update-reader-progress")
-            if progress_status in (401, 403, 429):
-                return "paused", f"上报阅读进度触发认证/风控 HTTP {progress_status}"
-            if progress_status < 200 or progress_status >= 300:
-                return "failed", f"上报阅读进度失败 HTTP {progress_status}: {redact_message(progress_raw)}"
-            china_date = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
-            time_payload = {"list": [{"bookId": int(cloud_id), "date": china_date, "duration": duration_seconds, "verify": ""}]}
-            time_status, _, time_raw = json_http_request(base_url, token, time_payload, "rest/read/update-reader-time-by-date")
-            if time_status in (401, 403, 429):
-                return "paused", f"上报阅读时长触发认证/风控 HTTP {time_status}"
-            if time_status < 200 or time_status >= 300:
-                return "failed", f"上报阅读时长失败 HTTP {time_status}: {redact_message(time_raw)}"
-            completed += 1
-        if completed:
-            task["dailyReadDate"] = today
-            task["dailyReadMinutes"] = used_today + duration_minutes
-            task["bookRotation"] = rotation + completed
-        return ("success", f"云端自动阅读完成 {completed} 本，累计 {duration_minutes} 分钟") if completed else ("failed", "没有找到可阅读的图书")
-    return "failed", f"未知阅微任务类型：{task_type}"
 
 
-def execute_task(task: dict[str, Any]) -> tuple[str, str]:
-    if task.get("taskType") in {"http"}:
-        return execute_http_task(task)
-    if task.get("taskType") in {"yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"}:
-        return execute_reamicro_task(task)
-    return "failed", f"未知任务类型：{task.get('taskType')}"
 
 
-def execute_linked_draw_task(tasks: dict[str, dict[str, Any]], checkin_task: dict[str, Any], started_at: int) -> tuple[str, str] | None:
-    """签到奖励领取成功后，立即运行同账号已启用的抽卡任务。"""
-    if not checkin_task.pop("claimJustCompleted", False):
-        return None
-    owner = str(checkin_task.get("owner", ""))
-    credential_id = task_credential_id(checkin_task)
-    candidates = [
-        task for task in tasks.values()
-        if task.get("owner") == owner
-        and task.get("taskType") == "yeshe_draw_card"
-        and task_credential_id(task) == credential_id
-        and task.get("enabled", True)
-        and task.get("status") not in {"paused", "cancelled"}
-    ]
-    if not candidates:
-        return None
-    draw_task = max(candidates, key=lambda item: bounded_config_int(item.get("updatedAt", item.get("createdAt", 0)), 0, 0))
-    draw_task["triggeredByCheckinReward"] = True
-    draw_task["status"] = "running"
-    draw_task["lastRunAt"] = started_at
-    result, message = execute_reamicro_task(draw_task)
-    finished_at = int(datetime.now(timezone.utc).timestamp() * 1000)
-    draw_task["status"] = result
-    draw_task["lastMessage"] = message
-    draw_task["runCount"] = int(draw_task.get("runCount", 0)) + 1
-    draw_task["consecutiveFailures"] = 0 if result == "success" else int(draw_task.get("consecutiveFailures", 0)) + 1
-    draw_task["nextRunAt"] = 0
-    record_task_execution(draw_task, result, message, started_at, finished_at)
-    task_log(str(draw_task.get("id", "")), message, "ERROR" if result == "failed" else "WARN" if result == "paused" else "INFO")
-    enqueue_task_notification(draw_task, result, message, finished_at)
-    return result, message
 
 
-def record_task_execution(task: dict[str, Any], result: str, message: str, started_at: int, finished_at: int) -> None:
-    history = task.get("executionHistory", [])
-    if not isinstance(history, list):
-        history = []
-    history.append({
-        "at": finished_at,
-        "startedAt": started_at,
-        "finishedAt": finished_at,
-        "durationMs": max(0, finished_at - started_at),
-        "result": result,
-        "message": message,
-        "runCount": int(task.get("runCount", 0)),
-        "consecutiveFailures": int(task.get("consecutiveFailures", 0)),
-    })
-    task["executionHistory"] = history[-100:]
-    task["lastExecution"] = history[-1]
 
 
-def apply_task_action(task: dict[str, Any], action: str, now: int | None = None) -> str:
-    now = now or int(datetime.now(timezone.utc).timestamp() * 1000)
-    task_id = str(task.get("id", ""))
-    if action == "run":
-        if task.get("taskType") == "yeshe_draw_card":
-            task["triggeredByCheckinReward"] = True
-        task["status"] = "scheduled"
-        task["enabled"] = True
-        task["nextRunAt"] = now
-        return f"任务 {task_id} 已安排立即执行"
-    if action == "pause":
-        task["status"] = "paused"
-        task["enabled"] = False
-        task["nextRunAt"] = 0
-        return f"任务 {task_id} 已暂停"
-    if action == "resume":
-        task["status"] = "scheduled"
-        task["enabled"] = True
-        task["nextRunAt"] = now
-        return f"任务 {task_id} 已恢复"
-    if action == "cancel":
-        task["status"] = "cancelled"
-        task["enabled"] = False
-        task["nextRunAt"] = 0
-        return f"任务 {task_id} 已取消"
-    raise ValueError("不支持的任务操作")
 
 
-async def task_scheduler_loop() -> None:
-    worker_id = "worker_" + secrets.token_hex(6)
-    while True:
-        try:
-            tasks = load_tasks()
-            now = int(datetime.now(timezone.utc).timestamp() * 1000)
-            changed = False
-            for task_id, task in tasks.items():
-                if not task.get("enabled", True) or task.get("status") in {"paused", "cancelled", "running"}:
-                    continue
-                if task.get("taskType") == "yeshe_draw_card" and not task.get("triggeredByCheckinReward"):
-                    task["status"] = "scheduled"
-                    task["nextRunAt"] = 0
-                    continue
-                next_run = int(task.get("nextRunAt", 0))
-                if next_run > now:
-                    continue
-                if not runtime.get_state_store().acquire_task_lock(task_id, worker_id, now + 15 * 60 * 1000, now):
-                    continue
-                task["status"] = "running"
-                task["lastRunAt"] = now
-                changed = True
-                save_tasks(tasks)
-                try:
-                    started_at = int(datetime.now(timezone.utc).timestamp() * 1000)
-                    result, message = await asyncio.to_thread(execute_task, task)
-                    finished_at = int(datetime.now(timezone.utc).timestamp() * 1000)
-                    task_log(task_id, message, "ERROR" if result == "failed" else "WARN" if result == "paused" else "INFO")
-                    task["status"] = result
-                    task["lastMessage"] = message
-                    task["runCount"] = int(task.get("runCount", 0)) + 1
-                    if result == "success":
-                        task["consecutiveFailures"] = 0
-                        task["nextRunAt"] = next_task_run(task, now)
-                    elif result == "failed":
-                        task["consecutiveFailures"] = int(task.get("consecutiveFailures", 0)) + 1
-                        max_retries = max(0, min(int(task.get("maxRetries", 3)), 10))
-                        if task["consecutiveFailures"] <= max_retries:
-                            task["status"] = "scheduled"
-                            task["nextRunAt"] = now + retry_delay_seconds(task) * 1000
-                            task["lastMessage"] = f"{message}；将在退避后重试"
-                        else:
-                            task["status"] = "paused"
-                            task["enabled"] = False
-                            task["nextRunAt"] = 0
-                            task["lastMessage"] = f"{message}；连续失败超过上限，任务已暂停"
-                    else:
-                        task["nextRunAt"] = 0
-                    record_task_execution(task, result, message, started_at, finished_at)
-                    enqueue_task_notification(task, result, message, finished_at)
-                    linked_draw = await asyncio.to_thread(execute_linked_draw_task, tasks, task, finished_at)
-                    if linked_draw:
-                        task["lastMessage"] = f"{message}；{linked_draw[1]}"
-                    changed = True
-                    save_tasks(tasks)
-                finally:
-                    runtime.get_state_store().release_task_lock(task_id, worker_id)
-            if changed:
-                save_tasks(tasks)
-        except Exception as error:
-            print(f"task scheduler failed: {error}", flush=True)
-        await asyncio.sleep(15)
+
+
+
+
+
+
+
+
 
 app = FastAPI(title="ReaMicro API", version=runtime.API_VERSION)
 
 
-def github_request(url: str) -> urllib.request.Request:
-    config = load_config()
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "ReaMicro-API-Server",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if config.get("githubToken"):
-        headers["Authorization"] = f"Bearer {config['githubToken']}"
-    return urllib.request.Request(url, headers=headers)
 
 
-def github_json(url: str) -> Any:
-    with urllib.request.urlopen(github_request(url), timeout=30) as stream:
-        return json.loads(stream.read().decode("utf-8"))
 
 
-def release_timestamp(value: str) -> int:
-    if not value:
-        return 0
-    return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
 
 
-def is_semantic_version(value: str) -> bool:
-    core = value.strip().split("-", 1)[0]
-    if not core:
-        return False
-    return all(part.isdigit() for part in core.split("."))
 
 
-def release_version_name(tag: str, title: str) -> str:
-    """从 tag 或 Release 标题里取出语义版本号。
-
-    客户端按语义版本号比较新旧，无法解析的字符串会被当成 0.0.0 并永远判定"已是最新版本"。
-    CI 的 tag 形如 ``ci-123-1``，但标题里带着真实版本号（``CI 2.0.0 #123``），
-    因此 tag 不是语义版本号时回退到标题。
-    """
-    candidate = tag.strip().lstrip("vV").split("+")[0]
-    if is_semantic_version(candidate):
-        return candidate
-    # 至少要带一个小数点，避免把标题里的构建号（#123）误当成版本号。
-    match = re.search(r"\d+(?:\.\d+)+", title or "")
-    if match:
-        return match.group(0)
-    return candidate
 
 
-def sync_module_release() -> dict[str, Any] | None:
-    config = load_config()
-    repository = config["githubRepository"]
-    if config.get("githubIncludePrerelease"):
-        releases = github_json(f"https://api.github.com/repos/{repository}/releases?per_page=20")
-        release = next((item for item in releases if not item.get("draft")), None)
-    else:
-        try:
-            release = github_json(f"https://api.github.com/repos/{repository}/releases/latest")
-        except urllib.error.HTTPError as error:
-            # GitHub 的 /releases/latest 会跳过预发布。仓库里只有预发布 Release 时返回 404，
-            # 这不是网络故障，直接提示需要在后台勾选"包含预发布 Release"。
-            if error.code == 404:
-                raise RuntimeError(
-                    f"仓库 {repository} 没有正式 Release；如果只发布预发布版本，请在后台勾选“包含预发布 Release”"
-                ) from error
-            raise
-    if not release:
-        return None
-    assets = [asset for asset in release.get("assets", []) if asset.get("name", "").lower().endswith(".apk")]
-    if not assets:
-        return None
-    asset = sorted(
-        assets,
-        key=lambda item: (
-            "unsigned" in item.get("name", "").lower(),
-            "release" not in item.get("name", "").lower(),
-        ),
-    )[0]
-    runtime.RELEASE_ROOT.mkdir(parents=True, exist_ok=True)
-    apk_path = runtime.RELEASE_ROOT / "latest.apk"
-    metadata_path = runtime.RELEASE_ROOT / "latest.json"
-    build_time = release_timestamp(asset.get("updated_at") or release.get("published_at", ""))
-    previous = {}
-    if metadata_path.is_file():
-        try:
-            previous = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            previous = {}
-    if previous.get("assetId") != asset.get("id") or previous.get("buildTime") != build_time or not apk_path.is_file():
-        temp = runtime.RELEASE_ROOT / ".latest.apk.tmp"
-        with urllib.request.urlopen(github_request(asset["browser_download_url"]), timeout=120) as source, temp.open("wb") as target:
-            shutil.copyfileobj(source, target)
-        temp.replace(apk_path)
-    sha256 = hashlib.sha256(apk_path.read_bytes()).hexdigest()
-    tag = str(release.get("tag_name") or release.get("name") or "").strip()
-    version_name = release_version_name(tag, str(release.get("name") or ""))
-    metadata = {
-        "versionName": version_name,
-        "versionCode": int(config.get("releaseVersionCode", 0)),
-        "buildTime": build_time,
-        "apkUrl": "/v1/releases/module/download",
-        "sha256": sha256,
-        "signature": "",
-        "changelog": release.get("body", ""),
-        "releaseUrl": release.get("html_url", ""),
-        "assetId": asset.get("id"),
-        "assetName": asset.get("name", "latest.apk"),
-        "channel": "beta" if release.get("prerelease") else "stable",
-        "etag": hashlib.sha256(apk_path.read_bytes()).hexdigest(),
-    }
-    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    runtime.RELEASE_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    runtime.RELEASE_STATUS_PATH.write_text(json.dumps({"status": "ok", "syncedAt": int(datetime.now(timezone.utc).timestamp() * 1000), "versionName": version_name, "assetId": asset.get("id")}, ensure_ascii=False, indent=2), encoding="utf-8")
-    return metadata
 
 
-async def release_sync_loop() -> None:
-    while True:
-        try:
-            await asyncio.to_thread(sync_module_release)
-        except Exception as error:
-            runtime.RELEASE_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            runtime.RELEASE_STATUS_PATH.write_text(json.dumps({"status": "error", "failedAt": int(datetime.now(timezone.utc).timestamp() * 1000), "message": redact_message(str(error))}, ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f"module release sync failed: {error}", flush=True)
-        await asyncio.sleep(load_config()["releaseSyncSeconds"])
 
 
-async def server_snapshot_loop() -> None:
-    while True:
-        config = load_config()
-        if config.get("serverSnapshotEnabled", True):
-            try:
-                snapshot = await asyncio.to_thread(create_server_snapshot)
-                audit_event("scheduled_server_snapshot", metadata={"filename": snapshot.name})
-            except Exception as error:
-                audit_event("scheduled_server_snapshot_failed", success=False, metadata={"type": type(error).__name__})
-        await asyncio.sleep(max(int(config.get("serverSnapshotSeconds", 86400)), 3600))
 
 
 @app.on_event("startup")
@@ -1082,10 +428,6 @@ def normalized_admin_name(value: str) -> str:
     return name
 
 
-def validate_admin_password(value: str) -> str:
-    if len(value) < 12:
-        raise ValueError("管理员密码至少需要 12 位")
-    return value
 
 
 def primary_admin_configured(config: dict[str, Any]) -> bool:
@@ -1658,21 +1000,6 @@ def admin_login_page(message: str = "") -> str:
     return _admin_auth_shell("登录", "请输入后台管理员账号。", body)
 
 
-def _admin_package_records() -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    for kind in sorted(runtime.PACKAGE_KINDS):
-        for manifest_path in sorted((runtime.PACKAGE_ROOT / kind).glob("*/manifest.json")):
-            try:
-                item = json.loads(manifest_path.read_text(encoding="utf-8"))
-                if not isinstance(item, dict):
-                    continue
-                item.setdefault("kind", kind)
-                item.setdefault("packageId", manifest_path.parent.name)
-                item.update(package_dependency_status(item))
-                records.append(item)
-            except (OSError, ValueError, HTTPException):
-                continue
-    return records
 
 
 
@@ -2595,12 +1922,6 @@ def _admin_shell(
     return _admin_layout(config, actor, section, head + body, title=f"{title} · ReaMicro 管理后台")
 
 
-def _admin_package_payload(package_dir: Path, manifest: dict[str, Any]) -> tuple[str, bytes]:
-    filename = safe_payload_filename(str(manifest.get("payload", "payload.bin")))
-    payload_path = package_dir / filename
-    if not payload_path.is_file():
-        raise HTTPException(status_code=404, detail="内容文件不存在")
-    return filename, payload_path.read_bytes()
 
 
 @app.get("/admin/packages/new", response_class=HTMLResponse)
@@ -3112,40 +2433,8 @@ def api_key_public_records(config: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(records, key=lambda value: bounded_config_int(value.get("createdAt", 0), 0, 0), reverse=True)
 
 
-def resolve_snapshot_path(filename: str) -> Path:
-    """校验快照文件名并返回数据卷内的实际路径。"""
-    if not re.fullmatch(r"reamicro-server-[0-9TZ-]+\.zip", filename):
-        raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="备份文件名无效"))
-    path = (runtime.SERVER_BACKUP_ROOT / filename).resolve()
-    if path.parent != runtime.SERVER_BACKUP_ROOT.resolve() or not path.is_file():
-        raise HTTPException(status_code=404, detail=response(code="BACKUP_NOT_FOUND", message="服务器快照不存在"))
-    return path
 
 
-def restore_server_snapshot(filename: str) -> dict[str, Any]:
-    """校验并恢复服务器快照；恢复前先自动创建一份安全快照。"""
-    path = resolve_snapshot_path(filename)
-    verification = verify_server_snapshot(path)
-    if not verification.get("valid"):
-        raise HTTPException(status_code=409, detail=response(code="BACKUP_INVALID", message="备份完整性校验失败"))
-    safety_snapshot = create_server_snapshot()
-    with tempfile.TemporaryDirectory(prefix="reamicro-restore-") as directory:
-        extract_root = Path(directory)
-        with zipfile.ZipFile(path) as archive:
-            archive.extractall(extract_root)
-        restored_db = extract_root / "state" / "reamicro.sqlite3"
-        restored_config = extract_root / "config" / "server.json"
-        if not restored_db.is_file() or not restored_config.is_file():
-            raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="备份缺少数据库或配置"))
-        runtime.CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
-        runtime.STATE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        Path(str(runtime.STATE_DB_PATH) + "-wal").unlink(missing_ok=True)
-        Path(str(runtime.STATE_DB_PATH) + "-shm").unlink(missing_ok=True)
-        shutil.copy2(restored_config, runtime.CONFIG_PATH)
-        shutil.copy2(restored_db, runtime.STATE_DB_PATH)
-    with runtime.state_store_lock:
-        state_store = None
-    return {"restored": True, "filename": filename, "safetySnapshot": safety_snapshot.name}
 
 
 @app.get("/admin/api-keys")
@@ -3244,18 +2533,6 @@ async def admin_server_backup_download(filename: str, credentials: HTTPBasicCred
     return FileResponse(resolve_snapshot_path(filename), media_type="application/zip", filename=filename)
 
 
-def verify_server_snapshot(path: Path) -> dict[str, Any]:
-    with zipfile.ZipFile(path) as archive:
-        allowed = {"snapshot-manifest.json", "state/reamicro.sqlite3", "config/server.json"}
-        if any(name not in allowed for name in archive.namelist()):
-            raise ValueError("备份包含不允许的文件路径")
-        manifest = json.loads(archive.read("snapshot-manifest.json").decode("utf-8"))
-        results = []
-        for item in manifest.get("files", []):
-            data = archive.read(str(item.get("path", "")))
-            digest = hashlib.sha256(data).hexdigest()
-            results.append({"path": item.get("path"), "size": len(data), "sha256": digest, "valid": digest == item.get("sha256")})
-        return {"valid": all(item["valid"] for item in results), "createdAt": manifest.get("createdAt"), "files": results}
 
 
 @app.get("/admin/backups/server/{filename}/verify")
@@ -3753,441 +3030,48 @@ async def admin_sync(
 
 
 
-def comparable_version(value: Any) -> tuple[tuple[int, Any], ...]:
-    parts = re.findall(r"\d+|[A-Za-z]+", str(value).lower())
-    return tuple((1, int(part)) if part.isdigit() else (0, part) for part in parts)
 
 
-def version_satisfies(version: Any, minimum: str = "", maximum: str = "") -> bool:
-    current = comparable_version(version)
-    return (not minimum or current >= comparable_version(minimum)) and (not maximum or current <= comparable_version(maximum))
 
 
-def normalize_package_dependencies(items: Any, current_kind: str = "", current_package_id: str = "") -> list[dict[str, Any]]:
-    if not isinstance(items, list):
-        raise HTTPException(status_code=400, detail="依赖必须是 JSON 数组")
-    normalized: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-    for item in items[:50]:
-        if not isinstance(item, dict):
-            raise HTTPException(status_code=400, detail="每项依赖必须是 JSON 对象")
-        dependency_kind = str(item.get("kind", "")).strip()
-        if dependency_kind and dependency_kind not in runtime.PACKAGE_KINDS:
-            raise HTTPException(status_code=400, detail=f"依赖内容类型无效：{dependency_kind}")
-        target = str(item.get("packageId") or item.get("contentId") or "").strip()
-        if not target:
-            raise HTTPException(status_code=400, detail="依赖缺少 packageId 或 contentId")
-        target = safe_package_segment(target)
-        if target == current_package_id and (not dependency_kind or dependency_kind == current_kind):
-            raise HTTPException(status_code=400, detail="内容包不能依赖自身")
-        minimum = str(item.get("minVersion", "")).strip()
-        maximum = str(item.get("maxVersion", "")).strip()
-        if minimum:
-            minimum = safe_package_segment(minimum)
-        if maximum:
-            maximum = safe_package_segment(maximum)
-        key = (dependency_kind, target)
-        if key in seen:
-            raise HTTPException(status_code=400, detail=f"依赖重复：{target}")
-        seen.add(key)
-        normalized.append({
-            "kind": dependency_kind,
-            "packageId": target,
-            "minVersion": minimum,
-            "maxVersion": maximum,
-            "required": bool(item.get("required", True)),
-        })
-    return normalized
 
 
-def published_package_manifests() -> list[dict[str, Any]]:
-    manifests: list[dict[str, Any]] = []
-    for kind in runtime.PACKAGE_KINDS:
-        for path in (runtime.PACKAGE_ROOT / kind).glob("*/manifest.json"):
-            try:
-                manifest = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if isinstance(manifest, dict) and str(manifest.get("status", "published")) == "published":
-                manifest.setdefault("kind", kind)
-                manifests.append(manifest)
-    return manifests
 
 
-def package_dependency_status(manifest: dict[str, Any]) -> dict[str, Any]:
-    dependencies = normalize_package_dependencies(
-        manifest.get("dependencies", []),
-        str(manifest.get("kind", "")),
-        str(manifest.get("packageId", "")),
-    )
-    available = published_package_manifests()
-    resolved: list[dict[str, Any]] = []
-    unresolved: list[dict[str, Any]] = []
-    for dependency in dependencies:
-        target = dependency["packageId"]
-        candidates = []
-        for candidate in available:
-            identities = {
-                str(candidate.get("packageId", "")),
-                str(candidate.get("contentId", "")),
-                *[str(alias) for alias in candidate.get("aliases", []) if alias],
-            }
-            if target not in identities or (dependency["kind"] and candidate.get("kind") != dependency["kind"]):
-                continue
-            candidates.append(candidate)
-        compatible = [candidate for candidate in candidates if version_satisfies(candidate.get("version", ""), dependency["minVersion"], dependency["maxVersion"])]
-        if compatible:
-            selected = sorted(compatible, key=lambda item: comparable_version(item.get("version", "")), reverse=True)[0]
-            resolved.append({**dependency, "resolvedKind": selected.get("kind"), "resolvedPackageId": selected.get("packageId"), "resolvedVersion": selected.get("version")})
-        else:
-            reason = "version_mismatch" if candidates else "not_found"
-            unresolved.append({**dependency, "reason": reason, "availableVersions": sorted({str(item.get("version", "")) for item in candidates})})
-    blocking = [item for item in unresolved if item.get("required", True)]
-    return {"dependenciesSatisfied": not blocking, "resolvedDependencies": resolved, "unresolvedDependencies": unresolved}
 
 
-def safe_package_segment(value: str) -> str:
-    value = value.strip()
-    if not value or len(value) > 120 or not value.replace("_", "").replace("-", "").replace(".", "").isalnum():
-        raise HTTPException(status_code=400, detail="包标识只能包含字母、数字、点、下划线和短横线")
-    return value
 
 
-def safe_payload_filename(value: str) -> str:
-    name = Path(value or "payload.bin").name
-    name = "".join(char if (char.isalnum() or char in "._-") else "_" for char in name)
-    return name[:120] or "payload.bin"
 
 
-def normalize_content_id(value: str, fallback: str) -> str:
-    """内容稳定 ID 不参与路径拼接，允许 URL/域名等源标识但拒绝控制字符。"""
-    text = " ".join(str(value or fallback).replace("\r", " ").replace("\n", " ").split()).strip()
-    if not text or len(text) > 240 or any(ord(char) < 32 for char in text):
-        raise HTTPException(status_code=400, detail="稳定内容 ID 无效")
-    return text
 
 
-def _metadata_text(value: Any) -> str:
-    """把内容元数据转成适合显示和匹配的单行文本。"""
-    if value is None or isinstance(value, (dict, list)):
-        return ""
-    text = " ".join(str(value).replace("\r", " ").replace("\n", " ").split())
-    return text[:160].strip()
 
 
-def normalize_source_domain(value: Any) -> str:
-    """把书源地址、域名或主机名统一成可比较的小写域名，无法识别时返回空串。"""
-    text = _metadata_text(value)
-    if not text:
-        return ""
-    if "://" in text:
-        host = urllib.parse.urlsplit(text).netloc
-    elif "/" in text:
-        host = text.split("/", 1)[0]
-    else:
-        host = text
-    host = host.rsplit("@", 1)[-1].strip().strip(".").lower()
-    if host.startswith("["):
-        host = host[1:].split("]", 1)[0]
-    elif ":" in host:
-        host = host.rsplit(":", 1)[0]
-    if host.startswith("www."):
-        host = host[4:]
-    # 只有形如 example.com 或 IP 的值算域名，纯标识（youshu、qidian）不参与域名比对。
-    if not host or " " in host or "." not in host:
-        return ""
-    if not re.fullmatch(r"[a-z0-9.\-]+", host):
-        return ""
-    return host[:120]
 
 
-def normalize_match_name(value: Any) -> str:
-    """内容名称的比较形式：折叠空白并忽略大小写。"""
-    return " ".join(str(value or "").split()).casefold()
 
 
-def package_match_domains(manifest: dict[str, Any]) -> set[str]:
-    """内容包用于比对的域名集合，取自显式 domains 字段和历史 aliases、contentId。"""
-    values: list[Any] = []
-    for key in ("domains", "aliases"):
-        entry = manifest.get(key)
-        if isinstance(entry, (list, tuple, set)):
-            values.extend(entry)
-        elif entry:
-            values.append(entry)
-    values.append(manifest.get("contentId", ""))
-    return {domain for domain in (normalize_source_domain(item) for item in values) if domain}
 
 
-def package_match_identities(manifest: dict[str, Any]) -> set[str]:
-    """内容包的稳定标识集合，供没有域名的关联源退化匹配使用。"""
-    values = {str(manifest.get(key, "")).strip().casefold() for key in ("packageId", "contentId") if manifest.get(key)}
-    aliases = manifest.get("aliases")
-    if isinstance(aliases, (list, tuple, set)):
-        values.update(str(item).strip().casefold() for item in aliases if str(item).strip())
-    return {item for item in values if item}
 
 
-def find_matching_package(kind: str, name: str, domains: set[str], identities: set[str]) -> dict[str, Any] | None:
-    """按“名称 + 域名”定位服务器上的同一个源；没有域名时退化为“名称 + 稳定标识”。"""
-    target_name = normalize_match_name(name)
-    if not target_name:
-        return None
-    target_domains = {domain for domain in (normalize_source_domain(item) for item in domains) if domain}
-    target_identities = {str(item).strip().casefold() for item in identities if str(item).strip()}
-    for path, manifest in _package_manifests(kind):
-        manifest.setdefault("kind", kind)
-        manifest.setdefault("packageId", path.parent.name)
-        if normalize_match_name(manifest.get("name", "")) != target_name:
-            continue
-        manifest_domains = package_match_domains(manifest)
-        if target_domains and manifest_domains:
-            if target_domains & manifest_domains:
-                return manifest
-            continue
-        # 关联源等没有域名的内容只靠名称容易误判，要求稳定标识同时命中。
-        if target_identities & package_match_identities(manifest):
-            return manifest
-    return None
 
 
-def infer_package_metadata(kind: str, filename: str, body: bytes) -> dict[str, Any]:
-    """从书源 JSON、归档清单或样式文件中提取外显名称、稳定标识和域名。"""
-    stem = Path(filename or "payload").stem
-    objects: list[dict[str, Any]] = []
-    if filename.lower().endswith((".json", ".json5")):
-        try:
-            parsed = json.loads(body.decode("utf-8"))
-            if isinstance(parsed, dict):
-                objects = [parsed]
-            elif isinstance(parsed, list):
-                objects = [item for item in parsed[:20] if isinstance(item, dict)]
-        except (UnicodeDecodeError, ValueError):
-            objects = []
-    elif filename.lower().endswith((".rmsource", ".apk", ".jar", ".zip")):
-        # 关联源是 ZIP 归档，名称和 ID 写在内部的 manifest.json 里。
-        try:
-            with zipfile.ZipFile(io.BytesIO(body)) as archive:
-                parsed = json.loads(archive.read("manifest.json").decode("utf-8"))
-            if isinstance(parsed, dict):
-                objects = [parsed]
-        except (KeyError, OSError, UnicodeDecodeError, ValueError, zipfile.BadZipFile):
-            objects = []
-    name_keys = (
-        "name", "title", "displayName", "label", "bookSourceName", "sourceName",
-        "styleName", "themeName", "epubStyleName", "highlightStyleName",
-    )
-    identity_keys = (
-        "contentId", "sourceId", "bookSourceId", "id", "key", "bookSourceUrl",
-        "sourceUrl", "url", "domain", "host",
-    )
-    name = ""
-    explicit_name = False
-    identity: list[str] = []
-    for item in objects:
-        if not name:
-            for key in name_keys:
-                name = _metadata_text(item.get(key))
-                if name:
-                    explicit_name = True
-                    break
-        for key in identity_keys:
-            value = _metadata_text(item.get(key))
-            if value and value not in identity:
-                identity.append(value)
-    if not name and filename.lower().endswith(".css"):
-        match = re.search(r"(?:^|[\*/#@])\s*(?:name|title)\s*[:=]\s*([^\r\n*]+)", body.decode("utf-8", errors="ignore"), re.IGNORECASE)
-        if match:
-            name = _metadata_text(match.group(1))
-            explicit_name = bool(name)
-    name = name or _metadata_text(stem) or _admin_kind_label(kind)
-    if not identity:
-        identity = [name]
-    domains: list[str] = []
-    for item in identity:
-        domain = normalize_source_domain(item)
-        if domain and domain not in domains:
-            domains.append(domain)
-    return {
-        "name": name[:120],
-        "identity": identity[:12],
-        "explicitName": explicit_name,
-        "domains": domains[:12],
-    }
 
 
-def package_name_slug(name: str, kind: str) -> str:
-    normalized = unicodedata.normalize("NFKC", name or "")
-    normalized = re.sub(r"[^\w.-]+", "-", normalized, flags=re.UNICODE).strip("-._")
-    normalized = normalized[:80].strip("-._")
-    return normalized or kind.replace("_", "-")
 
 
-def _package_manifests(kind: str) -> list[tuple[Path, dict[str, Any]]]:
-    values: list[tuple[Path, dict[str, Any]]] = []
-    for path in sorted((runtime.PACKAGE_ROOT / kind).glob("*/manifest.json")):
-        try:
-            manifest = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(manifest, dict):
-            values.append((path, manifest))
-    return values
 
 
-def resolve_package_identity(kind: str, requested_id: str, requested_content_id: str, metadata: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
-    """复用可识别的旧包，否则按已有 ID 列表分配不重复的新 ID。"""
-    manifests = _package_manifests(kind)
-    requested = requested_id.strip()
-    if requested:
-        package_id = safe_package_segment(requested)
-        return package_id, next((item for path, item in manifests if path.parent.name == package_id), None)
-    targets = {item.casefold() for item in metadata.get("identity", []) if item}
-    if requested_content_id.strip():
-        targets.add(requested_content_id.strip().casefold())
-    name = str(metadata.get("name", "")).strip().casefold()
-    for path, manifest in manifests:
-        values = {str(manifest.get(key, "")).strip().casefold() for key in ("packageId", "contentId", "name") if manifest.get(key)}
-        values.update(str(item).strip().casefold() for item in manifest.get("aliases", []) if item)
-        if targets.intersection(values) or (name and name == str(manifest.get("name", "")).strip().casefold()):
-            return safe_package_segment(str(manifest.get("packageId", path.parent.name))), manifest
-    identity_seed = next((str(item) for item in metadata.get("identity", []) if item), "")
-    identity_seed = re.sub(r"^[a-z]+://(?:www\.)?", "", identity_seed, flags=re.IGNORECASE).split("/")[0]
-    base = package_name_slug(identity_seed or str(metadata.get("name", "")), kind)
-    used = {path.parent.name for path, _ in manifests}
-    candidate = base
-    index = 2
-    while candidate in used:
-        suffix = f"-{index}"
-        candidate = (base[:120 - len(suffix)] + suffix).strip("-._")
-        index += 1
-    return safe_package_segment(candidate), None
 
 
-def next_package_version(current: Any) -> str:
-    value = str(current or "").strip()
-    numbers = re.findall(r"\d+", value)
-    if not numbers:
-        return "1.0.0"
-    parts = [int(item) for item in numbers[:3]]
-    while len(parts) < 3:
-        parts.append(0)
-    parts[2] += 1
-    return ".".join(str(item) for item in parts)
 
 
-def merge_package_aliases(existing: Any, detected: Any, requested: str) -> list[str]:
-    values = []
-    if isinstance(existing, list):
-        values.extend(existing)
-    if isinstance(detected, list):
-        values.extend(detected)
-    values.extend(requested.split(","))
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        text = _metadata_text(value)
-        key = text.casefold()
-        if not text or len(text) > 240 or key in seen:
-            continue
-        seen.add(key)
-        result.append(text)
-        if len(result) >= 50:
-            break
-    return result
 
 
-def package_signature(package_id: str, kind: str, content_id: str, version: str, build_time: int, sha256: str, body: bytes) -> str:
-    if not runtime.SIGNING_PRIVATE_KEY_FILE:
-        return ""
-    from cryptography.hazmat.primitives import serialization
-    key = serialization.load_pem_private_key(Path(runtime.SIGNING_PRIVATE_KEY_FILE).read_bytes(), password=None)
-    message = f"{package_id}\n{kind}\n{content_id}\n{version}\n{build_time}\n{sha256}".encode("utf-8") + body
-    import base64
-    return base64.b64encode(key.sign(message)).decode("ascii")
 
 
-def persist_package_payload(
-    kind: str,
-    package_id: str,
-    version: str,
-    content_id: str,
-    filename: str,
-    body: bytes,
-    name: str,
-    description: str,
-    aliases: list[str],
-    domains: list[str],
-    status_value: str,
-    channel: str,
-    dependencies: list[dict[str, Any]],
-    signature: str = "",
-    owner: str = "",
-) -> dict[str, Any]:
-    """把内容包写入数据卷：旧版本进 history，清单与 payload 原子替换。"""
-    package_dir = (runtime.PACKAGE_ROOT / kind / package_id).resolve()
-    if runtime.PACKAGE_ROOT.resolve() not in package_dir.parents:
-        raise HTTPException(status_code=400, detail="内容包路径无效")
-    package_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = package_dir / "manifest.json"
-    old_payload_path: Path | None = None
-    if manifest_path.is_file():
-        history = package_dir / "history"
-        history.mkdir(exist_ok=True)
-        old_version = "old"
-        old_manifest: dict[str, Any] = {}
-        try:
-            old_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            old_version = safe_package_segment(old_manifest.get("version", "old"))
-        except (OSError, ValueError):
-            pass
-        archive_dir = history / f"{old_version}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(manifest_path, archive_dir / "manifest.json")
-        old_payload = package_dir / str(old_manifest.get("payload", ""))
-        if old_payload.is_file() and old_payload.parent == package_dir:
-            shutil.copy2(old_payload, archive_dir / old_payload.name)
-            old_payload_path = old_payload
-    build_time = int(datetime.now(timezone.utc).timestamp() * 1000)
-    digest = hashlib.sha256(body).hexdigest()
-    manifest = {
-        "packageId": package_id,
-        "kind": kind,
-        "version": version,
-        "buildTime": build_time,
-        "schemaVersion": 1,
-        "minModuleVersion": load_config()["minModuleVersion"],
-        "sha256": digest,
-        "signature": signature.strip() or package_signature(package_id, kind, content_id, version, build_time, digest, body),
-        "payload": filename,
-        "contentId": content_id,
-        "aliases": aliases,
-        "domains": domains,
-        "name": name,
-        "description": description,
-        "status": status_value,
-        "channel": channel,
-        "dependencies": dependencies,
-    }
-    if owner:
-        manifest["uploadOwner"] = owner
-    if status_value == "published":
-        dependency_status = package_dependency_status(manifest)
-        if not dependency_status["dependenciesSatisfied"]:
-            raise HTTPException(
-                status_code=409,
-                detail=response(code="PACKAGE_DEPENDENCIES_UNRESOLVED", message="内容包存在未满足的必需依赖，请先上传依赖或保存为草稿", data=dependency_status),
-            )
-    payload_path = package_dir / filename
-    temp_payload = package_dir / ".payload.tmp"
-    temp_payload.write_bytes(body)
-    temp_payload.replace(payload_path)
-    temp_manifest = package_dir / ".manifest.json.tmp"
-    temp_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_manifest.replace(manifest_path)
-    if old_payload_path and old_payload_path != payload_path and old_payload_path.is_file():
-        old_payload_path.unlink()
-    return manifest
 
 
 @app.post("/admin/packages/upload", response_class=HTMLResponse)
@@ -4497,39 +3381,8 @@ async def download_credentials_backup(owner: str = Depends(backup_owner)) -> Fil
 
 
 
-async def verify_reamicro_secret(token: str, base_url: str) -> tuple[bool, str]:
-    status_code, _, raw = await asyncio.to_thread(
-        json_http_request,
-        base_url,
-        token,
-        {"pageNum": 1, "pageSize": 1},
-        "rest/read/get-reader-record-list",
-    )
-    if 200 <= status_code < 300:
-        return True, "验证成功"
-    return False, f"HTTP {status_code} {redact_message(raw)}"
 
 
-def update_credential_health(credential_id: str, success: bool, message: str, used: bool = False) -> None:
-    credentials = load_credentials()
-    credential = credentials.get(credential_id)
-    if not credential:
-        return
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    if used:
-        credential["lastUsedAt"] = now
-    if success:
-        credential["lastVerifiedAt"] = now
-        credential["lastVerifyMessage"] = message
-        credential["verifyFailures"] = 0
-    else:
-        credential["lastFailedAt"] = now
-        credential["lastVerifyMessage"] = message
-        credential["verifyFailures"] = int(credential.get("verifyFailures", 0)) + 1
-        if credential["verifyFailures"] >= 3:
-            credential["enabled"] = False
-    credential["updatedAt"] = now
-    save_credentials(credentials)
 
 
 
@@ -4843,51 +3696,12 @@ async def acknowledge_notifications(request: Request, owner: str = Depends(task_
     return response({"acknowledged": updated})
 
 
-def public_task(task: dict[str, Any], include_request: bool = False) -> dict[str, Any]:
-    value = {key: item for key, item in task.items() if key != "requestEncrypted"}
-    value["credentialId"] = task_credential_id(task)
-    if include_request and task.get("requestEncrypted"):
-        try:
-            value["request"] = decrypt_secret(str(task["requestEncrypted"]))
-        except Exception:
-            value["request"] = {}
-    return value
 
 
-def validate_package_payload(kind: str, filename: str, body: bytes) -> None:
-    if len(body) > 50 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="内容文件超过 50 MB")
-    if kind in {"online_source", "association_source", "theme", "epub_style", "highlight_style"} and filename.lower().endswith((".json", ".json5")):
-        try:
-            value = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            raise HTTPException(status_code=400, detail="JSON 内容包格式无效")
-        if not isinstance(value, (dict, list)):
-            raise HTTPException(status_code=400, detail="JSON 内容包必须是对象或数组")
-    if kind in {"epub_style", "highlight_style"} and filename.lower().endswith(".css"):
-        try:
-            body.decode("utf-8")
-        except UnicodeDecodeError:
-            raise HTTPException(status_code=400, detail="样式文件必须使用 UTF-8 编码")
 
 
-def package_manifest(package_kind: str, package_id: str) -> tuple[Path, dict[str, Any]]:
-    manifest_path = runtime.PACKAGE_ROOT / package_kind / package_id / "manifest.json"
-    if not manifest_path.is_file():
-        raise HTTPException(status_code=404, detail=response(code="PACKAGE_NOT_FOUND", message="内容包不存在"))
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        raise HTTPException(status_code=500, detail=response(code="PACKAGE_INVALID", message="内容包清单无效"))
-    return manifest_path, manifest
 
 
-def find_owned_task(task_id: str, owner: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    tasks = load_tasks()
-    task = tasks.get(task_id)
-    if not task or task.get("owner") != owner:
-        raise HTTPException(status_code=404, detail=response(code="TASK_NOT_FOUND", message="任务不存在"))
-    return tasks, task
 
 
 @app.get("/v1/tasks/{task_id}")
