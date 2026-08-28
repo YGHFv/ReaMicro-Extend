@@ -378,6 +378,107 @@ def merge_duplicate_credentials() -> int:
     return len(removed)
 
 
+def canonicalize_owner_identities() -> dict[str, int]:
+    """把历史遗留的归属写法统一成 `host:<阅微账号>`，并归并因此产生的重复记录。
+
+    旧版本按认证模式拼归属（`host-public:3`、`key:<hash>:host:3`、`account:name:host:3`），
+    管理员一改认证模式，同一台设备就换了身份：密钥、任务、消息、在线记录和备份目录全部分裂。
+    这里在启动时做一次性折叠，保证升级后旧数据还能被模块看到。
+    """
+    stats = {"credentials": 0, "tasks": 0, "notifications": 0, "presence": 0, "backups": 0}
+
+    credentials = load_credentials()
+    for item in credentials.values():
+        if isinstance(item, dict):
+            canonical = canonical_owner_of(str(item.get("owner", "")))
+            if canonical and canonical != item.get("owner"):
+                item["owner"] = canonical
+                stats["credentials"] += 1
+    if stats["credentials"]:
+        save_credentials(credentials)
+
+    tasks = load_tasks()
+    for task in tasks.values():
+        canonical = canonical_owner_of(str(task.get("owner", "")))
+        if canonical and canonical != task.get("owner"):
+            task["owner"] = canonical
+            stats["tasks"] += 1
+    if stats["tasks"]:
+        save_tasks(tasks)
+
+    notifications = load_notifications()
+    for item in notifications.values():
+        canonical = canonical_owner_of(str(item.get("owner", "")))
+        if canonical and canonical != item.get("owner"):
+            item["owner"] = canonical
+            stats["notifications"] += 1
+    if stats["notifications"]:
+        save_notifications(notifications)
+
+    # 在线记录以归属为键，折叠后同一账号的多行要合并成最近一次心跳。
+    presence = load_presence()
+    merged: dict[str, dict[str, Any]] = {}
+    for key, item in presence.items():
+        if not isinstance(item, dict):
+            continue
+        canonical = canonical_owner_of(str(item.get("owner", key)))
+        if not canonical:
+            continue
+        item["owner"] = canonical
+        existing = merged.get(canonical)
+        if existing is None:
+            merged[canonical] = item
+            continue
+        stats["presence"] += 1
+        if bounded_config_int(item.get("lastSeenAt", 0), 0, 0) >= bounded_config_int(existing.get("lastSeenAt", 0), 0, 0):
+            merged[canonical] = item
+    if stats["presence"] or set(merged) != set(presence):
+        save_presence(merged)
+
+    stats["backups"] = migrate_legacy_backup_dirs()
+    if any(stats.values()):
+        audit_event("owner_identity_canonicalized", metadata=stats)
+    return stats
+
+
+def migrate_legacy_backup_dirs() -> int:
+    """把旧归属写法命名的备份目录迁到规范归属目录下。"""
+    moved = 0
+    accounts = {
+        owner_host_account_id(str(item.get("owner", "")))
+        for source in (load_credentials().values(), load_tasks().values(), load_presence().values())
+        for item in source
+        if isinstance(item, dict)
+    }
+    for account_id in {value for value in accounts if value}:
+        canonical_dir_name = backup_owner_dir_name(f"host:{account_id}")
+        for legacy in legacy_owner_identities(f"host:{account_id}"):
+            legacy_dir_name = backup_owner_dir_name(legacy)
+            if legacy_dir_name == canonical_dir_name:
+                continue
+            for root in (BACKUP_ROOT, SECRET_BACKUP_ROOT):
+                legacy_dir = root / legacy_dir_name
+                target_dir = root / canonical_dir_name
+                if not legacy_dir.is_dir():
+                    continue
+                if target_dir.exists():
+                    # 规范目录已有数据时不覆盖，仅补齐缺失文件。
+                    for path in legacy_dir.rglob("*"):
+                        if not path.is_file():
+                            continue
+                        destination = target_dir / path.relative_to(legacy_dir)
+                        if destination.exists():
+                            continue
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(path, destination)
+                        moved += 1
+                else:
+                    target_dir.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(legacy_dir), str(target_dir))
+                    moved += 1
+    return moved
+
+
 def audit_event(action: str, actor: str = "system", request_id: str = "", success: bool = True, metadata: dict[str, Any] | None = None) -> None:
     """记录不含敏感值的管理与安全事件。"""
     try:
@@ -1169,6 +1270,8 @@ async def server_snapshot_loop() -> None:
 @app.on_event("startup")
 async def start_release_sync() -> None:
     get_state_store()
+    # 认证模式变更过的服务器会留下多套归属写法，先折叠再启动调度，避免任务按旧归属重复执行。
+    canonicalize_owner_identities()
     if RUN_RELEASE_SYNC:
         asyncio.create_task(release_sync_loop())
     if RUN_SCHEDULER:
@@ -1479,22 +1582,49 @@ def check_request_auth(
 
 
 def resolve_identity(api_key_value: str | None, account_name: str | None, account_password: str | None, host_account_id: str | None) -> str:
+    """把一次请求解析成稳定的数据归属标识。
+
+    关键约定：只要请求带了阅微账号 ID，归属就固定是 `host:<id>`，与用哪种认证模式通过校验无关。
+    认证模式只负责"能不能访问"，不参与"数据属于谁"——否则管理员在后台把认证模式从公开
+    改成阅微白名单之后，同一台设备的归属会从 `host-public:3` 变成 `host:3`，
+    已上传的同步密钥、已建立的任务和积压的消息全部失联，后台还会出现同一个账号两行在线记录。
+    """
     config = load_config()
     mode = active_auth_mode(config)
-    api_key = str(config.get("apiKey", ""))
-    key_record = configured_api_key(config, api_key_value) if mode == "api_key" else None
-    if key_record:
-        identity = "key:" + hashlib.sha256(api_key_value.encode()).hexdigest()[:24]
-        return identity + (":host:" + host_account_id if host_account_id else "")
-    encoded = str(config.get("accounts", {}).get(account_name or "", ""))
-    if mode == "account" and account_name and account_password and encoded and password_matches(account_password, encoded):
-        identity = "account:" + account_name
-        return identity + (":host:" + host_account_id if host_account_id else "")
-    if mode == "host_account_allowlist" and host_account_id and host_account_id in set(config.get("hostAccountAllowlist", [])):
-        return "host:" + host_account_id
-    if mode == "public":
-        return "host-public:" + host_account_id if host_account_id else "public"
-    raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="认证信息无效"))
+    account_id = str(host_account_id or "").strip()
+    authorized = False
+    fallback = ""
+    if mode == "api_key" and configured_api_key(config, api_key_value):
+        authorized = True
+        fallback = "key:" + hashlib.sha256(str(api_key_value).encode()).hexdigest()[:24]
+    elif mode == "account" and account_name and account_password and password_matches(
+        account_password,
+        str(config.get("accounts", {}).get(account_name, "")),
+    ):
+        authorized = True
+        fallback = "account:" + account_name
+    elif mode == "host_account_allowlist" and account_id and account_id in set(config.get("hostAccountAllowlist", [])):
+        authorized = True
+    elif mode == "public":
+        authorized = True
+        fallback = "public"
+    if not authorized:
+        raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="认证信息无效"))
+    return ("host:" + account_id) if account_id else fallback
+
+
+def legacy_owner_identities(canonical: str) -> list[str]:
+    """列出某个归属标识在历史版本里可能出现过的旧写法，供启动迁移归并。"""
+    account_id = owner_host_account_id(canonical)
+    if not account_id:
+        return []
+    return [f"host-public:{account_id}", f"host:{account_id}"]
+
+
+def canonical_owner_of(owner: str) -> str:
+    """把任意历史归属写法折叠成当前的规范写法。"""
+    account_id = owner_host_account_id(str(owner or ""))
+    return f"host:{account_id}" if account_id else str(owner or "")
 
 
 def configured_auth_modes(config: dict[str, Any]) -> list[str]:
@@ -1603,22 +1733,14 @@ async def backup_owner(
     x_reamicro_host_account_id: str | None = Header(default=None),
 ) -> str:
     enforce_api_scope(request, x_reamicro_api_key)
-    config = load_config()
-    mode = active_auth_mode(config)
-    api_key = str(config.get("apiKey", ""))
-    if mode == "api_key" and configured_api_key(config, x_reamicro_api_key):
-        identity = "key:" + x_reamicro_api_key + (":host:" + x_reamicro_host_account_id if x_reamicro_host_account_id else "")
-    elif mode == "account" and x_reamicro_account and x_reamicro_password and password_matches(
-        x_reamicro_password,
-        str(config.get("accounts", {}).get(x_reamicro_account, "")),
-    ):
-        identity = "account:" + x_reamicro_account + (":host:" + x_reamicro_host_account_id if x_reamicro_host_account_id else "")
-    elif mode == "host_account_allowlist" and x_reamicro_host_account_id and x_reamicro_host_account_id in set(config.get("hostAccountAllowlist", [])):
-        identity = "host:" + x_reamicro_host_account_id
-    elif mode == "public":
-        identity = "host-public:" + x_reamicro_host_account_id
-    else:
+    # 复用 resolve_identity 的规范归属，备份目录才不会在认证模式变更后失联。
+    identity = resolve_identity(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
+    if identity == "public":
         raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="备份功能需要非公开认证"))
+    return backup_owner_dir_name(identity)
+
+
+def backup_owner_dir_name(identity: str) -> str:
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
 
 
@@ -2430,7 +2552,12 @@ def _admin_overview_stats(config: dict[str, Any], records: list[dict[str, Any]])
     esc = lambda value: html.escape(str(value), quote=True)
     tasks = load_tasks()
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    online = sum(1 for item in load_presence().values() if bounded_config_int(item.get("onlineUntil", 0), 0, 0) > now)
+    # 按规范归属去重，同一个阅微账号的多条历史心跳只算一台设备。
+    online = len({
+        canonical_owner_of(str(item.get("owner", "")))
+        for item in load_presence().values()
+        if isinstance(item, dict) and bounded_config_int(item.get("onlineUntil", 0), 0, 0) > now
+    })
     pending = sum(1 for item in load_notifications().values() if not item.get("deliveredAt"))
     release_version = "未同步"
     release_path = RELEASE_ROOT / "latest.json"
@@ -2461,7 +2588,16 @@ def _admin_presence_panel() -> str:
     esc = lambda value: html.escape(str(value), quote=True)
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     presence_rows = []
-    for item in sorted(load_presence().values(), key=lambda value: bounded_config_int(value.get("lastSeenAt", 0), 0, 0), reverse=True):
+    # 按规范归属再去重一次：即使存量数据还没被启动迁移折叠，同一个阅微账号也只显示最近一行。
+    deduped: dict[str, dict[str, Any]] = {}
+    for item in load_presence().values():
+        if not isinstance(item, dict):
+            continue
+        canonical = canonical_owner_of(str(item.get("owner", ""))) or "未标记"
+        existing = deduped.get(canonical)
+        if existing is None or bounded_config_int(item.get("lastSeenAt", 0), 0, 0) > bounded_config_int(existing.get("lastSeenAt", 0), 0, 0):
+            deduped[canonical] = item
+    for item in sorted(deduped.values(), key=lambda value: bounded_config_int(value.get("lastSeenAt", 0), 0, 0), reverse=True):
         online_until = bounded_config_int(item.get("onlineUntil", 0), 0, 0)
         online = online_until > now
         presence_rows.append(
@@ -2497,7 +2633,8 @@ def _admin_presence_panel() -> str:
     pending_total = sum(1 for item in notifications if not item.get("deliveredAt"))
     return (
         f"<div class='panel'><h2>模块在线状态</h2>"
-        f"<p class='muted'>模块每 5 分钟上报一次心跳，服务器按 10 分钟租约判断在线。离线期间的任务消息会保留到下次在线。</p>"
+        f"<p class='muted'>阅微在前台时模块每 5 分钟上报一次心跳，另外在零点和云端任务完成后由系统闹钟唤醒上报；服务器按 10 分钟租约判断在线。"
+        f"消息在心跳响应里下发，模块显示成功后回执，未回执的会保留到下次在线。</p>"
         f"<div class='table-wrap'><table><thead><tr><th>来源账号</th><th>连接状态</th><th>模块版本</th><th>上报来源</th><th>最近心跳</th></tr></thead>"
         f"<tbody>{presence_table}</tbody></table></div></div>"
         f"<div class='panel'><h2>任务消息队列</h2>"

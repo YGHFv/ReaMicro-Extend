@@ -251,11 +251,12 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
         card.addView(credentialSpinner, apiServerRowParams(activity))
         val currentAccount = TextView(activity).apply {
             setTextColor(colors.body)
-            text = currentCredential?.let { "将自动上传当前阅微登录：${it.label}（账号 ${it.accountId}）" }
+            // 宿主账号可能没有昵称，label 是空串而不是 null，必须用 ifBlank 兜底否则界面上一片空白。
+            text = currentCredential?.let { "将自动上传当前阅微登录：${it.label.ifBlank { "阅微账号" }}（账号 ${it.accountId}）" }
                 ?: "当前未检测到阅微登录，请先在阅微登录账号"
             setPadding(24, 8, 24, 8)
         }
-        val label = apiServerEdit(activity, colors, "凭据名称", currentCredential?.label ?: "阅微账号")
+        val label = apiServerEdit(activity, colors, "凭据名称", currentCredential?.label?.ifBlank { "阅微账号" } ?: "阅微账号")
         val time = apiServerEdit(activity, colors, "每日执行时间，例如 00:05", "00:05")
         val duration = apiServerEdit(activity, colors, "云端阅读时长（分钟）", "30")
         val customBook = apiServerEdit(activity, colors, "自定义图书：每行 cloudBookId|书名；留空读取最近阅读", "").apply {
@@ -268,38 +269,53 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
         listOf(currentAccount, label, time, duration, customBook, checkin, draw, read).forEach { view -> card.addView(view, apiServerRowParams(activity)) }
         val status = TextView(activity).apply { setTextColor(colors.body); text = "凭据将在服务器端加密保存，模块设置备份不包含该密钥。" }
         card.addView(status, apiServerRowParams(activity))
-        Thread {
-            runCatching {
-                val manager = CloudTaskManager(client)
-                manager.credentials() to manager.list()
-            }.onSuccess { (credentials, tasks) ->
-                activity.runOnUiThread {
-                    credentialIds.clear()
-                    credentialIds.addAll(credentials.map { it.id })
-                    loadedTasks.clear()
-                    loadedTasks.addAll(tasks)
-                    credentialSpinner.adapter = apiServerStringAdapter(
-                        activity,
-                        credentials.map { "${it.label}${it.accountId.takeIf(String::isNotBlank)?.let { id -> " · $id" }.orEmpty()}" }
-                            .ifEmpty { listOf("当前账号尚未上传凭据") },
-                    )
-                    fun applyCredentialTasks(position: Int) {
-                        val selectedId = credentialIds.getOrNull(position).orEmpty()
-                        checkin.isChecked = tasks.firstOrNull { it.taskType == "yeshe_checkin" && it.credentialId == selectedId }?.enabled == true
-                        draw.isChecked = tasks.firstOrNull { it.taskType == "yeshe_draw_card" && it.credentialId == selectedId }?.enabled == true
-                        read.isChecked = tasks.firstOrNull { it.taskType == "cloud_auto_read" && it.credentialId == selectedId }?.enabled == true
+
+        fun applyCloudConfig(credentials: List<com.reamicro.fix.cloud.api.ReaMicroCredential>, tasks: List<com.reamicro.fix.cloud.api.CloudTask>) {
+            credentialIds.clear()
+            credentialIds.addAll(credentials.map { it.id })
+            loadedTasks.clear()
+            loadedTasks.addAll(tasks)
+            credentialSpinner.adapter = apiServerStringAdapter(
+                activity,
+                credentials.map { "${it.label}${it.accountId.takeIf(String::isNotBlank)?.let { id -> " · $id" }.orEmpty()}" }
+                    .ifEmpty { listOf("当前账号尚未上传凭据") },
+            )
+            fun applyCredentialTasks(position: Int) {
+                val selectedId = credentialIds.getOrNull(position).orEmpty()
+                checkin.isChecked = tasks.firstOrNull { it.taskType == "yeshe_checkin" && it.credentialId == selectedId }?.enabled == true
+                draw.isChecked = tasks.firstOrNull { it.taskType == "yeshe_draw_card" && it.credentialId == selectedId }?.enabled == true
+                read.isChecked = tasks.firstOrNull { it.taskType == "cloud_auto_read" && it.credentialId == selectedId }?.enabled == true
+            }
+            credentialSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) = applyCredentialTasks(position)
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+            }
+            val currentIndex = credentials.indexOfFirst { it.accountId == currentCredential?.accountId }
+            if (currentIndex >= 0) credentialSpinner.setSelection(currentIndex)
+            applyCredentialTasks(credentialSpinner.selectedItemPosition)
+        }
+
+        // 读取云端凭据与任务。上传成功后必须再跑一次，否则下拉框会一直停在"当前账号尚未上传凭据"。
+        fun reloadCloudConfig(notice: String? = null) {
+            Thread {
+                runCatching {
+                    val manager = CloudTaskManager(client)
+                    manager.credentials() to manager.list()
+                }.onSuccess { (credentials, tasks) ->
+                    activity.runOnUiThread {
+                        applyCloudConfig(credentials, tasks)
+                        status.text = notice?.let { "$it\n已读取 ${credentials.size} 个凭据、${tasks.size} 个任务。" }
+                            ?: "已读取 ${credentials.size} 个凭据、${tasks.size} 个任务；保存时会自动刷新当前阅微登录密钥。"
                     }
-                    credentialSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-                        override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) = applyCredentialTasks(position)
-                        override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+                }.onFailure { error ->
+                    activity.runOnUiThread {
+                        status.text = notice?.let { "$it\n读取云端配置失败：${error.message.orEmpty()}" }
+                            ?: (error.message ?: "读取云端配置失败")
                     }
-                    applyCredentialTasks(credentialSpinner.selectedItemPosition)
-                    val currentIndex = credentials.indexOfFirst { it.accountId == currentCredential?.accountId }
-                    if (currentIndex >= 0) credentialSpinner.setSelection(currentIndex)
-                    status.text = "已读取 ${credentials.size} 个凭据、${tasks.size} 个任务；保存时会自动刷新当前阅微登录密钥。"
                 }
-            }.onFailure { error -> activity.runOnUiThread { status.text = error.message ?: "读取云端配置失败" } }
-        }.start()
+            }.start()
+        }
+        reloadCloudConfig()
         val actions = settingsDialogActions(activity)
         actions.addView(settingsDialogButton(activity, "保存并验证", colors, SettingsDialogButtonRole.Primary).apply {
             setOnClickListener {
@@ -328,7 +344,8 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
                         manager.saveAutomation("yeshe_draw_card", draw.isChecked, credentialId, time.text.toString())
                         manager.saveAutomation("cloud_auto_read", read.isChecked, credentialId, time.text.toString(), readRequest)
                     }.onSuccess {
-                        activity.runOnUiThread { status.text = "阅微凭据与任务配置已同步" }
+                        // 上传成功后立刻重新拉取，界面才会从"尚未上传凭据"变成真实凭据。
+                        activity.runOnUiThread { reloadCloudConfig("阅微凭据与任务配置已同步") }
                     }.onFailure { error ->
                         activity.runOnUiThread {
                             status.text = error.message?.takeIf(String::isNotBlank) ?: "云端任务配置失败"
