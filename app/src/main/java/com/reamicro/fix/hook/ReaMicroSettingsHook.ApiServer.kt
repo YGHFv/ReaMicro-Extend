@@ -556,7 +556,7 @@ internal fun ReaMicroSettingsHook.openApiLibraryUploadDialog() {
                         ).mapNotNull { (kind, label) ->
                             pending.count { it.kind == kind }.takeIf { it > 0 }?.let { "$it 个$label" }
                         }
-                        // 引用本机图片的样式传上去，对方拿不到图片，先说清楚。
+                        // 图片会内嵌进高亮样式包，先让用户知道本次上传包含图片数据。
                         val localAssets = pending.count { it.usesLocalAssets }
                         status.text = when {
                             !loadedPolicy.allowed -> loadedPolicy.reason.ifBlank { "服务器未允许当前账号上传内容库" }
@@ -566,7 +566,7 @@ internal fun ReaMicroSettingsHook.openApiLibraryUploadDialog() {
                                 append(breakdown.joinToString("、"))
                                 append("；当前阅微账号 ${loadedPolicy.hostAccountId} 已在上传白名单。")
                                 if (localAssets > 0) {
-                                    append("\n其中 $localAssets 个样式引用了本机图片，上传后其他设备只会得到颜色与 CSS，不含图片。")
+                                    append("\n其中 $localAssets 个高亮样式包含图片，图片会随样式上传并在其他设备安装时自动还原。")
                                 }
                             }
                         }

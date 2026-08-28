@@ -22,7 +22,7 @@ from tests.conftest_support import (
     seed_task,
     unwrap,
 )
-from app import main, runtime
+from app import executors, main, runtime
 from app.api import releases as api_releases
 from app import releases
 from app import state
@@ -238,8 +238,15 @@ class ApiCredentialTest(unittest.TestCase):
         isolate(Path(self.temp.name))
         base_config()
         self.client = client()
+        self.original_verify = executors.verify_reamicro_secret
+
+        async def verified(token, base_url):
+            return True, "验证成功"
+
+        executors.verify_reamicro_secret = verified
 
     def tearDown(self):
+        executors.verify_reamicro_secret = self.original_verify
         self.temp.cleanup()
 
     def test_credential_crud_round_trip(self):

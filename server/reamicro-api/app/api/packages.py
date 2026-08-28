@@ -1,7 +1,8 @@
 """内容包的读取、下载与模块上传。
 
 模块上传遵循"同名同域只关联、不覆盖"：服务器已有同名同域的源时只回关联信息，
-不改服务器内容，避免任何白名单用户改动共享内容库。
+不改服务器内容，避免任何白名单用户改动共享内容库。唯一例外是上传者自己创建的
+高亮样式，允许再次上传更新内容，以便补充图片等资源。
 """
 
 from typing import Any
@@ -32,6 +33,7 @@ from app.packages import (
     find_matching_package,
     infer_package_metadata,
     merge_package_aliases,
+    next_package_version,
     normalize_content_id,
     normalize_source_domain,
     package_dependency_status,
@@ -43,6 +45,7 @@ from app.packages import (
     validate_package_payload,
 )
 from app.responses import response
+from app.state import canonical_owner_of
 from app.users import check_upload_quota
 from app.security import (
     authenticated,
@@ -58,6 +61,33 @@ from app.security import (
 )
 
 router = APIRouter()
+
+
+def _highlight_style_image(body: bytes) -> dict[str, Any] | None:
+    """提取高亮样式的内嵌图片描述；旧版或无图样式返回 None。"""
+    try:
+        root = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(root, dict):
+        return None
+    style = root.get("style", root)
+    if not isinstance(style, dict):
+        return None
+    image = style.get("ninePatchFile")
+    return image if isinstance(image, dict) else None
+
+
+def _stored_highlight_style_image(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    package_id = safe_package_segment(str(manifest.get("packageId", "")))
+    payload_name = safe_payload_filename(str(manifest.get("payload", "")))
+    payload_path = runtime.PACKAGE_ROOT / "highlight_style" / package_id / payload_name
+    if not payload_path.is_file():
+        return None
+    try:
+        return _highlight_style_image(payload_path.read_bytes())
+    except OSError:
+        return None
 
 
 @router.get("/v1/packages")
@@ -143,6 +173,46 @@ async def module_upload_package(request: Request, owner: str = Depends(module_up
         kind, parsed["name"], parsed["domains"], parsed["identities"], parsed["names"],
     )
     if existing is not None:
+        same_owner_highlight = (
+            kind == "highlight_style"
+            and canonical_owner_of(str(existing.get("uploadOwner", ""))) == canonical_owner_of(owner)
+        )
+        image_changed = _stored_highlight_style_image(existing) != _highlight_style_image(body)
+        if same_owner_highlight and image_changed:
+            package_id = safe_package_segment(str(existing.get("packageId", "")))
+            metadata = infer_package_metadata(kind, filename, body)
+            manifest = persist_package_payload(
+                kind=kind,
+                package_id=package_id,
+                version=next_package_version(existing.get("version")),
+                content_id=normalize_content_id(existing.get("contentId") or parsed["contentId"], package_id),
+                filename=filename,
+                body=body,
+                name=parsed["name"],
+                description=str(existing.get("description", "")) or "模块上传高亮样式",
+                aliases=merge_package_aliases(
+                    existing.get("aliases", []),
+                    list(metadata.get("identity", [])) + sorted(parsed["identities"]),
+                    "",
+                ),
+                domains=[],
+                status_value=str(existing.get("status", "published")),
+                channel=str(existing.get("channel", "stable")),
+                dependencies=existing.get("dependencies", []) if isinstance(existing.get("dependencies"), list) else [],
+                owner=owner,
+                names=sorted(set(existing.get("names", []) or []) | parsed["names"]),
+                primary="",
+            )
+            audit_event(
+                "module_upload_updated",
+                actor=owner,
+                success=True,
+                metadata={"kind": kind, "packageId": package_id, "version": manifest.get("version", "")},
+            )
+            return response(
+                {"uploaded": True, "linked": True, "package": module_package_summary(manifest, kind)},
+                message="高亮样式已更新并关联",
+            )
         # 名称与地址各命中一项即视为同一个源：不覆盖服务器内容，只回关联信息供后续更新。
         # 同时把本次带来的新名称与新地址并入清单——源改名或换域名后，
         # 集合里同时留着新旧两套，用旧信息的客户端也不会失联。

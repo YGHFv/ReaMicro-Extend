@@ -169,7 +169,7 @@ X-ReaMicro-Api-Key: <key>
 
 阅微登录密钥使用 `REAMICRO_SECRET_KEY` 派生的 AES-GCM 密钥保存。生产环境必须设置随机长值并持久化；丢失或修改该值后既有凭据无法解密。账号密钥备份由 Android 客户端使用用户口令加密，服务器只保存 `RCRED1` 密文。
 
-云任务支持 `yeshe_checkin`、`yeshe_draw_card` 和 `cloud_auto_read`。自动阅读可指定图书，未指定时读取阅微最近阅读记录；服务器按配置上报阅读进度和时长。
+云任务支持 `yeshe_checkin`、`yeshe_draw_card` 和 `cloud_auto_read`。自动阅读可指定图书，未指定时读取阅微最近阅读记录；服务器按配置只上报阅读时长，不修改书籍阅读进度。
 
 当前版本使用 Docker 数据卷内的 SQLite 事务库、JSON 配置与文件存储，适合个人或小规模部署。任务锁可避免同一数据卷上的多个 Worker 重复执行；真正的多主机部署仍应迁移到 PostgreSQL、共享对象存储和独立 Worker。
 

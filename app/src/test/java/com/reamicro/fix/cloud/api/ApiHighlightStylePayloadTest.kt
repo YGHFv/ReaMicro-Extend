@@ -1,11 +1,16 @@
 package com.reamicro.fix.cloud.api
 
 import com.reamicro.fix.settings.ReaderHighlightStyle
+import java.io.File
+import java.util.Base64
 import org.json.JSONObject
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 /**
  * 高亮样式内容包的编解码。
@@ -16,6 +21,8 @@ import org.junit.Test
  * 所以内容包不携带它们。
  */
 class ApiHighlightStylePayloadTest {
+    @get:Rule
+    val temporaryFolder = TemporaryFolder()
 
     private fun sample(
         id: String = "my_style",
@@ -82,11 +89,22 @@ class ApiHighlightStylePayloadTest {
     }
 
     @Test
-    fun `不上传本机图片路径`() {
-        // 九宫格路径是本机绝对路径，对别的设备毫无意义，带上去只会指向不存在的文件。
-        val text = String(writeHighlightStylePayload(sample(ninePatchPath = "/data/user/0/app/files/x.png")), Charsets.UTF_8)
-        assertFalse(text.contains("ninePatchPath"))
-        assertFalse(text.contains("/data/"))
+    fun `图片内嵌上传且安装时还原为本机文件`() {
+        val source = temporaryFolder.newFile("glow.9.png").apply { writeBytes(TINY_PNG) }
+        val payload = payloadJson(sample(ninePatchPath = source.absolutePath))
+        val styleJson = payload.getJSONObject("style")
+        val imageJson = styleJson.getJSONObject("ninePatchFile")
+        assertEquals("image/png", imageJson.getString("mime"))
+        assertEquals("glow.9.png", imageJson.getString("name"))
+        assertFalse(payload.toString().contains(source.absolutePath))
+
+        val assetDir = temporaryFolder.newFolder("restored")
+        val restored = readHighlightStylePayload(styleJson, fallbackId = "fallback", assetDir = assetDir)
+        val restoredFile = File(restored.ninePatchPath)
+        assertTrue(restoredFile.isFile)
+        assertTrue(restoredFile.name.endsWith(".9.png"))
+        assertArrayEquals(TINY_PNG, restoredFile.readBytes())
+        assertEquals("10,10,10,10", restored.ninePatchSlice)
     }
 
     @Test
@@ -107,13 +125,20 @@ class ApiHighlightStylePayloadTest {
     @Test
     fun `载荷带 schemaVersion 便于后续演进`() {
         val json = payloadJson(sample())
-        assertEquals(1, json.getInt("schemaVersion"))
+        assertEquals(2, json.getInt("schemaVersion"))
         assertTrue(json.has("style"))
     }
 
     @Test
     fun `识别依赖本机资源的样式`() {
         assertFalse(highlightStyleUsesLocalAssets(sample()))
-        assertTrue(highlightStyleUsesLocalAssets(sample(ninePatchPath = "/data/x.png")))
+        val source = temporaryFolder.newFile("highlight.png").apply { writeBytes(TINY_PNG) }
+        assertTrue(highlightStyleUsesLocalAssets(sample(ninePatchPath = source.absolutePath)))
+    }
+
+    private companion object {
+        val TINY_PNG: ByteArray = Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        )
     }
 }

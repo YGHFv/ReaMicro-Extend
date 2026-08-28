@@ -152,6 +152,9 @@ class ReaMicroHookEntry {
                 requestCoverFix = bookDetailsAssociationActionHook::requestCoverFixForCurrentDetails,
             ).install()
         }
+        installFeature("TravelingMerchantEndTimeHook") {
+            TravelingMerchantEndTimeHook(classLoader).install()
+        }
         installFeature("LocalExportHook") {
             LocalExportHook(
                 classLoader = classLoader,

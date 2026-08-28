@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Requ
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasicCredentials
 
-from app import runtime
+from app import executors, runtime
 import secrets
 from datetime import datetime, timezone
 from app.audit import audit_event
@@ -17,10 +17,6 @@ from app.config_store import bounded_config_int
 from app.crypto import (
     decrypt_secret,
     encrypt_secret,
-)
-from app.executors import (
-    update_credential_health,
-    verify_reamicro_secret,
 )
 from app.responses import response
 from app.security import task_owner
@@ -62,7 +58,7 @@ async def save_reamicro_credential(request: Request, owner: str = Depends(task_o
     base_url = str(payload.get("baseUrl") or "https://api.reamicro.zhendong.ltd/").strip()
     if not base_url.startswith("https://"):
         raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_INVALID", message="阅微 API 地址必须使用 HTTPS"))
-    verified, verify_message = await verify_reamicro_secret(token, base_url)
+    verified, verify_message = await executors.verify_reamicro_secret(token, base_url)
     if not verified:
         raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_VERIFY_FAILED", message=f"阅微登录密钥验证失败：{verify_message}"))
     account_id = str(payload.get("accountId") or "")[:100]
@@ -188,10 +184,10 @@ async def verify_reamicro_credential(credential_id: str, owner: str = Depends(ta
         secret = decrypt_secret(str(credential.get("secretEncrypted", "")))
         token = str(secret.get("token", "")) if isinstance(secret, dict) else ""
         base_url = str(secret.get("baseUrl", "")) if isinstance(secret, dict) else ""
-        verified, message = await verify_reamicro_secret(token, base_url)
+        verified, message = await executors.verify_reamicro_secret(token, base_url)
     except Exception as error:
         verified, message = False, str(error)
-    update_credential_health(credential_id, verified, message)
+    executors.update_credential_health(credential_id, verified, message)
     current = load_credentials().get(credential_id, credential)
     if not verified:
         raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_VERIFY_FAILED", message=message, data=credential_public(current)))

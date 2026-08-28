@@ -183,7 +183,13 @@ class ApiPackageManager(
                 val id = styleRoot.optString("id").trim().ifBlank { error("高亮样式缺少 ID") }
                 // 字段定义与上传侧共用 readHighlightStylePayload，避免两边对不上。
                 // 样式本身不带深浅外观，深浅由高亮规则和默认样式设置决定。
-                settings.setReaderHighlightStyle(readHighlightStylePayload(styleRoot, id))
+                settings.setReaderHighlightStyle(
+                    readHighlightStylePayload(
+                        styleRoot = styleRoot,
+                        fallbackId = id,
+                        assetDir = File(context.filesDir, HIGHLIGHT_IMAGE_DIR),
+                    ),
+                )
                 id
             }
             ApiPackageKind.ASSOCIATION_SOURCE -> {
@@ -283,6 +289,7 @@ class ApiPackageManager(
     companion object {
         private const val PREFS = "reamicro_api_packages"
         private const val ROOT = "reamicro_api_packages"
+        private const val HIGHLIGHT_IMAGE_DIR = "reader_highlight_nine_patch"
         private const val KEY_INSTALLED_IDS = "installed_ids"
         /** 仅关联、尚未从服务器安装过内容的占位版本号。 */
         const val LINKED_VERSION = "0.0.0"

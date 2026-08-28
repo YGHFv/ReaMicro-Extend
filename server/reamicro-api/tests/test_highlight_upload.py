@@ -1,7 +1,7 @@
 """模块上传高亮样式。
 
 高亮样式没有域名可比，服务器按"名称 + 稳定标识"两类各命中一项来匹配。
-样式内容裹在 `{"schemaVersion":1,"style":{...}}` 里，元数据推断必须下钻到 style，
+样式内容裹在 `{"schemaVersion":2,"style":{...}}` 里，元数据推断必须下钻到 style，
 否则名称会退化成文件名、标识也取不到样式 ID。
 """
 import json
@@ -42,7 +42,7 @@ def style_payload(style_id: str = STYLE_ID, name: str = STYLE_NAME, **extra) -> 
         "css": "font-size: 0.9em",
     }
     style.update(extra)
-    return json.dumps({"schemaVersion": 1, "style": style}, ensure_ascii=False).encode("utf-8")
+    return json.dumps({"schemaVersion": 2, "style": style}, ensure_ascii=False).encode("utf-8")
 
 
 class HighlightUploadTest(unittest.TestCase):
@@ -157,6 +157,24 @@ class HighlightUploadTest(unittest.TestCase):
         response = self.client.get(f"/v1/packages/highlight_style/{package_id}/download", headers=module_headers())
         self.assertEqual(200, response.status_code)
         self.assertEqual(json.loads(payload.decode()), json.loads(response.content.decode()))
+
+    def test_owner_can_update_existing_style_to_add_image(self):
+        first = unwrap(self._upload(style_payload()))
+        image = {
+            "name": "glow.9.png",
+            "mime": "image/png",
+            "sha256": "test-image-hash",
+            "base64": "iVBORw0KGgo=",
+        }
+        updated = unwrap(self._upload(style_payload(ninePatchFile=image, ninePatchSlice="10,10,10,10")))
+        self.assertTrue(updated["uploaded"])
+        self.assertTrue(updated["linked"])
+        self.assertEqual("1.0.1", updated["package"]["version"])
+        package_id = first["package"]["packageId"]
+        stored = json.loads(
+            (runtime.PACKAGE_ROOT / "highlight_style" / package_id / f"{STYLE_ID}.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(image, stored["style"]["ninePatchFile"])
 
     def test_invalid_json_rejected(self):
         response = self._upload(b"not json at all")

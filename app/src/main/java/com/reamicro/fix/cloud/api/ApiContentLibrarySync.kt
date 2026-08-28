@@ -146,7 +146,7 @@ class ApiContentLibrarySync(
                     payloadName = "${safeName(style.id)}.json",
                     payload = writeHighlightStylePayload(style),
                     localContentId = style.id,
-                    // 依赖本机图片的样式对方拿不到图，界面上提示用户。
+                    // 图片会内嵌进样式包，界面上提示用户上传内容包含图片。
                     usesLocalAssets = highlightStyleUsesLocalAssets(style),
                 )
             }

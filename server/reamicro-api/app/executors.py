@@ -58,6 +58,21 @@ def nested_value(value: Any, *keys: str) -> Any:
     return current
 
 
+def reamicro_business_error(body: Any) -> str:
+    """提取阅微 HTTP 200 响应里的业务错误。"""
+    if not isinstance(body, dict) or "code" not in body:
+        return ""
+    raw_code = body.get("code")
+    try:
+        code = int(str(raw_code).strip())
+    except (TypeError, ValueError):
+        return f"阅微返回无法识别的业务码：{redact_message(str(raw_code))}"
+    if code in (0, 200):
+        return ""
+    message = body.get("message") or body.get("msg") or "未提供错误说明"
+    return f"阅微业务码 {code}：{redact_message(str(message))}"
+
+
 def lottery_result_summary(body: Any) -> str:
     """从阅微抽卡响应中提取适合通知展示的结果。"""
     result = nested_value(body, "data", "result") or nested_value(body, "result") or nested_value(body, "data")
@@ -345,17 +360,23 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
     if task_type == "cloud_auto_read":
         books = request.get("books") if isinstance(request.get("books"), list) else []
         if not books:
+            recent_endpoint = str(request.get("recentEndpoint") or "rest/reader/get-read-record-list")
             status_code, record_body, raw = json_http_request(
                 base_url,
                 token,
                 {"pageNum": 1, "pageSize": int(request.get("recentLimit", 1) or 1)},
-                "rest/read/get-reader-record-list",
+                recent_endpoint,
             )
             if status_code < 200 or status_code >= 300:
                 return ("paused", f"读取最近阅读记录失败 HTTP {status_code}") if status_code in (401, 403, 429) else ("failed", f"读取最近阅读记录失败 HTTP {status_code}: {redact_message(raw)}")
+            business_error = reamicro_business_error(record_body)
+            if business_error:
+                return "failed", f"读取最近阅读记录失败：{business_error}"
             books = nested_value(record_body, "data", "list") or nested_value(record_body, "data") or []
         if isinstance(books, dict):
             books = [books]
+        if not isinstance(books, list):
+            books = []
         books = books[: max(1, min(int(request.get("bookLimit", 1) or 1), 10))]
         duration_minutes = max(1, min(int(request.get("durationMinutes", 30) or 30), 720))
         daily_limit_minutes = max(duration_minutes, min(int(request.get("dailyLimitMinutes", 720) or 720), 1440))
@@ -371,30 +392,24 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
         for book in books:
             if not isinstance(book, dict):
                 continue
-            cloud_id = book.get("cloudBookId") or book.get("bookId") or book.get("id")
-            if not cloud_id:
+            raw_cloud_id = book.get("cloudBookId") or book.get("bookId") or book.get("id")
+            try:
+                cloud_id = int(str(raw_cloud_id).strip())
+            except (TypeError, ValueError):
                 continue
-            progress_payload = {
-                "objectId": str(book.get("objectId") or cloud_id),
-                "bookId": str(book.get("bookId") or cloud_id),
-                "bookName": str(book.get("name") or book.get("bookName") or ""),
-                "chapterNum": int(book.get("chapterNum") or 0),
-                "cursorIndex": str(book.get("cursorIndex") or ""),
-                "title": str(book.get("name") or book.get("bookName") or ""),
-                "progress": min(0.999, float(book.get("progress") or 0.0) + 0.01),
-            }
-            progress_status, _, progress_raw = json_http_request(base_url, token, progress_payload, "rest/read/update-reader-progress")
-            if progress_status in (401, 403, 429):
-                return "paused", f"上报阅读进度触发认证/风控 HTTP {progress_status}"
-            if progress_status < 200 or progress_status >= 300:
-                return "failed", f"上报阅读进度失败 HTTP {progress_status}: {redact_message(progress_raw)}"
+            if cloud_id <= 0:
+                continue
             china_date = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
-            time_payload = {"list": [{"bookId": int(cloud_id), "date": china_date, "duration": duration_seconds, "verify": ""}]}
-            time_status, _, time_raw = json_http_request(base_url, token, time_payload, "rest/read/update-reader-time-by-date")
+            time_payload = {"list": [{"bookId": cloud_id, "date": china_date, "duration": duration_seconds, "verify": ""}]}
+            time_endpoint = str(request.get("timeEndpoint") or "rest/reader/update-read-time-by-date")
+            time_status, time_body, time_raw = json_http_request(base_url, token, time_payload, time_endpoint)
             if time_status in (401, 403, 429):
                 return "paused", f"上报阅读时长触发认证/风控 HTTP {time_status}"
             if time_status < 200 or time_status >= 300:
                 return "failed", f"上报阅读时长失败 HTTP {time_status}: {redact_message(time_raw)}"
+            business_error = reamicro_business_error(time_body)
+            if business_error:
+                return "failed", f"上报阅读时长失败：{business_error}"
             completed += 1
         if completed:
             task["dailyReadDate"] = today
@@ -413,14 +428,17 @@ def execute_task(task: dict[str, Any]) -> tuple[str, str]:
 
 
 async def verify_reamicro_secret(token: str, base_url: str) -> tuple[bool, str]:
-    status_code, _, raw = await asyncio.to_thread(
+    status_code, body, raw = await asyncio.to_thread(
         json_http_request,
         base_url,
         token,
         {"pageNum": 1, "pageSize": 1},
-        "rest/read/get-reader-record-list",
+        "rest/reader/get-read-record-list",
     )
     if 200 <= status_code < 300:
+        business_error = reamicro_business_error(body)
+        if business_error:
+            return False, business_error
         return True, "验证成功"
     return False, f"HTTP {status_code} {redact_message(raw)}"
 
