@@ -21,7 +21,7 @@ from tests.conftest_support import (
     seed_task,
     unwrap,
 )
-from app import main
+from app import main, runtime
 
 
 class ApiDiscoveryTest(unittest.TestCase):
@@ -45,7 +45,7 @@ class ApiDiscoveryTest(unittest.TestCase):
         response = self.client.get("/v1/discovery")
         self.assertEqual(200, response.status_code)
         data = unwrap(response)
-        self.assertEqual(main.API_VERSION, data["apiVersion"])
+        self.assertEqual(runtime.API_VERSION, data["apiVersion"])
         self.assertEqual(["host_account_allowlist"], data["authModes"])
         self.assertTrue(data["authRequired"])
         # 发现接口不能泄露密钥或白名单内容。
@@ -57,7 +57,7 @@ class ApiDiscoveryTest(unittest.TestCase):
         self.assertEqual(401, self.client.get("/v1/meta").status_code)
         allowed = self.client.get("/v1/meta", headers=module_headers())
         self.assertEqual(200, allowed.status_code)
-        self.assertEqual(main.API_VERSION, unwrap(allowed)["apiVersion"])
+        self.assertEqual(runtime.API_VERSION, unwrap(allowed)["apiVersion"])
 
     def test_allowlist_rejects_unknown_account(self):
         response = self.client.get("/v1/meta", headers=module_headers(account_id="999"))
@@ -172,7 +172,7 @@ class ApiPackageTest(unittest.TestCase):
         self.assertTrue(data["linked"])
         self.assertEqual("example-com", data["package"]["packageId"])
         # 服务器内容不能被模块覆盖。
-        stored = json.loads((main.PACKAGE_ROOT / "online_source" / "example-com" / "manifest.json").read_text(encoding="utf-8"))
+        stored = json.loads((runtime.PACKAGE_ROOT / "online_source" / "example-com" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual("1.2.0", stored["version"])
 
     def test_module_upload_creates_new_package(self):
@@ -500,10 +500,10 @@ class ApiReleaseTest(unittest.TestCase):
 
     def _seed_release(self, channel: str = "beta"):
         # 下载路由固定读 RELEASE_ROOT/latest.apk，文件名不能改。
-        main.RELEASE_ROOT.mkdir(parents=True, exist_ok=True)
-        apk = main.RELEASE_ROOT / "latest.apk"
+        runtime.RELEASE_ROOT.mkdir(parents=True, exist_ok=True)
+        apk = runtime.RELEASE_ROOT / "latest.apk"
         apk.write_bytes(b"PK\x03\x04fake-apk-bytes")
-        (main.RELEASE_ROOT / "latest.json").write_text(json.dumps({
+        (runtime.RELEASE_ROOT / "latest.json").write_text(json.dumps({
             "versionName": "2.4.0",
             "versionCode": 2400,
             "channel": channel,
@@ -527,7 +527,7 @@ class ApiReleaseTest(unittest.TestCase):
         self._seed_release("beta")
         response = self.client.get("/v1/releases/module/download", headers=module_headers())
         self.assertEqual(200, response.status_code)
-        expected = json.loads((main.RELEASE_ROOT / "latest.json").read_text(encoding="utf-8"))["sha256"]
+        expected = json.loads((runtime.RELEASE_ROOT / "latest.json").read_text(encoding="utf-8"))["sha256"]
         self.assertEqual(expected, main.hashlib.sha256(response.content).hexdigest())
 
     def test_missing_release_reports_not_configured(self):
@@ -553,7 +553,7 @@ class ApiReleaseTest(unittest.TestCase):
         self.assertEqual(400, response.status_code)
 
     def test_github_webhook_rejects_bad_signature(self):
-        main.GITHUB_WEBHOOK_SECRET = "webhook-secret"
+        runtime.GITHUB_WEBHOOK_SECRET = "webhook-secret"
         response = self.client.post(
             "/v1/webhooks/github",
             headers={"X-Hub-Signature-256": "sha256=deadbeef", "X-GitHub-Event": "release"},

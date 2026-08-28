@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app import main
+from app import main, runtime
+from tests.conftest_support import isolate
 
 
 ACCOUNT_ID = "3"
@@ -24,20 +25,7 @@ class OwnerIdentityTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
-        main.CONFIG_ROOT = root / "config"
-        main.CONFIG_PATH = main.CONFIG_ROOT / "server.json"
-        main.TASK_ROOT = root / "tasks"
-        main.TASKS_PATH = main.TASK_ROOT / "tasks.json"
-        main.TASK_LOG_ROOT = main.TASK_ROOT / "logs"
-        main.ACCOUNT_ROOT = root / "accounts"
-        main.ACCOUNT_PATH = main.ACCOUNT_ROOT / "credentials.json"
-        main.AUDIT_ROOT = root / "audit"
-        main.AUDIT_PATH = main.AUDIT_ROOT / "events.jsonl"
-        main.BACKUP_ROOT = root / "backups"
-        main.SECRET_BACKUP_ROOT = root / "backups" / "secrets"
-        main.STATE_DB_PATH = root / "state" / "reamicro.sqlite3"
-        main.SECRET_KEY = "test-secret-key-for-owner-identity"
-        main.state_store = None
+        isolate(root, secret_key="test-secret-key-for-owner-identity")
 
     def tearDown(self):
         self.temp_dir.cleanup()

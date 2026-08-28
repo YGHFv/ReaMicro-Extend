@@ -22,7 +22,7 @@ from tests.conftest_support import (
     seed_package,
     seed_task,
 )
-from app import main
+from app import main, runtime
 
 # 真实浏览器的 Accept 头。后台错误页按它决定返回 HTML 还是 JSON。
 BROWSER_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
@@ -55,7 +55,7 @@ class AdminAuthTest(unittest.TestCase):
             follow_redirects=False,
         )
         self.assertIn(login.status_code, (302, 303))
-        self.assertIn(main.ADMIN_SESSION_COOKIE, login.cookies)
+        self.assertIn(runtime.ADMIN_SESSION_COOKIE, login.cookies)
         page = self.client.get("/admin")
         self.assertEqual(200, page.status_code)
         self.assertIn("概览", page.text)
@@ -66,7 +66,7 @@ class AdminAuthTest(unittest.TestCase):
             data={"username": ADMIN_USER, "password": "wrong-password"},
             follow_redirects=False,
         )
-        self.assertNotIn(main.ADMIN_SESSION_COOKIE, response.cookies)
+        self.assertNotIn(runtime.ADMIN_SESSION_COOKIE, response.cookies)
         self.assertNotEqual(303, response.status_code)
 
     def test_logout_clears_session(self):
@@ -86,7 +86,7 @@ class AdminAuthTest(unittest.TestCase):
 
     def test_content_kind_sections_render(self):
         seed_package()
-        for kind in sorted(main.PACKAGE_KINDS):
+        for kind in sorted(runtime.PACKAGE_KINDS):
             response = self.client.get(f"/admin/content/{kind}", auth=admin_auth())
             self.assertEqual(200, response.status_code, f"{kind} 返回 {response.status_code}")
             self.assertIn("<table>", response.text, f"{kind} 缺少内容表格")
@@ -142,7 +142,7 @@ class AdminPackageOperationTest(unittest.TestCase):
             files={"payload": ("upload.json", payload, "application/json")},
         )
         self.assertEqual(200, response.status_code, response.text[:400])
-        kinds = {path.parent.name for path in (main.PACKAGE_ROOT / "online_source").glob("*/manifest.json")}
+        kinds = {path.parent.name for path in (runtime.PACKAGE_ROOT / "online_source").glob("*/manifest.json")}
         # 包 ID 由域名推导，点号是合法字符。
         self.assertIn("upload.example.org", kinds)
 
@@ -174,7 +174,7 @@ class AdminPackageOperationTest(unittest.TestCase):
             },
         )
         self.assertEqual(200, response.status_code, response.text[:400])
-        stored = json.loads((main.PACKAGE_ROOT / "online_source" / "example-com" / "manifest.json").read_text(encoding="utf-8"))
+        stored = json.loads((runtime.PACKAGE_ROOT / "online_source" / "example-com" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual("改名后的书源", stored["name"])
         self.assertEqual("beta", stored["channel"])
 
@@ -186,7 +186,7 @@ class AdminPackageOperationTest(unittest.TestCase):
             data={"csrf_token": self.csrf, "version": "1.1.0"},
         )
         self.assertEqual(200, response.status_code, response.text[:400])
-        stored = json.loads((main.PACKAGE_ROOT / "online_source" / "example-com" / "manifest.json").read_text(encoding="utf-8"))
+        stored = json.loads((runtime.PACKAGE_ROOT / "online_source" / "example-com" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual("1.1.0", stored["version"])
 
     def test_published_package_cannot_be_deleted_directly(self):
@@ -197,7 +197,7 @@ class AdminPackageOperationTest(unittest.TestCase):
             data={"csrf_token": self.csrf},
         )
         self.assertEqual(409, response.status_code)
-        self.assertTrue((main.PACKAGE_ROOT / "online_source" / "example-com" / "manifest.json").is_file())
+        self.assertTrue((runtime.PACKAGE_ROOT / "online_source" / "example-com" / "manifest.json").is_file())
         # 浏览器 Accept 必须拿到 HTML 提示页；API 客户端才拿 JSON。
         self.assertNotIn('{"code"', response.text)
         self.assertIn("操作未完成", response.text)
@@ -220,7 +220,7 @@ class AdminPackageOperationTest(unittest.TestCase):
             data={"csrf_token": self.csrf},
         )
         self.assertEqual(200, response.status_code, response.text[:400])
-        self.assertFalse((main.PACKAGE_ROOT / "online_source" / "draft-source").exists())
+        self.assertFalse((runtime.PACKAGE_ROOT / "online_source" / "draft-source").exists())
 
     def test_package_paths_reject_traversal(self):
         for package_id in ("..", "../..", "....", "a/b"):
@@ -408,7 +408,7 @@ class AdminSecurityTest(unittest.TestCase):
             data={"csrf_token": self.csrf},
         )
         self.assertEqual(200, created.status_code, created.text[:400])
-        snapshots = sorted(main.SERVER_BACKUP_ROOT.glob("*.zip"))
+        snapshots = sorted(runtime.SERVER_BACKUP_ROOT.glob("*.zip"))
         self.assertEqual(1, len(snapshots))
 
         verified = self.client.post(
@@ -429,7 +429,7 @@ class AdminSecurityTest(unittest.TestCase):
 
     def test_snapshot_restore_requires_confirmation(self):
         self.client.post("/admin/backups/server", auth=admin_auth(), data={"csrf_token": self.csrf})
-        name = sorted(main.SERVER_BACKUP_ROOT.glob("*.zip"))[0].name
+        name = sorted(runtime.SERVER_BACKUP_ROOT.glob("*.zip"))[0].name
         mismatch = self.client.post(
             "/admin/security/backups/restore",
             auth=admin_auth(),

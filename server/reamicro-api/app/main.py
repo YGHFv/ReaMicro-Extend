@@ -34,487 +34,146 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.responses import JSONResponse
 from fastapi.responses import Response
 from app.storage import StateStore
-
-API_VERSION = "1.1"
-CONFIG_ROOT = Path(os.getenv("REAMICRO_CONFIG_ROOT", "/data/config"))
-CONFIG_PATH = CONFIG_ROOT / "server.json"
-DEFAULT_FEATURES = {
-    item.strip()
-    for item in os.getenv(
-        "REAMICRO_FEATURES",
-        "association_source,theme_library,style_library,book_source_library,backup,module_update",
-    ).split(",")
-    if item.strip()
-}
-PACKAGE_ROOT = Path(os.getenv("REAMICRO_PACKAGE_ROOT", "/data/packages"))
-RELEASE_ROOT = Path(os.getenv("REAMICRO_RELEASE_ROOT", "/data/releases/module"))
-RELEASE_STATUS_PATH = RELEASE_ROOT / "sync-status.json"
-BACKUP_ROOT = Path(os.getenv("REAMICRO_BACKUP_ROOT", "/data/backups"))
-SECRET_BACKUP_ROOT = Path(os.getenv("REAMICRO_SECRET_BACKUP_ROOT", "/data/backups/secrets"))
-SERVER_BACKUP_ROOT = Path(os.getenv("REAMICRO_SERVER_BACKUP_ROOT", "/data/backups/server"))
-TASK_ROOT = Path(os.getenv("REAMICRO_TASK_ROOT", "/data/tasks"))
-TASKS_PATH = TASK_ROOT / "tasks.json"
-STATE_DB_PATH = Path(os.getenv("REAMICRO_STATE_DB", "/data/state/reamicro.sqlite3"))
-TASK_LOG_ROOT = TASK_ROOT / "logs"
-AUDIT_ROOT = Path(os.getenv("REAMICRO_AUDIT_ROOT", "/data/audit"))
-AUDIT_PATH = AUDIT_ROOT / "events.jsonl"
-ACCOUNT_ROOT = Path(os.getenv("REAMICRO_ACCOUNT_ROOT", "/data/accounts"))
-ACCOUNT_PATH = ACCOUNT_ROOT / "credentials.json"
-SECRET_KEY = os.getenv("REAMICRO_SECRET_KEY", "")
-ADMIN_USERNAME = os.getenv("REAMICRO_ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("REAMICRO_ADMIN_PASSWORD", "")
-SIGNING_PRIVATE_KEY_FILE = os.getenv("REAMICRO_SIGNING_PRIVATE_KEY_FILE", "")
-GITHUB_WEBHOOK_SECRET = os.getenv("REAMICRO_GITHUB_WEBHOOK_SECRET", "")
-config_lock = threading.RLock()
-state_store_lock = threading.RLock()
-state_store: StateStore | None = None
-rate_lock = threading.RLock()
-rate_buckets: dict[str, list[float]] = {}
-RATE_LIMIT = max(int(os.getenv("REAMICRO_RATE_LIMIT", "120")), 10)
-RATE_WINDOW_SECONDS = 60
-ADMIN_SESSION_SECONDS = max(int(os.getenv("REAMICRO_ADMIN_SESSION_SECONDS", "43200")), 900)
-ADMIN_COOKIE_SECURE = os.getenv("REAMICRO_ADMIN_COOKIE_SECURE", "true").lower() == "true"
-ADMIN_SESSION_COOKIE = "reamicro_admin_session"
-metrics_lock = threading.RLock()
-metrics_counters: dict[str, int] = {"requests": 0, "errors": 0, "rate_limited": 0}
-metrics_routes: dict[str, int] = {}
-RUN_SCHEDULER = os.getenv("REAMICRO_RUN_SCHEDULER", "true").lower() == "true"
-RUN_RELEASE_SYNC = os.getenv("REAMICRO_RUN_RELEASE_SYNC", "true").lower() == "true"
-# 模块只允许上传书源和关联源；样式与主题仍然只能由后台管理员发布。
-MODULE_UPLOAD_DEFAULT_KINDS = {"online_source", "association_source"}
-MODULE_UPLOAD_MAX_BYTES = 8 * 1024 * 1024
-
-
-def env_bool(name: str, default: bool) -> bool:
-    return os.getenv(name, str(default)).lower() == "true"
-
-
-def default_config() -> dict[str, Any]:
-    return {
-        "serverId": os.getenv("REAMICRO_SERVER_ID", "reamicro-api"),
-        "apiKey": os.getenv("REAMICRO_API_KEY", ""),
-        "apiKeyRecords": [],
-        "secretKey": os.getenv("REAMICRO_SECRET_KEY", ""),
-        "allowPublic": env_bool("REAMICRO_ALLOW_PUBLIC", True),
-        "authMode": os.getenv("REAMICRO_AUTH_MODE", ""),
-        "features": sorted(DEFAULT_FEATURES),
-        "minModuleVersion": os.getenv("REAMICRO_MIN_MODULE_VERSION", "2.0.0"),
-        "signingPublicKey": os.getenv("REAMICRO_SIGNING_PUBLIC_KEY", ""),
-        "githubRepository": os.getenv("REAMICRO_GITHUB_REPOSITORY", "YGHFv/ReaMicro-Extend"),
-        "githubToken": os.getenv("REAMICRO_GITHUB_TOKEN", ""),
-        "githubIncludePrerelease": env_bool("REAMICRO_GITHUB_INCLUDE_PRERELEASE", False),
-        "releaseSyncSeconds": bounded_config_int(os.getenv("REAMICRO_RELEASE_SYNC_SECONDS", "1800"), 1800, 300),
-        "releaseVersionCode": bounded_config_int(os.getenv("REAMICRO_RELEASE_VERSION_CODE", "0"), 0, 0),
-        "serverSnapshotEnabled": env_bool("REAMICRO_SERVER_SNAPSHOT_ENABLED", True),
-        "serverSnapshotSeconds": bounded_config_int(os.getenv("REAMICRO_SERVER_SNAPSHOT_SECONDS", "86400"), 86400, 3600),
-        "serverSnapshotRetention": bounded_config_int(os.getenv("REAMICRO_SERVER_SNAPSHOT_RETENTION", "30"), 30, 3),
-        "accounts": {},
-        "primaryAdmin": {},
-        "adminAccounts": {},
-        "hostAccountAllowlist": [],
-        "moduleUploadEnabled": env_bool("REAMICRO_MODULE_UPLOAD_ENABLED", False),
-        "moduleUploadAllowlist": [],
-        "moduleUploadKinds": sorted(MODULE_UPLOAD_DEFAULT_KINDS),
-    }
+from app import runtime
+from app.config_store import (
+    active_auth_mode,
+    api_key_auth_configured,
+    bounded_config_int,
+    configured_auth_modes,
+    default_config,
+    infer_auth_mode,
+    load_config,
+    module_upload_kinds,
+    module_upload_kinds_form,
+    normalized_config_list,
+    public_server_capabilities,
+    save_config,
+)
+from app.responses import (
+    response,
+)
+from app.audit import (
+    audit_actor,
+    audit_event,
+    task_log,
+)
+from app.crypto import (
+    api_key_digest,
+    decrypt_secret,
+    encrypt_secret,
+    generate_long_secret,
+    password_hash,
+    password_matches,
+    secret_cipher_key,
+    secret_key_id,
+)
+from app.state import (
+    backup_owner_dir_name,
+    canonical_owner_of,
+    canonicalize_owner_identities,
+    credential_public,
+    enqueue_task_notification,
+    find_duplicate_task,
+    legacy_owner_identities,
+    load_credentials,
+    load_notifications,
+    load_presence,
+    load_tasks,
+    merge_duplicate_credentials,
+    merge_duplicate_tasks,
+    migrate_legacy_backup_dirs,
+    owner_host_account_id,
+    save_credentials,
+    save_notifications,
+    save_presence,
+    save_tasks,
+    task_credential_id,
+    task_unique_key,
+)
+from app.labels import (
+    _ADMIN_METADATA_LABELS,
+    _admin_action_label,
+    _admin_channel_label,
+    _admin_health_label,
+    _admin_kind_label,
+    _admin_metadata_label,
+    _admin_owner_label,
+    _admin_result_label,
+    _admin_status_label,
+    _admin_task_label,
+    _admin_task_status_label,
+)
 
 
-def bounded_config_int(value: Any, default: int, minimum: int) -> int:
-    try:
-        return max(int(value), minimum)
-    except (TypeError, ValueError, OverflowError):
-        return default
 
 
-def normalized_config_list(value: Any) -> list[str]:
-    if isinstance(value, str):
-        values = value.replace("\r", "\n").replace(",", "\n").splitlines()
-    elif isinstance(value, (list, tuple, set)):
-        values = value
-    else:
-        values = []
-    return sorted({str(item).strip() for item in values if str(item).strip()})
 
 
-def module_upload_kinds(value: Any) -> list[str]:
-    """模块可上传的内容类型。只保留白名单内的类型，配置为空时回退到默认集合。"""
-    values = {item for item in normalized_config_list(value) if item in MODULE_UPLOAD_DEFAULT_KINDS}
-    return sorted(values or MODULE_UPLOAD_DEFAULT_KINDS)
 
 
-# 后台表单字段与 module_upload_kinds 同名，另取别名避免函数被参数遮蔽。
-module_upload_kinds_form = module_upload_kinds
 
 
-def load_config() -> dict[str, Any]:
-    with config_lock:
-        config = default_config()
-        auth_mode_explicit = False
-        try:
-            if CONFIG_PATH.is_file():
-                stored = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-                if isinstance(stored, dict):
-                    config.update(stored)
-                    auth_mode_explicit = str(stored.get("authMode", "")).strip() in {"public", "api_key", "account", "host_account_allowlist"}
-        except (OSError, ValueError):
-            pass
-        config["features"] = normalized_config_list(config.get("features", []))
-        config["releaseSyncSeconds"] = bounded_config_int(config.get("releaseSyncSeconds", 1800), 1800, 300)
-        config["serverSnapshotSeconds"] = bounded_config_int(config.get("serverSnapshotSeconds", 86400), 86400, 3600)
-        config["serverSnapshotRetention"] = bounded_config_int(config.get("serverSnapshotRetention", 30), 30, 3)
-        config["accounts"] = config.get("accounts", {}) if isinstance(config.get("accounts", {}), dict) else {}
-        config["apiKeyRecords"] = config.get("apiKeyRecords", []) if isinstance(config.get("apiKeyRecords", []), list) else []
-        config["primaryAdmin"] = config.get("primaryAdmin", {}) if isinstance(config.get("primaryAdmin", {}), dict) else {}
-        config["adminAccounts"] = config.get("adminAccounts", {}) if isinstance(config.get("adminAccounts", {}), dict) else {}
-        config["hostAccountAllowlist"] = normalized_config_list(config.get("hostAccountAllowlist", []))
-        config["moduleUploadEnabled"] = bool(config.get("moduleUploadEnabled", False))
-        config["moduleUploadAllowlist"] = normalized_config_list(config.get("moduleUploadAllowlist", []))
-        config["moduleUploadKinds"] = module_upload_kinds(config.get("moduleUploadKinds"))
-        if config.get("authMode") not in {"public", "api_key", "account", "host_account_allowlist"}:
-            config["authMode"] = infer_auth_mode(config)
-        config["_authModeExplicit"] = auth_mode_explicit
-        return config
 
 
-def save_config(next_config: dict[str, Any]) -> dict[str, Any]:
-    with config_lock:
-        CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
-        safe = default_config()
-        safe.update(next_config)
-        safe["features"] = normalized_config_list(safe.get("features", []))
-        safe["releaseSyncSeconds"] = bounded_config_int(safe.get("releaseSyncSeconds", 1800), 1800, 300)
-        safe["serverSnapshotSeconds"] = bounded_config_int(safe.get("serverSnapshotSeconds", 86400), 86400, 3600)
-        safe["serverSnapshotRetention"] = bounded_config_int(safe.get("serverSnapshotRetention", 30), 30, 3)
-        safe["accounts"] = safe.get("accounts", {}) if isinstance(safe.get("accounts", {}), dict) else {}
-        safe["apiKeyRecords"] = safe.get("apiKeyRecords", []) if isinstance(safe.get("apiKeyRecords", []), list) else []
-        safe["primaryAdmin"] = safe.get("primaryAdmin", {}) if isinstance(safe.get("primaryAdmin", {}), dict) else {}
-        safe["adminAccounts"] = safe.get("adminAccounts", {}) if isinstance(safe.get("adminAccounts", {}), dict) else {}
-        safe["hostAccountAllowlist"] = normalized_config_list(safe.get("hostAccountAllowlist", []))
-        safe["moduleUploadEnabled"] = bool(safe.get("moduleUploadEnabled", False))
-        safe["moduleUploadAllowlist"] = normalized_config_list(safe.get("moduleUploadAllowlist", []))
-        safe["moduleUploadKinds"] = module_upload_kinds(safe.get("moduleUploadKinds"))
-        if safe.get("authMode") not in {"public", "api_key", "account", "host_account_allowlist"}:
-            safe["authMode"] = infer_auth_mode(safe)
-        safe.pop("_authModeExplicit", None)
-        temp = CONFIG_PATH.with_suffix(".tmp")
-        temp.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp.replace(CONFIG_PATH)
-        return safe
 
 
-def infer_auth_mode(config: dict[str, Any]) -> str:
-    """从旧版多认证配置迁移到单选认证模式。"""
-    if config.get("hostAccountAllowlist"):
-        return "host_account_allowlist"
-    if config.get("accounts"):
-        return "account"
-    if api_key_auth_configured(config):
-        return "api_key"
-    return "public"
 
 
-def active_auth_mode(config: dict[str, Any]) -> str:
-    mode = str(config.get("authMode") or infer_auth_mode(config))
-    if mode == "public" and not config.get("_authModeExplicit") and (api_key_auth_configured(config) or config.get("accounts") or config.get("hostAccountAllowlist")):
-        return infer_auth_mode(config)
-    return mode if mode in {"public", "api_key", "account", "host_account_allowlist"} else "api_key"
 
 
-def get_state_store() -> StateStore:
-    global state_store
-    with state_store_lock:
-        if state_store is None or state_store.path != STATE_DB_PATH:
-            state_store = StateStore(STATE_DB_PATH)
-            state_store.initialize()
-            state_store.import_json_namespace("tasks", TASKS_PATH)
-            state_store.import_json_namespace("credentials", ACCOUNT_PATH)
-        return state_store
 
 
-def load_tasks() -> dict[str, dict[str, Any]]:
-    return get_state_store().load_namespace("tasks")
 
 
-def save_tasks(tasks: dict[str, dict[str, Any]]) -> None:
-    get_state_store().save_namespace("tasks", tasks)
 
 
-def load_notifications() -> dict[str, dict[str, Any]]:
-    return get_state_store().load_namespace("notifications")
 
 
-def save_notifications(items: dict[str, dict[str, Any]]) -> None:
-    get_state_store().save_namespace("notifications", items)
 
 
-def load_presence() -> dict[str, dict[str, Any]]:
-    return get_state_store().load_namespace("presence")
 
 
-def save_presence(items: dict[str, dict[str, Any]]) -> None:
-    get_state_store().save_namespace("presence", items)
 
 
-def enqueue_task_notification(task: dict[str, Any], result: str, message: str, finished_at: int) -> str:
-    notification_id = "msg_" + secrets.token_hex(10)
-    items = load_notifications()
-    items[notification_id] = {
-        "id": notification_id,
-        "owner": str(task.get("owner", "")),
-        "taskId": str(task.get("id", "")),
-        "taskType": str(task.get("taskType", "")),
-        "result": result,
-        "title": _admin_task_label(task.get("taskType", "")) + ("执行完成" if result == "success" else "执行异常"),
-        "message": message,
-        "createdAt": finished_at,
-        "deliveredAt": 0,
-    }
-    # 每个用户最多保留最近 200 条，防止长期离线无限增长。
-    owned = sorted((item for item in items.values() if item.get("owner") == task.get("owner")), key=lambda item: int(item.get("createdAt", 0)), reverse=True)
-    for expired in owned[200:]:
-        items.pop(str(expired.get("id", "")), None)
-    save_notifications(items)
-    return notification_id
 
 
-def merge_duplicate_tasks() -> int:
-    """同一所有者、同一同步密钥、同一任务类型只保留最新任务。"""
-    tasks = load_tasks()
-    groups: dict[tuple[str, str, str], list[tuple[str, dict[str, Any]]]] = {}
-    for key, task in tasks.items():
-        if not isinstance(task, dict):
-            continue
-        task_type = str(task.get("taskType", ""))
-        credential_id = task_credential_id(task)
-        if task_type and credential_id and task_type != "http":
-            groups.setdefault((str(task.get("owner", "")), task_type, credential_id), []).append((key, task))
-    removed = 0
-    for items in groups.values():
-        if len(items) < 2:
-            continue
-        items.sort(key=lambda pair: (bounded_config_int(pair[1].get("updatedAt", 0), 0, 0), bounded_config_int(pair[1].get("createdAt", 0), 0, 0), pair[0]), reverse=True)
-        for duplicate_id, _ in items[1:]:
-            tasks.pop(duplicate_id, None)
-            removed += 1
-    if removed:
-        save_tasks(tasks)
-        audit_event("tasks_merged", metadata={"removedCount": removed, "source": "dedupe"})
-    return removed
 
 
-def task_unique_key(task: dict[str, Any]) -> tuple[str, str, str] | None:
-    """返回需要幂等的任务键；通用 HTTP 任务允许多个并存。"""
-    task_type = str(task.get("taskType", "")).strip()
-    credential_id = task_credential_id(task)
-    owner = str(task.get("owner", "")).strip()
-    if not owner or not credential_id or not task_type or task_type == "http":
-        return None
-    return owner, credential_id, task_type
 
 
-def find_duplicate_task(tasks: dict[str, dict[str, Any]], task: dict[str, Any], exclude_id: str = "") -> tuple[str, dict[str, Any]] | None:
-    key = task_unique_key(task)
-    if not key:
-        return None
-    candidates = [(task_id, item) for task_id, item in tasks.items() if task_id != exclude_id and task_unique_key(item) == key]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda pair: (bounded_config_int(pair[1].get("updatedAt", 0), 0, 0), bounded_config_int(pair[1].get("createdAt", 0), 0, 0), pair[0]))
 
 
-def load_credentials() -> dict[str, dict[str, Any]]:
-    return get_state_store().load_namespace("credentials")
 
 
-def save_credentials(credentials: dict[str, dict[str, Any]]) -> None:
-    get_state_store().save_namespace("credentials", credentials)
 
 
-def merge_duplicate_credentials() -> int:
-    """归并历史上同一所有者、同一阅微账号产生的重复同步密钥。"""
-    credentials = load_credentials()
-    groups: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
-    for key, item in credentials.items():
-        if not isinstance(item, dict) or item.get("type", "reamicro") != "reamicro":
-            continue
-        owner = str(item.get("owner", ""))
-        account_id = str(item.get("accountId", ""))
-        if owner and account_id:
-            groups.setdefault((owner, account_id), []).append((key, item))
-    removed: dict[str, str] = {}
-    for (owner, _), items in groups.items():
-        if len(items) < 2:
-            continue
-        items.sort(key=lambda pair: (bounded_config_int(pair[1].get("updatedAt", 0), 0, 0), pair[0]), reverse=True)
-        keep_id = items[0][0]
-        for duplicate_id, _ in items[1:]:
-            credentials.pop(duplicate_id, None)
-            removed[duplicate_id] = keep_id
-    if not removed:
-        return 0
-    save_credentials(credentials)
-    tasks = load_tasks()
-    rebound = False
-    for task in tasks.values():
-        task_owner_value = str(task.get("owner", ""))
-        old_id = str(task.get("credentialId", ""))
-        if old_id in removed:
-            task["credentialId"] = removed[old_id]
-            rebound = True
-        if task.get("requestEncrypted"):
-            try:
-                request_value = decrypt_secret(str(task["requestEncrypted"]))
-            except Exception:
-                request_value = None
-            if isinstance(request_value, dict) and str(request_value.get("credentialId", "")) in removed:
-                request_value["credentialId"] = removed[str(request_value["credentialId"])]
-                task["requestEncrypted"] = encrypt_secret(request_value)
-                rebound = True
-        if task_owner_value and task.get("credentialId") in removed:
-            task["credentialId"] = removed[str(task["credentialId"])]
-            rebound = True
-    if rebound:
-        save_tasks(tasks)
-    audit_event("credentials_merged", metadata={"removedCount": len(removed), "source": "admin_read"})
-    return len(removed)
 
 
-def canonicalize_owner_identities() -> dict[str, int]:
-    """把历史遗留的归属写法统一成 `host:<阅微账号>`，并归并因此产生的重复记录。
-
-    旧版本按认证模式拼归属（`host-public:3`、`key:<hash>:host:3`、`account:name:host:3`），
-    管理员一改认证模式，同一台设备就换了身份：密钥、任务、消息、在线记录和备份目录全部分裂。
-    这里在启动时做一次性折叠，保证升级后旧数据还能被模块看到。
-    """
-    stats = {"credentials": 0, "tasks": 0, "notifications": 0, "presence": 0, "backups": 0}
-
-    credentials = load_credentials()
-    for item in credentials.values():
-        if isinstance(item, dict):
-            canonical = canonical_owner_of(str(item.get("owner", "")))
-            if canonical and canonical != item.get("owner"):
-                item["owner"] = canonical
-                stats["credentials"] += 1
-    if stats["credentials"]:
-        save_credentials(credentials)
-
-    tasks = load_tasks()
-    for task in tasks.values():
-        canonical = canonical_owner_of(str(task.get("owner", "")))
-        if canonical and canonical != task.get("owner"):
-            task["owner"] = canonical
-            stats["tasks"] += 1
-    if stats["tasks"]:
-        save_tasks(tasks)
-
-    notifications = load_notifications()
-    for item in notifications.values():
-        canonical = canonical_owner_of(str(item.get("owner", "")))
-        if canonical and canonical != item.get("owner"):
-            item["owner"] = canonical
-            stats["notifications"] += 1
-    if stats["notifications"]:
-        save_notifications(notifications)
-
-    # 在线记录以归属为键，折叠后同一账号的多行要合并成最近一次心跳。
-    presence = load_presence()
-    merged: dict[str, dict[str, Any]] = {}
-    for key, item in presence.items():
-        if not isinstance(item, dict):
-            continue
-        canonical = canonical_owner_of(str(item.get("owner", key)))
-        if not canonical:
-            continue
-        item["owner"] = canonical
-        existing = merged.get(canonical)
-        if existing is None:
-            merged[canonical] = item
-            continue
-        stats["presence"] += 1
-        if bounded_config_int(item.get("lastSeenAt", 0), 0, 0) >= bounded_config_int(existing.get("lastSeenAt", 0), 0, 0):
-            merged[canonical] = item
-    if stats["presence"] or set(merged) != set(presence):
-        save_presence(merged)
-
-    stats["backups"] = migrate_legacy_backup_dirs()
-    if any(stats.values()):
-        audit_event("owner_identity_canonicalized", metadata=stats)
-    return stats
 
 
-def migrate_legacy_backup_dirs() -> int:
-    """把旧归属写法命名的备份目录迁到规范归属目录下。"""
-    moved = 0
-    accounts = {
-        owner_host_account_id(str(item.get("owner", "")))
-        for source in (load_credentials().values(), load_tasks().values(), load_presence().values())
-        for item in source
-        if isinstance(item, dict)
-    }
-    for account_id in {value for value in accounts if value}:
-        canonical_dir_name = backup_owner_dir_name(f"host:{account_id}")
-        for legacy in legacy_owner_identities(f"host:{account_id}"):
-            legacy_dir_name = backup_owner_dir_name(legacy)
-            if legacy_dir_name == canonical_dir_name:
-                continue
-            for root in (BACKUP_ROOT, SECRET_BACKUP_ROOT):
-                legacy_dir = root / legacy_dir_name
-                target_dir = root / canonical_dir_name
-                if not legacy_dir.is_dir():
-                    continue
-                if target_dir.exists():
-                    # 规范目录已有数据时不覆盖，仅补齐缺失文件。
-                    for path in legacy_dir.rglob("*"):
-                        if not path.is_file():
-                            continue
-                        destination = target_dir / path.relative_to(legacy_dir)
-                        if destination.exists():
-                            continue
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(path, destination)
-                        moved += 1
-                else:
-                    target_dir.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(legacy_dir), str(target_dir))
-                    moved += 1
-    return moved
 
 
-def audit_event(action: str, actor: str = "system", request_id: str = "", success: bool = True, metadata: dict[str, Any] | None = None) -> None:
-    """记录不含敏感值的管理与安全事件。"""
-    try:
-        AUDIT_ROOT.mkdir(parents=True, exist_ok=True)
-        event = {
-            "at": int(datetime.now(timezone.utc).timestamp() * 1000),
-            "action": action,
-            "actor": actor,
-            "requestId": request_id,
-            "success": success,
-            "metadata": metadata or {},
-        }
-        with AUDIT_PATH.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
-    except OSError:
-        pass
 
 
-def audit_actor(actor: dict[str, Any] | None) -> str:
-    if not actor:
-        return "system"
-    return f"admin:{actor.get('username', 'unknown')}"
+
+
+
+
+
 
 
 def create_server_snapshot() -> Path:
-    SERVER_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+    runtime.SERVER_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    database_copy = SERVER_BACKUP_ROOT / f"state-{timestamp}.sqlite3"
-    archive = SERVER_BACKUP_ROOT / f"reamicro-server-{timestamp}.zip"
-    get_state_store().backup(database_copy)
+    database_copy = runtime.SERVER_BACKUP_ROOT / f"state-{timestamp}.sqlite3"
+    archive = runtime.SERVER_BACKUP_ROOT / f"reamicro-server-{timestamp}.zip"
+    runtime.get_state_store().backup(database_copy)
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as stream:
         stream.write(database_copy, "state/reamicro.sqlite3")
-        if CONFIG_PATH.is_file():
-            stream.write(CONFIG_PATH, "config/server.json")
+        if runtime.CONFIG_PATH.is_file():
+            stream.write(runtime.CONFIG_PATH, "config/server.json")
         manifest = {"createdAt": int(datetime.now(timezone.utc).timestamp() * 1000), "files": []}
-        source_map = {"state/reamicro.sqlite3": database_copy, "config/server.json": CONFIG_PATH}
+        source_map = {"state/reamicro.sqlite3": database_copy, "config/server.json": runtime.CONFIG_PATH}
         for name, source in source_map.items():
             if source.is_file():
                 manifest["files"].append({"path": name, "size": source.stat().st_size, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()})
@@ -525,7 +184,7 @@ def create_server_snapshot() -> Path:
 
 
 def prune_server_snapshots(retention: int) -> int:
-    snapshots = sorted(SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"), reverse=True)
+    snapshots = sorted(runtime.SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"), reverse=True)
     removed = 0
     for expired in snapshots[max(int(retention), 3):]:
         expired.unlink(missing_ok=True)
@@ -535,7 +194,7 @@ def prune_server_snapshots(retention: int) -> int:
 
 def list_server_snapshots() -> list[dict[str, Any]]:
     items = []
-    for path in sorted(SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"), reverse=True):
+    for path in sorted(runtime.SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"), reverse=True):
         try:
             items.append({"name": path.name, "size": path.stat().st_size, "modifiedAt": int(path.stat().st_mtime * 1000), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
         except OSError:
@@ -569,58 +228,28 @@ def rotate_secret_key(new_key: str) -> int:
 
 def allow_rate_limit(key: str) -> bool:
     now = time.monotonic()
-    with rate_lock:
-        values = [item for item in rate_buckets.get(key, []) if now - item < RATE_WINDOW_SECONDS]
-        if len(values) >= RATE_LIMIT:
-            rate_buckets[key] = values
+    with runtime.rate_lock:
+        values = [item for item in runtime.rate_buckets.get(key, []) if now - item < runtime.RATE_WINDOW_SECONDS]
+        if len(values) >= runtime.RATE_LIMIT:
+            runtime.rate_buckets[key] = values
             return False
         values.append(now)
-        rate_buckets[key] = values
-        if len(rate_buckets) > 10_000:
-            oldest = sorted(rate_buckets, key=lambda item: rate_buckets[item][-1] if rate_buckets[item] else now)[:1000]
+        runtime.rate_buckets[key] = values
+        if len(runtime.rate_buckets) > 10_000:
+            oldest = sorted(runtime.rate_buckets, key=lambda item: runtime.rate_buckets[item][-1] if runtime.rate_buckets[item] else now)[:1000]
             for item in oldest:
-                rate_buckets.pop(item, None)
+                runtime.rate_buckets.pop(item, None)
         return True
 
 
-def task_log(task_id: str, message: str, level: str = "INFO") -> None:
-    TASK_LOG_ROOT.mkdir(parents=True, exist_ok=True)
-    path = TASK_LOG_ROOT / f"{task_id}.log"
-    with path.open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps({
-            "at": int(datetime.now(timezone.utc).timestamp() * 1000),
-            "taskId": task_id,
-            "level": level,
-            "message": message,
-        }, ensure_ascii=False) + "\n")
 
 
-def secret_cipher_key() -> bytes:
-    material = str(load_config().get("secretKey", "")) or SECRET_KEY or ADMIN_PASSWORD
-    if not material:
-        raise ValueError("未配置 REAMICRO_SECRET_KEY 或管理密码")
-    return hashlib.sha256(material.encode("utf-8")).digest()
 
 
-def secret_key_id() -> str:
-    material = str(load_config().get("secretKey", "")) or SECRET_KEY or ADMIN_PASSWORD
-    return "key_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
 
 
-def encrypt_secret(value: Any) -> str:
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    nonce = secrets.token_bytes(12)
-    body = json.dumps(value, ensure_ascii=False).encode("utf-8")
-    encrypted = AESGCM(secret_cipher_key()).encrypt(nonce, body, b"reamicro-task-v1")
-    return "RCSEC2:" + secret_key_id() + ":" + base64.urlsafe_b64encode(nonce + encrypted).decode("ascii")
 
 
-def decrypt_secret(value: str) -> Any:
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    encoded = value.split(":", 2)[-1] if value.startswith("RCSEC2:") else value
-    raw = base64.urlsafe_b64decode(encoded.encode("ascii"))
-    body = AESGCM(secret_cipher_key()).decrypt(raw[:12], raw[12:], b"reamicro-task-v1")
-    return json.loads(body.decode("utf-8"))
 
 
 def task_interval(task: dict[str, Any]) -> int:
@@ -693,16 +322,6 @@ def normalized_time_of_day(value: Any) -> str:
         raise ValueError("每日执行时间必须使用 HH:MM 格式")
 
 
-def task_credential_id(task: dict[str, Any]) -> str:
-    if task.get("credentialId"):
-        return str(task.get("credentialId"))
-    if not task.get("requestEncrypted"):
-        return ""
-    try:
-        request = decrypt_secret(str(task["requestEncrypted"]))
-        return str(request.get("credentialId", "")) if isinstance(request, dict) else ""
-    except Exception:
-        return ""
 
 
 def execute_http_task(task: dict[str, Any]) -> tuple[str, str]:
@@ -1188,7 +807,7 @@ async def task_scheduler_loop() -> None:
                 next_run = int(task.get("nextRunAt", 0))
                 if next_run > now:
                     continue
-                if not get_state_store().acquire_task_lock(task_id, worker_id, now + 15 * 60 * 1000, now):
+                if not runtime.get_state_store().acquire_task_lock(task_id, worker_id, now + 15 * 60 * 1000, now):
                     continue
                 task["status"] = "running"
                 task["lastRunAt"] = now
@@ -1227,14 +846,14 @@ async def task_scheduler_loop() -> None:
                     changed = True
                     save_tasks(tasks)
                 finally:
-                    get_state_store().release_task_lock(task_id, worker_id)
+                    runtime.get_state_store().release_task_lock(task_id, worker_id)
             if changed:
                 save_tasks(tasks)
         except Exception as error:
             print(f"task scheduler failed: {error}", flush=True)
         await asyncio.sleep(15)
 
-app = FastAPI(title="ReaMicro API", version=API_VERSION)
+app = FastAPI(title="ReaMicro API", version=runtime.API_VERSION)
 
 
 def github_request(url: str) -> urllib.request.Request:
@@ -1313,9 +932,9 @@ def sync_module_release() -> dict[str, Any] | None:
             "release" not in item.get("name", "").lower(),
         ),
     )[0]
-    RELEASE_ROOT.mkdir(parents=True, exist_ok=True)
-    apk_path = RELEASE_ROOT / "latest.apk"
-    metadata_path = RELEASE_ROOT / "latest.json"
+    runtime.RELEASE_ROOT.mkdir(parents=True, exist_ok=True)
+    apk_path = runtime.RELEASE_ROOT / "latest.apk"
+    metadata_path = runtime.RELEASE_ROOT / "latest.json"
     build_time = release_timestamp(asset.get("updated_at") or release.get("published_at", ""))
     previous = {}
     if metadata_path.is_file():
@@ -1324,7 +943,7 @@ def sync_module_release() -> dict[str, Any] | None:
         except (OSError, ValueError):
             previous = {}
     if previous.get("assetId") != asset.get("id") or previous.get("buildTime") != build_time or not apk_path.is_file():
-        temp = RELEASE_ROOT / ".latest.apk.tmp"
+        temp = runtime.RELEASE_ROOT / ".latest.apk.tmp"
         with urllib.request.urlopen(github_request(asset["browser_download_url"]), timeout=120) as source, temp.open("wb") as target:
             shutil.copyfileobj(source, target)
         temp.replace(apk_path)
@@ -1346,8 +965,8 @@ def sync_module_release() -> dict[str, Any] | None:
         "etag": hashlib.sha256(apk_path.read_bytes()).hexdigest(),
     }
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    RELEASE_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    RELEASE_STATUS_PATH.write_text(json.dumps({"status": "ok", "syncedAt": int(datetime.now(timezone.utc).timestamp() * 1000), "versionName": version_name, "assetId": asset.get("id")}, ensure_ascii=False, indent=2), encoding="utf-8")
+    runtime.RELEASE_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    runtime.RELEASE_STATUS_PATH.write_text(json.dumps({"status": "ok", "syncedAt": int(datetime.now(timezone.utc).timestamp() * 1000), "versionName": version_name, "assetId": asset.get("id")}, ensure_ascii=False, indent=2), encoding="utf-8")
     return metadata
 
 
@@ -1356,8 +975,8 @@ async def release_sync_loop() -> None:
         try:
             await asyncio.to_thread(sync_module_release)
         except Exception as error:
-            RELEASE_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            RELEASE_STATUS_PATH.write_text(json.dumps({"status": "error", "failedAt": int(datetime.now(timezone.utc).timestamp() * 1000), "message": redact_message(str(error))}, ensure_ascii=False, indent=2), encoding="utf-8")
+            runtime.RELEASE_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            runtime.RELEASE_STATUS_PATH.write_text(json.dumps({"status": "error", "failedAt": int(datetime.now(timezone.utc).timestamp() * 1000), "message": redact_message(str(error))}, ensure_ascii=False, indent=2), encoding="utf-8")
             print(f"module release sync failed: {error}", flush=True)
         await asyncio.sleep(load_config()["releaseSyncSeconds"])
 
@@ -1376,53 +995,25 @@ async def server_snapshot_loop() -> None:
 
 @app.on_event("startup")
 async def start_release_sync() -> None:
-    get_state_store()
+    runtime.get_state_store()
     # 认证模式变更过的服务器会留下多套归属写法，先折叠再启动调度，避免任务按旧归属重复执行。
     canonicalize_owner_identities()
-    if RUN_RELEASE_SYNC:
+    if runtime.RUN_RELEASE_SYNC:
         asyncio.create_task(release_sync_loop())
-    if RUN_SCHEDULER:
+    if runtime.RUN_SCHEDULER:
         recover_interrupted_tasks()
         asyncio.create_task(task_scheduler_loop())
         asyncio.create_task(server_snapshot_loop())
 
 
-def response(data: Any = None, code: str = "OK", message: str = "", request_id: str = "") -> dict[str, Any]:
-    return {
-        "code": code,
-        "message": message,
-        "data": data,
-        "requestId": request_id or "req_" + secrets.token_hex(8),
-        "serverTime": datetime.now(timezone.utc).isoformat(),
-    }
 
 
-def password_hash(password: str, salt: bytes | None = None) -> str:
-    salt = salt or secrets.token_bytes(16)
-    digest = _hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 210_000)
-    return "pbkdf2$210000$" + base64.urlsafe_b64encode(salt).decode() + "$" + base64.urlsafe_b64encode(digest).decode()
 
 
-def password_matches(password: str, encoded: str) -> bool:
-    try:
-        scheme, rounds, salt_text, digest_text = encoded.split("$", 3)
-        if scheme != "pbkdf2":
-            return False
-        salt = base64.urlsafe_b64decode(salt_text.encode())
-        expected = base64.urlsafe_b64decode(digest_text.encode())
-        actual = _hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, int(rounds))
-        return hmac.compare_digest(actual, expected)
-    except (ValueError, TypeError):
-        return False
 
 
-def generate_long_secret(byte_length: int = 48) -> str:
-    """生成适合 API Key 或初始密码的 URL 安全随机值。"""
-    return secrets.token_urlsafe(max(32, byte_length))
 
 
-def api_key_digest(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def configured_api_key(config: dict[str, Any], value: str | None) -> dict[str, Any] | None:
@@ -1482,13 +1073,6 @@ def enforce_api_scope(request: Request, api_key_value: str | None) -> None:
         raise HTTPException(status_code=403, detail=response(code="API_SCOPE_REQUIRED", message=f"当前 API Key 缺少权限：{scope}"))
 
 
-def api_key_auth_configured(config: dict[str, Any]) -> bool:
-    if str(config.get("apiKey", "")):
-        return True
-    return any(
-        isinstance(record, dict) and record.get("enabled", True) and str(record.get("digest", ""))
-        for record in config.get("apiKeyRecords", [])
-    )
 
 
 def normalized_admin_name(value: str) -> str:
@@ -1517,11 +1101,11 @@ def resolve_admin(credentials: HTTPBasicCredentials | None, allow_bootstrap: boo
             return actor
         raise HTTPException(status_code=401, detail="后台会话已失效")
     if not primary_admin_configured(config):
-        if not ADMIN_PASSWORD:
+        if not runtime.ADMIN_PASSWORD:
             raise HTTPException(status_code=503, detail="未配置主管理员初始密码 REAMICRO_ADMIN_PASSWORD")
-        if credentials and hmac.compare_digest(credentials.username, ADMIN_USERNAME) and hmac.compare_digest(credentials.password, ADMIN_PASSWORD):
+        if credentials and hmac.compare_digest(credentials.username, runtime.ADMIN_USERNAME) and hmac.compare_digest(credentials.password, runtime.ADMIN_PASSWORD):
             if allow_bootstrap:
-                return {"username": ADMIN_USERNAME, "role": "primary", "needsSetup": True}
+                return {"username": runtime.ADMIN_USERNAME, "role": "primary", "needsSetup": True}
             raise HTTPException(status_code=403, detail="主管理员首次登录必须先设置新账号密码")
     else:
         primary = config["primaryAdmin"]
@@ -1558,7 +1142,7 @@ def require_admin(credentials: HTTPBasicCredentials | None, allow_bootstrap: boo
 def admin_auth_version(config: dict[str, Any], actor: dict[str, Any]) -> str:
     username = str(actor.get("username", ""))
     if actor.get("needsSetup"):
-        material = ADMIN_PASSWORD
+        material = runtime.ADMIN_PASSWORD
     elif actor.get("role") == "primary":
         material = str(config.get("primaryAdmin", {}).get("passwordHash", ""))
     else:
@@ -1569,18 +1153,18 @@ def admin_auth_version(config: dict[str, Any], actor: dict[str, Any]) -> str:
 def create_admin_session(actor: dict[str, Any]) -> str:
     token = generate_long_secret(48)
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    get_state_store().save_admin_session(
+    runtime.get_state_store().save_admin_session(
         api_key_digest(token),
         actor,
         admin_auth_version(load_config(), actor),
         now,
-        now + ADMIN_SESSION_SECONDS * 1000,
+        now + runtime.ADMIN_SESSION_SECONDS * 1000,
     )
     return token
 
 
 def session_admin(request: Request) -> dict[str, Any] | None:
-    token = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+    token = request.cookies.get(runtime.ADMIN_SESSION_COOKIE, "")
     if not token:
         return None
     return validate_admin_session_token(token)
@@ -1588,25 +1172,25 @@ def session_admin(request: Request) -> dict[str, Any] | None:
 
 def validate_admin_session_token(token: str) -> dict[str, Any] | None:
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    actor = get_state_store().load_admin_session(api_key_digest(token), now)
+    actor = runtime.get_state_store().load_admin_session(api_key_digest(token), now)
     if not actor:
         return None
     config = load_config()
     if actor.get("role") == "subadmin":
         record = config.get("adminAccounts", {}).get(actor.get("username", ""), {})
         if not isinstance(record, dict) or not record.get("enabled", True):
-            get_state_store().delete_admin_session(api_key_digest(token))
+            runtime.get_state_store().delete_admin_session(api_key_digest(token))
             return None
         actor["permissions"] = record.get("permissions", [])
     if not hmac.compare_digest(str(actor.get("authVersion", "")), admin_auth_version(config, actor)):
-        get_state_store().delete_admin_session(api_key_digest(token))
+        runtime.get_state_store().delete_admin_session(api_key_digest(token))
         return None
     return actor
 
 
 async def basic_security(request: Request) -> HTTPBasicCredentials | None:
     """会话优先，兼容旧的 HTTP Basic 登录。"""
-    token = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+    token = request.cookies.get(runtime.ADMIN_SESSION_COOKIE, "")
     if token and validate_admin_session_token(token):
         return HTTPBasicCredentials(username="__session__:" + token, password="")
     authorization = request.headers.get("Authorization", "")
@@ -1650,7 +1234,7 @@ def admin_csrf_token(config: dict[str, Any], actor: dict[str, Any]) -> str:
         encoded = str(config.get("primaryAdmin", {}).get("passwordHash", ""))
     else:
         encoded = str(config.get("adminAccounts", {}).get(username, {}).get("passwordHash", ""))
-    material = (str(config.get("secretKey", "")) or SECRET_KEY or ADMIN_PASSWORD or encoded).encode("utf-8")
+    material = (str(config.get("secretKey", "")) or runtime.SECRET_KEY or runtime.ADMIN_PASSWORD or encoded).encode("utf-8")
     return hmac.new(hashlib.sha256(material).digest(), f"admin-csrf:{username}:{encoded}".encode("utf-8"), hashlib.sha256).hexdigest()
 
 
@@ -1720,44 +1304,12 @@ def resolve_identity(api_key_value: str | None, account_name: str | None, accoun
     return ("host:" + account_id) if account_id else fallback
 
 
-def legacy_owner_identities(canonical: str) -> list[str]:
-    """列出某个归属标识在历史版本里可能出现过的旧写法，供启动迁移归并。"""
-    account_id = owner_host_account_id(canonical)
-    if not account_id:
-        return []
-    return [f"host-public:{account_id}", f"host:{account_id}"]
 
 
-def canonical_owner_of(owner: str) -> str:
-    """把任意历史归属写法折叠成当前的规范写法。"""
-    account_id = owner_host_account_id(str(owner or ""))
-    return f"host:{account_id}" if account_id else str(owner or "")
 
 
-def configured_auth_modes(config: dict[str, Any]) -> list[str]:
-    return [active_auth_mode(config)]
 
 
-def public_server_capabilities(config: dict[str, Any]) -> dict[str, Any]:
-    modes = configured_auth_modes(config)
-    return {
-        "apiVersion": API_VERSION,
-        "serverId": config["serverId"],
-        "features": config["features"],
-        "authModes": modes,
-        "authMode": modes[0] if len(modes) == 1 else "multiple",
-        "authRequired": modes != ["public"],
-        "allowPublic": "public" in modes,
-        "authMethods": ["apiKey", "account", "hostAccount", "public"],
-        "packageSchemaVersions": [1],
-        "taskTypes": ["http", "yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"],
-        "maxUploadSize": 50 * 1024 * 1024,
-        "minModuleVersion": config["minModuleVersion"],
-        "signingPublicKey": config["signingPublicKey"],
-        "moduleUploadEnabled": bool(config.get("moduleUploadEnabled", False)),
-        "moduleUploadKinds": module_upload_kinds(config.get("moduleUploadKinds")),
-        "moduleUploadMaxSize": MODULE_UPLOAD_MAX_BYTES,
-    }
 
 
 async def authenticated(
@@ -1805,7 +1357,7 @@ def module_upload_policy(config: dict[str, Any], host_account_id: str | None) ->
         "reason": reason,
         "hostAccountId": account_id,
         "kinds": module_upload_kinds(config.get("moduleUploadKinds")),
-        "maxSize": MODULE_UPLOAD_MAX_BYTES,
+        "maxSize": runtime.MODULE_UPLOAD_MAX_BYTES,
     }
 
 
@@ -1847,8 +1399,6 @@ async def backup_owner(
     return backup_owner_dir_name(identity)
 
 
-def backup_owner_dir_name(identity: str) -> str:
-    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
 
 
 @app.middleware("http")
@@ -1858,31 +1408,31 @@ async def security_middleware(request: Request, call_next):
     client_host = request.client.host if request.client else "unknown"
     rate_key = f"{client_host}:{request.url.path}"
     if not allow_rate_limit(rate_key):
-        with metrics_lock:
-            metrics_counters["rate_limited"] += 1
+        with runtime.metrics_lock:
+            runtime.metrics_counters["rate_limited"] += 1
         audit_event("rate_limit", actor=client_host, request_id=request_id, success=False, metadata={"path": request.url.path})
         return JSONResponse(
             status_code=429,
             content=response(code="RATE_LIMITED", message="请求过于频繁，请稍后重试", request_id=request_id),
-            headers={"Retry-After": str(RATE_WINDOW_SECONDS), "X-Request-Id": request_id},
+            headers={"Retry-After": str(runtime.RATE_WINDOW_SECONDS), "X-Request-Id": request_id},
         )
     try:
         result = await call_next(request)
     except Exception:
-        with metrics_lock:
-            metrics_counters["errors"] += 1
+        with runtime.metrics_lock:
+            runtime.metrics_counters["errors"] += 1
         audit_event("request_error", actor=client_host, request_id=request_id, success=False, metadata={"path": request.url.path})
         raise
     result.headers["X-Request-Id"] = request_id
-    result.headers["X-ReaMicro-API-Version"] = API_VERSION
+    result.headers["X-ReaMicro-API-Version"] = runtime.API_VERSION
     # 后台页面包含账号、凭据状态和 CSRF，禁止浏览器及反向代理复用旧 HTML。
     if request.url.path == "/admin" or request.url.path.startswith("/admin/"):
         result.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         result.headers["Pragma"] = "no-cache"
         result.headers["Expires"] = "0"
-    with metrics_lock:
-        metrics_counters["requests"] += 1
-        metrics_routes[request.url.path] = metrics_routes.get(request.url.path, 0) + 1
+    with runtime.metrics_lock:
+        runtime.metrics_counters["requests"] += 1
+        runtime.metrics_routes[request.url.path] = runtime.metrics_routes.get(request.url.path, 0) + 1
     return result
 
 
@@ -1950,8 +1500,8 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> Respon
 async def unhandled_exception_handler(request: Request, exc: Exception) -> Response:
     request_id = getattr(request.state, "request_id", "") or "req_" + secrets.token_hex(8)
     client_host = request.client.host if request.client else "unknown"
-    with metrics_lock:
-        metrics_counters["errors"] += 1
+    with runtime.metrics_lock:
+        runtime.metrics_counters["errors"] += 1
     audit_event(
         "unhandled_exception",
         actor=client_host,
@@ -1985,8 +1535,8 @@ async def health_live() -> dict[str, Any]:
 
 @app.get("/health/ready")
 async def health_ready() -> JSONResponse:
-    database = get_state_store().integrity_check()
-    ready = database == "ok" and CONFIG_ROOT.parent.exists()
+    database = runtime.get_state_store().integrity_check()
+    ready = database == "ok" and runtime.CONFIG_ROOT.parent.exists()
     payload = response({"status": "ready" if ready else "not_ready", "database": database})
     return JSONResponse(status_code=200 if ready else 503, content=payload)
 
@@ -1994,27 +1544,27 @@ async def health_ready() -> JSONResponse:
 @app.get("/health/dependencies")
 async def health_dependencies(_: None = Depends(authenticated)) -> dict[str, Any]:
     sync_status = {}
-    if RELEASE_STATUS_PATH.is_file():
-        try: sync_status = json.loads(RELEASE_STATUS_PATH.read_text(encoding="utf-8"))
+    if runtime.RELEASE_STATUS_PATH.is_file():
+        try: sync_status = json.loads(runtime.RELEASE_STATUS_PATH.read_text(encoding="utf-8"))
         except (OSError, ValueError): sync_status = {"status": "invalid"}
     return response({
-        "database": get_state_store().integrity_check(),
-        "releaseCache": (RELEASE_ROOT / "latest.json").is_file(),
+        "database": runtime.get_state_store().integrity_check(),
+        "releaseCache": (runtime.RELEASE_ROOT / "latest.json").is_file(),
         "releaseSync": sync_status,
-        "packageStorage": PACKAGE_ROOT.exists(),
-        "backupStorage": BACKUP_ROOT.exists(),
+        "packageStorage": runtime.PACKAGE_ROOT.exists(),
+        "backupStorage": runtime.BACKUP_ROOT.exists(),
     })
 
 
 @app.get("/v1/diagnostics")
 async def diagnostics(_: None = Depends(authenticated)) -> dict[str, Any]:
     config = load_config()
-    database = get_state_store().integrity_check()
-    package_count = sum(1 for kind in PACKAGE_KINDS for _ in (PACKAGE_ROOT / kind).glob("*/manifest.json"))
-    snapshot_count = len(list(SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"))) if SERVER_BACKUP_ROOT.exists() else 0
+    database = runtime.get_state_store().integrity_check()
+    package_count = sum(1 for kind in runtime.PACKAGE_KINDS for _ in (runtime.PACKAGE_ROOT / kind).glob("*/manifest.json"))
+    snapshot_count = len(list(runtime.SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"))) if runtime.SERVER_BACKUP_ROOT.exists() else 0
     release_status = {}
-    if RELEASE_STATUS_PATH.is_file():
-        try: release_status = json.loads(RELEASE_STATUS_PATH.read_text(encoding="utf-8"))
+    if runtime.RELEASE_STATUS_PATH.is_file():
+        try: release_status = json.loads(runtime.RELEASE_STATUS_PATH.read_text(encoding="utf-8"))
         except (OSError, ValueError): release_status = {"status": "invalid"}
     return response({
         "serverId": config.get("serverId", ""),
@@ -2024,15 +1574,15 @@ async def diagnostics(_: None = Depends(authenticated)) -> dict[str, Any]:
         "tasks": len(load_tasks()),
         "snapshots": snapshot_count,
         "releaseSync": release_status,
-        "storage": {"config": CONFIG_ROOT.exists(), "packages": PACKAGE_ROOT.exists(), "backups": BACKUP_ROOT.exists()},
+        "storage": {"config": runtime.CONFIG_ROOT.exists(), "packages": runtime.PACKAGE_ROOT.exists(), "backups": runtime.BACKUP_ROOT.exists()},
     })
 
 
 @app.get("/metrics")
 async def metrics(_: None = Depends(authenticated)) -> Response:
-    with metrics_lock:
-        counters = dict(metrics_counters)
-        routes = dict(metrics_routes)
+    with runtime.metrics_lock:
+        counters = dict(runtime.metrics_counters)
+        routes = dict(runtime.metrics_routes)
     lines = [
         "# HELP reamicro_http_requests_total Total HTTP responses",
         "# TYPE reamicro_http_requests_total counter",
@@ -2054,7 +1604,7 @@ async def metrics(_: None = Depends(authenticated)) -> Response:
         f"reamicro_tasks_failed {sum(1 for task in load_tasks().values() if task.get('status') == 'failed')}",
         "# HELP reamicro_packages Current package count",
         "# TYPE reamicro_packages gauge",
-        f"reamicro_packages {sum(1 for kind in PACKAGE_KINDS for _ in (PACKAGE_ROOT / kind).glob('*/manifest.json'))}",
+        f"reamicro_packages {sum(1 for kind in runtime.PACKAGE_KINDS for _ in (runtime.PACKAGE_ROOT / kind).glob('*/manifest.json'))}",
     ]
     for route, count in sorted(routes.items()):
         safe_route = route.replace('"', '\\"')
@@ -2076,13 +1626,13 @@ def _admin_auth_shell(title: str, subtitle: str, body: str) -> str:
 
 def admin_setup_page(message: str = "", actor: dict[str, Any] | None = None) -> str:
     message_html = f"<p class='msg'>{html.escape(message)}</p>" if message else ""
-    actor = actor or {"username": ADMIN_USERNAME, "role": "primary", "needsSetup": True}
+    actor = actor or {"username": runtime.ADMIN_USERNAME, "role": "primary", "needsSetup": True}
     csrf_value = html.escape(admin_csrf_token(load_config(), actor), quote=True)
     body = (
         f"{message_html}"
         f"<form method='post' action='/admin/setup'>"
         f"<input type='hidden' name='csrf_token' value='{csrf_value}'>"
-        f"<label>主管理员用户名<input name='username' value='{html.escape(ADMIN_USERNAME, quote=True)}' autocomplete='username' required></label>"
+        f"<label>主管理员用户名<input name='username' value='{html.escape(runtime.ADMIN_USERNAME, quote=True)}' autocomplete='username' required></label>"
         f"<label>新密码（至少 12 位）<input type='password' name='password' minlength='12' autocomplete='new-password' required></label>"
         f"<label>确认新密码<input type='password' name='password_confirm' minlength='12' autocomplete='new-password' required></label>"
         f"<button type='submit'>完成初始化</button></form>"
@@ -2110,8 +1660,8 @@ def admin_login_page(message: str = "") -> str:
 
 def _admin_package_records() -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for kind in sorted(PACKAGE_KINDS):
-        for manifest_path in sorted((PACKAGE_ROOT / kind).glob("*/manifest.json")):
+    for kind in sorted(runtime.PACKAGE_KINDS):
+        for manifest_path in sorted((runtime.PACKAGE_ROOT / kind).glob("*/manifest.json")):
             try:
                 item = json.loads(manifest_path.read_text(encoding="utf-8"))
                 if not isinstance(item, dict):
@@ -2125,50 +1675,14 @@ def _admin_package_records() -> list[dict[str, Any]]:
     return records
 
 
-def _admin_kind_label(kind: str) -> str:
-    return {"online_source": "书源", "association_source": "关联源", "epub_style": "EPUB 样式", "highlight_style": "高亮样式", "theme": "主题库"}.get(kind, kind)
 
 
-def _admin_task_label(task_type: Any) -> str:
-    return {
-        "yeshe_checkin": "野社零点签到",
-        "yeshe_draw_card": "野社自动抽卡",
-        "cloud_auto_read": "云端自动阅读",
-        "http": "通用 HTTPS 请求",
-    }.get(str(task_type), str(task_type) or "未命名任务")
 
 
-def _admin_task_status_label(status: Any) -> str:
-    return {
-        "scheduled": "等待执行",
-        "running": "执行中",
-        "success": "执行成功",
-        "failed": "执行失败",
-        "paused": "已暂停",
-        "cancelled": "已取消",
-    }.get(str(status), str(status) or "未知")
 
 
-def _admin_health_label(health: Any) -> str:
-    return {
-        "valid": "有效",
-        "warning": "需要验证",
-        "invalid": "已失效",
-        "paused": "已暂停",
-        "unverified": "未验证",
-    }.get(str(health), str(health) or "未验证")
 
 
-def _admin_owner_label(owner: Any) -> str:
-    text = str(owner or "")
-    if text.startswith("host:") or ":host:" in text or text.startswith("host-public:"):
-        account_id = owner_host_account_id(text)
-        return f"阅微账号 {account_id}" if account_id else "阅微账号认证"
-    if text.startswith("account:"):
-        return f"独立账号：{text.split(':', 1)[1]}"
-    if text.startswith("key:"):
-        return "API Key 用户"
-    return text or "未标记"
 
 
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -2268,21 +1782,10 @@ def _admin_size_label(value: Any) -> str:
     return f"{size:.1f} GB"
 
 
-def _admin_status_label(status: Any) -> str:
-    return {
-        "published": "已发布",
-        "draft": "草稿",
-        "testing": "测试中",
-        "unpublished": "已下架",
-    }.get(str(status), str(status) or "已发布")
 
 
-def _admin_channel_label(channel: Any) -> str:
-    return {"stable": "正式版", "beta": "预发布", "nightly": "每夜构建"}.get(str(channel), str(channel) or "正式版")
 
 
-def _admin_result_label(result: Any) -> str:
-    return {"success": "成功", "failed": "失败", "skipped": "已跳过", "cancelled": "已取消"}.get(str(result), str(result) or "未知")
 
 
 def _admin_digest_label(value: Any) -> str:
@@ -2293,77 +1796,14 @@ def _admin_digest_label(value: Any) -> str:
     return text[:12]
 
 
-def _admin_action_label(action: Any) -> str:
-    """审计事件转中文说明。未收录的动作原样显示，便于排查新事件。"""
-    return {
-        "admin_login_success": "管理员登录成功",
-        "admin_login_failed": "管理员登录失败",
-        "admin_settings_updated": "修改服务器设置",
-        "admin_csrf_rejected": "后台请求校验失败",
-        "admin_setup_completed": "完成主管理员初始化",
-        "subadmin_created": "创建子管理员",
-        "subadmin_password_reset": "重置子管理员密码",
-        "subadmin_toggled": "启用或停用子管理员",
-        "subadmin_deleted": "删除子管理员",
-        "api_key_created": "创建 API Key",
-        "api_key_revoked": "吊销 API Key",
-        "secret_key_rotated": "轮换服务器加密密钥",
-        "secret_key_rotation_failed": "轮换加密密钥失败",
-        "package_uploaded": "上传内容包",
-        "package_edited": "编辑内容包",
-        "package_deleted": "删除内容包",
-        "package_rolled_back": "回滚内容包",
-        "module_upload_created": "模块上传新内容",
-        "module_upload_linked": "模块关联已有内容",
-        "module_upload_denied": "模块上传被拒绝",
-        "server_snapshot_created": "创建服务器快照",
-        "server_snapshot_restored": "恢复服务器快照",
-        "rate_limit": "触发请求限流",
-        "request_error": "请求处理异常",
-    }.get(str(action), str(action) or "未知操作")
 
 
-_ADMIN_METADATA_LABELS = {
-    "kind": "类型",
-    "packageId": "内容包",
-    "version": "版本",
-    "status": "状态",
-    "username": "用户名",
-    "keyId": "密钥 ID",
-    "permissions": "权限",
-    "filename": "文件",
-    "serverId": "服务器 ID",
-    "hostAccountId": "阅微账号",
-    "path": "路径",
-    "enabled": "启用",
-    "reencrypted": "重新加密条目",
-    "safetySnapshot": "安全快照",
-}
 
 
-def _admin_metadata_label(metadata: Any) -> str:
-    """审计详情转成可读的"键：值"串，代替裸 JSON。"""
-    if not isinstance(metadata, dict) or not metadata:
-        return "无附加信息"
-    parts: list[str] = []
-    for key, value in metadata.items():
-        label = _ADMIN_METADATA_LABELS.get(str(key), str(key))
-        if key == "kind":
-            text = _admin_kind_label(str(value))
-        elif key == "status":
-            text = _admin_status_label(value)
-        elif isinstance(value, bool):
-            text = "是" if value else "否"
-        elif isinstance(value, (list, tuple)):
-            text = "、".join(str(item) for item in value) or "无"
-        else:
-            text = str(value)
-        parts.append(f"{label}：{text}")
-    return "；".join(parts)
 
 
 def admin_section_path(section: str) -> str:
-    if section in PACKAGE_KINDS:
+    if section in runtime.PACKAGE_KINDS:
         return f"/admin/content/{section}"
     return {
         "overview": "/admin",
@@ -2489,7 +1929,7 @@ def _admin_layout(
             active="active" if key == section else "",
             href=admin_section_path(key),
             label=label,
-            count=len([item for item in counts if item.get("kind") == key]) if key in PACKAGE_KINDS else "",
+            count=len([item for item in counts if item.get("kind") == key]) if key in runtime.PACKAGE_KINDS else "",
         )
         for key, label in ADMIN_NAV_LABELS
     )
@@ -2497,7 +1937,7 @@ def _admin_layout(
     notice = f"<div class='notice'>{esc(message)}</div>" if message else ""
     secret = f"<div class='secret'><strong>请立即保存，离开本页后无法再次查看：</strong>\n{esc(secret_notice)}</div>" if secret_notice else ""
     role_label = "主管理员" if actor.get("role") == "primary" else "子管理员"
-    version_line = f"<p class='muted' style='margin:0 0 12px;text-align:right;font-size:12px'>API v{API_VERSION} · 时间均为北京时间</p>"
+    version_line = f"<p class='muted' style='margin:0 0 12px;text-align:right;font-size:12px'>API v{runtime.API_VERSION} · 时间均为北京时间</p>"
     return (
         f"<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
         f"<meta name='viewport' content='width=device-width,initial-scale=1'><title>{esc(title)}</title>"
@@ -2525,7 +1965,7 @@ def _admin_release_panel() -> str:
     """模块 Release 同步状态。此前后台看不到同步结果和失败原因。"""
     esc = lambda value: html.escape(str(value), quote=True)
     metadata: dict[str, Any] = {}
-    release_path = RELEASE_ROOT / "latest.json"
+    release_path = runtime.RELEASE_ROOT / "latest.json"
     if release_path.is_file():
         try:
             loaded = json.loads(release_path.read_text(encoding="utf-8"))
@@ -2533,13 +1973,13 @@ def _admin_release_panel() -> str:
         except (OSError, ValueError):
             metadata = {}
     sync_status: dict[str, Any] = {}
-    if RELEASE_STATUS_PATH.is_file():
+    if runtime.RELEASE_STATUS_PATH.is_file():
         try:
-            loaded = json.loads(RELEASE_STATUS_PATH.read_text(encoding="utf-8"))
+            loaded = json.loads(runtime.RELEASE_STATUS_PATH.read_text(encoding="utf-8"))
             sync_status = loaded if isinstance(loaded, dict) else {}
         except (OSError, ValueError):
             sync_status = {}
-    apk_path = RELEASE_ROOT / "latest.apk"
+    apk_path = runtime.RELEASE_ROOT / "latest.apk"
     apk_note = _admin_size_label(apk_path.stat().st_size) if apk_path.is_file() else "尚未下载"
     success = sync_status.get("success")
     status_class = "success" if success else ("failed" if success is False else "unverified")
@@ -2588,7 +2028,7 @@ def _admin_settings_content(config: dict[str, Any], actor: dict[str, Any], csrf_
     kind_checkboxes = "".join(
         f"<label><input type='checkbox' name='module_upload_kinds' value='{esc(kind)}' "
         f"{'checked' if kind in config.get('moduleUploadKinds', []) else ''}> {esc(_admin_kind_label(kind))}</label>"
-        for kind in sorted(MODULE_UPLOAD_DEFAULT_KINDS)
+        for kind in sorted(runtime.MODULE_UPLOAD_DEFAULT_KINDS)
     )
     head = (
         "<div class='page-head'><div><p class='eyebrow'>系统</p><h1>服务器设置</h1>"
@@ -2673,7 +2113,7 @@ def _admin_overview_stats(config: dict[str, Any], records: list[dict[str, Any]])
     })
     pending = sum(1 for item in load_notifications().values() if not item.get("deliveredAt"))
     release_version = "未同步"
-    release_path = RELEASE_ROOT / "latest.json"
+    release_path = runtime.RELEASE_ROOT / "latest.json"
     if release_path.is_file():
         try:
             release_version = str(json.loads(release_path.read_text(encoding="utf-8")).get("versionName", "未同步"))
@@ -2966,7 +2406,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
     merge_duplicate_tasks()
     esc = lambda value: html.escape(str(value), quote=True)
     actor = actor or {"username": "", "role": "subadmin", "permissions": []}
-    valid_sections = {"overview", "packages", "tasks", "settings", "security", *PACKAGE_KINDS}
+    valid_sections = {"overview", "packages", "tasks", "settings", "security", *runtime.PACKAGE_KINDS}
     section = section if section in valid_sections else "overview"
     csrf_html = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
     records = _admin_package_records()
@@ -3041,8 +2481,8 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
             f"<td class='actions'><a class='button subtle' href='/admin/tasks/{task_id}/logs'>日志</a> {task_actions}</td></tr>"
         )
     task_table = "".join(task_rows) or "<tr><td colspan='8' class='empty'>暂无云端任务</td></tr>"
-    if section in {"overview", "packages", *PACKAGE_KINDS}:
-        selected = section if section in PACKAGE_KINDS else ""
+    if section in {"overview", "packages", *runtime.PACKAGE_KINDS}:
+        selected = section if section in runtime.PACKAGE_KINDS else ""
         visible = [item for item in records if not selected or item.get("kind") == selected]
         head_action = f"<a class='button' href='/admin/packages/new?kind={esc(selected or 'online_source')}'>新增内容</a>" if can_packages else ""
         if section == "overview":
@@ -3166,10 +2606,10 @@ def _admin_package_payload(package_dir: Path, manifest: dict[str, Any]) -> tuple
 @app.get("/admin/packages/new", response_class=HTMLResponse)
 async def admin_new_package(kind: str = Query("online_source"), actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
     require_admin_permission(actor, "packages:write")
-    kind = kind if kind in PACKAGE_KINDS else "online_source"
+    kind = kind if kind in runtime.PACKAGE_KINDS else "online_source"
     config = load_config(); esc = lambda value: html.escape(str(value), quote=True)
     csrf = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
-    options = "".join(f"<option value='{k}' {'selected' if k == kind else ''}>{_admin_kind_label(k)}</option>" for k in sorted(PACKAGE_KINDS))
+    options = "".join(f"<option value='{k}' {'selected' if k == kind else ''}>{_admin_kind_label(k)}</option>" for k in sorted(runtime.PACKAGE_KINDS))
     channel_options = "".join(f"<option value='{value}'>{_admin_channel_label(value)}</option>" for value in ("stable", "beta", "nightly"))
     body = f"<div class='panel'><p class='muted'>包 ID、显示名称和版本号可留空：服务器会根据文件内容及已有列表自动生成；同一包再次上传会自动归档旧版本。</p><form method='post' action='/admin/packages/upload' enctype='multipart/form-data'>{csrf}<div class='grid-2'><label>内容类型<select name='kind'>{options}</select></label><label>包 ID（可留空自动生成）<input name='package_id' placeholder='根据名称自动生成'></label><label>版本号（可留空自动递增）<input name='version' placeholder='新包默认为 1.0.0'></label><label>显示名称（可留空自动识别）<input name='name' placeholder='从书源/样式文件识别'></label><label>稳定内容 ID（可留空使用包 ID）<input name='content_id'></label><label>发布状态<select name='status_value'><option value='published'>立即发布</option><option value='draft'>草稿</option><option value='testing'>测试中</option></select></label><label>发布渠道<select name='channel'>{channel_options}</select></label></div><label>别名（逗号分隔）<input name='aliases'></label><label>依赖 JSON<textarea name='dependencies' placeholder='[]'></textarea></label><label>内容文件<input type='file' name='payload' required></label><button class='button' type='submit'>上传并保存</button></form></div>"
     return HTMLResponse(_admin_shell(
@@ -3407,7 +2847,7 @@ async def admin_delete_package(
     if str(manifest.get("status", "published")) == "published":
         raise HTTPException(status_code=409, detail="已发布内容不能直接删除，请先下架")
     package_dir = manifest_path.parent
-    trash_dir = PACKAGE_ROOT / ".trash" / package_kind
+    trash_dir = runtime.PACKAGE_ROOT / ".trash" / package_kind
     trash_dir.mkdir(parents=True, exist_ok=True)
     target = trash_dir / f"{package_id}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
     shutil.move(str(package_dir), str(target))
@@ -3472,11 +2912,11 @@ async def admin_login_post(username: str = Form(""), password: str = Form("")) -
     audit_event("admin_login_success", actor=audit_actor(actor))
     result = RedirectResponse("/admin", status_code=303)
     result.set_cookie(
-        ADMIN_SESSION_COOKIE,
+        runtime.ADMIN_SESSION_COOKIE,
         token,
-        max_age=ADMIN_SESSION_SECONDS,
+        max_age=runtime.ADMIN_SESSION_SECONDS,
         httponly=True,
-        secure=ADMIN_COOKIE_SECURE,
+        secure=runtime.ADMIN_COOKIE_SECURE,
         samesite="lax",
         path="/admin",
     )
@@ -3485,14 +2925,14 @@ async def admin_login_post(username: str = Form(""), password: str = Form("")) -
 
 @app.post("/admin/logout")
 async def admin_logout(request: Request, csrf_token: str = Form("")) -> RedirectResponse:
-    token = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+    token = request.cookies.get(runtime.ADMIN_SESSION_COOKIE, "")
     if token:
         actor = validate_admin_session_token(token)
         if actor:
             require_admin_csrf(load_config(), actor, csrf_token)
-        get_state_store().delete_admin_session(api_key_digest(token))
+        runtime.get_state_store().delete_admin_session(api_key_digest(token))
     result = RedirectResponse("/admin/login", status_code=303)
-    result.delete_cookie(ADMIN_SESSION_COOKIE, path="/admin")
+    result.delete_cookie(runtime.ADMIN_SESSION_COOKIE, path="/admin")
     return result
 
 
@@ -3519,7 +2959,7 @@ async def admin_content(q: str = Query(""), actor: dict[str, Any] = Depends(admi
 
 @app.get("/admin/content/{package_kind}", response_class=HTMLResponse)
 async def admin_content_kind(package_kind: str, q: str = Query(""), actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
-    if package_kind not in PACKAGE_KINDS:
+    if package_kind not in runtime.PACKAGE_KINDS:
         raise HTTPException(status_code=404, detail="内容分类不存在")
     return admin_html(admin_page(load_config(), actor=actor, section=package_kind, query=q))
 
@@ -3551,8 +2991,8 @@ async def admin_audit(
     rows = []
     total = 0
     failures = 0
-    if AUDIT_PATH.is_file():
-        for line in AUDIT_PATH.read_text(encoding="utf-8").splitlines()[-800:][::-1]:
+    if runtime.AUDIT_PATH.is_file():
+        for line in runtime.AUDIT_PATH.read_text(encoding="utf-8").splitlines()[-800:][::-1]:
             try:
                 event = json.loads(line)
             except ValueError:
@@ -3585,7 +3025,7 @@ async def admin_audit(
         f"<div><strong>{total}</strong><span>最近记录条数</span></div>"
         f"<div><strong>{failures}</strong><span>其中失败事件</span></div>"
         f"<div><strong>{len(rows)}</strong><span>当前显示</span></div>"
-        f"<div><strong>{_admin_size_label(AUDIT_PATH.stat().st_size) if AUDIT_PATH.is_file() else '0 B'}</strong><span>日志文件大小</span></div>"
+        f"<div><strong>{_admin_size_label(runtime.AUDIT_PATH.stat().st_size) if runtime.AUDIT_PATH.is_file() else '0 B'}</strong><span>日志文件大小</span></div>"
         f"</div>"
     )
     body = (
@@ -3676,15 +3116,14 @@ def resolve_snapshot_path(filename: str) -> Path:
     """校验快照文件名并返回数据卷内的实际路径。"""
     if not re.fullmatch(r"reamicro-server-[0-9TZ-]+\.zip", filename):
         raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="备份文件名无效"))
-    path = (SERVER_BACKUP_ROOT / filename).resolve()
-    if path.parent != SERVER_BACKUP_ROOT.resolve() or not path.is_file():
+    path = (runtime.SERVER_BACKUP_ROOT / filename).resolve()
+    if path.parent != runtime.SERVER_BACKUP_ROOT.resolve() or not path.is_file():
         raise HTTPException(status_code=404, detail=response(code="BACKUP_NOT_FOUND", message="服务器快照不存在"))
     return path
 
 
 def restore_server_snapshot(filename: str) -> dict[str, Any]:
     """校验并恢复服务器快照；恢复前先自动创建一份安全快照。"""
-    global state_store
     path = resolve_snapshot_path(filename)
     verification = verify_server_snapshot(path)
     if not verification.get("valid"):
@@ -3698,13 +3137,13 @@ def restore_server_snapshot(filename: str) -> dict[str, Any]:
         restored_config = extract_root / "config" / "server.json"
         if not restored_db.is_file() or not restored_config.is_file():
             raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="备份缺少数据库或配置"))
-        CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
-        STATE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        Path(str(STATE_DB_PATH) + "-wal").unlink(missing_ok=True)
-        Path(str(STATE_DB_PATH) + "-shm").unlink(missing_ok=True)
-        shutil.copy2(restored_config, CONFIG_PATH)
-        shutil.copy2(restored_db, STATE_DB_PATH)
-    with state_store_lock:
+        runtime.CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
+        runtime.STATE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        Path(str(runtime.STATE_DB_PATH) + "-wal").unlink(missing_ok=True)
+        Path(str(runtime.STATE_DB_PATH) + "-shm").unlink(missing_ok=True)
+        shutil.copy2(restored_config, runtime.CONFIG_PATH)
+        shutil.copy2(restored_db, runtime.STATE_DB_PATH)
+    with runtime.state_store_lock:
         state_store = None
     return {"restored": True, "filename": filename, "safetySnapshot": safety_snapshot.name}
 
@@ -4065,7 +3504,7 @@ async def admin_setup(
             "updatedAt": now,
         }
         save_config(current)
-        get_state_store().delete_admin_sessions_for_user(str(actor.get("username", "")))
+        runtime.get_state_store().delete_admin_sessions_for_user(str(actor.get("username", "")))
         audit_event("primary_admin_initialized", f"admin:{username}", success=True)
         return HTMLResponse(
             "<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>初始化完成</title>"
@@ -4128,7 +3567,7 @@ async def admin_settings(
         "serverId": server_id.strip() or current["serverId"],
         "minModuleVersion": min_module_version.strip() or current["minModuleVersion"],
         "apiKey": "" if clear_api_key is not None else (generated_api_key or api_key or current.get("apiKey", "")),
-        "secretKey": generated_secret_key or current.get("secretKey", "") or SECRET_KEY,
+        "secretKey": generated_secret_key or current.get("secretKey", "") or runtime.SECRET_KEY,
         "allowPublic": selected_auth_mode == "public",
         "authMode": selected_auth_mode,
         "hostAccountAllowlist": ([item.strip() for item in host_account_allowlist.splitlines() if item.strip()] if selected_auth_mode == "host_account_allowlist" else current.get("hostAccountAllowlist", [])),
@@ -4244,7 +3683,7 @@ async def admin_reset_subadmin(
     admins[username] = record
     current["adminAccounts"] = admins
     saved = save_config(current)
-    get_state_store().delete_admin_sessions_for_user(username)
+    runtime.get_state_store().delete_admin_sessions_for_user(username)
     audit_event("subadmin_password_reset", audit_actor(actor), success=True, metadata={"username": username})
     return HTMLResponse(admin_page(saved, f"子管理员 {username} 的密码已重置", actor=actor, secret_notice=f"新密码：{password}", section="security"))
 
@@ -4270,7 +3709,7 @@ async def admin_toggle_subadmin(
     current["adminAccounts"] = admins
     saved = save_config(current)
     if not record["enabled"]:
-        get_state_store().delete_admin_sessions_for_user(username)
+        runtime.get_state_store().delete_admin_sessions_for_user(username)
     audit_event("subadmin_toggled", audit_actor(actor), success=True, metadata={"username": username, "enabled": record["enabled"]})
     state_text = "启用" if record["enabled"] else "停用"
     return HTMLResponse(admin_page(saved, f"子管理员 {username} 已{state_text}", actor=actor, section="security"))
@@ -4292,7 +3731,7 @@ async def admin_delete_subadmin(
     admins.pop(username, None)
     current["adminAccounts"] = admins
     saved = save_config(current)
-    get_state_store().delete_admin_sessions_for_user(username)
+    runtime.get_state_store().delete_admin_sessions_for_user(username)
     audit_event("subadmin_deleted", audit_actor(actor), success=True, metadata={"username": username})
     return HTMLResponse(admin_page(saved, f"子管理员 {username} 已删除", actor=actor, section="security"))
 
@@ -4312,13 +3751,6 @@ async def admin_sync(
         return HTMLResponse(admin_page(load_config(), f"同步失败：{error}", actor=actor, section="settings"), status_code=502)
 
 
-PACKAGE_KINDS = {
-    "online_source",
-    "epub_style",
-    "highlight_style",
-    "association_source",
-    "theme",
-}
 
 
 def comparable_version(value: Any) -> tuple[tuple[int, Any], ...]:
@@ -4340,7 +3772,7 @@ def normalize_package_dependencies(items: Any, current_kind: str = "", current_p
         if not isinstance(item, dict):
             raise HTTPException(status_code=400, detail="每项依赖必须是 JSON 对象")
         dependency_kind = str(item.get("kind", "")).strip()
-        if dependency_kind and dependency_kind not in PACKAGE_KINDS:
+        if dependency_kind and dependency_kind not in runtime.PACKAGE_KINDS:
             raise HTTPException(status_code=400, detail=f"依赖内容类型无效：{dependency_kind}")
         target = str(item.get("packageId") or item.get("contentId") or "").strip()
         if not target:
@@ -4370,8 +3802,8 @@ def normalize_package_dependencies(items: Any, current_kind: str = "", current_p
 
 def published_package_manifests() -> list[dict[str, Any]]:
     manifests: list[dict[str, Any]] = []
-    for kind in PACKAGE_KINDS:
-        for path in (PACKAGE_ROOT / kind).glob("*/manifest.json"):
+    for kind in runtime.PACKAGE_KINDS:
+        for path in (runtime.PACKAGE_ROOT / kind).glob("*/manifest.json"):
             try:
                 manifest = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -4593,7 +4025,7 @@ def package_name_slug(name: str, kind: str) -> str:
 
 def _package_manifests(kind: str) -> list[tuple[Path, dict[str, Any]]]:
     values: list[tuple[Path, dict[str, Any]]] = []
-    for path in sorted((PACKAGE_ROOT / kind).glob("*/manifest.json")):
+    for path in sorted((runtime.PACKAGE_ROOT / kind).glob("*/manifest.json")):
         try:
             manifest = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -4666,10 +4098,10 @@ def merge_package_aliases(existing: Any, detected: Any, requested: str) -> list[
 
 
 def package_signature(package_id: str, kind: str, content_id: str, version: str, build_time: int, sha256: str, body: bytes) -> str:
-    if not SIGNING_PRIVATE_KEY_FILE:
+    if not runtime.SIGNING_PRIVATE_KEY_FILE:
         return ""
     from cryptography.hazmat.primitives import serialization
-    key = serialization.load_pem_private_key(Path(SIGNING_PRIVATE_KEY_FILE).read_bytes(), password=None)
+    key = serialization.load_pem_private_key(Path(runtime.SIGNING_PRIVATE_KEY_FILE).read_bytes(), password=None)
     message = f"{package_id}\n{kind}\n{content_id}\n{version}\n{build_time}\n{sha256}".encode("utf-8") + body
     import base64
     return base64.b64encode(key.sign(message)).decode("ascii")
@@ -4693,8 +4125,8 @@ def persist_package_payload(
     owner: str = "",
 ) -> dict[str, Any]:
     """把内容包写入数据卷：旧版本进 history，清单与 payload 原子替换。"""
-    package_dir = (PACKAGE_ROOT / kind / package_id).resolve()
-    if PACKAGE_ROOT.resolve() not in package_dir.parents:
+    package_dir = (runtime.PACKAGE_ROOT / kind / package_id).resolve()
+    if runtime.PACKAGE_ROOT.resolve() not in package_dir.parents:
         raise HTTPException(status_code=400, detail="内容包路径无效")
     package_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = package_dir / "manifest.json"
@@ -4778,7 +4210,7 @@ async def admin_upload_package(
     current_config = load_config()
     require_admin_csrf(current_config, actor, csrf_token)
     require_admin_permission(actor, "packages:write")
-    if kind not in PACKAGE_KINDS:
+    if kind not in runtime.PACKAGE_KINDS:
         raise HTTPException(status_code=400, detail="不支持的内容包类型")
     filename = safe_payload_filename(payload.filename or "payload.bin")
     body = await payload.read()
@@ -4940,7 +4372,7 @@ async def meta(_: None = Depends(authenticated)) -> dict[str, Any]:
 
 @app.get("/v1/releases/module/latest")
 async def latest_release(channel: str = Query("stable"), _: None = Depends(authenticated)) -> dict[str, Any]:
-    metadata_path = RELEASE_ROOT / "latest.json"
+    metadata_path = runtime.RELEASE_ROOT / "latest.json"
     if not metadata_path.is_file():
         try:
             await asyncio.to_thread(sync_module_release)
@@ -4957,13 +4389,19 @@ async def latest_release(channel: str = Query("stable"), _: None = Depends(authe
     return response(metadata)
 
 
+def github_webhook_signature(body: bytes) -> str:
+    """按当前配置的 Webhook Secret 计算期望签名。抽出来便于单测覆盖比对逻辑。"""
+    return "sha256=" + hmac.new(runtime.GITHUB_WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
+
+
 @app.post("/v1/webhooks/github")
 async def github_release_webhook(request: Request) -> dict[str, Any]:
-    if not GITHUB_WEBHOOK_SECRET:
+    """GitHub Release webhook。签名计算见 github_webhook_signature。"""
+    if not runtime.GITHUB_WEBHOOK_SECRET:
         raise HTTPException(status_code=503, detail=response(code="WEBHOOK_DISABLED", message="未配置 GitHub Webhook Secret"))
     body = await request.body()
     provided = request.headers.get("X-Hub-Signature-256", "")
-    expected = "sha256=" + hmac.new(GITHUB_WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    expected = github_webhook_signature(body)
     if not provided or not hmac.compare_digest(provided, expected):
         audit_event("github_webhook_rejected", success=False)
         raise HTTPException(status_code=401, detail=response(code="WEBHOOK_SIGNATURE_INVALID", message="Webhook 签名无效"))
@@ -4987,7 +4425,7 @@ async def upload_module_backup(request: Request, owner: str = Depends(backup_own
         raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="备份为空或超过 20 MB"))
     if not body.startswith(b"PK"):
         raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="备份不是 ZIP 文件"))
-    owner_dir = BACKUP_ROOT / owner / "module"
+    owner_dir = runtime.BACKUP_ROOT / owner / "module"
     owner_dir.mkdir(parents=True, exist_ok=True)
     created_at = int(datetime.now(timezone.utc).timestamp() * 1000)
     target = owner_dir / f"{created_at}.zip"
@@ -5008,7 +4446,7 @@ async def upload_module_backup(request: Request, owner: str = Depends(backup_own
 
 @app.get("/v1/backups/module/latest")
 async def download_module_backup(owner: str = Depends(backup_owner)) -> FileResponse:
-    owner_dir = BACKUP_ROOT / owner / "module"
+    owner_dir = runtime.BACKUP_ROOT / owner / "module"
     metadata_path = owner_dir / "latest.json"
     if not metadata_path.is_file():
         raise HTTPException(status_code=404, detail=response(code="BACKUP_NOT_FOUND", message="没有模块设置备份"))
@@ -5026,7 +4464,7 @@ async def upload_credentials_backup(request: Request, owner: str = Depends(backu
         raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="密钥备份为空或超过 10 MB"))
     if not body.startswith(b"RCRED1\n"):
         raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="密钥备份格式无效"))
-    owner_dir = SECRET_BACKUP_ROOT / owner
+    owner_dir = runtime.SECRET_BACKUP_ROOT / owner
     owner_dir.mkdir(parents=True, exist_ok=True)
     created_at = int(datetime.now(timezone.utc).timestamp() * 1000)
     target = owner_dir / f"{created_at}.bin"
@@ -5046,7 +4484,7 @@ async def upload_credentials_backup(request: Request, owner: str = Depends(backu
 
 @app.get("/v1/backups/credentials/latest")
 async def download_credentials_backup(owner: str = Depends(backup_owner)) -> FileResponse:
-    owner_dir = SECRET_BACKUP_ROOT / owner
+    owner_dir = runtime.SECRET_BACKUP_ROOT / owner
     metadata_path = owner_dir / "latest.json"
     if not metadata_path.is_file():
         raise HTTPException(status_code=404, detail=response(code="BACKUP_NOT_FOUND", message="没有账号密钥备份"))
@@ -5057,34 +4495,6 @@ async def download_credentials_backup(owner: str = Depends(backup_owner)) -> Fil
     return FileResponse(target, media_type="application/octet-stream", filename="reamicro-credentials.rcbak")
 
 
-def credential_public(value: dict[str, Any]) -> dict[str, Any]:
-    enabled = bool(value.get("enabled", True))
-    verify_failures = max(int(value.get("verifyFailures", 0)), 0)
-    if not enabled:
-        health = "paused"
-    elif verify_failures >= 3:
-        health = "invalid"
-    elif verify_failures:
-        health = "warning"
-    elif value.get("lastVerifiedAt"):
-        health = "valid"
-    else:
-        health = "unverified"
-    return {
-        "id": value.get("id", ""),
-        "type": value.get("type", "reamicro"),
-        "label": value.get("label", "阅微账号"),
-        "accountId": value.get("accountId", ""),
-        "createdAt": value.get("createdAt", 0),
-        "updatedAt": value.get("updatedAt", 0),
-        "lastVerifiedAt": value.get("lastVerifiedAt", 0),
-        "lastVerifyMessage": value.get("lastVerifyMessage", ""),
-        "lastUsedAt": value.get("lastUsedAt", 0),
-        "lastFailedAt": value.get("lastFailedAt", 0),
-        "verifyFailures": verify_failures,
-        "enabled": enabled,
-        "health": health,
-    }
 
 
 async def verify_reamicro_secret(token: str, base_url: str) -> tuple[bool, str]:
@@ -5122,15 +4532,6 @@ def update_credential_health(credential_id: str, success: bool, message: str, us
     save_credentials(credentials)
 
 
-def owner_host_account_id(owner: str) -> str:
-    marker = ":host:"
-    if marker in owner:
-        return owner.rsplit(marker, 1)[1]
-    if owner.startswith("host:"):
-        return owner.split(":", 1)[1]
-    if owner.startswith("host-public:"):
-        return owner.split(":", 1)[1]
-    return ""
 
 
 @app.get("/v1/credentials/reamicro")
@@ -5151,7 +4552,7 @@ async def save_reamicro_credential(request: Request, owner: str = Depends(task_o
     if idempotency_key:
         if len(idempotency_key) > 128:
             raise HTTPException(status_code=400, detail=response(code="IDEMPOTENCY_INVALID", message="Idempotency-Key 过长"))
-        previous = get_state_store().get_idempotency(owner, "save_credential", idempotency_key)
+        previous = runtime.get_state_store().get_idempotency(owner, "save_credential", idempotency_key)
         if previous:
             return previous
     if len(token) < 16 or len(token) > 8_192:
@@ -5244,7 +4645,7 @@ async def save_reamicro_credential(request: Request, owner: str = Depends(task_o
     audit_event("credential_uploaded", f"owner:{owner}", metadata={"credentialId": credential_id, "accountId": account_id, "type": "reamicro"})
     result = response(credential_public(credentials[credential_id]))
     if idempotency_key:
-        get_state_store().save_idempotency(owner, "save_credential", idempotency_key, result, now)
+        runtime.get_state_store().save_idempotency(owner, "save_credential", idempotency_key, result, now)
     return result
 
 
@@ -5324,7 +4725,7 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
     if idempotency_key:
         if len(idempotency_key) > 128:
             raise HTTPException(status_code=400, detail=response(code="IDEMPOTENCY_INVALID", message="Idempotency-Key 过长"))
-        previous = get_state_store().get_idempotency(owner, "create_task", idempotency_key)
+        previous = runtime.get_state_store().get_idempotency(owner, "create_task", idempotency_key)
         if previous:
             return previous
     task_type = str(payload.get("taskType", "")).strip()
@@ -5378,7 +4779,7 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
     task_log(task_id, "任务已创建")
     result = response(public_task(task))
     if idempotency_key:
-        get_state_store().save_idempotency(owner, "create_task", idempotency_key, result, now)
+        runtime.get_state_store().save_idempotency(owner, "create_task", idempotency_key, result, now)
     return result
 
 
@@ -5471,7 +4872,7 @@ def validate_package_payload(kind: str, filename: str, body: bytes) -> None:
 
 
 def package_manifest(package_kind: str, package_id: str) -> tuple[Path, dict[str, Any]]:
-    manifest_path = PACKAGE_ROOT / package_kind / package_id / "manifest.json"
+    manifest_path = runtime.PACKAGE_ROOT / package_kind / package_id / "manifest.json"
     if not manifest_path.is_file():
         raise HTTPException(status_code=404, detail=response(code="PACKAGE_NOT_FOUND", message="内容包不存在"))
     try:
@@ -5589,7 +4990,7 @@ async def delete_task(task_id: str, owner: str = Depends(task_owner)) -> dict[st
 @app.get("/v1/tasks/{task_id}/logs")
 async def task_logs(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
     find_owned_task(task_id, owner)
-    path = TASK_LOG_ROOT / f"{task_id}.log"
+    path = runtime.TASK_LOG_ROOT / f"{task_id}.log"
     items = []
     if path.is_file():
         for line in path.read_text(encoding="utf-8").splitlines()[-200:]:
@@ -5634,7 +5035,7 @@ async def admin_task_logs(task_id: str, actor: dict[str, Any] = Depends(admin_ac
     # task_log() 写的逐行日志此前只有 /v1/tasks/{id}/logs 能取到，后台完全看不到，
     # 排查失败原因时只能看到执行历史里的一句汇总。这里一并展示。
     log_rows = []
-    log_path = TASK_LOG_ROOT / f"{task_id}.log"
+    log_path = runtime.TASK_LOG_ROOT / f"{task_id}.log"
     if log_path.is_file():
         for line in log_path.read_text(encoding="utf-8").splitlines()[-200:][::-1]:
             try:
@@ -5671,10 +5072,10 @@ async def admin_task_logs(task_id: str, actor: dict[str, Any] = Depends(admin_ac
 
 @app.get("/v1/releases/module/download")
 async def download_release(request: Request, _: None = Depends(authenticated)) -> Response:
-    apk_path = RELEASE_ROOT / "latest.apk"
+    apk_path = runtime.RELEASE_ROOT / "latest.apk"
     if not apk_path.is_file():
         raise HTTPException(status_code=404, detail=response(code="NOT_FOUND", message="模块 APK 尚未同步"))
-    metadata_path = RELEASE_ROOT / "latest.json"
+    metadata_path = runtime.RELEASE_ROOT / "latest.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else {}
     etag = str(metadata.get("etag") or metadata.get("sha256") or hashlib.sha256(apk_path.read_bytes()).hexdigest())
     if request.headers.get("If-None-Match", "").strip('"') == etag:
@@ -5718,7 +5119,7 @@ async def packages(kind: str = Query(...), _: None = Depends(authenticated)) -> 
     if not kind.replace("_", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail=response(code="INVALID_KIND", message="内容包类型无效"))
     items = []
-    for manifest_path in sorted((PACKAGE_ROOT / kind).glob("*/manifest.json")):
+    for manifest_path in sorted((runtime.PACKAGE_ROOT / kind).glob("*/manifest.json")):
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if str(manifest.get("status", "published")) != "published":
@@ -5751,7 +5152,7 @@ def parse_module_upload_item(item: Any) -> dict[str, Any]:
     if not isinstance(item, dict):
         raise HTTPException(status_code=400, detail=response(code="INVALID_PAYLOAD", message="内容描述必须是对象"))
     kind = str(item.get("kind", "")).strip()
-    if kind not in MODULE_UPLOAD_DEFAULT_KINDS:
+    if kind not in runtime.MODULE_UPLOAD_DEFAULT_KINDS:
         raise HTTPException(status_code=400, detail=response(code="INVALID_KIND", message="模块只能上传书源和关联源"))
     name = _metadata_text(item.get("name"))
     if not name:
@@ -5825,8 +5226,8 @@ async def module_upload_package(request: Request, owner: str = Depends(module_up
         raise HTTPException(status_code=400, detail=response(code="INVALID_PAYLOAD", message="内容文件必须是 base64 编码"))
     if not body:
         raise HTTPException(status_code=400, detail=response(code="INVALID_PAYLOAD", message="内容文件为空"))
-    if len(body) > MODULE_UPLOAD_MAX_BYTES:
-        raise HTTPException(status_code=413, detail=response(code="PAYLOAD_TOO_LARGE", message=f"内容文件超过 {MODULE_UPLOAD_MAX_BYTES // (1024 * 1024)} MB"))
+    if len(body) > runtime.MODULE_UPLOAD_MAX_BYTES:
+        raise HTTPException(status_code=413, detail=response(code="PAYLOAD_TOO_LARGE", message=f"内容文件超过 {runtime.MODULE_UPLOAD_MAX_BYTES // (1024 * 1024)} MB"))
     filename = safe_payload_filename(str(payload.get("payloadName", "")) or f"{kind}.json")
     validate_package_payload(kind, filename, body)
     existing = find_matching_package(kind, parsed["name"], parsed["domains"], parsed["identities"])
@@ -5889,8 +5290,8 @@ async def package_dependency_graph(_: None = Depends(authenticated)) -> dict[str
 async def package_history(package_kind: str, package_id: str, _: None = Depends(authenticated)) -> dict[str, Any]:
     safe_package_segment(package_kind)
     safe_package_segment(package_id)
-    package_dir = (PACKAGE_ROOT / package_kind / package_id).resolve()
-    if PACKAGE_ROOT.resolve() not in package_dir.parents:
+    package_dir = (runtime.PACKAGE_ROOT / package_kind / package_id).resolve()
+    if runtime.PACKAGE_ROOT.resolve() not in package_dir.parents:
         raise HTTPException(status_code=400, detail=response(code="INVALID_PACKAGE", message="内容包路径无效"))
     history = []
     for manifest_path in sorted((package_dir / "history").glob("*/manifest.json"), reverse=True):
@@ -6023,7 +5424,7 @@ async def rollback_package(
 async def package_download(package_kind: str, package_id: str, _: None = Depends(authenticated)) -> FileResponse:
     if not package_kind.replace("_", "").replace("-", "").isalnum() or not package_id.replace("_", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail=response(code="INVALID_PACKAGE", message="内容包标识无效"))
-    manifest_path = PACKAGE_ROOT / package_kind / package_id / "manifest.json"
+    manifest_path = runtime.PACKAGE_ROOT / package_kind / package_id / "manifest.json"
     if not manifest_path.is_file():
         raise HTTPException(status_code=404, detail=response(code="NOT_FOUND", message="内容包不存在"))
     try:
@@ -6038,7 +5439,7 @@ async def package_download(package_kind: str, package_id: str, _: None = Depends
                 detail=response(code="PACKAGE_DEPENDENCIES_UNRESOLVED", message="内容包必需依赖尚未满足", data=dependency_status),
             )
         payload = (manifest_path.parent / manifest["payload"]).resolve()
-        if PACKAGE_ROOT.resolve() not in payload.parents:
+        if runtime.PACKAGE_ROOT.resolve() not in payload.parents:
             raise ValueError("invalid payload path")
     except HTTPException:
         raise

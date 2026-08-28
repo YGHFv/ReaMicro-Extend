@@ -12,7 +12,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app import main
+from app import main, runtime
+from tests.conftest_support import isolate
 
 
 CHINA = timezone(timedelta(hours=8))
@@ -22,14 +23,7 @@ class YesheCheckinClaimTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
-        main.SECRET_KEY = "test-secret-key-for-yeshe"
-        main.ACCOUNT_ROOT = root / "accounts"
-        main.ACCOUNT_PATH = main.ACCOUNT_ROOT / "credentials.json"
-        main.TASK_ROOT = root / "tasks"
-        main.TASKS_PATH = main.TASK_ROOT / "tasks.json"
-        main.TASK_LOG_ROOT = main.TASK_ROOT / "logs"
-        main.STATE_DB_PATH = root / "state" / "reamicro.sqlite3"
-        main.state_store = None
+        isolate(root, secret_key="test-secret-key-for-yeshe")
         main.save_credentials({
             "rea_1": {
                 "id": "rea_1", "owner": "host:3", "type": "reamicro", "accountId": "3",

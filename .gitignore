@@ -74,3 +74,8 @@ external-sources/
 source-files/*
 !source-files/
 !source-files/fanqie.rmsource
+
+# 服务端拆分期间的一次性辅助文件
+.refactor_*.py
+.out_*.py
+.main.backup.py

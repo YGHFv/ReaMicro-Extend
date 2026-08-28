@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app import main
+from app import main, runtime
+from tests.conftest_support import isolate
 
 
 PRIMARY = {"username": "owner", "role": "primary", "needsSetup": False, "permissions": []}
@@ -26,21 +27,7 @@ class AdminPageRenderTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
-        main.CONFIG_ROOT = root / "config"
-        main.CONFIG_PATH = main.CONFIG_ROOT / "server.json"
-        main.PACKAGE_ROOT = root / "packages"
-        main.RELEASE_ROOT = root / "releases"
-        main.RELEASE_STATUS_PATH = main.RELEASE_ROOT / "sync-status.json"
-        main.SERVER_BACKUP_ROOT = root / "backups" / "server"
-        main.TASK_ROOT = root / "tasks"
-        main.TASKS_PATH = main.TASK_ROOT / "tasks.json"
-        main.ACCOUNT_ROOT = root / "accounts"
-        main.ACCOUNT_PATH = main.ACCOUNT_ROOT / "credentials.json"
-        main.AUDIT_ROOT = root / "audit"
-        main.AUDIT_PATH = main.AUDIT_ROOT / "events.jsonl"
-        main.STATE_DB_PATH = root / "state" / "reamicro.sqlite3"
-        main.SECRET_KEY = "test-secret-key-for-admin-pages"
-        main.state_store = None
+        isolate(root, secret_key="test-secret-key-for-admin-pages")
         self.config = main.save_config({
             **main.default_config(),
             "primaryAdmin": {"username": "owner", "passwordHash": main.password_hash("owner-password-123")},
@@ -75,7 +62,7 @@ class AdminPageRenderTest(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _seed_package(self):
-        package_dir = main.PACKAGE_ROOT / "online_source" / "example-com"
+        package_dir = runtime.PACKAGE_ROOT / "online_source" / "example-com"
         package_dir.mkdir(parents=True, exist_ok=True)
         manifest = {
             "packageId": "example-com",
@@ -164,14 +151,14 @@ class AdminPageRenderTest(unittest.TestCase):
 
     def _seed_snapshot(self):
         """造一份快照文件，让快照表格渲染出下载和校验按钮。"""
-        main.SERVER_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+        runtime.SERVER_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
         self.snapshot_name = "reamicro-server-2026-08-28T010203Z.zip"
-        with zipfile.ZipFile(main.SERVER_BACKUP_ROOT / self.snapshot_name, "w") as archive:
+        with zipfile.ZipFile(runtime.SERVER_BACKUP_ROOT / self.snapshot_name, "w") as archive:
             archive.writestr("snapshot-manifest.json", json.dumps({"createdAt": int(RAW_TIMESTAMP), "files": []}))
 
     def _seed_audit(self):
-        main.AUDIT_ROOT.mkdir(parents=True, exist_ok=True)
-        main.AUDIT_PATH.write_text(
+        runtime.AUDIT_ROOT.mkdir(parents=True, exist_ok=True)
+        runtime.AUDIT_PATH.write_text(
             json.dumps({
                 "at": "2026-08-28T01:02:03+00:00",
                 "actor": "admin:owner",

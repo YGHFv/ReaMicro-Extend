@@ -15,21 +15,15 @@ from fastapi import HTTPException, Request
 from fastapi.security import HTTPBasicCredentials
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app import main
+from app import main, runtime
+from tests.conftest_support import isolate
 
 
 class CloudTaskSecurityTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
-        main.SECRET_KEY = "test-secret-key"
-        main.ACCOUNT_ROOT = root / "accounts"
-        main.ACCOUNT_PATH = main.ACCOUNT_ROOT / "credentials.json"
-        main.TASK_ROOT = root / "tasks"
-        main.TASKS_PATH = main.TASK_ROOT / "tasks.json"
-        main.STATE_DB_PATH = root / "state" / "reamicro.sqlite3"
-        main.SERVER_BACKUP_ROOT = root / "backups" / "server"
-        main.state_store = None
+        isolate(root, secret_key="test-secret-key")
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -165,7 +159,7 @@ class CloudTaskSecurityTest(unittest.TestCase):
             main.apply_task_action(task, "invalid", 3000)
 
     def test_idempotency_storage(self):
-        store = main.get_state_store()
+        store = runtime.get_state_store()
         value = {"code": "OK", "data": {"id": "task_1"}}
         store.save_idempotency("account:alice", "create_task", "request-1", value, 100_000_000)
         self.assertEqual(store.get_idempotency("account:alice", "create_task", "request-1"), value)
@@ -175,35 +169,16 @@ class AdminSecurityTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
-        self.original_config_root = main.CONFIG_ROOT
-        self.original_config_path = main.CONFIG_PATH
-        self.original_admin_username = main.ADMIN_USERNAME
-        self.original_admin_password = main.ADMIN_PASSWORD
-        self.original_package_root = main.PACKAGE_ROOT
-        self.original_release_root = main.RELEASE_ROOT
-        self.original_audit_root = main.AUDIT_ROOT
-        self.original_audit_path = main.AUDIT_PATH
-        main.CONFIG_ROOT = root / "config"
-        main.CONFIG_PATH = main.CONFIG_ROOT / "server.json"
-        main.STATE_DB_PATH = root / "state" / "reamicro.sqlite3"
-        main.SERVER_BACKUP_ROOT = root / "backups" / "server"
-        main.PACKAGE_ROOT = root / "packages"
-        main.RELEASE_ROOT = root / "releases" / "module"
-        main.AUDIT_ROOT = root / "audit"
-        main.AUDIT_PATH = main.AUDIT_ROOT / "events.jsonl"
-        main.state_store = None
-        main.ADMIN_USERNAME = "bootstrap-admin"
-        main.ADMIN_PASSWORD = "bootstrap-password-123"
+        self.original_admin_username = runtime.ADMIN_USERNAME
+        self.original_admin_password = runtime.ADMIN_PASSWORD
+        isolate(root, secret_key="test-secret-key")
+        # 这个类专门测首次登录引导，需要环境变量里的兜底管理员。
+        runtime.ADMIN_USERNAME = "bootstrap-admin"
+        runtime.ADMIN_PASSWORD = "bootstrap-password-123"
 
     def tearDown(self):
-        main.CONFIG_ROOT = self.original_config_root
-        main.CONFIG_PATH = self.original_config_path
-        main.ADMIN_USERNAME = self.original_admin_username
-        main.ADMIN_PASSWORD = self.original_admin_password
-        main.PACKAGE_ROOT = self.original_package_root
-        main.RELEASE_ROOT = self.original_release_root
-        main.AUDIT_ROOT = self.original_audit_root
-        main.AUDIT_PATH = self.original_audit_path
+        runtime.ADMIN_USERNAME = self.original_admin_username
+        runtime.ADMIN_PASSWORD = self.original_admin_password
         self.temp_dir.cleanup()
 
     def test_primary_admin_must_complete_first_login_setup(self):
@@ -306,7 +281,7 @@ class AdminSecurityTest(unittest.TestCase):
         actor = main.require_admin(HTTPBasicCredentials(username="owner", password="owner-password-123"))
         token = main.create_admin_session(actor)
         self.assertEqual(main.validate_admin_session_token(token)["username"], "owner")
-        raw = main.STATE_DB_PATH.read_bytes()
+        raw = runtime.STATE_DB_PATH.read_bytes()
         self.assertNotIn(token.encode("utf-8"), raw)
         config["primaryAdmin"]["passwordHash"] = main.password_hash("new-owner-password-123")
         main.save_config(config)
@@ -359,8 +334,8 @@ class AdminSecurityTest(unittest.TestCase):
         main.save_config(config)
         self.assertIsNone(main.configured_api_key(main.load_config(), "long-api-key"))
         self.assertIsNone(main.configured_api_key(main.load_config(), "revoked"))
-        main.metrics_counters["requests"] = 2
-        self.assertEqual(main.metrics_counters["requests"], 2)
+        runtime.metrics_counters["requests"] = 2
+        self.assertEqual(runtime.metrics_counters["requests"], 2)
 
     def test_admin_page_renders_after_primary_setup(self):
         config = main.load_config()
@@ -455,13 +430,13 @@ class AdminSecurityTest(unittest.TestCase):
             main.require_admin_csrf(config, actor, "invalid")
 
     def test_rate_limit_window(self):
-        original_limit = main.RATE_LIMIT
-        main.RATE_LIMIT = 1
+        original_limit = runtime.RATE_LIMIT
+        runtime.RATE_LIMIT = 1
         key = "test-rate-limit"
-        main.rate_buckets.pop(key, None)
+        runtime.rate_buckets.pop(key, None)
         self.assertTrue(main.allow_rate_limit(key))
         self.assertFalse(main.allow_rate_limit(key))
-        main.RATE_LIMIT = original_limit
+        runtime.RATE_LIMIT = original_limit
 
     def test_daily_task_schedule_uses_configured_timezone_and_rolls_to_next_day(self):
         now = int(datetime(2026, 8, 26, 1, 0, tzinfo=timezone.utc).timestamp() * 1000)
@@ -473,8 +448,8 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertEqual(main.next_task_run(task, late_now), next_day)
 
     def test_malformed_config_values_fall_back_without_breaking_backend(self):
-        main.CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
-        main.CONFIG_PATH.write_text(json.dumps({"releaseSyncSeconds": "invalid", "serverSnapshotSeconds": None, "features": "backup,module_update", "hostAccountAllowlist": "100\n200"}), encoding="utf-8")
+        runtime.CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
+        runtime.CONFIG_PATH.write_text(json.dumps({"releaseSyncSeconds": "invalid", "serverSnapshotSeconds": None, "features": "backup,module_update", "hostAccountAllowlist": "100\n200"}), encoding="utf-8")
         config = main.load_config()
         self.assertEqual(config["releaseSyncSeconds"], 1800)
         self.assertEqual(config["serverSnapshotSeconds"], 86400)
@@ -500,7 +475,7 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertNotIn("secret detail", result.body.decode("utf-8"))
 
     def test_state_store_persists_and_locks_tasks(self):
-        store = main.get_state_store()
+        store = runtime.get_state_store()
         store.save_namespace("tasks", {"task_1": {"id": "task_1", "status": "scheduled"}})
         self.assertEqual(store.load_namespace("tasks")["task_1"]["status"], "scheduled")
         self.assertTrue(store.acquire_task_lock("task_1", "worker_1", 2000, 1000))
@@ -509,7 +484,7 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertTrue(store.acquire_task_lock("task_1", "worker_2", 2000, 1000))
 
     def test_state_store_backup_integrity(self):
-        store = main.get_state_store()
+        store = runtime.get_state_store()
         store.save_namespace("credentials", {"credential_1": {"id": "credential_1"}})
         backup = Path(self.temp_dir.name) / "backup.sqlite3"
         store.backup(backup)
@@ -519,11 +494,11 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertTrue(snapshot.is_file())
 
     def test_server_snapshot_retention(self):
-        main.SERVER_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+        runtime.SERVER_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
         for index in range(5):
-            (main.SERVER_BACKUP_ROOT / f"reamicro-server-2026082{index}T000000Z.zip").write_bytes(b"zip")
+            (runtime.SERVER_BACKUP_ROOT / f"reamicro-server-2026082{index}T000000Z.zip").write_bytes(b"zip")
         self.assertEqual(main.prune_server_snapshots(3), 2)
-        self.assertEqual(len(list(main.SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"))), 3)
+        self.assertEqual(len(list(runtime.SERVER_BACKUP_ROOT.glob("reamicro-server-*.zip"))), 3)
 
     def test_package_payload_validation(self):
         main.validate_package_payload("online_source", "source.json", b'{"id":"source"}')
@@ -539,8 +514,8 @@ class AdminSecurityTest(unittest.TestCase):
         package_id, existing = main.resolve_package_identity("online_source", "", "", metadata)
         self.assertEqual(package_id, "reader.example.test")
         self.assertIsNone(existing)
-        (main.PACKAGE_ROOT / "online_source" / package_id).mkdir(parents=True)
-        (main.PACKAGE_ROOT / "online_source" / package_id / "manifest.json").write_text(json.dumps({"packageId": package_id, "contentId": "https://reader.example.test", "name": "夜读书源", "version": "1.2.3"}), encoding="utf-8")
+        (runtime.PACKAGE_ROOT / "online_source" / package_id).mkdir(parents=True)
+        (runtime.PACKAGE_ROOT / "online_source" / package_id / "manifest.json").write_text(json.dumps({"packageId": package_id, "contentId": "https://reader.example.test", "name": "夜读书源", "version": "1.2.3"}), encoding="utf-8")
         reused, manifest = main.resolve_package_identity("online_source", "", "", metadata)
         self.assertEqual(reused, package_id)
         self.assertEqual(manifest["version"], "1.2.3")
@@ -560,7 +535,7 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertIn('name=\'name\'', html_text)
 
     def test_package_dependency_resolution_supports_alias_and_versions(self):
-        dependency_dir = main.PACKAGE_ROOT / "online_source" / "parser.common"
+        dependency_dir = runtime.PACKAGE_ROOT / "online_source" / "parser.common"
         dependency_dir.mkdir(parents=True)
         (dependency_dir / "manifest.json").write_text(json.dumps({
             "kind": "online_source",
@@ -589,17 +564,22 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertEqual(status["unresolvedDependencies"][0]["reason"], "not_found")
 
     def test_webhook_signature(self):
+        # 原先这个断言只是"用字面量算一遍再和同一个字面量比"，恒真。
+        # 改成真正校验签名比对逻辑：正确签名通过，篡改 body 或密钥都不通过。
+        runtime.GITHUB_WEBHOOK_SECRET = "webhook-secret"
         body = b'{"action":"published"}'
-        main.GITHUB_WEBHOOK_SECRET = "webhook-secret"
-        signature = "sha256=" + hmac.new(b"webhook-secret", body, hashlib.sha256).hexdigest()
-        self.assertTrue(hmac.compare_digest(signature, "sha256=" + hmac.new(main.GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()))
+        expected = "sha256=" + hmac.new(b"webhook-secret", body, hashlib.sha256).hexdigest()
+        self.assertTrue(hmac.compare_digest(expected, main.github_webhook_signature(body)))
+        self.assertFalse(hmac.compare_digest(expected, main.github_webhook_signature(b'{"action":"deleted"}')))
+        runtime.GITHUB_WEBHOOK_SECRET = "other-secret"
+        self.assertFalse(hmac.compare_digest(expected, main.github_webhook_signature(body)))
 
     def test_release_range_and_etag_metadata(self):
-        main.RELEASE_ROOT.mkdir(parents=True, exist_ok=True)
-        apk = main.RELEASE_ROOT / "latest.apk"
+        runtime.RELEASE_ROOT.mkdir(parents=True, exist_ok=True)
+        apk = runtime.RELEASE_ROOT / "latest.apk"
         apk.write_bytes(b"0123456789")
         digest = hashlib.sha256(apk.read_bytes()).hexdigest()
-        (main.RELEASE_ROOT / "latest.json").write_text(json.dumps({"etag": digest}), encoding="utf-8")
+        (runtime.RELEASE_ROOT / "latest.json").write_text(json.dumps({"etag": digest}), encoding="utf-8")
         self.assertEqual(digest, hashlib.sha256(apk.read_bytes()).hexdigest())
 
     def test_release_version_name_falls_back_to_title(self):
@@ -619,9 +599,9 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertFalse(main.is_semantic_version(""))
 
     def test_latest_release_channel_filter(self):
-        main.RELEASE_ROOT.mkdir(parents=True, exist_ok=True)
+        runtime.RELEASE_ROOT.mkdir(parents=True, exist_ok=True)
         metadata = {"versionName": "2.0.0", "channel": "beta", "apkUrl": "/v1/releases/module/download"}
-        (main.RELEASE_ROOT / "latest.json").write_text(json.dumps(metadata), encoding="utf-8")
+        (runtime.RELEASE_ROOT / "latest.json").write_text(json.dumps(metadata), encoding="utf-8")
         # 默认渠道是 stable，预发布版本会被拒绝——这正是客户端不带 channel 时出现 404 的原因。
         with self.assertRaises(HTTPException) as stable:
             asyncio.run(main.latest_release(channel="stable"))
@@ -635,9 +615,9 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertEqual(400, invalid.exception.status_code)
 
     def test_latest_release_accepts_stable_when_asking_beta(self):
-        main.RELEASE_ROOT.mkdir(parents=True, exist_ok=True)
+        runtime.RELEASE_ROOT.mkdir(parents=True, exist_ok=True)
         metadata = {"versionName": "2.0.0", "channel": "stable"}
-        (main.RELEASE_ROOT / "latest.json").write_text(json.dumps(metadata), encoding="utf-8")
+        (runtime.RELEASE_ROOT / "latest.json").write_text(json.dumps(metadata), encoding="utf-8")
         self.assertEqual("2.0.0", asyncio.run(main.latest_release(channel="beta"))["data"]["versionName"])
 
 
@@ -647,18 +627,13 @@ class ModuleContentLibraryUploadTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
-        main.CONFIG_ROOT = root / "config"
-        main.CONFIG_PATH = main.CONFIG_ROOT / "server.json"
-        main.PACKAGE_ROOT = root / "packages"
-        main.AUDIT_ROOT = root / "audit"
-        main.AUDIT_PATH = main.AUDIT_ROOT / "events.jsonl"
-        main.SIGNING_PRIVATE_KEY_FILE = ""
+        isolate(root, secret_key="test-secret-key")
 
     def tearDown(self):
         self.temp_dir.cleanup()
 
     def write_package(self, kind, package_id, name, domains=(), aliases=(), content_id=""):
-        package_dir = main.PACKAGE_ROOT / kind / package_id
+        package_dir = runtime.PACKAGE_ROOT / kind / package_id
         package_dir.mkdir(parents=True, exist_ok=True)
         manifest = {
             "packageId": package_id,
@@ -725,7 +700,7 @@ class ModuleContentLibraryUploadTest(unittest.TestCase):
         result = asyncio.run(main.module_upload_package(request, owner="host:10086"))
         self.assertTrue(result["data"]["uploaded"])
         self.assertTrue(result["data"]["linked"])
-        created = main.PACKAGE_ROOT / "online_source" / result["data"]["package"]["packageId"] / "manifest.json"
+        created = runtime.PACKAGE_ROOT / "online_source" / result["data"]["package"]["packageId"] / "manifest.json"
         manifest = json.loads(created.read_text(encoding="utf-8"))
         # 上传者写入 uploadOwner，域名落盘，供后续按名称+域名比对。
         self.assertEqual("host:10086", manifest["uploadOwner"])

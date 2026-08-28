@@ -13,39 +13,44 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient
 
-from app import main
+from app import main, runtime
 
 ADMIN_USER = "owner"
 ADMIN_PASSWORD = "owner-password-12345"
 HOST_ACCOUNT_ID = "3"
 
 
-def isolate(root: Path) -> None:
-    """把服务器的全部持久化路径指到 root 下。"""
-    main.CONFIG_ROOT = root / "config"
-    main.CONFIG_PATH = main.CONFIG_ROOT / "server.json"
-    main.PACKAGE_ROOT = root / "packages"
-    main.RELEASE_ROOT = root / "releases" / "module"
-    main.RELEASE_STATUS_PATH = main.RELEASE_ROOT / "sync-status.json"
-    main.BACKUP_ROOT = root / "backups"
-    main.SECRET_BACKUP_ROOT = root / "backups" / "secrets"
-    main.SERVER_BACKUP_ROOT = root / "backups" / "server"
-    main.TASK_ROOT = root / "tasks"
-    main.TASKS_PATH = main.TASK_ROOT / "tasks.json"
-    main.TASK_LOG_ROOT = main.TASK_ROOT / "logs"
-    main.AUDIT_ROOT = root / "audit"
-    main.AUDIT_PATH = main.AUDIT_ROOT / "events.jsonl"
-    main.ACCOUNT_ROOT = root / "accounts"
-    main.ACCOUNT_PATH = main.ACCOUNT_ROOT / "credentials.json"
-    main.STATE_DB_PATH = root / "state" / "reamicro.sqlite3"
-    main.SECRET_KEY = "test-secret-key-for-end-to-end-suite"
-    main.SIGNING_PRIVATE_KEY_FILE = ""
-    main.GITHUB_WEBHOOK_SECRET = ""
-    main.ADMIN_COOKIE_SECURE = False
-    main.state_store = None
-    main.rate_buckets.clear()
-    main.metrics_counters.update({"requests": 0, "errors": 0, "rate_limited": 0})
-    main.metrics_routes.clear()
+def isolate(root: Path, secret_key: str = "test-secret-key-for-end-to-end-suite") -> None:
+    """把服务器的全部持久化路径指到 root 下。
+
+    路径和可变状态都住在 `app.runtime`，各模块在调用时读 `runtime.X`，
+    所以这里改 runtime 的属性就能整体重定向。**不要改 main 上的同名属性**——
+    拆分后那些只是导入时的引用，改了不生效。
+    """
+    runtime.CONFIG_ROOT = root / "config"
+    runtime.CONFIG_PATH = runtime.CONFIG_ROOT / "server.json"
+    runtime.PACKAGE_ROOT = root / "packages"
+    runtime.RELEASE_ROOT = root / "releases" / "module"
+    runtime.RELEASE_STATUS_PATH = runtime.RELEASE_ROOT / "sync-status.json"
+    runtime.BACKUP_ROOT = root / "backups"
+    runtime.SECRET_BACKUP_ROOT = root / "backups" / "secrets"
+    runtime.SERVER_BACKUP_ROOT = root / "backups" / "server"
+    runtime.TASK_ROOT = root / "tasks"
+    runtime.TASKS_PATH = runtime.TASK_ROOT / "tasks.json"
+    runtime.TASK_LOG_ROOT = runtime.TASK_ROOT / "logs"
+    runtime.AUDIT_ROOT = root / "audit"
+    runtime.AUDIT_PATH = runtime.AUDIT_ROOT / "events.jsonl"
+    runtime.ACCOUNT_ROOT = root / "accounts"
+    runtime.ACCOUNT_PATH = runtime.ACCOUNT_ROOT / "credentials.json"
+    runtime.STATE_DB_PATH = root / "state" / "reamicro.sqlite3"
+    runtime.SECRET_KEY = secret_key
+    runtime.SIGNING_PRIVATE_KEY_FILE = ""
+    runtime.GITHUB_WEBHOOK_SECRET = ""
+    runtime.ADMIN_COOKIE_SECURE = False
+    runtime.state_store = None
+    runtime.rate_buckets.clear()
+    runtime.metrics_counters.update({"requests": 0, "errors": 0, "rate_limited": 0})
+    runtime.metrics_routes.clear()
 
 
 def base_config(**overrides) -> dict:
@@ -86,7 +91,7 @@ def admin_csrf(actor_role: str = "primary", username: str = ADMIN_USER) -> str:
 
 def seed_package(kind: str = "online_source", package_id: str = "example-com", **manifest_overrides) -> dict:
     """写入一个已发布内容包（含 payload 与一份历史版本）。"""
-    package_dir = main.PACKAGE_ROOT / kind / package_id
+    package_dir = runtime.PACKAGE_ROOT / kind / package_id
     package_dir.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({"bookSourceName": "示例书源", "bookSourceUrl": "https://example.com"}, ensure_ascii=False).encode("utf-8")
     (package_dir / "source.json").write_bytes(payload)
