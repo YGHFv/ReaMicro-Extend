@@ -35,6 +35,76 @@ from fastapi.responses import JSONResponse
 from fastapi.responses import Response
 from app.storage import StateStore
 from app import runtime
+from app.security import (
+    admin_actor,
+    admin_auth_version,
+    admin_csrf_token,
+    allow_rate_limit,
+    api_key_permissions,
+    authenticated,
+    backup_owner,
+    basic_security,
+    check_request_auth,
+    configured_api_key,
+    create_admin_session,
+    create_api_key_record,
+    enforce_api_scope,
+    module_upload_owner,
+    module_upload_policy,
+    normalized_admin_name,
+    primary_admin_configured,
+    require_admin,
+    require_admin_csrf,
+    require_admin_permission,
+    require_primary_admin,
+    required_api_scope,
+    resolve_admin,
+    resolve_identity,
+    revoke_api_key_record,
+    session_admin,
+    task_owner,
+    validate_admin_session_token,
+)
+from app.admin.format import (
+    BEIJING_TZ,
+    _admin_datetime,
+    _admin_digest_label,
+    _admin_duration_label,
+    _admin_relative_label,
+    _admin_size_label,
+    _admin_time_detail,
+    _admin_time_label,
+    admin_section_path,
+)
+from app.admin.layout import (
+    ADMIN_AUTH_STYLE,
+    ADMIN_ERROR_HINTS,
+    ADMIN_NAV_LABELS,
+    ADMIN_STYLE,
+    _admin_auth_shell,
+    _admin_layout,
+    _admin_shell,
+    admin_error_page,
+    admin_html,
+    admin_login_page,
+    admin_setup_page,
+)
+from app.admin.views import (
+    ADMIN_ASSIGNABLE_PERMISSIONS,
+    API_KEY_PERMISSIONS,
+    _admin_api_key_table,
+    _admin_overview_stats,
+    _admin_package_table,
+    _admin_presence_panel,
+    _admin_release_panel,
+    _admin_security_content,
+    _admin_settings_content,
+    _admin_snapshot_table,
+    _admin_subadmin_table,
+    _admin_task_detail,
+    admin_page,
+    api_key_public_records,
+)
 from app.packages import (
     _admin_package_payload,
     _admin_package_records,
@@ -251,20 +321,6 @@ from app.labels import (
 
 
 
-def allow_rate_limit(key: str) -> bool:
-    now = time.monotonic()
-    with runtime.rate_lock:
-        values = [item for item in runtime.rate_buckets.get(key, []) if now - item < runtime.RATE_WINDOW_SECONDS]
-        if len(values) >= runtime.RATE_LIMIT:
-            runtime.rate_buckets[key] = values
-            return False
-        values.append(now)
-        runtime.rate_buckets[key] = values
-        if len(runtime.rate_buckets) > 10_000:
-            oldest = sorted(runtime.rate_buckets, key=lambda item: runtime.rate_buckets[item][-1] if runtime.rate_buckets[item] else now)[:1000]
-            for item in oldest:
-                runtime.rate_buckets.pop(item, None)
-        return True
 
 
 
@@ -362,288 +418,6 @@ async def start_release_sync() -> None:
 
 
 
-def configured_api_key(config: dict[str, Any], value: str | None) -> dict[str, Any] | None:
-    if not value:
-        return None
-    for record in config.get("apiKeyRecords", []):
-        if isinstance(record, dict) and record.get("enabled", True) and hmac.compare_digest(str(record.get("digest", "")), api_key_digest(value)):
-            record["lastUsedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
-            return record
-    records = config.get("apiKeyRecords", [])
-    if isinstance(records, list) and records:
-        return None
-    legacy = str(config.get("apiKey", ""))
-    if legacy and hmac.compare_digest(value, legacy):
-        return {"id": "legacy", "name": "legacy", "permissions": ["read", "write"], "enabled": True}
-    return None
-
-
-def api_key_permissions(config: dict[str, Any], value: str | None) -> set[str]:
-    record = configured_api_key(config, value)
-    if not record:
-        return set()
-    permissions = record.get("permissions", [])
-    if not isinstance(permissions, list) or not permissions:
-        return {"read", "write", "packages:read", "packages:write", "tasks:read", "tasks:write", "credentials:read", "credentials:write", "backup:read"}
-    result = {str(item).strip() for item in permissions if str(item).strip()}
-    if "read" in result:
-        result.update({"packages:read", "tasks:read", "credentials:read", "backup:read"})
-    if "write" in result:
-        result.update({"packages:write", "tasks:write", "credentials:write"})
-    return result
-
-
-def required_api_scope(request: Request) -> str | None:
-    path = request.url.path
-    if path.startswith("/v1/packages"):
-        return "packages:write" if request.method not in {"GET", "HEAD"} else "packages:read"
-    if path.startswith("/v1/tasks"):
-        return "tasks:write" if request.method not in {"GET", "HEAD"} else "tasks:read"
-    if path.startswith("/v1/notifications"):
-        return "tasks:write" if request.method not in {"GET", "HEAD"} else "tasks:read"
-    if path.startswith("/v1/presence"):
-        return "tasks:write"
-    if path.startswith("/v1/credentials"):
-        return "credentials:write" if request.method not in {"GET", "HEAD"} else "credentials:read"
-    if path.startswith("/v1/backups"):
-        return "backup:write" if request.method not in {"GET", "HEAD"} else "backup:read"
-    return None
-
-
-def enforce_api_scope(request: Request, api_key_value: str | None) -> None:
-    scope = required_api_scope(request)
-    if not scope or not api_key_value:
-        return
-    permissions = api_key_permissions(load_config(), api_key_value)
-    if scope not in permissions:
-        raise HTTPException(status_code=403, detail=response(code="API_SCOPE_REQUIRED", message=f"当前 API Key 缺少权限：{scope}"))
-
-
-
-
-def normalized_admin_name(value: str) -> str:
-    name = value.strip()
-    if not 3 <= len(name) <= 64 or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
-        raise ValueError("管理员用户名需为 3-64 位字母、数字、点、下划线或短横线")
-    return name
-
-
-
-
-def primary_admin_configured(config: dict[str, Any]) -> bool:
-    record = config.get("primaryAdmin", {})
-    return isinstance(record, dict) and bool(record.get("username")) and bool(record.get("passwordHash"))
-
-
-def resolve_admin(credentials: HTTPBasicCredentials | None, allow_bootstrap: bool = False) -> dict[str, Any]:
-    config = load_config()
-    if credentials and credentials.username.startswith("__session__:"):
-        actor = validate_admin_session_token(credentials.username.split(":", 1)[1])
-        if actor:
-            return actor
-        raise HTTPException(status_code=401, detail="后台会话已失效")
-    if not primary_admin_configured(config):
-        if not runtime.ADMIN_PASSWORD:
-            raise HTTPException(status_code=503, detail="未配置主管理员初始密码 REAMICRO_ADMIN_PASSWORD")
-        if credentials and hmac.compare_digest(credentials.username, runtime.ADMIN_USERNAME) and hmac.compare_digest(credentials.password, runtime.ADMIN_PASSWORD):
-            if allow_bootstrap:
-                return {"username": runtime.ADMIN_USERNAME, "role": "primary", "needsSetup": True}
-            raise HTTPException(status_code=403, detail="主管理员首次登录必须先设置新账号密码")
-    else:
-        primary = config["primaryAdmin"]
-        if credentials and hmac.compare_digest(credentials.username, str(primary.get("username", ""))) and password_matches(
-            credentials.password,
-            str(primary.get("passwordHash", "")),
-        ):
-            return {"username": credentials.username, "role": "primary", "needsSetup": False}
-
-    if credentials:
-        record = config.get("adminAccounts", {}).get(credentials.username)
-        if isinstance(record, dict) and record.get("enabled", True) and password_matches(
-            credentials.password,
-            str(record.get("passwordHash", "")),
-        ):
-            permissions = record.get("permissions", ["settings:write", "packages:write", "tasks:write"])
-            return {
-                "username": credentials.username,
-                "role": "subadmin",
-                "needsSetup": False,
-                "permissions": [str(item) for item in permissions] if isinstance(permissions, list) else [],
-            }
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="需要后台管理员认证",
-        headers={"WWW-Authenticate": 'Basic realm="ReaMicro Admin"'},
-    )
-
-
-def require_admin(credentials: HTTPBasicCredentials | None, allow_bootstrap: bool = False) -> dict[str, Any]:
-    return resolve_admin(credentials, allow_bootstrap=allow_bootstrap)
-
-
-def admin_auth_version(config: dict[str, Any], actor: dict[str, Any]) -> str:
-    username = str(actor.get("username", ""))
-    if actor.get("needsSetup"):
-        material = runtime.ADMIN_PASSWORD
-    elif actor.get("role") == "primary":
-        material = str(config.get("primaryAdmin", {}).get("passwordHash", ""))
-    else:
-        material = str(config.get("adminAccounts", {}).get(username, {}).get("passwordHash", ""))
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
-
-
-def create_admin_session(actor: dict[str, Any]) -> str:
-    token = generate_long_secret(48)
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    runtime.get_state_store().save_admin_session(
-        api_key_digest(token),
-        actor,
-        admin_auth_version(load_config(), actor),
-        now,
-        now + runtime.ADMIN_SESSION_SECONDS * 1000,
-    )
-    return token
-
-
-def session_admin(request: Request) -> dict[str, Any] | None:
-    token = request.cookies.get(runtime.ADMIN_SESSION_COOKIE, "")
-    if not token:
-        return None
-    return validate_admin_session_token(token)
-
-
-def validate_admin_session_token(token: str) -> dict[str, Any] | None:
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    actor = runtime.get_state_store().load_admin_session(api_key_digest(token), now)
-    if not actor:
-        return None
-    config = load_config()
-    if actor.get("role") == "subadmin":
-        record = config.get("adminAccounts", {}).get(actor.get("username", ""), {})
-        if not isinstance(record, dict) or not record.get("enabled", True):
-            runtime.get_state_store().delete_admin_session(api_key_digest(token))
-            return None
-        actor["permissions"] = record.get("permissions", [])
-    if not hmac.compare_digest(str(actor.get("authVersion", "")), admin_auth_version(config, actor)):
-        runtime.get_state_store().delete_admin_session(api_key_digest(token))
-        return None
-    return actor
-
-
-async def basic_security(request: Request) -> HTTPBasicCredentials | None:
-    """会话优先，兼容旧的 HTTP Basic 登录。"""
-    token = request.cookies.get(runtime.ADMIN_SESSION_COOKIE, "")
-    if token and validate_admin_session_token(token):
-        return HTTPBasicCredentials(username="__session__:" + token, password="")
-    authorization = request.headers.get("Authorization", "")
-    if not authorization.lower().startswith("basic "):
-        return None
-    try:
-        raw = base64.b64decode(authorization[6:].strip()).decode("utf-8")
-        username, password = raw.split(":", 1)
-        return HTTPBasicCredentials(username=username, password=password)
-    except (ValueError, UnicodeDecodeError, binascii.Error):
-        return None
-
-
-async def admin_actor(
-    request: Request,
-    credentials: HTTPBasicCredentials | None = Depends(basic_security),
-) -> dict[str, Any]:
-    actor = session_admin(request)
-    if actor:
-        return actor
-    if credentials:
-        return require_admin(credentials, allow_bootstrap=True)
-    raise HTTPException(status_code=303, detail="请先登录后台", headers={"Location": "/admin/login"})
-
-
-def require_primary_admin(actor: dict[str, Any]) -> None:
-    if actor.get("role") != "primary" or actor.get("needsSetup"):
-        raise HTTPException(status_code=403, detail="只有主管理员可以管理子管理员")
-
-
-def require_admin_permission(actor: dict[str, Any], permission: str) -> None:
-    if actor.get("role") == "primary":
-        return
-    if permission not in set(actor.get("permissions", [])):
-        raise HTTPException(status_code=403, detail=f"当前子管理员缺少权限：{permission}")
-
-
-def admin_csrf_token(config: dict[str, Any], actor: dict[str, Any]) -> str:
-    username = str(actor.get("username", ""))
-    if actor.get("role") == "primary":
-        encoded = str(config.get("primaryAdmin", {}).get("passwordHash", ""))
-    else:
-        encoded = str(config.get("adminAccounts", {}).get(username, {}).get("passwordHash", ""))
-    material = (str(config.get("secretKey", "")) or runtime.SECRET_KEY or runtime.ADMIN_PASSWORD or encoded).encode("utf-8")
-    return hmac.new(hashlib.sha256(material).digest(), f"admin-csrf:{username}:{encoded}".encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-def require_admin_csrf(config: dict[str, Any], actor: dict[str, Any], value: str) -> None:
-    expected = admin_csrf_token(config, actor)
-    if not value or not hmac.compare_digest(value, expected):
-        audit_event("admin_csrf_rejected", audit_actor(actor), success=False)
-        raise HTTPException(status_code=403, detail="后台请求校验失败，请刷新页面后重试")
-
-
-def check_request_auth(
-    api_key_value: str | None,
-    account_name: str | None,
-    account_password: str | None,
-    host_account_id: str | None,
-) -> None:
-    config = load_config()
-    mode = active_auth_mode(config)
-    api_key = str(config.get("apiKey", ""))
-    key_record = configured_api_key(config, api_key_value) if mode == "api_key" else None
-    if key_record:
-        if key_record.get("id") != "legacy":
-            save_config(config)
-        return
-    accounts = config.get("accounts", {})
-    if mode == "account" and account_name and account_password and isinstance(accounts, dict):
-        encoded = accounts.get(account_name)
-        if encoded and password_matches(account_password, str(encoded)):
-            return
-    allowlist = set(config.get("hostAccountAllowlist", []))
-    if mode == "host_account_allowlist" and host_account_id and host_account_id in allowlist:
-        return
-    if mode == "public":
-        return
-    raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="认证信息无效"))
-
-
-def resolve_identity(api_key_value: str | None, account_name: str | None, account_password: str | None, host_account_id: str | None) -> str:
-    """把一次请求解析成稳定的数据归属标识。
-
-    关键约定：只要请求带了阅微账号 ID，归属就固定是 `host:<id>`，与用哪种认证模式通过校验无关。
-    认证模式只负责"能不能访问"，不参与"数据属于谁"——否则管理员在后台把认证模式从公开
-    改成阅微白名单之后，同一台设备的归属会从 `host-public:3` 变成 `host:3`，
-    已上传的同步密钥、已建立的任务和积压的消息全部失联，后台还会出现同一个账号两行在线记录。
-    """
-    config = load_config()
-    mode = active_auth_mode(config)
-    account_id = str(host_account_id or "").strip()
-    authorized = False
-    fallback = ""
-    if mode == "api_key" and configured_api_key(config, api_key_value):
-        authorized = True
-        fallback = "key:" + hashlib.sha256(str(api_key_value).encode()).hexdigest()[:24]
-    elif mode == "account" and account_name and account_password and password_matches(
-        account_password,
-        str(config.get("accounts", {}).get(account_name, "")),
-    ):
-        authorized = True
-        fallback = "account:" + account_name
-    elif mode == "host_account_allowlist" and account_id and account_id in set(config.get("hostAccountAllowlist", [])):
-        authorized = True
-    elif mode == "public":
-        authorized = True
-        fallback = "public"
-    if not authorized:
-        raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="认证信息无效"))
-    return ("host:" + account_id) if account_id else fallback
 
 
 
@@ -654,91 +428,56 @@ def resolve_identity(api_key_value: str | None, account_name: str | None, accoun
 
 
 
-async def authenticated(
-    request: Request,
-    x_reamicro_api_key: str | None = Header(default=None),
-    x_reamicro_account: str | None = Header(default=None),
-    x_reamicro_password: str | None = Header(default=None),
-    x_reamicro_host_account_id: str | None = Header(default=None),
-) -> None:
-    check_request_auth(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
-    enforce_api_scope(request, x_reamicro_api_key)
 
 
-async def task_owner(
-    request: Request,
-    x_reamicro_api_key: str | None = Header(default=None),
-    x_reamicro_account: str | None = Header(default=None),
-    x_reamicro_password: str | None = Header(default=None),
-    x_reamicro_host_account_id: str | None = Header(default=None),
-) -> str:
-    identity = resolve_identity(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
-    enforce_api_scope(request, x_reamicro_api_key)
-    if identity == "public":
-        raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="云任务需要非公开认证"))
-    return identity
 
 
-def module_upload_policy(config: dict[str, Any], host_account_id: str | None) -> dict[str, Any]:
-    """模块上传许可：需要后台启用上传功能，且当前阅微账号 ID 在上传白名单内。"""
-    enabled = bool(config.get("moduleUploadEnabled", False))
-    account_id = str(host_account_id or "").strip()
-    allowlist = set(config.get("moduleUploadAllowlist", []))
-    allowed = enabled and bool(account_id) and account_id in allowlist
-    if not enabled:
-        reason = "服务器未启用用户模块上传功能"
-    elif not account_id:
-        reason = "请求未携带阅微账号 ID，请先在阅微登录账号"
-    elif not allowed:
-        reason = f"阅微账号 {account_id} 不在上传白名单"
-    else:
-        reason = ""
-    return {
-        "enabled": enabled,
-        "allowed": allowed,
-        "reason": reason,
-        "hostAccountId": account_id,
-        "kinds": module_upload_kinds(config.get("moduleUploadKinds")),
-        "maxSize": runtime.MODULE_UPLOAD_MAX_BYTES,
-    }
 
 
-async def module_upload_owner(
-    request: Request,
-    x_reamicro_api_key: str | None = Header(default=None),
-    x_reamicro_account: str | None = Header(default=None),
-    x_reamicro_password: str | None = Header(default=None),
-    x_reamicro_host_account_id: str | None = Header(default=None),
-) -> str:
-    """模块上传的所有者标识。先走常规认证，再校验上传白名单。"""
-    identity = resolve_identity(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
-    enforce_api_scope(request, x_reamicro_api_key)
-    policy = module_upload_policy(load_config(), x_reamicro_host_account_id)
-    if not policy["allowed"]:
-        audit_event(
-            "module_upload_denied",
-            actor=identity,
-            request_id=getattr(request.state, "request_id", ""),
-            success=False,
-            metadata={"hostAccountId": policy["hostAccountId"]},
-        )
-        raise HTTPException(status_code=403, detail=response(code="MODULE_UPLOAD_FORBIDDEN", message=policy["reason"], data=policy))
-    return identity
 
 
-async def backup_owner(
-    request: Request,
-    x_reamicro_api_key: str | None = Header(default=None),
-    x_reamicro_account: str | None = Header(default=None),
-    x_reamicro_password: str | None = Header(default=None),
-    x_reamicro_host_account_id: str | None = Header(default=None),
-) -> str:
-    enforce_api_scope(request, x_reamicro_api_key)
-    # 复用 resolve_identity 的规范归属，备份目录才不会在认证模式变更后失联。
-    identity = resolve_identity(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
-    if identity == "public":
-        raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="备份功能需要非公开认证"))
-    return backup_owner_dir_name(identity)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -786,34 +525,8 @@ def wants_admin_html(request: Request) -> bool:
     return "text/html" in request.headers.get("Accept", "").lower()
 
 
-ADMIN_ERROR_HINTS = {
-    400: "请求参数不正确，请返回上一页检查填写内容。",
-    401: "后台会话已失效，请重新登录。",
-    403: "当前账号没有执行该操作的权限。如果是子管理员，请联系主管理员分配对应权限。",
-    404: "要操作的对象不存在，可能已被删除或改名。",
-    409: "当前状态不允许该操作，请先处理提示中的前置条件。",
-    413: "上传内容超过服务器允许的大小上限。",
-    429: "操作过于频繁，请稍后重试。",
-    500: "服务器内部错误，可凭请求 ID 在审计日志中定位。",
-    502: "访问外部服务失败，请检查网络或令牌配置。",
-    503: "服务尚未就绪，请稍后重试。",
-}
 
 
-def admin_error_page(status_code: int, message: str, request_id: str = "") -> str:
-    """后台错误提示页。此前后台任何异常都直接返回裸 JSON，浏览器里无法阅读。"""
-    esc = lambda value: html.escape(str(value), quote=True)
-    hint = ADMIN_ERROR_HINTS.get(status_code, "操作没有完成。")
-    request_note = f"<small>请求 ID：{esc(request_id)}</small>" if request_id else ""
-    login_button = "<a class='button' href='/admin/login'>重新登录</a>" if status_code == 401 else ""
-    body = (
-        f"<p class='msg'>{esc(message or hint)}</p>"
-        f"<p class='muted' style='margin:0 0 18px'>{esc(hint)}</p>"
-        f"<div class='inline' style='gap:8px'>{login_button}"
-        f"<a class='button' href='/admin' style='background:#eef2f7;color:#334155'>返回后台首页</a></div>"
-        f"{request_note}"
-    )
-    return _admin_auth_shell(f"操作未完成（HTTP {status_code}）", "后台操作被服务器拒绝。", body)
 
 
 @app.exception_handler(HTTPException)
@@ -954,574 +667,72 @@ async def metrics(_: None = Depends(authenticated)) -> Response:
     return Response("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
 
-def _admin_auth_shell(title: str, subtitle: str, body: str) -> str:
-    """登录与初始化页的外壳。没有侧栏，但配色和控件与后台一致。"""
-    esc = lambda value: html.escape(str(value), quote=True)
-    return (
-        f"<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
-        f"<meta name='viewport' content='width=device-width,initial-scale=1'><title>{esc(title)}</title>"
-        f"<style>{ADMIN_AUTH_STYLE}</style></head><body><main>"
-        f"<p class='brand'>ReaMicro API 管理后台</p><h1>{esc(title)}</h1>"
-        f"<p class='muted'>{esc(subtitle)}</p>{body}</main></body></html>"
-    )
-
-
-def admin_setup_page(message: str = "", actor: dict[str, Any] | None = None) -> str:
-    message_html = f"<p class='msg'>{html.escape(message)}</p>" if message else ""
-    actor = actor or {"username": runtime.ADMIN_USERNAME, "role": "primary", "needsSetup": True}
-    csrf_value = html.escape(admin_csrf_token(load_config(), actor), quote=True)
-    body = (
-        f"{message_html}"
-        f"<form method='post' action='/admin/setup'>"
-        f"<input type='hidden' name='csrf_token' value='{csrf_value}'>"
-        f"<label>主管理员用户名<input name='username' value='{html.escape(runtime.ADMIN_USERNAME, quote=True)}' autocomplete='username' required></label>"
-        f"<label>新密码（至少 12 位）<input type='password' name='password' minlength='12' autocomplete='new-password' required></label>"
-        f"<label>确认新密码<input type='password' name='password_confirm' minlength='12' autocomplete='new-password' required></label>"
-        f"<button type='submit'>完成初始化</button></form>"
-        f"<small>初始化信息保存于 /data/config/server.json，密码只保存 PBKDF2 哈希。完成后环境变量中的引导密码立即失效。</small>"
-    )
-    return _admin_auth_shell(
-        "首次设置主管理员",
-        "环境变量中的账号仅用于首次引导，完成后改用数据卷内保存的加盐密码哈希。",
-        body,
-    )
-
-
-def admin_login_page(message: str = "") -> str:
-    message_html = f"<p class='msg'>{html.escape(message)}</p>" if message else ""
-    body = (
-        f"{message_html}"
-        f"<form method='post' action='/admin/login'>"
-        f"<label>管理员用户名<input name='username' autocomplete='username' required></label>"
-        f"<label>密码<input type='password' name='password' autocomplete='current-password' required></label>"
-        f"<button type='submit'>登录</button></form>"
-        f"<small>主管理员与子管理员使用同一个登录入口。会话通过 HttpOnly Cookie 保存。</small>"
-    )
-    return _admin_auth_shell("登录", "请输入后台管理员账号。", body)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-BEIJING_TZ = timezone(timedelta(hours=8))
-
-
-def _admin_datetime(value: Any) -> datetime | None:
-    """把毫秒/秒时间戳或 ISO 字符串统一解析为北京时间，无法解析时返回 None。"""
-    if value is None or value == "":
-        return None
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return None
-        if not re.fullmatch(r"-?\d+(\.\d+)?", text):
-            try:
-                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-            except ValueError:
-                return None
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed.astimezone(BEIJING_TZ)
-        value = text
-    try:
-        timestamp = float(value)
-    except (TypeError, ValueError):
-        return None
-    if timestamp <= 0:
-        return None
-    if timestamp > 10_000_000_000:
-        timestamp /= 1000
-    try:
-        return datetime.fromtimestamp(timestamp, BEIJING_TZ)
-    except (OverflowError, OSError, ValueError):
-        return None
 
 
-def _admin_time_label(value: Any, empty: str = "未安排") -> str:
-    parsed = _admin_datetime(value)
-    if parsed is None:
-        return str(value) if value else empty
-    return parsed.strftime("%Y-%m-%d %H:%M")
-
-
-def _admin_time_detail(value: Any, empty: str = "未安排") -> str:
-    """完整时间 + 相对时间，用于表格里的次要说明行。"""
-    parsed = _admin_datetime(value)
-    if parsed is None:
-        return empty
-    return f"{parsed.strftime('%Y-%m-%d %H:%M:%S')}（{_admin_relative_label(parsed)}）"
-
-
-def _admin_relative_label(moment: datetime) -> str:
-    delta = datetime.now(BEIJING_TZ) - moment
-    seconds = int(delta.total_seconds())
-    future = seconds < 0
-    seconds = abs(seconds)
-    if seconds < 60:
-        text = "刚刚" if not future else "即将"
-        return text
-    for limit, divisor, unit in ((3600, 60, "分钟"), (86400, 3600, "小时"), (2592000, 86400, "天")):
-        if seconds < limit:
-            return f"{seconds // divisor} {unit}{'后' if future else '前'}"
-    return f"{seconds // 2592000} 个月{'后' if future else '前'}"
-
-
-def _admin_duration_label(value: Any) -> str:
-    """毫秒耗时转成可读时长。"""
-    try:
-        millis = int(float(value))
-    except (TypeError, ValueError):
-        return "未记录"
-    if millis <= 0:
-        return "不足 1 毫秒"
-    if millis < 1000:
-        return f"{millis} 毫秒"
-    if millis < 60_000:
-        return f"{millis / 1000:.1f} 秒"
-    minutes, seconds = divmod(millis // 1000, 60)
-    if minutes < 60:
-        return f"{minutes} 分 {seconds} 秒"
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours} 小时 {minutes} 分"
-
-
-def _admin_size_label(value: Any) -> str:
-    """字节数转成人类可读大小。"""
-    try:
-        size = float(value)
-    except (TypeError, ValueError):
-        return "未知大小"
-    if size < 0:
-        return "未知大小"
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} GB"
-
-
-
-
-
-
-
-
-def _admin_digest_label(value: Any) -> str:
-    """摘要只显示前 12 位，完整值放进 title 供悬停查看。"""
-    text = str(value or "")
-    if not text:
-        return "无摘要"
-    return text[:12]
-
-
-
-
-
-
-
-
-def admin_section_path(section: str) -> str:
-    if section in runtime.PACKAGE_KINDS:
-        return f"/admin/content/{section}"
-    return {
-        "overview": "/admin",
-        "packages": "/admin/content",
-        "tasks": "/admin/tasks",
-        "settings": "/admin/settings",
-        "security": "/admin/security",
-    }.get(section, "/admin")
-
-
-def _admin_task_detail(task: dict[str, Any]) -> str:
-    """将任务内部配置转换为后台可读的简短说明。"""
-    task_type = str(task.get("taskType", ""))
-    schedule = task.get("schedule") if isinstance(task.get("schedule"), dict) else {}
-    time_of_day = str(schedule.get("timeOfDay", "")).strip()
-    parts: list[str] = []
-    if time_of_day:
-        parts.append(f"执行时间：每日 {time_of_day}")
-    try:
-        request = decrypt_secret(str(task.get("requestEncrypted", ""))) if task.get("requestEncrypted") else {}
-    except Exception:
-        request = {}
-    if not isinstance(request, dict):
-        request = {}
-    if task_type == "yeshe_checkin":
-        parts.append("奖励领取：签到后 8 小时（周奖励，每周一次）")
-        if task.get("lastCheckinAt"):
-            parts.append(f"上次签到：{_admin_time_label(task.get('lastCheckinAt'))}")
-        if task.get("lastClaimAt"):
-            parts.append(f"上次领取：{_admin_time_label(task.get('lastClaimAt'))}")
-        claimed_date = str(task.get("claimCompletedDate", ""))
-        if claimed_date:
-            parts.append(f"奖励领取日期：{claimed_date}")
-        retry_count = bounded_config_int(task.get("claimRetryCount", 0), 0, 0)
-        if retry_count:
-            parts.append(f"领取重试：已重试 {retry_count} 次")
-    elif task_type == "yeshe_draw_card":
-        parts.append(f"每日抽卡：{int(request.get('dailyLimit', 1) or 1)} 次")
-    elif task_type == "cloud_auto_read":
-        parts.append(f"阅读时长：{int(request.get('durationMinutes', 30) or 30)} 分钟")
-        books = request.get("books") if isinstance(request.get("books"), list) else []
-        if books:
-            names = [str(item.get("name") or item.get("bookName") or item.get("title") or item.get("bookId") or "未命名") for item in books if isinstance(item, dict)]
-            parts.append("阅读图书：" + "、".join(names[:3]) + (" 等" if len(names) > 3 else ""))
-        else:
-            parts.append(f"阅读图书：最近阅读记录（{int(request.get('recentLimit', 1) or 1)} 本）")
-    elif task_type == "http":
-        parts.append(f"请求：{str(request.get('method', 'GET')).upper()} {str(request.get('url', ''))[:80]}")
-    return "；".join(parts) or "未配置详细参数"
-
-
-def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: str = "", csrf_token: str = "") -> str:
-    esc = lambda value: html.escape(str(value), quote=True)
-    needle = query.strip().lower()
-    rows: list[str] = []
-    for item in sorted(records, key=lambda value: (str(value.get("kind", "")), str(value.get("packageId", "")))):
-        haystack = " ".join(str(item.get(key, "")) for key in ("kind", "packageId", "contentId", "name", "version", "aliases")).lower()
-        if needle and needle not in haystack:
-            continue
-        kind = str(item.get("kind", "")); package_id = str(item.get("packageId", ""))
-        dependency = "依赖满足" if item.get("dependenciesSatisfied", True) else "缺少必需依赖"
-        status_value = str(item.get("status", "published"))
-        source = _admin_owner_label(item.get("uploadOwner", "")) if item.get("uploadOwner") else "后台上传"
-        domains = "、".join(sorted(package_match_domains(item)))
-        if can_write:
-            actions = (
-                f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/edit'>编辑</a> "
-                f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/preview'>预览</a> "
-                f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/history'>历史</a> "
-                f"<form class='inline' method='post' action='/admin/packages/{esc(kind)}/{esc(package_id)}/delete'>"
-                f"<input type='hidden' name='csrf_token' value='{esc(csrf_token)}'>"
-                f"<button class='button subtle danger' type='submit'>删除</button></form>"
-            )
-        else:
-            actions = f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/preview'>预览</a>"
-        rows.append(
-            f"<tr><td>{esc(_admin_kind_label(kind))}<small>{esc(source)}</small></td>"
-            f"<td><strong>{esc(item.get('name', package_id))}</strong>"
-            f"<small>包 ID {esc(package_id)}{(' · ' + esc(domains)) if domains else ''}</small></td>"
-            f"<td>{esc(item.get('version', ''))}<small>{esc(_admin_time_label(item.get('buildTime'), '未记录'))}</small></td>"
-            f"<td><span class='status status-{esc(status_value)}'>{esc(_admin_status_label(status_value))}</span></td>"
-            f"<td>{esc(_admin_channel_label(item.get('channel', 'stable')))}<small>{esc(dependency)}</small></td>"
-            f"<td class='actions'>{actions}</td></tr>"
-        )
-    return "".join(rows) or "<tr><td colspan='6' class='empty'>没有匹配的内容包</td></tr>"
-
-
-ADMIN_NAV_LABELS = [
-    ("overview", "概览"),
-    ("packages", "全部内容"),
-    ("online_source", "书源"),
-    ("association_source", "关联源"),
-    ("epub_style", "EPUB 样式"),
-    ("highlight_style", "高亮样式"),
-    ("theme", "主题库"),
-    ("tasks", "云端任务"),
-    ("settings", "服务器设置"),
-    ("security", "子管理员与安全"),
-]
-
-# 后台全站共用一套样式，子页面（编辑、预览、历史、差异、日志、审计）与主页面外观保持一致。
-ADMIN_STYLE = """:root{--line:#e5e9f0;--muted:#64748b;--blue:#2563eb;--ink:#1f2937}*{box-sizing:border-box}body{margin:0;background:#f4f7fb;color:var(--ink);font-family:system-ui,-apple-system,'Microsoft YaHei',sans-serif;line-height:1.5}aside{position:fixed;inset:0 auto 0 0;width:236px;padding:22px 14px;background:#f8fafc;border-right:1px solid var(--line);overflow-y:auto}.brand{font-size:18px;font-weight:700;padding:0 12px 22px}.brand small{display:block;color:var(--muted);font-size:11px;margin-top:5px}nav a{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;margin:3px 0;border-radius:6px;color:#475569;text-decoration:none;font-size:14px}nav a.active,nav a:hover{background:#e8f0ff;color:#1d4ed8;font-weight:650}nav span{color:#94a3b8;font-size:11px}main{margin-left:236px;max-width:1480px;padding:30px 38px 56px}.topbar{display:flex;justify-content:flex-end;align-items:center;gap:15px;color:var(--muted);font-size:13px;margin-bottom:24px}.page-head{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:20px}h1{margin:3px 0 5px;font-size:26px;line-height:1.25}h2{margin:0 0 16px;font-size:19px;line-height:1.3}h3{margin:18px 0 10px;font-size:15px}.eyebrow{color:var(--blue);font-size:12px;font-weight:700;margin:0}.muted,small{color:var(--muted)}.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:20px}.stats div,.table-wrap,.panel{background:#fff;border:1px solid var(--line);border-radius:8px}.stats div{padding:18px}.stats strong{display:block;font-size:24px}.stats span{color:var(--muted);font-size:13px}.toolbar{display:flex;gap:8px;align-items:center;margin-bottom:12px}input,textarea,select{width:100%;padding:9px 10px;border:1px solid #cfd6e1;border-radius:5px;background:#fff;color:var(--ink);font:inherit}textarea{min-height:110px;resize:vertical;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace}label{display:flex;flex-direction:column;gap:6px;min-width:0;font-size:13px;font-weight:600;color:#334155}label:has(input[type=checkbox]){display:flex;flex-direction:row;align-items:center;gap:8px}input[type=checkbox]{width:auto}.grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-bottom:14px}.panel form{display:flex;flex-direction:column;gap:14px}.panel form.inline{flex-direction:row;gap:6px;align-items:center;display:inline-flex;margin:0}.panel form .button{align-self:flex-start}.toolbar input{width:min(420px,100%)}.button{display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:9px 14px;border:0;border-radius:5px;background:var(--blue);color:#fff;text-decoration:none;font:inherit;font-weight:650;cursor:pointer;white-space:nowrap}.button.subtle{background:#eef2f7;color:#334155;padding:6px 9px;min-height:32px;font-size:12px}.button.danger{background:#fef2f2;color:#b91c1c}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:760px}th,td{padding:13px 14px;border-bottom:1px solid var(--line);text-align:left;font-size:13px;vertical-align:top}th{background:#fafbfc;color:var(--muted);font-weight:650;white-space:nowrap}td small{display:block;margin-top:4px;font-size:11px}.status{display:inline-block;padding:3px 7px;border-radius:4px;font-size:11px;background:#eef2f7}.status-published,.status-valid,.status-success,.status-online{background:#ecfdf3;color:#047857}.status-draft,.status-testing,.status-warning,.status-unverified{background:#fff7ed;color:#b45309}.status-invalid,.status-failed{background:#fef2f2;color:#b91c1c}.status-offline,.status-paused,.status-cancelled,.status-unpublished{background:#f1f5f9;color:#475569}.actions{white-space:nowrap}.notice,.secret,.panel{padding:18px;margin-bottom:18px}.notice{background:#ecfdf5;color:#166534}.secret{background:#fff7ed;color:#9a3412;white-space:pre-wrap}.inline{display:inline-flex;gap:6px;align-items:center}.empty{padding:28px;text-align:center;color:var(--muted)}pre{white-space:pre-wrap;overflow:auto;background:#0f172a;color:#e2e8f0;border-radius:6px;padding:16px;line-height:1.55;font-size:12.5px}code{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;font-size:12px}fieldset{border:1px solid var(--line);border-radius:6px;padding:14px;margin:0;display:flex;flex-direction:column;gap:12px}legend{padding:0 6px;font-size:13px;font-weight:650;color:#334155}details summary{cursor:pointer;font-size:13px;font-weight:650;color:#334155}@media(max-width:900px){aside{width:200px}main{margin-left:200px;padding:24px 20px}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.grid-2{grid-template-columns:1fr}}@media(max-width:620px){aside{position:static;width:auto;border-right:0;border-bottom:1px solid var(--line)}main{margin-left:0;padding:20px 14px}nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px}.topbar{justify-content:flex-start;flex-wrap:wrap}.stats{grid-template-columns:1fr 1fr}.toolbar{align-items:stretch;flex-direction:column}.toolbar input{width:100%}.page-head{display:block}}"""
-
-# 登录和初始化页没有侧栏，但配色、控件和圆角与后台一致。
-ADMIN_AUTH_STYLE = """:root{--line:#e5e9f0;--muted:#64748b;--blue:#2563eb;--ink:#1f2937}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#f4f7fb;color:var(--ink);font-family:system-ui,-apple-system,'Microsoft YaHei',sans-serif;line-height:1.5}main{width:100%;max-width:460px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:28px}.brand{color:var(--blue);font-size:12px;font-weight:700;margin:0}h1{margin:4px 0 6px;font-size:23px}p.muted{color:var(--muted);font-size:13px;margin:0 0 18px}form{display:flex;flex-direction:column;gap:14px}label{display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:600;color:#334155}input{width:100%;padding:10px;border:1px solid #cfd6e1;border-radius:5px;font:inherit}button{min-height:42px;border:0;border-radius:5px;background:var(--blue);color:#fff;font:inherit;font-weight:650;cursor:pointer}.msg{padding:11px 13px;border-radius:6px;background:#fef2f2;color:#b91c1c;font-size:13px;margin:0 0 16px}small{display:block;color:var(--muted);font-size:12px;margin-top:16px}"""
-
-
-def _admin_layout(
-    config: dict[str, Any],
-    actor: dict[str, Any],
-    section: str,
-    content: str,
-    message: str = "",
-    secret_notice: str = "",
-    records: list[dict[str, Any]] | None = None,
-    title: str = "ReaMicro API 管理后台",
-) -> str:
-    """后台统一外壳：侧栏、顶栏、提示区加内容。所有后台页面都经过这里。"""
-    esc = lambda value: html.escape(str(value), quote=True)
-    counts = records if records is not None else _admin_package_records()
-    nav_html = "".join(
-        "<a class=\"{active}\" href=\"{href}\">{label}<span>{count}</span></a>".format(
-            active="active" if key == section else "",
-            href=admin_section_path(key),
-            label=label,
-            count=len([item for item in counts if item.get("kind") == key]) if key in runtime.PACKAGE_KINDS else "",
-        )
-        for key, label in ADMIN_NAV_LABELS
-    )
-    csrf_html = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
-    notice = f"<div class='notice'>{esc(message)}</div>" if message else ""
-    secret = f"<div class='secret'><strong>请立即保存，离开本页后无法再次查看：</strong>\n{esc(secret_notice)}</div>" if secret_notice else ""
-    role_label = "主管理员" if actor.get("role") == "primary" else "子管理员"
-    version_line = f"<p class='muted' style='margin:0 0 12px;text-align:right;font-size:12px'>API v{runtime.API_VERSION} · 时间均为北京时间</p>"
-    return (
-        f"<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
-        f"<meta name='viewport' content='width=device-width,initial-scale=1'><title>{esc(title)}</title>"
-        f"<style>{ADMIN_STYLE}</style></head><body>"
-        f"<aside><div class='brand'>ReaMicro<small>API 管理后台 · 5222</small></div><nav>{nav_html}</nav></aside>"
-        f"<main><div class='topbar'><span>管理员：{esc(actor.get('username', ''))}</span><span>{role_label}</span>"
-        f"<form class='inline' method='post' action='/admin/logout'>{csrf_html}"
-        f"<button class='button subtle' type='submit'>退出</button></form></div>"
-        f"{notice}{secret}{version_line}{content}</main></body></html>"
-    )
-
-
-ADMIN_ASSIGNABLE_PERMISSIONS = [
-    ("settings:write", "修改服务器设置"),
-    ("packages:write", "管理内容包"),
-    ("tasks:write", "管理云端任务"),
-    ("module:sync", "同步模块 Release"),
-    ("audit:read", "查看审计日志"),
-    ("backup:admin", "创建和校验快照"),
-    ("security:write", "轮换密钥等安全操作"),
-]
-
-
-def _admin_release_panel() -> str:
-    """模块 Release 同步状态。此前后台看不到同步结果和失败原因。"""
-    esc = lambda value: html.escape(str(value), quote=True)
-    metadata: dict[str, Any] = {}
-    release_path = runtime.RELEASE_ROOT / "latest.json"
-    if release_path.is_file():
-        try:
-            loaded = json.loads(release_path.read_text(encoding="utf-8"))
-            metadata = loaded if isinstance(loaded, dict) else {}
-        except (OSError, ValueError):
-            metadata = {}
-    sync_status: dict[str, Any] = {}
-    if runtime.RELEASE_STATUS_PATH.is_file():
-        try:
-            loaded = json.loads(runtime.RELEASE_STATUS_PATH.read_text(encoding="utf-8"))
-            sync_status = loaded if isinstance(loaded, dict) else {}
-        except (OSError, ValueError):
-            sync_status = {}
-    apk_path = runtime.RELEASE_ROOT / "latest.apk"
-    apk_note = _admin_size_label(apk_path.stat().st_size) if apk_path.is_file() else "尚未下载"
-    success = sync_status.get("success")
-    status_class = "success" if success else ("failed" if success is False else "unverified")
-    status_text = "同步成功" if success else ("同步失败" if success is False else "尚未同步")
-    rows = "".join(
-        f"<tr><th style='width:170px'>{esc(label)}</th><td>{value}</td></tr>"
-        for label, value in (
-            ("当前版本", esc(metadata.get("versionName", "") or "未同步")),
-            ("发布渠道", esc(_admin_channel_label(metadata.get("channel", "")) if metadata.get("channel") else "未同步")),
-            ("发布时间", esc(_admin_time_label(metadata.get("publishedAt"), "未记录"))),
-            ("APK 文件", esc(apk_note)),
-            ("同步状态", f"<span class='status status-{status_class}'>{esc(status_text)}</span>"),
-            ("最近同步", esc(_admin_time_detail(sync_status.get("at") or sync_status.get("checkedAt"), "未记录"))),
-            ("同步说明", esc(sync_status.get("message", "") or "无附加说明")),
-        )
-    )
-    return (
-        f"<div class='panel'><h2>模块 Release 同步</h2>"
-        f"<p class='muted'>服务器定时从 GitHub 拉取模块 Release 供客户端更新。"
-        f"若仓库只发布预发布 Release，必须勾选下方的“包含预发布 Release”，否则 GitHub 找不到正式版会导致同步失败。</p>"
-        f"<div class='table-wrap'><table style='min-width:auto'><tbody>{rows}</tbody></table></div></div>"
-    )
-
-
-def _admin_settings_content(config: dict[str, Any], actor: dict[str, Any], csrf_html: str) -> str:
-    """服务器设置分区。所有可配置项都在界面上可见可改，不再依赖隐藏字段保值。"""
-    esc = lambda value: html.escape(str(value), quote=True)
-    newline = "\n"
-    selected_mode = str(config.get("authMode") or infer_auth_mode(config))
-    mode_options = "".join(
-        f"<option value='{mode}' {'selected' if mode == selected_mode else ''}>{label}</option>"
-        for mode, label in (
-            ("public", "公开访问"),
-            ("api_key", "API Key"),
-            ("account", "独立账号密码"),
-            ("host_account_allowlist", "阅微账号白名单"),
-        )
-    )
-    accounts = config.get("accounts", {})
-    account_note = (
-        f"当前已配置独立账号：{esc('、'.join(sorted(accounts.keys())))}"
-        if isinstance(accounts, dict) and accounts
-        else "当前没有独立账号"
-    )
-    api_key_note = "已配置 API Key" if api_key_auth_configured(config) else "尚未配置任何 API Key"
-    kind_checkboxes = "".join(
-        f"<label><input type='checkbox' name='module_upload_kinds' value='{esc(kind)}' "
-        f"{'checked' if kind in config.get('moduleUploadKinds', []) else ''}> {esc(_admin_kind_label(kind))}</label>"
-        for kind in sorted(runtime.MODULE_UPLOAD_DEFAULT_KINDS)
-    )
-    head = (
-        "<div class='page-head'><div><p class='eyebrow'>系统</p><h1>服务器设置</h1>"
-        "<p class='muted'>认证模式为单选，只有当前选中的认证方式会对 API 生效。未选中的模式配置会保留但不参与认证。</p></div></div>"
-    )
-    auth_blocks = (
-        f"<div data-auth-section='api_key'>"
-        f"<p class='muted' style='margin:0 0 10px'>{esc(api_key_note)}。明细管理请到“子管理员与安全”。</p>"
-        f"<label>API Key（留空保持当前值）<input type='password' name='api_key' autocomplete='new-password'></label>"
-        f"<label><input type='checkbox' name='generate_api_key'> 生成新的随机 API Key（保存后显示一次）</label>"
-        f"<label><input type='checkbox' name='clear_api_key'> 清空全部 API Key</label></div>"
-        f"<div data-auth-section='account'>"
-        f"<p class='muted' style='margin:0 0 10px'>{account_note}。</p>"
-        f"<div class='grid-2'><label>新增或更新账号名<input name='account_name' autocomplete='off'></label>"
-        f"<label>账号密码<input type='password' name='account_password' autocomplete='new-password'></label></div>"
-        f"<label>要删除的账号名<input name='remove_account' autocomplete='off'></label></div>"
-        f"<div data-auth-section='host_account_allowlist'>"
-        f"<label>阅微账号白名单（每行一个阅微账号 ID）"
-        f"<textarea name='host_account_allowlist'>{esc(newline.join(config.get('hostAccountAllowlist', [])))}</textarea></label></div>"
-    )
-    form = (
-        f"<div class='panel'><h2>基础与认证</h2><form method='post' action='/admin/settings'>{csrf_html}"
-        f"<div class='grid-2'>"
-        f"<label>服务器 ID<input name='server_id' value='{esc(config.get('serverId', ''))}'></label>"
-        f"<label>最低模块版本<input name='min_module_version' value='{esc(config.get('minModuleVersion', ''))}'></label>"
-        f"<label>认证类型<select name='auth_mode' id='auth-mode'>{mode_options}</select></label>"
-        f"<label>功能列表（逗号分隔）<input name='features' value='{esc(','.join(config.get('features', [])))}'></label>"
-        f"</div>{auth_blocks}"
-        f"<fieldset><legend>模块 Release 同步</legend>"
-        f"<div class='grid-2'>"
-        f"<label>GitHub 仓库<input name='github_repository' value='{esc(config.get('githubRepository', ''))}'></label>"
-        f"<label>同步间隔（秒，最小 300）<input name='release_sync_seconds' type='number' min='300' value='{esc(config.get('releaseSyncSeconds', 1800))}'></label>"
-        f"<label>GitHub 令牌（留空保持当前值）<input type='password' name='github_token' autocomplete='new-password'></label>"
-        f"<label>最低可接受 versionCode<input name='release_version_code' type='number' min='0' value='{esc(config.get('releaseVersionCode', 0))}'></label>"
-        f"</div>"
-        f"<label><input type='checkbox' name='github_include_prerelease' {'checked' if config.get('githubIncludePrerelease') else ''}> "
-        f"包含预发布 Release（仓库只发预发布时必须勾选）</label>"
-        f"<label><input type='checkbox' name='clear_github_token'> 清空已保存的 GitHub 令牌</label>"
-        f"</fieldset>"
-        f"<fieldset><legend>服务器快照</legend>"
-        f"<label><input type='checkbox' name='server_snapshot_enabled' {'checked' if config.get('serverSnapshotEnabled', True) else ''}> 启用定时快照</label>"
-        f"<div class='grid-2'>"
-        f"<label>快照间隔（秒，最小 3600）<input name='server_snapshot_seconds' type='number' min='3600' value='{esc(config.get('serverSnapshotSeconds', 86400))}'></label>"
-        f"<label>保留份数（最少 3）<input name='server_snapshot_retention' type='number' min='3' value='{esc(config.get('serverSnapshotRetention', 30))}'></label>"
-        f"</div></fieldset>"
-        f"<fieldset><legend>用户模块上传</legend>"
-        f"<p class='muted' style='margin:0;font-size:12px'>启用后，白名单内的阅微账号可以从模块上传书源和关联源。"
-        f"服务器已存在名称和域名相同的源时只建立关联，不会被模块覆盖。</p>"
-        f"<label><input type='checkbox' name='module_upload_enabled' {'checked' if config.get('moduleUploadEnabled') else ''}> 启用模块上传内容库</label>"
-        f"<label>上传 ID 白名单（阅微账号 ID，每行一个）"
-        f"<textarea name='module_upload_allowlist' placeholder='例如&#10;10086&#10;20250'>{esc(newline.join(config.get('moduleUploadAllowlist', [])))}</textarea></label>"
-        f"<div><p class='muted' style='margin:0 0 8px;font-size:12px'>允许上传的类型（全部取消则回退到默认的书源和关联源）</p>{kind_checkboxes}</div>"
-        f"</fieldset>"
-        f"<fieldset><legend>内容包签名</legend>"
-        f"<label>Ed25519 签名公钥（Base64，留空表示不校验签名）"
-        f"<textarea name='signing_public_key' style='min-height:70px'>{esc(config.get('signingPublicKey', ''))}</textarea></label>"
-        f"</fieldset>"
-        f"<div class='inline'><button class='button' type='submit'>保存设置</button>"
-        f"<button class='button subtle' type='submit' formaction='/admin/sync'>立即同步模块 Release</button></div>"
-        f"</form></div>"
-    )
-    script = (
-        "<script>(()=>{const select=document.getElementById('auth-mode');if(!select)return;"
-        "const sync=()=>document.querySelectorAll('[data-auth-section]').forEach(node=>{"
-        "node.hidden=node.dataset.authSection!==select.value;"
-        "node.querySelectorAll('input,textarea,select').forEach(input=>input.disabled=node.hidden)});"
-        "select.addEventListener('change',sync);sync()})();</script>"
-    )
-    return head + form + _admin_release_panel() + script
-
-
-def _admin_overview_stats(config: dict[str, Any], records: list[dict[str, Any]]) -> str:
-    """概览统计卡片：内容库、任务、模块在线和服务器配置要点。"""
-    esc = lambda value: html.escape(str(value), quote=True)
-    tasks = load_tasks()
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    # 按规范归属去重，同一个阅微账号的多条历史心跳只算一台设备。
-    online = len({
-        canonical_owner_of(str(item.get("owner", "")))
-        for item in load_presence().values()
-        if isinstance(item, dict) and bounded_config_int(item.get("onlineUntil", 0), 0, 0) > now
-    })
-    pending = sum(1 for item in load_notifications().values() if not item.get("deliveredAt"))
-    release_version = "未同步"
-    release_path = runtime.RELEASE_ROOT / "latest.json"
-    if release_path.is_file():
-        try:
-            release_version = str(json.loads(release_path.read_text(encoding="utf-8")).get("versionName", "未同步"))
-        except (OSError, ValueError):
-            release_version = "读取失败"
-    cards = [
-        (str(len(records)), "内容包总数"),
-        (str(sum(1 for item in records if str(item.get("status", "published")) == "published")), "其中已发布"),
-        (str(len(tasks)), "云端任务"),
-        (str(sum(1 for item in tasks.values() if str(item.get("status")) == "failed")), "执行失败任务"),
-        (str(online), "模块在线设备"),
-        (str(pending), "待发送消息"),
-        (release_version, "模块 Release 版本"),
-        ("已开放" if config.get("moduleUploadEnabled") else "未开放", "用户模块上传"),
-    ]
-    return (
-        "<div class='stats' style='grid-template-columns:repeat(4,minmax(0,1fr))'>"
-        + "".join(f"<div><strong>{esc(value)}</strong><span>{esc(label)}</span></div>" for value, label in cards)
-        + "</div>"
-    )
-
-
-def _admin_presence_panel() -> str:
-    """模块在线状态与离线消息队列。此前后台完全看不到这两类数据。"""
-    esc = lambda value: html.escape(str(value), quote=True)
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    presence_rows = []
-    # 按规范归属再去重一次：即使存量数据还没被启动迁移折叠，同一个阅微账号也只显示最近一行。
-    deduped: dict[str, dict[str, Any]] = {}
-    for item in load_presence().values():
-        if not isinstance(item, dict):
-            continue
-        canonical = canonical_owner_of(str(item.get("owner", ""))) or "未标记"
-        existing = deduped.get(canonical)
-        if existing is None or bounded_config_int(item.get("lastSeenAt", 0), 0, 0) > bounded_config_int(existing.get("lastSeenAt", 0), 0, 0):
-            deduped[canonical] = item
-    for item in sorted(deduped.values(), key=lambda value: bounded_config_int(value.get("lastSeenAt", 0), 0, 0), reverse=True):
-        online_until = bounded_config_int(item.get("onlineUntil", 0), 0, 0)
-        online = online_until > now
-        presence_rows.append(
-            f"<tr><td>{esc(_admin_owner_label(item.get('owner', '')))}</td>"
-            f"<td><span class='status status-{'online' if online else 'offline'}'>{'在线' if online else '离线'}</span>"
-            f"<small>租约至 {esc(_admin_time_label(online_until, '未记录'))}</small></td>"
-            f"<td>{esc(item.get('moduleVersion', '') or '未上报')}"
-            f"<small>构建 {esc(_admin_time_label(item.get('buildTime'), '未记录'))}</small></td>"
-            f"<td>{esc(item.get('source', '') or 'module')}</td>"
-            f"<td>{esc(_admin_time_label(item.get('lastSeenAt'), '未记录'))}"
-            f"<small>{esc(_admin_time_detail(item.get('lastSeenAt'), '未记录'))}</small></td></tr>"
-        )
-    presence_table = "".join(presence_rows) or "<tr><td colspan='5' class='empty'>暂无模块心跳记录</td></tr>"
-    notification_rows = []
-    notifications = sorted(
-        load_notifications().values(),
-        key=lambda value: bounded_config_int(value.get("createdAt", 0), 0, 0),
-        reverse=True,
-    )
-    for item in notifications[:30]:
-        delivered = bounded_config_int(item.get("deliveredAt", 0), 0, 0)
-        result = str(item.get("result", ""))
-        notification_rows.append(
-            f"<tr><td>{esc(item.get('title', '') or '任务消息')}"
-            f"<small>{esc(item.get('message', '') or '无消息内容')}</small></td>"
-            f"<td>{esc(_admin_owner_label(item.get('owner', '')))}</td>"
-            f"<td><span class='status status-{esc(result)}'>{esc(_admin_result_label(result))}</span></td>"
-            f"<td><span class='status status-{'success' if delivered else 'unverified'}'>{'已送达' if delivered else '待发送'}</span>"
-            f"<small>{esc(_admin_time_label(delivered, '模块下次在线时发送'))}</small></td>"
-            f"<td>{esc(_admin_time_label(item.get('createdAt'), '未记录'))}</td></tr>"
-        )
-    notification_table = "".join(notification_rows) or "<tr><td colspan='5' class='empty'>暂无任务消息</td></tr>"
-    pending_total = sum(1 for item in notifications if not item.get("deliveredAt"))
-    return (
-        f"<div class='panel'><h2>模块在线状态</h2>"
-        f"<p class='muted'>阅微在前台时模块每 5 分钟上报一次心跳，另外在零点和云端任务完成后由系统闹钟唤醒上报；服务器按 10 分钟租约判断在线。"
-        f"消息在心跳响应里下发，模块显示成功后回执，未回执的会保留到下次在线。</p>"
-        f"<div class='table-wrap'><table><thead><tr><th>来源账号</th><th>连接状态</th><th>模块版本</th><th>上报来源</th><th>最近心跳</th></tr></thead>"
-        f"<tbody>{presence_table}</tbody></table></div></div>"
-        f"<div class='panel'><h2>任务消息队列</h2>"
-        f"<p class='muted'>显示最近 30 条任务消息，其中 {pending_total} 条等待发送。模块确认接收后才会标记为已送达。</p>"
-        f"<div class='table-wrap'><table><thead><tr><th>消息</th><th>接收账号</th><th>任务结果</th><th>发送状态</th><th>产生时间</th></tr></thead>"
-        f"<tbody>{notification_table}</tbody></table></div></div>"
-    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def normalized_admin_permissions(values: Any) -> list[str]:
@@ -1534,365 +745,14 @@ def normalized_admin_permissions(values: Any) -> list[str]:
     return sorted({str(item).strip() for item in values if str(item).strip() in allowed})
 
 
-def _admin_subadmin_table(config: dict[str, Any], csrf_html: str) -> str:
-    """子管理员列表，带重置密码、启用停用和删除操作。"""
-    esc = lambda value: html.escape(str(value), quote=True)
-    accounts = config.get("adminAccounts", {})
-    rows = []
-    for username in sorted(accounts.keys()):
-        record = accounts.get(username)
-        if not isinstance(record, dict):
-            continue
-        enabled = bool(record.get("enabled", True))
-        permissions = record.get("permissions", [])
-        permission_labels = "、".join(
-            dict(ADMIN_ASSIGNABLE_PERMISSIONS).get(str(item), str(item)) for item in permissions
-        ) if isinstance(permissions, list) and permissions else "未分配权限"
-        actions = (
-            f"<form class='inline' method='post' action='/admin/admins/reset'>{csrf_html}"
-            f"<input type='hidden' name='username' value='{esc(username)}'>"
-            f"<button class='button subtle' type='submit'>重置密码</button></form> "
-            f"<form class='inline' method='post' action='/admin/admins/toggle'>{csrf_html}"
-            f"<input type='hidden' name='username' value='{esc(username)}'>"
-            f"<button class='button subtle' type='submit'>{'停用' if enabled else '启用'}</button></form> "
-            f"<form class='inline' method='post' action='/admin/admins/delete'>{csrf_html}"
-            f"<input type='hidden' name='username' value='{esc(username)}'>"
-            f"<button class='button subtle danger' type='submit'>删除</button></form>"
-        )
-        rows.append(
-            f"<tr><td><strong>{esc(username)}</strong><small>由 {esc(record.get('createdBy', '未知'))} 创建</small></td>"
-            f"<td><span class='status status-{'valid' if enabled else 'paused'}'>{'已启用' if enabled else '已停用'}</span></td>"
-            f"<td>{esc(permission_labels)}</td>"
-            f"<td>{esc(_admin_time_label(record.get('updatedAt'), '未记录'))}"
-            f"<small>创建于 {esc(_admin_time_label(record.get('createdAt'), '未记录'))}</small></td>"
-            f"<td class='actions'>{actions}</td></tr>"
-        )
-    table = "".join(rows) or "<tr><td colspan='5' class='empty'>暂无子管理员</td></tr>"
-    permission_checkboxes = "".join(
-        f"<label><input type='checkbox' name='permissions' value='{esc(key)}' "
-        f"{'checked' if key in {'settings:write', 'packages:write', 'tasks:write'} else ''}> {esc(label)}</label>"
-        for key, label in ADMIN_ASSIGNABLE_PERMISSIONS
-    )
-    return (
-        f"<div class='panel'><h2>子管理员</h2>"
-        f"<p class='muted'>子管理员使用同一个登录地址，只能执行被授予的操作。重置密码、停用和删除会立即清空该账号的全部后台会话。</p>"
-        f"<div class='table-wrap' style='margin-bottom:16px'><table><thead><tr><th>用户名</th><th>状态</th><th>权限</th><th>最近变更</th><th>操作</th></tr></thead>"
-        f"<tbody>{table}</tbody></table></div>"
-        f"<h3>创建子管理员</h3>"
-        f"<form method='post' action='/admin/admins/create'>{csrf_html}"
-        f"<div class='grid-2'><label>用户名<input name='username' required></label>"
-        f"<label>初始密码（留空自动生成 24 位随机密码）<input type='password' name='password' minlength='12'></label></div>"
-        f"<fieldset><legend>授予权限</legend>{permission_checkboxes}</fieldset>"
-        f"<button class='button' type='submit'>创建子管理员</button></form></div>"
-    )
 
 
-def _admin_api_key_table(config: dict[str, Any], csrf_html: str) -> str:
-    """API Key 列表与创建、吊销操作。密钥明文只在创建时显示一次。"""
-    esc = lambda value: html.escape(str(value), quote=True)
-    rows = []
-    for record in api_key_public_records(config):
-        enabled = bool(record.get("enabled", True))
-        permissions = record.get("permissions", [])
-        actions = ""
-        if enabled:
-            actions = (
-                f"<form class='inline' method='post' action='/admin/security/api-keys/revoke'>{csrf_html}"
-                f"<input type='hidden' name='key_id' value='{esc(record.get('id', ''))}'>"
-                f"<button class='button subtle danger' type='submit'>吊销</button></form>"
-            )
-        revoked_note = "" if enabled else f"<small>吊销于 {esc(_admin_time_label(record.get('revokedAt'), '未记录'))}</small>"
-        permission_text = "、".join(str(item) for item in permissions) if permissions else "无"
-        action_cell = actions or "<span class='muted'>无可用操作</span>"
-        rows.append(
-            f"<tr><td><strong>{esc(record.get('name', ''))}</strong><small><code>{esc(record.get('id', ''))}</code></small></td>"
-            f"<td><span class='status status-{'valid' if enabled else 'invalid'}'>{'生效中' if enabled else '已吊销'}</span>{revoked_note}</td>"
-            f"<td>{esc(permission_text)}</td>"
-            f"<td>{esc(_admin_time_label(record.get('createdAt'), '未记录'))}</td>"
-            f"<td>{esc(_admin_time_label(record.get('lastUsedAt'), '从未使用'))}</td>"
-            f"<td class='actions'>{action_cell}</td></tr>"
-        )
-    table = "".join(rows) or "<tr><td colspan='6' class='empty'>暂无 API Key</td></tr>"
-    permission_checkboxes = "".join(
-        f"<label><input type='checkbox' name='permissions' value='{esc(key)}' {'checked' if key == 'read' else ''}> {esc(key)}</label>"
-        for key in API_KEY_PERMISSIONS
-    )
-    return (
-        f"<div class='panel'><h2>API Key</h2>"
-        f"<p class='muted'>供脚本或第三方客户端调用 API 使用。密钥只保存哈希，明文仅在创建时显示一次；泄露后请立即吊销。</p>"
-        f"<div class='table-wrap' style='margin-bottom:16px'><table><thead><tr><th>名称</th><th>状态</th><th>权限范围</th><th>创建时间</th><th>最近使用</th><th>操作</th></tr></thead>"
-        f"<tbody>{table}</tbody></table></div>"
-        f"<h3>创建 API Key</h3>"
-        f"<form method='post' action='/admin/security/api-keys/create'>{csrf_html}"
-        f"<label>名称<input name='name' placeholder='例如 内容同步脚本'></label>"
-        f"<fieldset><legend>权限范围</legend>{permission_checkboxes}</fieldset>"
-        f"<button class='button' type='submit'>创建 API Key</button></form></div>"
-    )
 
 
-def _admin_snapshot_table(config: dict[str, Any], actor: dict[str, Any], csrf_html: str) -> str:
-    """服务器快照列表，带下载、校验和（仅主管理员）恢复操作。"""
-    esc = lambda value: html.escape(str(value), quote=True)
-    is_primary = actor.get("role") == "primary"
-    rows = []
-    for item in list_server_snapshots():
-        filename = str(item.get("filename", item.get("name", "")))
-        actions = [
-            f"<a class='button subtle' href='/admin/backups/server/{esc(filename)}'>下载</a>",
-            f"<form class='inline' method='post' action='/admin/security/backups/verify'>{csrf_html}"
-            f"<input type='hidden' name='filename' value='{esc(filename)}'>"
-            f"<button class='button subtle' type='submit'>校验完整性</button></form>",
-        ]
-        created = item.get("createdAt") or item.get("modifiedAt")
-        rows.append(
-            f"<tr><td><strong>{esc(filename)}</strong>"
-            f"<small>摘要 <code title='{esc(item.get('sha256', ''))}'>{esc(_admin_digest_label(item.get('sha256')))}</code></small></td>"
-            f"<td>{esc(_admin_size_label(item.get('size')))}</td>"
-            f"<td>{esc(_admin_time_label(created, '未记录'))}"
-            f"<small>{esc(_admin_time_detail(created, '未记录'))}</small></td>"
-            f"<td class='actions'>{' '.join(actions)}</td></tr>"
-        )
-    table = "".join(rows) or "<tr><td colspan='4' class='empty'>暂无服务器快照</td></tr>"
-    restore_block = ""
-    if is_primary:
-        restore_block = (
-            f"<h3>恢复快照</h3>"
-            f"<p class='muted'>恢复会用快照内的数据库和 <code>server.json</code> 覆盖当前数据，"
-            f"覆盖前会自动创建一份安全快照。恢复后请重启容器让所有进程重新加载配置。</p>"
-            f"<form method='post' action='/admin/security/backups/restore'>{csrf_html}"
-            f"<div class='grid-2'><label>要恢复的快照文件名<input name='filename' placeholder='reamicro-server-....zip' required></label>"
-            f"<label>再次输入同一文件名以确认<input name='confirm' placeholder='与上方完全一致' required></label></div>"
-            f"<button class='button danger' type='submit'>确认恢复</button></form>"
-        )
-    else:
-        restore_block = "<p class='muted'>恢复快照仅限主管理员操作。</p>"
-    retention = bounded_config_int(config.get("serverSnapshotRetention", 30), 30, 3)
-    return (
-        f"<div class='panel'><h2>服务器快照</h2>"
-        f"<p class='muted'>快照包含 SQLite 数据库与服务器配置，最多保留 {retention} 份。"
-        f"快照内含加密后的阅微凭据，请与服务器加密密钥分开保存。</p>"
-        f"<form class='inline' method='post' action='/admin/backups/server' style='margin-bottom:14px'>{csrf_html}"
-        f"<button class='button' type='submit'>立即创建快照</button></form>"
-        f"<div class='table-wrap' style='margin-bottom:16px'><table><thead><tr><th>文件名</th><th>大小</th><th>创建时间</th><th>操作</th></tr></thead>"
-        f"<tbody>{table}</tbody></table></div>{restore_block}</div>"
-    )
 
 
-def _admin_security_content(config: dict[str, Any], actor: dict[str, Any], csrf_html: str) -> str:
-    """安全分区：子管理员、API Key、快照、密钥轮换和审计入口。"""
-    esc = lambda value: html.escape(str(value), quote=True)
-    is_primary = actor.get("role") == "primary"
-    permissions = set(actor.get("permissions", []))
-    head = (
-        "<div class='page-head'><div><p class='eyebrow'>保护</p><h1>子管理员与安全</h1>"
-        "<p class='muted'>管理员账号、API Key、服务器快照与加密密钥。</p></div></div>"
-    )
-    stats = (
-        f"<div class='stats'>"
-        f"<div><strong>{len(config.get('adminAccounts', {}))}</strong><span>子管理员</span></div>"
-        f"<div><strong>{sum(1 for item in api_key_public_records(config) if item.get('enabled', True))}</strong><span>生效中的 API Key</span></div>"
-        f"<div><strong>{len(list_server_snapshots())}</strong><span>服务器快照</span></div>"
-        f"<div><strong>{'已设置' if config.get('secretKey') else '未设置'}</strong><span>服务器加密密钥</span></div>"
-        f"</div>"
-    )
-    blocks = [head, stats]
-    if is_primary:
-        blocks.append(_admin_subadmin_table(config, csrf_html))
-        blocks.append(_admin_api_key_table(config, csrf_html))
-    if is_primary or "backup:admin" in permissions:
-        blocks.append(_admin_snapshot_table(config, actor, csrf_html))
-    if is_primary or "security:write" in permissions:
-        blocks.append(
-            f"<div class='panel'><h2>服务器加密密钥</h2>"
-            f"<p class='muted'>该密钥用于加密阅微登录凭据和任务参数。轮换会用新密钥重新加密所有既有数据；"
-            f"轮换期间请避免并发写入，并务必保存新密钥，丢失后既有凭据无法解密。</p>"
-            f"<form method='post' action='/admin/security/rotate-secret'>{csrf_html}"
-            f"<label>新的加密密钥（留空则自动生成随机长密钥）<input type='password' name='new_secret_key' autocomplete='new-password'></label>"
-            f"<button class='button danger' type='submit'>轮换加密密钥</button></form></div>"
-        )
-    if is_primary or "audit:read" in permissions:
-        blocks.append(
-            f"<div class='panel'><h2>审计日志</h2>"
-            f"<p class='muted'>记录登录、设置变更、内容包操作、模块上传和快照操作，保存在数据卷的 "
-            f"<code>/data/audit/events.jsonl</code>。</p>"
-            f"<p><a class='button subtle' href='/admin/audit'>查看审计日志</a></p></div>"
-        )
-    if not is_primary:
-        blocks.append(
-            f"<div class='panel'><h2>当前账号权限</h2><p class='muted'>你是子管理员 "
-            f"{esc(actor.get('username', ''))}，已获授权："
-            f"{esc('、'.join(dict(ADMIN_ASSIGNABLE_PERMISSIONS).get(item, item) for item in sorted(permissions)) or '无')}。"
-            f"子管理员账号与 API Key 管理仅主管理员可见。</p></div>"
-        )
-    return "".join(blocks)
 
 
-def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] | None = None, secret_notice: str = "", section: str = "overview", query: str = "") -> str:
-    """分类管理后台，保留原有写入路由并提供统一内容列表入口。"""
-    merge_duplicate_credentials()
-    merge_duplicate_tasks()
-    esc = lambda value: html.escape(str(value), quote=True)
-    actor = actor or {"username": "", "role": "subadmin", "permissions": []}
-    valid_sections = {"overview", "packages", "tasks", "settings", "security", *runtime.PACKAGE_KINDS}
-    section = section if section in valid_sections else "overview"
-    csrf_html = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
-    records = _admin_package_records()
-    actor_permissions = set(actor.get("permissions", []))
-    is_primary = actor.get("role") == "primary"
-    can_packages = is_primary or "packages:write" in actor_permissions
-    can_tasks = is_primary or "tasks:write" in actor_permissions
-    no_permission_note = "<span class='muted'>需要任务管理权限</span>"
-    credential_rows = []
-    for credential in sorted(load_credentials().values(), key=lambda value: bounded_config_int(value.get("updatedAt", 0), 0, 0), reverse=True):
-        owner = str(credential.get("owner", ""))
-        owner_display = owner[:12] + "…" if len(owner) > 12 else owner
-        public_credential = credential_public(credential)
-        health = str(public_credential.get("health", "unverified"))
-        credential_id = str(credential.get("id", ""))
-        enabled = bool(credential.get("enabled", True))
-        credential_actions = ""
-        if can_tasks:
-            credential_actions = (
-                f"<form class='inline' method='post' action='/admin/credentials/action'>{csrf_html}"
-                f"<input type='hidden' name='credential_id' value='{esc(credential_id)}'>"
-                f"<button class='button subtle' name='action' value='verify' type='submit'>验证</button>"
-                f"<button class='button subtle' name='action' value='toggle' type='submit'>{'停用' if enabled else '启用'}</button>"
-                f"<button class='button subtle danger' name='action' value='delete' type='submit'>删除</button></form>"
-            )
-        credential_rows.append(
-            f"<tr><td><strong>{esc(credential.get('label', '阅微账号'))}</strong><small><code>{esc(credential_id)}</code></small></td>"
-            f"<td>{esc(credential.get('accountId', '') or '未提供')}</td>"
-            f"<td>{esc(_admin_owner_label(owner))}<small>{esc(owner_display)}</small></td>"
-            f"<td><span class='status status-{esc(health)}'>{esc(_admin_health_label(health))}</span>"
-            f"<small>{esc(credential.get('lastVerifyMessage', '') or '暂无验证说明')}</small></td>"
-            f"<td>{esc(_admin_time_label(credential.get('updatedAt', 0), '未记录'))}"
-            f"<small>最近使用 {esc(_admin_time_label(credential.get('lastUsedAt', 0), '从未使用'))}</small></td>"
-            f"<td class='actions'>{credential_actions or no_permission_note}</td></tr>"
-        )
-    credential_table = "".join(credential_rows) or "<tr><td colspan='6' class='empty'>暂无模块上传的阅微同步密钥</td></tr>"
-    credential_options = "<option value=''>不使用凭据</option>" + "".join(
-        f"<option value='{esc(item.get('id', ''))}'>{esc(item.get('label', '阅微账号'))} · {esc(item.get('accountId', '') or item.get('owner', ''))}</option>"
-        for item in sorted(load_credentials().values(), key=lambda value: str(value.get('label', '')))
-    )
-    task_rows = []
-    for task in sorted(load_tasks().values(), key=lambda value: bounded_config_int(value.get("createdAt", 0), 0, 0), reverse=True):
-        task_id = esc(task.get("id", "")); task_status = str(task.get("status", ""))
-        task_actions = ""
-        if can_tasks:
-            buttons = ["<button class='button subtle' name='action' value='run'>立即运行</button>"]
-            if task_status == "running":
-                buttons = []
-            elif task.get("enabled", True) and task_status not in {"cancelled", "paused"}:
-                buttons.append("<button class='button subtle' name='action' value='pause'>暂停</button>")
-            else:
-                buttons.append("<button class='button subtle' name='action' value='resume'>恢复</button>")
-            if task_status not in {"cancelled", "running"}:
-                buttons.append("<button class='button subtle' name='action' value='cancel'>取消</button>")
-            if task_status != "running":
-                buttons.append("<button class='button subtle danger' name='action' value='delete'>删除</button>")
-            if buttons:
-                task_actions = f"<form class='inline' method='post' action='/admin/tasks/action'>{csrf_html}<input type='hidden' name='task_id' value='{task_id}'>{''.join(buttons)}</form>"
-        last_result = str(task.get("lastResult", ""))
-        result_note = f"<small>{esc(_admin_result_label(last_result))}</small>" if last_result else ""
-        task_rows.append(
-            f"<tr><td><strong>{esc(_admin_task_label(task.get('taskType', '')))}</strong>"
-            f"<small>{esc(_admin_time_label(task.get('createdAt'), '未记录'))} 创建</small></td>"
-            f"<td>{esc(_admin_owner_label(task.get('owner', '')))}</td>"
-            f"<td>{esc(task_credential_id(task) or '未关联')}</td>"
-            f"<td>{esc(_admin_task_detail(task))}</td>"
-            f"<td><span class='status status-{esc(task_status)}'>{esc(_admin_task_status_label(task_status))}</span>"
-            f"<small>{'已启用' if task.get('enabled', True) else '已停用'}</small></td>"
-            f"<td>{esc(task.get('lastMessage', '') or '暂无执行记录')}{result_note}</td>"
-            f"<td>{esc(_admin_time_label(task.get('nextRunAt', 0)))}"
-            f"<small>{esc(_admin_time_detail(task.get('nextRunAt', 0)))}</small></td>"
-            f"<td class='actions'><a class='button subtle' href='/admin/tasks/{task_id}/logs'>日志</a> {task_actions}</td></tr>"
-        )
-    task_table = "".join(task_rows) or "<tr><td colspan='8' class='empty'>暂无云端任务</td></tr>"
-    if section in {"overview", "packages", *runtime.PACKAGE_KINDS}:
-        selected = section if section in runtime.PACKAGE_KINDS else ""
-        visible = [item for item in records if not selected or item.get("kind") == selected]
-        head_action = f"<a class='button' href='/admin/packages/new?kind={esc(selected or 'online_source')}'>新增内容</a>" if can_packages else ""
-        if section == "overview":
-            content = (
-                f"<div class='page-head'><div><p class='eyebrow'>总览</p><h1>概览</h1>"
-                f"<p class='muted'>服务器状态、内容库统计与模块连接情况。</p></div>{head_action}</div>"
-            )
-            content += _admin_overview_stats(config, records)
-            content += _admin_presence_panel()
-            content += "<h2 style='margin:26px 0 14px'>全部内容</h2>"
-        else:
-            title = "内容管理" if section == "packages" else _admin_kind_label(section)
-            description = (
-                "按类型管理版本、依赖、发布状态和历史版本。"
-                if section == "packages"
-                else f"管理{_admin_kind_label(section)}的版本、发布状态和历史版本。"
-            )
-            content = (
-                f"<div class='page-head'><div><p class='eyebrow'>内容中心</p><h1>{esc(title)}</h1>"
-                f"<p class='muted'>{esc(description)}</p></div>{head_action}</div>"
-            )
-        clear_button = (
-            f"<a class='button subtle' href='{admin_section_path(section)}'>清除搜索</a>" if query.strip() else ""
-        )
-        # 内容表格对概览、全部内容和各类型分区都要渲染，此前被误缩进导致分区页只有标题。
-        content += (
-            f"<form class='toolbar' method='get' action='{admin_section_path(section)}'>"
-            f"<input name='q' value='{esc(query)}' placeholder='搜索名称、包 ID、版本或别名'>"
-            f"<button class='button' type='submit'>搜索</button>{clear_button}"
-            f"</form>"
-            f"<div class='table-wrap'><table><thead><tr><th>类型 / 来源</th><th>内容</th>"
-            f"<th>版本 / 构建时间</th><th>状态</th><th>渠道 / 依赖</th><th>操作</th></tr></thead>"
-            f"<tbody>{_admin_package_table(visible, can_packages, query, admin_csrf_token(config, actor))}</tbody></table></div>"
-        )
-    else:
-        task_credentials = ""
-        if section == "tasks":
-            all_tasks = load_tasks()
-            task_credentials = (
-                f"<div class='stats'>"
-                f"<div><strong>{len(load_credentials())}</strong><span>同步密钥数量</span></div>"
-                f"<div><strong>{len(all_tasks)}</strong><span>云端任务数量</span></div>"
-                f"<div><strong>{sum(1 for value in all_tasks.values() if value.get('enabled', True))}</strong><span>已启用任务</span></div>"
-                f"<div><strong>{sum(1 for value in all_tasks.values() if value.get('status') == 'failed')}</strong><span>执行失败任务</span></div>"
-                f"</div>"
-                f"<div class='panel'><h2>阅微同步密钥</h2>"
-                f"<p class='muted'>密钥只保存加密密文，不显示原文。一个阅微账号 ID 对应一个同步密钥；重新同步会更新该账号的原记录。"
-                f"删除密钥会自动暂停依赖它的任务。</p>"
-                f"<div class='table-wrap'><table><thead><tr><th>密钥名称</th><th>阅微账号 ID</th><th>来源账号</th>"
-                f"<th>验证状态</th><th>更新 / 使用时间</th><th>操作</th></tr></thead><tbody>{credential_table}</tbody></table></div></div>"
-                f"<div class='panel'><h2>任务运行状态</h2>"
-                f"<div class='table-wrap'><table><thead><tr><th>任务</th><th>来源账号</th><th>同步密钥 ID</th><th>任务详情</th>"
-                f"<th>运行状态</th><th>最近结果</th><th>下次执行</th><th>操作</th></tr></thead><tbody>{task_table}</tbody></table></div></div>"
-            )
-        if section == "tasks":
-            book_example = '[{"cloudBookId":123,"bookId":123,"name":"书名"}]'
-            task_form = (
-                f"<div class='panel'><h2>创建云端任务</h2>"
-                f"<p class='muted'>同一所有者、同步密钥和任务类型只保留一个任务；重复创建会更新已有任务而不是新增。</p>"
-                f"<form method='post' action='/admin/tasks/create'>{csrf_html}"
-                f"<div class='grid-2'>"
-                f"<label>任务类型<select name='task_type'><option value='yeshe_checkin'>野社零点签到</option>"
-                f"<option value='yeshe_draw_card'>野社自动抽卡</option><option value='cloud_auto_read'>云端自动阅读</option>"
-                f"<option value='http'>通用 HTTPS 请求</option></select></label>"
-                f"<label>每日执行时间（北京时间 HH:MM）<input name='time_of_day' value='00:05'></label>"
-                f"<label>同步密钥<select name='credential_id'>{credential_options}</select></label>"
-                # 非 http 任务的归属跟随所选同步密钥，这里只作为 http 任务的兜底归属。
-                f"<label>任务所有者（仅自定义 HTTP 任务使用；阅微任务自动跟随所选同步密钥）"
-                f"<input name='owner' value='admin'></label>"
-                f"<label>阅读时长（分钟，1-720）<input name='duration_minutes' type='number' min='1' max='720' value='30'></label>"
-                f"<label>最近阅读取用数量（1-20）<input name='recent_limit' type='number' min='1' max='20' value='1'></label>"
-                f"</div>"
-                f"<label>自定义图书 JSON（留空则读取阅微最近阅读记录）"
-                f"<textarea name='request_body' placeholder='{html.escape(book_example, quote=True)}'></textarea></label>"
-                f"<p class='muted' style='margin:0'>自定义图书格式示例：<code>{html.escape(book_example)}</code></p>"
-                f"<button class='button' type='submit'>创建任务</button></form></div>"
-            )
-            content = f"<div class='page-head'><div><p class='eyebrow'>自动化</p><h1>云端任务</h1><p class='muted'>配置、查看和控制自动阅读、签到、抽卡任务。每个阅微账号只保留一个同步密钥，重新同步会更新原密钥。</p></div></div>{task_credentials}{task_form}"
-        elif section == "settings":
-            content = _admin_settings_content(config, actor, csrf_html)
-        else:
-            content = _admin_security_content(config, actor, csrf_html)
-    return _admin_layout(config, actor, section, content, message=message, secret_notice=secret_notice, records=records)
 
 
 @app.get("/admin/legacy", response_class=HTMLResponse)
@@ -1900,26 +760,6 @@ async def admin_legacy(actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResp
     return RedirectResponse("/admin/settings", status_code=303)
 
 
-def _admin_shell(
-    title: str,
-    body: str,
-    config: dict[str, Any],
-    actor: dict[str, Any],
-    section: str = "packages",
-    eyebrow: str = "内容中心",
-    description: str = "",
-    back_href: str = "",
-    back_label: str = "返回内容列表",
-) -> str:
-    """后台子页面（编辑、预览、历史、差异、日志）的统一外壳，与主页面同一套侧栏和样式。"""
-    esc = lambda value: html.escape(str(value), quote=True)
-    back = f"<a class='button subtle' href='{esc(back_href)}'>← {esc(back_label)}</a>" if back_href else ""
-    description_html = f"<p class='muted'>{esc(description)}</p>" if description else ""
-    head = (
-        f"<div class='page-head'><div><p class='eyebrow'>{esc(eyebrow)}</p><h1>{esc(title)}</h1>"
-        f"{description_html}</div>{back}</div>"
-    )
-    return _admin_layout(config, actor, section, head + body, title=f"{title} · ReaMicro 管理后台")
 
 
 
@@ -2257,8 +1097,6 @@ async def admin_logout(request: Request, csrf_token: str = Form("")) -> Redirect
     return result
 
 
-def admin_html(page: str, status_code: int = 200) -> HTMLResponse:
-    return HTMLResponse(page, status_code=status_code, headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache", "Expires": "0"})
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -2370,67 +1208,12 @@ async def admin_audit(
     ))
 
 
-API_KEY_PERMISSIONS = (
-    "read",
-    "write",
-    "packages:read",
-    "packages:write",
-    "tasks:read",
-    "tasks:write",
-    "credentials:read",
-    "credentials:write",
-    "backup:read",
-)
 
 
-def create_api_key_record(config: dict[str, Any], name: str, raw_permissions: Any) -> tuple[dict[str, Any], str]:
-    """生成一条 API Key 记录并返回明文密钥；明文只在创建时返回一次。"""
-    if isinstance(raw_permissions, str):
-        raw_permissions = [item for item in raw_permissions.replace(",", "\n").splitlines()]
-    if not isinstance(raw_permissions, (list, tuple)):
-        raise HTTPException(status_code=400, detail=response(code="API_SCOPE_INVALID", message="permissions 必须是数组"))
-    permissions = sorted({str(item).strip() for item in raw_permissions if str(item).strip()})
-    if not set(permissions).issubset(set(API_KEY_PERMISSIONS)):
-        raise HTTPException(status_code=400, detail=response(code="API_SCOPE_INVALID", message="存在不支持的 API Key 权限范围"))
-    plain = generate_long_secret(48)
-    record = {
-        "id": "key_" + secrets.token_hex(8),
-        "name": str(name or "API Key")[:80],
-        "digest": api_key_digest(plain),
-        "permissions": permissions or ["read"],
-        "enabled": True,
-        "createdAt": int(datetime.now(timezone.utc).timestamp() * 1000),
-        "lastUsedAt": 0,
-    }
-    config["apiKeyRecords"] = [item for item in config.get("apiKeyRecords", []) if isinstance(item, dict)] + [record]
-    return record, plain
 
 
-def revoke_api_key_record(config: dict[str, Any], key_id: str) -> None:
-    """把指定 API Key 标记为已吊销；记录保留以便审计。"""
-    found = False
-    records = []
-    for item in config.get("apiKeyRecords", []):
-        if not isinstance(item, dict):
-            continue
-        value = dict(item)
-        if str(value.get("id")) == key_id:
-            value["enabled"] = False
-            value["revokedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
-            found = True
-        records.append(value)
-    if not found:
-        raise HTTPException(status_code=404, detail=response(code="API_KEY_NOT_FOUND", message="API Key 不存在"))
-    config["apiKeyRecords"] = records
 
 
-def api_key_public_records(config: dict[str, Any]) -> list[dict[str, Any]]:
-    records = []
-    for item in config.get("apiKeyRecords", []):
-        if not isinstance(item, dict):
-            continue
-        records.append({key: item.get(key) for key in ("id", "name", "permissions", "enabled", "createdAt", "lastUsedAt", "revokedAt")})
-    return sorted(records, key=lambda value: bounded_config_int(value.get("createdAt", 0), 0, 0), reverse=True)
 
 
 
