@@ -270,6 +270,12 @@ class AuditTailReadTest(unittest.TestCase):
         self.assertEqual(10, page.count("<tr><td>"))
 
 
+def count_body_rows(page: str) -> int:
+    """统计表格数据行。不能用 `<tr><td>` 计数——首列可能是勾选框单元格。"""
+    body = re.search(r"<tbody>(.*?)</tbody>", page, re.S)
+    return body.group(1).count("<tr>") if body else 0
+
+
 class ContentListPaginationTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -285,14 +291,14 @@ class ContentListPaginationTest(unittest.TestCase):
     def test_content_list_paginates(self):
         first = self.client.get("/admin/content/online_source", auth=admin_auth()).text
         third = self.client.get("/admin/content/online_source?page=3", auth=admin_auth()).text
-        self.assertEqual(50, first.count("<tr><td>"))
-        self.assertEqual(20, third.count("<tr><td>"))
+        self.assertEqual(50, count_body_rows(first))
+        self.assertEqual(20, count_body_rows(third))
         self.assertIn("共 120 条", first)
 
     def test_search_and_page_combine(self):
         page = self.client.get("/admin/content/online_source", params={"q": "书源 1"}, auth=admin_auth()).text
         # "书源 1"、"书源 1x"、"书源 1xx" 都会命中，条数应少于全部。
-        self.assertLess(page.count("<tr><td>"), 120)
+        self.assertLess(count_body_rows(page), 120)
         self.assertIn("q=", page)
 
 

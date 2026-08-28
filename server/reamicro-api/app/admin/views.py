@@ -172,8 +172,13 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
             )
         else:
             actions = f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/preview'>预览</a>"
+        select_cell = (
+            f"<td class='col-check'><input type='checkbox' name='selected' form='batch-form' "
+            f"value='{esc(package_id)}' aria-label='选择 {esc(item.get('name', package_id))}'></td>"
+            if can_write else ""
+        )
         rows.append(
-            f"<tr><td>{esc(_admin_kind_label(kind))}<small>{esc(source)}</small></td>"
+            f"<tr>{select_cell}<td>{esc(_admin_kind_label(kind))}<small>{esc(source)}</small></td>"
             f"<td><strong>{esc(item.get('name', package_id))}</strong>"
             f"<small>包 ID {esc(package_id)}{(' · ' + esc(domains)) if domains else ''}</small></td>"
             f"<td>{esc(item.get('version', ''))}<small>{esc(_admin_time_label(item.get('buildTime'), '未记录'))}</small></td>"
@@ -183,7 +188,7 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
             f"<td>{esc(_admin_channel_label(item.get('channel', 'stable')))}<small>{esc(dependency)}</small></td>"
             f"<td class='actions'>{actions}</td></tr>"
         )
-    return "".join(rows) or "<tr><td colspan='7' class='empty'>没有匹配的内容包</td></tr>"
+    return "".join(rows) or f"<tr><td colspan='{8 if can_write else 7}' class='empty'>没有匹配的内容包</td></tr>"
 
 
 def _admin_release_panel() -> str:
@@ -725,6 +730,26 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
         # 内容表格对概览、全部内容和各类型分区都要渲染，此前被误缩进导致分区页只有标题。
         # 长列表分页：一次渲染上千个内容包会让页面无法使用。
         page_items, page_info = paginate(visible, page)
+        # 批量操作只在具体类型分区提供：跨类型批量容易误操作，且检测会打太多站点。
+        check_head = "<th class='col-check'></th>" if can_packages and section in runtime.PACKAGE_KINDS else ""
+        batch_bar = ""
+        if can_packages and section in runtime.PACKAGE_KINDS and page_items:
+            actions = "".join(
+                f"<option value='{esc(value)}'>{esc(label)}</option>"
+                for value, label in (
+                    ("check", "检测地址"), ("unpublish", "下架"), ("publish", "上架"), ("delete", "删除"),
+                )
+            )
+            batch_bar = (
+                f"<form class='batch-bar' id='batch-form' method='post' "
+                f"action='/admin/content/{esc(section)}/batch'>"
+                f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
+                f"<span class='hint-tight'>勾选后对选中项批量操作</span>"
+                f"<select name='action' aria-label='批量操作'>{actions}</select>"
+                f"<button class='button subtle' type='submit'>执行</button>"
+                f"<span class='hint-tight'>已发布内容需先下架才能删除</span>"
+                f"</form>"
+            )
         # 批量检测只对具体类型分区提供：全部内容一起检测会打太多站点。
         batch_check = ""
         if can_packages and section in runtime.PACKAGE_KINDS:
@@ -738,7 +763,8 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
             f"<input name='q' value='{esc(query)}' placeholder='搜索名称、包 ID、版本或别名'>"
             f"<button class='button' type='submit'>搜索</button>{clear_button}{batch_check}"
             f"</form>"
-            f"<div class='table-wrap'><table><thead><tr><th>类型 / 来源</th><th>内容</th>"
+            f"{batch_bar}"
+            f"<div class='table-wrap'><table><thead><tr>{check_head}<th>类型 / 来源</th><th>内容</th>"
             f"<th>版本 / 构建时间</th><th>状态</th><th>可用性</th><th>渠道 / 依赖</th><th>操作</th></tr></thead>"
             f"<tbody>{_admin_package_table(page_items, can_packages, query, admin_csrf_token(config, actor))}</tbody></table></div>"
             + pager_html(page_info, admin_section_path(section), {"q": query})

@@ -188,6 +188,12 @@ _UTILITIES = """
 .pager{display:flex;align-items:center;gap:var(--gap-1);flex-wrap:wrap;margin-bottom:var(--gap-4)}
 .pager .hint-tight{margin:0 var(--gap-2)}
 .pager [aria-disabled=true]{opacity:.45;cursor:default;pointer-events:none}
+.batch-bar{display:flex;align-items:center;gap:var(--gap-2);flex-wrap:wrap;
+  padding:10px var(--gap-3);margin-bottom:var(--gap-2);background:var(--surface);
+  border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+.batch-bar select{width:auto;min-width:120px}
+.col-check{width:38px}
+.col-check input{margin:0}
 """
 
 _RESPONSIVE = """

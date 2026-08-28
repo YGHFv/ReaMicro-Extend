@@ -1474,6 +1474,7 @@ async def admin_users(q: str = Query(""), actor: dict[str, Any] = Depends(admin_
 async def admin_users_save(
     account_id: str = Form(...),
     note: str = Form(""),
+    upload_quota: int = Form(0),
     enabled: str | None = Form(None),
     allow_access: str | None = Form(None),
     allow_upload: str | None = Form(None),
@@ -1492,6 +1493,7 @@ async def admin_users_save(
         note=note,
         enabled=enabled is not None,
         capabilities=capabilities,
+        uploadQuota=upload_quota,
     )
     config = set_allowlist_membership(account, allow_access is not None, allow_upload is not None)
     audit_event("user_updated", audit_actor(actor), metadata={"hostAccountId": account})
@@ -1578,3 +1580,92 @@ async def admin_check_kind(
         actor=actor,
         section=kind,
     ))
+
+
+# 批量操作允许的动作。每项都对应一条已有的单个操作路径，只是省去逐个点击。
+BATCH_ACTIONS = {
+    "publish": "上架",
+    "unpublish": "下架",
+    "delete": "删除",
+    "check": "检测地址",
+}
+
+
+@router.post("/admin/content/{package_kind}/batch", response_class=HTMLResponse)
+async def admin_batch_packages(
+    package_kind: str,
+    action: str = Form(...),
+    selected: list[str] = Form(default=[]),
+    csrf_token: str = Form(""),
+    actor: dict[str, Any] = Depends(admin_actor),
+) -> HTMLResponse:
+    """对勾选的内容包批量执行操作。
+
+    删除沿用单个删除的规则：**已发布的必须先下架**，不因为是批量就放宽。
+    检测串行执行，避免同时打爆目标站点。
+    """
+    config = load_config()
+    require_admin_csrf(config, actor, csrf_token)
+    require_admin_permission(actor, "packages:write")
+    kind = safe_package_segment(package_kind)
+    if kind not in runtime.PACKAGE_KINDS:
+        raise HTTPException(status_code=404, detail="内容分类不存在")
+    if action not in BATCH_ACTIONS:
+        raise HTTPException(status_code=400, detail="不支持的批量操作")
+    package_ids = [safe_package_segment(item) for item in dict.fromkeys(selected) if item.strip()]
+    if not package_ids:
+        return admin_html(admin_page(config, "没有勾选任何内容包", actor=actor, section=kind))
+
+    done, skipped, failed = [], [], []
+    for package_id in package_ids:
+        manifest_path = runtime.PACKAGE_ROOT / kind / package_id / "manifest.json"
+        if not manifest_path.is_file():
+            failed.append(f"{package_id}：内容包不存在")
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            failed.append(f"{package_id}：清单无法解析")
+            continue
+        name = str(manifest.get("name", package_id))
+        if action == "delete":
+            if str(manifest.get("status", "published")) == "published":
+                skipped.append(f"{name}：已发布，请先下架")
+                continue
+            try:
+                shutil.rmtree(manifest_path.parent)
+                done.append(name)
+            except OSError as error:
+                failed.append(f"{name}：{error}")
+            continue
+        if action in {"publish", "unpublish"}:
+            target = "published" if action == "publish" else "unpublished"
+            if str(manifest.get("status", "published")) == target:
+                skipped.append(f"{name}：状态未变")
+                continue
+            if target == "published" and not package_dependency_status(manifest).get("dependenciesSatisfied", True):
+                skipped.append(f"{name}：依赖未满足")
+                continue
+            manifest["status"] = target
+            temp = manifest_path.with_suffix(".tmp")
+            temp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp.replace(manifest_path)
+            done.append(name)
+            continue
+        # check
+        report = await asyncio.to_thread(check_package, kind, package_id)
+        label = STATUS_LABELS.get(report["status"], report["status"])
+        done.append(f"{name}（{label}）")
+
+    audit_event(
+        f"packages_batch_{action}",
+        audit_actor(actor),
+        success=not failed,
+        metadata={"kind": kind, "requested": len(package_ids), "done": len(done), "skipped": len(skipped)},
+    )
+    parts = [f"批量{BATCH_ACTIONS[action]}：成功 {len(done)} 个"]
+    if skipped:
+        parts.append(f"跳过 {len(skipped)} 个（{'；'.join(skipped[:3])}{'…' if len(skipped) > 3 else ''}）")
+    if failed:
+        parts.append(f"失败 {len(failed)} 个（{'；'.join(failed[:3])}{'…' if len(failed) > 3 else ''}）")
+    return admin_html(admin_page(load_config(), "，".join(parts), actor=actor, section=kind))

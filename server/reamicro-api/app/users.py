@@ -165,6 +165,54 @@ def user_has_capability(account_id: str, capability: str) -> bool:
     return capability in normalize_capabilities(user.get("capabilities", []))
 
 
+def user_upload_quota(account_id: str) -> int:
+    """该用户可拥有的内容包上限。0 表示不限。"""
+    user = get_user(account_id)
+    if user is None:
+        return 0
+    return bounded_config_int(user.get("uploadQuota", 0), 0, 0)
+
+
+def count_user_uploads(account_id: str) -> int:
+    """统计该用户当前拥有的内容包数量。
+
+    按 `uploadOwner` 归集并折叠历史归属写法，与 `user_statistics` 用同一套判定，
+    避免两处口径不一致导致界面显示的数字和实际限额对不上。
+    """
+    from app.state import canonical_owner_of
+
+    account_id = normalize_account_id(account_id)
+    if not account_id:
+        return 0
+    owner = f"host:{account_id}"
+    total = 0
+    for kind in sorted(runtime.PACKAGE_KINDS):
+        for path in (runtime.PACKAGE_ROOT / kind).glob("*/manifest.json"):
+            try:
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if canonical_owner_of(str(manifest.get("uploadOwner", ""))) == owner:
+                total += 1
+    return total
+
+
+def check_upload_quota(account_id: str) -> tuple[bool, str, dict[str, int]]:
+    """检查是否还能再新建一个内容包。
+
+    只拦**新建**：关联到已有内容包不占额度，否则用户想更新自己的源反而会被自己的配额挡住。
+    返回 (是否允许, 拒绝原因, 用量信息)。
+    """
+    quota = user_upload_quota(account_id)
+    used = count_user_uploads(account_id)
+    usage = {"quota": quota, "used": used, "remaining": max(0, quota - used) if quota else 0}
+    if quota <= 0:
+        return True, "", usage
+    if used >= quota:
+        return False, f"已达到上传上限（{used}/{quota} 个内容包），请先删除不再需要的内容或联系管理员调整", usage
+    return True, "", usage
+
+
 def user_statistics(account_id: str) -> dict[str, Any]:
     """归集某个用户的使用情况，供后台用户页展示。"""
     account_id = normalize_account_id(account_id)

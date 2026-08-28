@@ -43,6 +43,7 @@ from app.packages import (
     validate_package_payload,
 )
 from app.responses import response
+from app.users import check_upload_quota
 from app.security import (
     authenticated,
     basic_security,
@@ -89,7 +90,10 @@ async def module_upload_policy_endpoint(
     """模块查询是否允许上传内容库；未获许可也返回 200，由客户端提示原因。"""
     check_request_auth(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
     enforce_api_scope(request, x_reamicro_api_key)
-    return response(module_upload_policy(load_config(), x_reamicro_host_account_id))
+    policy = module_upload_policy(load_config(), x_reamicro_host_account_id)
+    # 带上配额用量，模块在上传前就能显示"还能传几个"，不用先撞墙再看报错。
+    _, _, usage = check_upload_quota(str(x_reamicro_host_account_id or ""))
+    return response({**policy, **usage})
 
 
 @router.post("/v1/packages/match")
@@ -153,6 +157,21 @@ async def module_upload_package(request: Request, owner: str = Depends(module_up
         return response(
             {"uploaded": False, "linked": True, "package": module_package_summary(matched, kind)},
             message=f"服务器已存在同一个源（{reason}），已自动关联",
+        )
+    # 配额只拦新建：上面命中已有内容包的路径已经 return，走到这里才是真的要建新包。
+    # 反过来若在关联前就拦，用户想更新自己的源会被自己的配额挡住。
+    host_account_id = str(request.headers.get("X-ReaMicro-Host-Account-Id", "")).strip()
+    allowed_by_quota, quota_reason, quota_usage = check_upload_quota(host_account_id)
+    if not allowed_by_quota:
+        audit_event(
+            "module_upload_quota_exceeded",
+            actor=owner,
+            success=False,
+            metadata={"kind": kind, "hostAccountId": host_account_id, **quota_usage},
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=response(code="UPLOAD_QUOTA_EXCEEDED", message=quota_reason, data=quota_usage),
         )
     metadata = infer_package_metadata(kind, filename, body)
     detected_domains = sorted(parsed["domains"] | {

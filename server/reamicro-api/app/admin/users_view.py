@@ -9,7 +9,7 @@ from typing import Any
 from app import runtime
 from app.admin.format import _admin_time_detail, _admin_time_label
 from app.admin.layout import _admin_layout, admin_csrf_token
-from app.config_store import load_config
+from app.config_store import bounded_config_int, load_config
 from app.users import (
     USER_CAPABILITIES,
     USER_CAPABILITY_LABELS,
@@ -63,6 +63,8 @@ def admin_users_page(
         state_class = "ok" if stats["online"] else ("idle" if enabled else "bad")
         state_text = "在线" if stats["online"] else ("离线" if enabled else "已停用")
         failed_note = f"（失败 {stats['failedTasks']}）" if stats["failedTasks"] else ""
+        quota = bounded_config_int(user.get("uploadQuota", 0), 0, 0) if user else 0
+        upload_note = f"{stats['uploads']}/{quota} 个" if quota else f"{stats['uploads']} 个（不限）"
         rows.append(
             f"<tr><td><strong>阅微账号 {esc(account_id)}</strong>"
             f"<small>{esc(user.get('note', '') or '未填备注')}</small>"
@@ -71,7 +73,7 @@ def admin_users_page(
             f"<small>{esc(_admin_time_detail(stats['lastSeenAt'], '从未上报'))}</small></td>"
             f"<td>{esc(stats['moduleVersion'] or '未上报')}</td>"
             f"<td>密钥 {stats['credentials']} · 任务 {stats['tasks']}{failed_note}"
-            f"<small>上传内容 {stats['uploads']} 个 · 待发消息 {stats['pendingNotifications']} 条</small></td>"
+            f"<small>上传内容 {esc(upload_note)} · 待发消息 {stats['pendingNotifications']} 条</small></td>"
             f"<td><form method='post' action='/admin/users/save'>{csrf_html}"
             f"<input type='hidden' name='account_id' value='{esc(account_id)}'>"
             f"<label><input type='checkbox' name='enabled' {'checked' if enabled else ''}> 启用账号</label>"
@@ -79,6 +81,8 @@ def admin_users_page(
             f"<label><input type='checkbox' name='allow_upload' {'checked' if membership['upload'] else ''}> 允许上传内容库</label>"
             f"<fieldset><legend>可用功能</legend>{_capability_checkboxes('capabilities', capabilities)}</fieldset>"
             f"<label>备注<input name='note' value='{esc(user.get('note', ''))}' placeholder='例如 自用主力机'></label>"
+            f"<label>上传上限（内容包个数，0 为不限）"
+            f"<input name='upload_quota' type='number' min='0' value='{quota}'></label>"
             f"<button class='button subtle' type='submit'>保存</button></form>"
             f"<form class='inline mt' method='post' action='/admin/users/delete'>{csrf_html}"
             f"<input type='hidden' name='account_id' value='{esc(account_id)}'>"
