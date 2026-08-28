@@ -761,6 +761,43 @@ def json_http_request(url: str, token: str, payload: Any, endpoint: str = "", ti
         return error.code, {}, raw
 
 
+def iso_week_key(now_ms: int) -> str:
+    """按北京时间返回 ISO 年-周，用于判断"本周"是否已领取过周奖励。"""
+    local = datetime.fromtimestamp(now_ms / 1000, timezone(timedelta(hours=8)))
+    year, week, _ = local.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+# 阅微对重复领取的回复文案。命中任意一条即视为奖励已到账的终态，不再重试。
+CLAIM_ALREADY_GRANTED_PATTERNS = (
+    "已领取",
+    "已经领取",
+    "已领过",
+    "重复领取",
+    "已发放",
+    "已到账",
+    "already claimed",
+    "already received",
+)
+
+
+def claim_reward_already_granted(message: Any, body: Any = None) -> bool:
+    """判断领取周奖励的失败回复是否其实表示"早就领过了"。
+
+    阅微在重复领取时返回 HTTP 200 + `data.success=false` + "上一周奖励已领取"。
+    这是终态而非可重试错误，必须和真正的领取失败区分开。
+    """
+    text = str(message or "")
+    if any(pattern in text for pattern in CLAIM_ALREADY_GRANTED_PATTERNS):
+        return True
+    if any(pattern in text.lower() for pattern in ("already claimed", "already received")):
+        return True
+    for key in ("claimed", "isClaimed", "received", "hasClaimed"):
+        if nested_value(body, "data", key) is True:
+            return True
+    return False
+
+
 def nested_value(value: Any, *keys: str) -> Any:
     current = value
     for key in keys:
@@ -883,6 +920,11 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             task["claimCompletedDate"] = ""
         if task.get("claimCompletedDate") == today:
             return "success", f"{checkin_message or '野社签到状态已检查'}，签到奖励今日已领取"
+        # 文社奖励是"每周"结算的：本周已领取过就不必再调接口，否则每天都会拿到
+        # "上一周奖励已领取"并被当成失败反复重试。
+        current_week = iso_week_key(now_ms)
+        if task.get("claimCompletedWeek") == current_week:
+            return "success", f"{checkin_message or '野社签到状态已检查'}，本周签到奖励已领取，等待下周结算"
         claim_due_at = bounded_config_int(task.get("claimDueAt", 0), now_ms + 8 * 3_600_000, 0)
         if now_ms < claim_due_at:
             task["nextRunAtOverride"] = claim_due_at
@@ -893,12 +935,22 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             return "paused", f"阅微认证/风控响应 HTTP {claim_status}"
         success = 200 <= claim_status < 300 and nested_value(claim_body, "data", "success") is not False
         claim_message = nested_value(claim_body, "data", "message") or nested_value(claim_body, "message") or redact_message(claim_raw)
-        if success:
+        # 阅微对"已经领过"的重复请求会回 success=false + "上一周奖励已领取"。
+        # 那是奖励已到账的终态，不是可重试的错误；当成失败会导致每 5 分钟重试一轮、
+        # 再排一次 23:59 最后重试，天天如此。
+        already_claimed = 200 <= claim_status < 300 and claim_reward_already_granted(claim_message, claim_body)
+        if success or already_claimed:
             task["lastClaimAt"] = now_ms
             task["claimCompletedDate"] = today
+            task["claimCompletedWeek"] = current_week
             task["claimRetryCount"] = 0
+            task["claimFinalAttemptDate"] = ""
+            # 已领取状态同样要放行联动抽卡，否则抽卡任务会一直等在"等待签到奖励领取完成"。
             task["claimJustCompleted"] = True
-            return "success", f"{checkin_message or '野社签到状态已检查'}，签到奖励领取成功" + (f"：{redact_message(str(claim_message))}" if claim_message else "")
+            detail = f"：{redact_message(str(claim_message))}" if claim_message else ""
+            if not success:
+                return "success", f"{checkin_message or '野社签到状态已检查'}，签到奖励此前已领取，本周不再重试{detail}"
+            return "success", f"{checkin_message or '野社签到状态已检查'}，签到奖励领取成功{detail}"
 
         retry_count = bounded_config_int(task.get("claimRetryCount", 0), 0, 0) + 1
         task["claimRetryCount"] = retry_count
@@ -2282,11 +2334,18 @@ def _admin_task_detail(task: dict[str, Any]) -> str:
     if not isinstance(request, dict):
         request = {}
     if task_type == "yeshe_checkin":
-        parts.append("奖励领取：签到后 8 小时")
+        parts.append("奖励领取：签到后 8 小时（周奖励，每周一次）")
         if task.get("lastCheckinAt"):
             parts.append(f"上次签到：{_admin_time_label(task.get('lastCheckinAt'))}")
         if task.get("lastClaimAt"):
             parts.append(f"上次领取：{_admin_time_label(task.get('lastClaimAt'))}")
+        claimed_week = str(task.get("claimCompletedWeek", ""))
+        if claimed_week:
+            current = iso_week_key(int(datetime.now(timezone.utc).timestamp() * 1000))
+            parts.append(f"周奖励：{claimed_week} 已领取" + ("，本周无需再领" if claimed_week == current else "，等待本周结算"))
+        retry_count = bounded_config_int(task.get("claimRetryCount", 0), 0, 0)
+        if retry_count:
+            parts.append(f"领取重试：已重试 {retry_count} 次")
     elif task_type == "yeshe_draw_card":
         parts.append(f"每日抽卡：{int(request.get('dailyLimit', 1) or 1)} 次")
     elif task_type == "cloud_auto_read":
