@@ -121,6 +121,7 @@ def admin_section_path(section: str) -> str:
     return {
         "overview": "/admin",
         "packages": "/admin/content",
+        "users": "/admin/users",
         "tasks": "/admin/tasks",
         "settings": "/admin/settings",
         "security": "/admin/security",

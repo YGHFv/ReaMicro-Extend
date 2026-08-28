@@ -43,6 +43,7 @@ from app.labels import (
     _admin_task_label,
     _admin_task_status_label,
 )
+from app.source_check import STATUS_LABELS, STATUS_OK, STATUS_SLOW, STATUS_UNREACHABLE, stored_health
 from app.packages import (
     _admin_package_records,
     package_dependency_status,
@@ -144,11 +145,25 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
         status_value = str(item.get("status", "published"))
         source = _admin_owner_label(item.get("uploadOwner", "")) if item.get("uploadOwner") else "后台上传"
         domains = "、".join(sorted(package_match_domains(item)))
+        # 上次检测结果直接读清单缓存，渲染列表不会触发任何网络请求。
+        health = stored_health(item)
+        health_status = health["status"]
+        health_class = {STATUS_OK: "valid", STATUS_SLOW: "warning", STATUS_UNREACHABLE: "invalid"}.get(health_status, "unverified")
+        health_detail = (
+            _admin_time_label(health["checkedAt"], "从未检测")
+            if health["checkedAt"] else "从未检测"
+        )
+        reachable = sum(1 for r in health["results"] if r.get("status") in (STATUS_OK, STATUS_SLOW))
+        if health["results"]:
+            health_detail += f" · {reachable}/{len(health['results'])} 个地址可用"
         if can_write:
             actions = (
                 f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/edit'>编辑</a> "
                 f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/preview'>预览</a> "
                 f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/history'>历史</a> "
+                f"<form class='inline' method='post' action='/admin/packages/{esc(kind)}/{esc(package_id)}/check'>"
+                f"<input type='hidden' name='csrf_token' value='{esc(csrf_token)}'>"
+                f"<button class='button subtle' type='submit'>检测</button></form> "
                 f"<form class='inline' method='post' action='/admin/packages/{esc(kind)}/{esc(package_id)}/delete'>"
                 f"<input type='hidden' name='csrf_token' value='{esc(csrf_token)}'>"
                 f"<button class='button subtle danger' type='submit'>删除</button></form>"
@@ -161,10 +176,12 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
             f"<small>包 ID {esc(package_id)}{(' · ' + esc(domains)) if domains else ''}</small></td>"
             f"<td>{esc(item.get('version', ''))}<small>{esc(_admin_time_label(item.get('buildTime'), '未记录'))}</small></td>"
             f"<td><span class='status status-{esc(status_value)}'>{esc(_admin_status_label(status_value))}</span></td>"
+            f"<td><span class='status status-{health_class}'>{esc(STATUS_LABELS.get(health_status, health_status))}</span>"
+            f"<small>{esc(health_detail)}</small></td>"
             f"<td>{esc(_admin_channel_label(item.get('channel', 'stable')))}<small>{esc(dependency)}</small></td>"
             f"<td class='actions'>{actions}</td></tr>"
         )
-    return "".join(rows) or "<tr><td colspan='6' class='empty'>没有匹配的内容包</td></tr>"
+    return "".join(rows) or "<tr><td colspan='7' class='empty'>没有匹配的内容包</td></tr>"
 
 
 def _admin_release_panel() -> str:
@@ -602,7 +619,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
     merge_duplicate_tasks()
     esc = lambda value: html.escape(str(value), quote=True)
     actor = actor or {"username": "", "role": "subadmin", "permissions": []}
-    valid_sections = {"overview", "packages", "tasks", "settings", "security", *runtime.PACKAGE_KINDS}
+    valid_sections = {"overview", "packages", "users", "tasks", "settings", "security", *runtime.PACKAGE_KINDS}
     section = section if section in valid_sections else "overview"
     csrf_html = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
     records = _admin_package_records()
@@ -704,13 +721,21 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
             f"<a class='button subtle' href='{admin_section_path(section)}'>清除搜索</a>" if query.strip() else ""
         )
         # 内容表格对概览、全部内容和各类型分区都要渲染，此前被误缩进导致分区页只有标题。
+        # 批量检测只对具体类型分区提供：全部内容一起检测会打太多站点。
+        batch_check = ""
+        if can_packages and section in runtime.PACKAGE_KINDS:
+            batch_check = (
+                f"<form class='inline' method='post' action='/admin/content/{esc(section)}/check-all'>"
+                f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
+                f"<button class='button subtle' type='submit'>检测全部地址</button></form>"
+            )
         content += (
             f"<form class='toolbar' method='get' action='{admin_section_path(section)}'>"
             f"<input name='q' value='{esc(query)}' placeholder='搜索名称、包 ID、版本或别名'>"
-            f"<button class='button' type='submit'>搜索</button>{clear_button}"
+            f"<button class='button' type='submit'>搜索</button>{clear_button}{batch_check}"
             f"</form>"
             f"<div class='table-wrap'><table><thead><tr><th>类型 / 来源</th><th>内容</th>"
-            f"<th>版本 / 构建时间</th><th>状态</th><th>渠道 / 依赖</th><th>操作</th></tr></thead>"
+            f"<th>版本 / 构建时间</th><th>状态</th><th>可用性</th><th>渠道 / 依赖</th><th>操作</th></tr></thead>"
             f"<tbody>{_admin_package_table(visible, can_packages, query, admin_csrf_token(config, actor))}</tbody></table></div>"
         )
     else:

@@ -27,6 +27,8 @@ from app.scheduler import (
     public_task,
 )
 from app.security import task_owner
+from app.state import owner_host_account_id
+from app.users import touch_user
 from app.state import (
     find_duplicate_task,
     load_credentials,
@@ -136,6 +138,8 @@ async def presence_heartbeat(request: Request, owner: str = Depends(task_owner))
     payload = payload if isinstance(payload, dict) else {}
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     lease_until = now + 10 * 60_000
+    # 顺带记录用户活跃：首次出现的阅微账号自动建档，省去管理员手工录入。
+    touch_user(owner_host_account_id(owner))
     presence = load_presence()
     presence[owner] = {
         "owner": owner,

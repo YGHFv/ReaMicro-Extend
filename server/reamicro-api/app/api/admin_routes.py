@@ -82,7 +82,16 @@ from app.labels import (
     _admin_task_label,
     _admin_task_status_label,
 )
+from app.admin.users_view import admin_users_page
+from app.source_check import STATUS_LABELS, check_kind, check_package
 from app.security import normalized_admin_permissions
+from app.users import (
+    delete_user,
+    normalize_account_id,
+    set_allowlist_membership,
+    sync_users_from_activity,
+    upsert_user,
+)
 from app.packages import (
     _admin_package_payload,
     _metadata_text,
@@ -219,7 +228,7 @@ async def admin_edit_package_get(package_kind: str, package_id: str, actor: dict
     csrf = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
     status_options = "".join(f"<option value='{status}' {'selected' if manifest.get('status', 'published') == status else ''}>{_admin_status_label(status)}</option>" for status in ('published', 'draft', 'testing', 'unpublished'))
     channel_options = "".join(f"<option value='{channel}' {'selected' if manifest.get('channel', 'stable') == channel else ''}>{_admin_channel_label(channel)}</option>" for channel in ('stable', 'beta', 'nightly'))
-    body = f"<div class='panel'><p class='muted'>当前版本 {esc(manifest.get('version', ''))}，构建于 {esc(_admin_time_label(manifest.get('buildTime'), '未记录'))}。保存后旧版本自动归档到历史，可随时回滚。</p><form method='post' action='/admin/packages/{esc(package_kind)}/{esc(package_id)}/edit'>{csrf}<div class='grid-2'><label>版本号<input name='version' value='{esc(manifest.get('version', ''))}' required></label><label>内容文件名<input name='filename' value='{esc(filename)}' required></label><label>稳定内容 ID<input name='content_id' value='{esc(manifest.get('contentId', ''))}'></label><label>名称<input name='name' value='{esc(manifest.get('name', package_id))}'></label><label>发布状态<select name='status_value'>{status_options}</select></label><label>发布渠道<select name='channel'>{channel_options}</select></label></div><label>别名（逗号分隔）<input name='aliases' value='{esc(','.join(str(item) for item in manifest.get('aliases', [])))}'></label><label>依赖 JSON<textarea name='dependencies'>{esc(json.dumps(manifest.get('dependencies', []), ensure_ascii=False, indent=2))}</textarea></label><label>内容<textarea name='payload_text' style='min-height:320px'>{esc(text)}</textarea></label><div class='inline'><button class='button' type='submit'>保存新版本</button> <a class='button subtle' href='/admin/packages/{esc(package_kind)}/{esc(package_id)}/preview'>取消</a></div></form></div>"
+    body = f"<div class='panel'><p class='muted'>当前版本 {esc(manifest.get('version', ''))}，构建于 {esc(_admin_time_label(manifest.get('buildTime'), '未记录'))}。保存后旧版本自动归档到历史，可随时回滚。</p><form method='post' action='/admin/packages/{esc(package_kind)}/{esc(package_id)}/edit'>{csrf}<div class='grid-2'><label>版本号<input name='version' value='{esc(manifest.get('version', ''))}' required></label><label>内容文件名<input name='filename' value='{esc(filename)}' required></label><label>稳定内容 ID<input name='content_id' value='{esc(manifest.get('contentId', ''))}'></label><label>名称<input name='name' value='{esc(manifest.get('name', package_id))}'></label><label>发布状态<select name='status_value'>{status_options}</select></label><label>发布渠道<select name='channel'>{channel_options}</select></label></div><label>访问地址（每行一个，第一行为主地址，其余为备用镜像）<textarea name='domains' style='min-height:90px' placeholder='example.com&#10;mirror.example.net'>{esc(chr(10).join(str(item) for item in manifest.get('domains', [])))}</textarea></label><label>别名（逗号分隔）<input name='aliases' value='{esc(','.join(str(item) for item in manifest.get('aliases', [])))}'></label><label>依赖 JSON<textarea name='dependencies'>{esc(json.dumps(manifest.get('dependencies', []), ensure_ascii=False, indent=2))}</textarea></label><label>内容<textarea name='payload_text' style='min-height:320px'>{esc(text)}</textarea></label><div class='inline'><button class='button' type='submit'>保存新版本</button> <a class='button subtle' href='/admin/packages/{esc(package_kind)}/{esc(package_id)}/preview'>取消</a></div></form></div>"
     return HTMLResponse(_admin_shell(
         "编辑 · " + str(manifest.get("name", package_id)),
         body,
@@ -244,6 +253,7 @@ async def admin_edit_package_post(
     status_value: str = Form("published"),
     channel: str = Form("stable"),
     dependencies: str = Form("[]"),
+    domains: str = Form(""),
     payload_text: str = Form(""),
     csrf_token: str = Form(""),
     actor: dict[str, Any] = Depends(admin_actor),
@@ -273,7 +283,19 @@ async def admin_edit_package_post(
     if old_payload.is_file() and old_payload.parent == package_dir:
         shutil.copy2(old_payload, archive_dir / old_payload.name)
     build_time = int(datetime.now(timezone.utc).timestamp() * 1000); digest = hashlib.sha256(body).hexdigest()
-    manifest = {**current, "packageId": package_id, "kind": package_kind, "version": version, "buildTime": build_time, "sha256": digest, "payload": filename, "contentId": stable_id, "aliases": merge_package_aliases(current.get("aliases", []), metadata.get("identity", []), aliases), "name": name.strip() or (str(current.get("name", "")) if not metadata.get("explicitName") else "") or str(metadata.get("name") or package_id), "status": status_value, "channel": channel, "dependencies": dependency_items}
+    # 访问地址：管理员手填的排在前面（第一行是主地址），再补上从内容里识别出的，去重保序。
+    edited_domains: list[str] = []
+    for line in domains.replace(",", "\n").splitlines():
+        domain = normalize_source_domain(line)
+        if domain and domain not in edited_domains:
+            edited_domains.append(domain)
+    for value in package_match_domains({**current, "domains": [], "aliases": metadata.get("identity", [])}):
+        if value not in edited_domains:
+            edited_domains.append(value)
+    manifest = {**current, "packageId": package_id, "kind": package_kind, "version": version, "buildTime": build_time, "sha256": digest, "payload": filename, "contentId": stable_id, "aliases": merge_package_aliases(current.get("aliases", []), metadata.get("identity", []), aliases), "domains": edited_domains, "name": name.strip() or (str(current.get("name", "")) if not metadata.get("explicitName") else "") or str(metadata.get("name") or package_id), "status": status_value, "channel": channel, "dependencies": dependency_items}
+    # 地址变了就作废上次检测结果，避免显示过期的可用性。
+    if edited_domains != [str(item) for item in current.get("domains", [])]:
+        manifest.pop("healthCheck", None)
     if status_value == "published" and not package_dependency_status(manifest).get("dependenciesSatisfied", True):
         raise HTTPException(status_code=409, detail="内容包存在未满足的必需依赖")
     manifest["signature"] = package_signature(package_id, package_kind, stable_id, version, build_time, digest, body)
@@ -1406,4 +1428,119 @@ async def admin_task_logs(task_id: str, actor: dict[str, Any] = Depends(admin_ac
         description=f"最近 {min(len(history), 100)} 条执行记录，最新的排在最前。",
         back_href="/admin/tasks",
         back_label="返回云端任务",
+    ))
+
+
+@router.get("/admin/users", response_class=HTMLResponse)
+async def admin_users(q: str = Query(""), actor: dict[str, Any] = Depends(admin_actor)) -> HTMLResponse:
+    return admin_html(admin_users_page(load_config(), actor=actor, query=q))
+
+
+@router.post("/admin/users/save", response_class=HTMLResponse)
+async def admin_users_save(
+    account_id: str = Form(...),
+    note: str = Form(""),
+    enabled: str | None = Form(None),
+    allow_access: str | None = Form(None),
+    allow_upload: str | None = Form(None),
+    capabilities: list[str] = Form(default=[]),
+    csrf_token: str = Form(""),
+    actor: dict[str, Any] = Depends(admin_actor),
+) -> HTMLResponse:
+    config = load_config()
+    require_admin_csrf(config, actor, csrf_token)
+    require_admin_permission(actor, "settings:write")
+    account = normalize_account_id(account_id)
+    if not account:
+        raise HTTPException(status_code=400, detail="阅微账号 ID 无效")
+    upsert_user(
+        account,
+        note=note,
+        enabled=enabled is not None,
+        capabilities=capabilities,
+    )
+    config = set_allowlist_membership(account, allow_access is not None, allow_upload is not None)
+    audit_event("user_updated", audit_actor(actor), metadata={"hostAccountId": account})
+    return admin_html(admin_users_page(config, f"已保存阅微账号 {account} 的设置", actor=actor))
+
+
+@router.post("/admin/users/delete", response_class=HTMLResponse)
+async def admin_users_delete(
+    account_id: str = Form(...),
+    csrf_token: str = Form(""),
+    actor: dict[str, Any] = Depends(admin_actor),
+) -> HTMLResponse:
+    config = load_config()
+    require_admin_csrf(config, actor, csrf_token)
+    require_admin_permission(actor, "settings:write")
+    account = normalize_account_id(account_id)
+    removed = delete_user(account)
+    audit_event("user_deleted", audit_actor(actor), success=removed, metadata={"hostAccountId": account})
+    message = f"已删除阅微账号 {account} 的档案" if removed else "该账号没有档案"
+    return admin_html(admin_users_page(load_config(), message, actor=actor))
+
+
+@router.post("/admin/users/sync", response_class=HTMLResponse)
+async def admin_users_sync(
+    csrf_token: str = Form(""),
+    actor: dict[str, Any] = Depends(admin_actor),
+) -> HTMLResponse:
+    config = load_config()
+    require_admin_csrf(config, actor, csrf_token)
+    require_admin_permission(actor, "settings:write")
+    added = sync_users_from_activity()
+    return admin_html(admin_users_page(load_config(), f"已补建 {added} 个用户档案", actor=actor))
+
+
+@router.post("/admin/packages/{package_kind}/{package_id}/check", response_class=HTMLResponse)
+async def admin_check_package(
+    package_kind: str,
+    package_id: str,
+    csrf_token: str = Form(""),
+    actor: dict[str, Any] = Depends(admin_actor),
+) -> HTMLResponse:
+    """检测单个内容包的全部地址。结果写回清单，列表页直接读缓存不再发请求。"""
+    config = load_config()
+    require_admin_csrf(config, actor, csrf_token)
+    require_admin_permission(actor, "packages:write")
+    kind = safe_package_segment(package_kind)
+    if kind not in runtime.PACKAGE_KINDS:
+        raise HTTPException(status_code=404, detail="内容分类不存在")
+    report = await asyncio.to_thread(check_package, kind, package_id)
+    detail = "；".join(
+        f"{item['url']} {STATUS_LABELS.get(item['status'], item['status'])}"
+        + (f" {item['elapsedMs']} 毫秒" if item.get("elapsedMs") else "")
+        for item in report["results"]
+    )
+    message = f"{report.get('name', package_id)} 检测完成：{STATUS_LABELS.get(report['status'], report['status'])}"
+    if detail:
+        message += f"（{detail}）"
+    elif report.get("message"):
+        message += f"（{report['message']}）"
+    return admin_html(admin_page(load_config(), message, actor=actor, section=kind))
+
+
+@router.post("/admin/content/{package_kind}/check-all", response_class=HTMLResponse)
+async def admin_check_kind(
+    package_kind: str,
+    csrf_token: str = Form(""),
+    actor: dict[str, Any] = Depends(admin_actor),
+) -> HTMLResponse:
+    """批量检测一类内容包。逐个串行探测，避免同时打爆目标站点。"""
+    config = load_config()
+    require_admin_csrf(config, actor, csrf_token)
+    require_admin_permission(actor, "packages:write")
+    kind = safe_package_segment(package_kind)
+    if kind not in runtime.PACKAGE_KINDS:
+        raise HTTPException(status_code=404, detail="内容分类不存在")
+    reports = await asyncio.to_thread(check_kind, kind)
+    counts: dict[str, int] = {}
+    for item in reports:
+        counts[item["status"]] = counts.get(item["status"], 0) + 1
+    summary = "、".join(f"{STATUS_LABELS.get(k, k)} {v} 个" for k, v in sorted(counts.items()))
+    return admin_html(admin_page(
+        load_config(),
+        f"已检测 {len(reports)} 个{_admin_kind_label(kind)}：{summary or '无可检测地址'}",
+        actor=actor,
+        section=kind,
     ))

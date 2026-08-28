@@ -43,9 +43,11 @@ ADMIN_ASSIGNABLE_PERMISSIONS = (
     "security:write",
 )
 
+# API Key 可授予的权限。required_api_scope 用到的每个 scope 都必须在此出现，
+# 否则那条路由对任何 API Key 调用方都会无条件 403。
 API_KEY_PERMISSIONS = (
     "read", "write", "packages:read", "packages:write", "tasks:read", "tasks:write",
-    "credentials:read", "credentials:write", "backup:read",
+    "credentials:read", "credentials:write", "backup:read", "backup:write",
 )
 
 
@@ -71,12 +73,14 @@ def api_key_permissions(config: dict[str, Any], value: str | None) -> set[str]:
         return set()
     permissions = record.get("permissions", [])
     if not isinstance(permissions, list) or not permissions:
-        return {"read", "write", "packages:read", "packages:write", "tasks:read", "tasks:write", "credentials:read", "credentials:write", "backup:read"}
+        return set(API_KEY_PERMISSIONS)
     result = {str(item).strip() for item in permissions if str(item).strip()}
     if "read" in result:
         result.update({"packages:read", "tasks:read", "credentials:read", "backup:read"})
     if "write" in result:
-        result.update({"packages:write", "tasks:write", "credentials:write"})
+        # backup:write 必须包含在内。漏掉它会让所有带 API Key 的备份上传请求
+        # 无条件 403——required_api_scope 要求这个 scope，但它此前无处可授予。
+        result.update({"packages:write", "tasks:write", "credentials:write", "backup:write"})
     return result
 
 
@@ -278,23 +282,30 @@ def check_request_auth(
 ) -> None:
     config = load_config()
     mode = active_auth_mode(config)
-    api_key = str(config.get("apiKey", ""))
+    authorized = False
     key_record = configured_api_key(config, api_key_value) if mode == "api_key" else None
     if key_record:
         if key_record.get("id") != "legacy":
             save_config(config)
-        return
-    accounts = config.get("accounts", {})
-    if mode == "account" and account_name and account_password and isinstance(accounts, dict):
-        encoded = accounts.get(account_name)
-        if encoded and password_matches(account_password, str(encoded)):
-            return
-    allowlist = set(config.get("hostAccountAllowlist", []))
-    if mode == "host_account_allowlist" and host_account_id and host_account_id in allowlist:
-        return
-    if mode == "public":
-        return
-    raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="认证信息无效"))
+        authorized = True
+    elif mode == "account" and account_name and account_password:
+        accounts = config.get("accounts", {})
+        encoded = accounts.get(account_name) if isinstance(accounts, dict) else None
+        authorized = bool(encoded) and password_matches(account_password, str(encoded))
+    elif mode == "host_account_allowlist" and host_account_id:
+        authorized = host_account_id in set(config.get("hostAccountAllowlist", []))
+    elif mode == "public":
+        authorized = True
+    if not authorized:
+        raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="认证信息无效"))
+    # 停用的用户要在**所有**接口被拒，不只是任务和备份那几个。
+    # 此前这里有四条独立的 return，各自绕过了用户闸门。
+    account_id = str(host_account_id or "").strip()
+    if account_id and not _user_enabled(account_id):
+        raise HTTPException(
+            status_code=403,
+            detail=response(code="USER_DISABLED", message=f"阅微账号 {account_id} 已被管理员停用"),
+        )
 
 
 def resolve_identity(api_key_value: str | None, account_name: str | None, account_password: str | None, host_account_id: str | None) -> str:
@@ -326,7 +337,19 @@ def resolve_identity(api_key_value: str | None, account_name: str | None, accoun
         fallback = "public"
     if not authorized:
         raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="认证信息无效"))
+    if account_id and not _user_enabled(account_id):
+        raise HTTPException(
+            status_code=403,
+            detail=response(code="USER_DISABLED", message=f"阅微账号 {account_id} 已被管理员停用"),
+        )
     return ("host:" + account_id) if account_id else fallback
+
+
+def _user_enabled(account_id: str) -> bool:
+    """延迟导入 users：users 需要读 config 与 state，而本模块位于它们之上。"""
+    from app.users import user_enabled
+
+    return user_enabled(account_id)
 
 
 async def authenticated(
@@ -398,10 +421,14 @@ def module_upload_policy(config: dict[str, Any], host_account_id: str | None) ->
     account_id = str(host_account_id or "").strip()
     allowlist = set(config.get("moduleUploadAllowlist", []))
     allowed = enabled and bool(account_id) and account_id in allowlist
+    if allowed and not _user_can_upload(account_id):
+        allowed = False
     if not enabled:
         reason = "服务器未启用用户模块上传功能"
     elif not account_id:
         reason = "请求未携带阅微账号 ID，请先在阅微登录账号"
+    elif account_id in allowlist and not _user_can_upload(account_id):
+        reason = f"阅微账号 {account_id} 的上传权限已被管理员关闭"
     elif not allowed:
         reason = f"阅微账号 {account_id} 不在上传白名单"
     else:
@@ -482,3 +509,10 @@ def normalized_admin_permissions(values: Any) -> list[str]:
     allowed = set(ADMIN_ASSIGNABLE_PERMISSIONS)
     return sorted({str(item).strip() for item in values if str(item).strip() in allowed})
 
+
+
+def _user_can_upload(account_id: str) -> bool:
+    """延迟导入同上。用户档案里关掉上传能力时，即便在白名单里也不放行。"""
+    from app.users import user_has_capability
+
+    return user_has_capability(account_id, "content:upload")

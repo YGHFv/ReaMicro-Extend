@@ -46,6 +46,7 @@ ADMIN_NAV_LABELS = [
     ("epub_style", "EPUB 样式"),
     ("highlight_style", "高亮样式"),
     ("theme", "主题库"),
+    ("users", "用户管理"),
     ("tasks", "云端任务"),
     ("settings", "服务器设置"),
     ("security", "子管理员与安全"),
