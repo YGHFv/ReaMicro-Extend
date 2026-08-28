@@ -46,6 +46,7 @@ from app.labels import (
     _admin_task_label,
     _admin_task_status_label,
 )
+from app.retention import data_usage
 from app.rule_check import DEFAULT_PROBE_QUERY, RULE_STATUS_LABELS, stored_rule_check
 from app.source_check import STATUS_LABELS, STATUS_OK, STATUS_SLOW, STATUS_UNREACHABLE, stored_health
 from app.packages import (
@@ -321,7 +322,7 @@ def _admin_settings_content(config: dict[str, Any], actor: dict[str, Any], csrf_
         f"<label>快照间隔（秒，最小 3600）<input name='server_snapshot_seconds' type='number' min='3600' value='{esc(config.get('serverSnapshotSeconds', 86400))}'></label>"
         f"<label>保留份数（最少 3）<input name='server_snapshot_retention' type='number' min='3' value='{esc(config.get('serverSnapshotRetention', 30))}'></label>"
         f"</div></fieldset>"
-        f"<fieldset><legend>用户模块上传</legend>"
+        f"<fieldset><legend>数据保留</legend><p class='hint'>此前审计日志、任务日志与内容包历史都无限增长。超过阈值后审计切历史文件、任务日志裁掉前半段、内容包历史只留最近若干份。</p><div class='grid-2'><label>审计日志上限（MB）<input name='audit_max_mb' type='number' min='1' value='{config.get('auditMaxMb', 32)}'></label><label>审计历史保留份数<input name='audit_keep_files' type='number' min='0' value='{config.get('auditKeepFiles', 3)}'></label><label>单任务日志上限（KB）<input name='task_log_max_kb' type='number' min='16' value='{config.get('taskLogMaxKb', 512)}'></label><label>内容包历史保留份数<input name='package_history_keep' type='number' min='1' value='{config.get('packageHistoryKeep', 10)}'></label></div></fieldset><fieldset><legend>用户模块上传</legend>"
         f"<p class='muted hint-tight'>启用后，白名单内的阅微账号可以从模块上传书源和关联源。"
         f"服务器已存在名称和域名相同的源时只建立关联，不会被模块覆盖。</p>"
         f"<label><input type='checkbox' name='module_upload_enabled' {'checked' if config.get('moduleUploadEnabled') else ''}> 启用模块上传内容库</label>"
@@ -344,7 +345,7 @@ def _admin_settings_content(config: dict[str, Any], actor: dict[str, Any], csrf_
         "node.querySelectorAll('input,textarea,select').forEach(input=>input.disabled=node.hidden)});"
         "select.addEventListener('change',sync);sync()})();</script>"
     )
-    return head + form + _admin_release_panel() + script
+    return head + form + _admin_release_panel() + _admin_retention_panel(config, actor) + script
 
 
 def _admin_overview_stats(config: dict[str, Any], records: list[dict[str, Any]]) -> str:
@@ -842,3 +843,33 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
         else:
             content = _admin_security_content(config, actor, csrf_html)
     return _admin_layout(config, actor, section, content, message=message, secret_notice=secret_notice, records=records)
+
+
+def _admin_retention_panel(config: dict[str, Any], actor: dict[str, Any]) -> str:
+    """数据占用与手动清理。
+
+    列出各类数据的当前占用，便于判断阈值配得是否合适——光有阈值看不出离上限还有多远。
+    """
+    esc = lambda value: html.escape(str(value), quote=True)
+    usage = data_usage()
+    rows = "".join(
+        f"<tr><th class='col-mid'>{esc(label)}</th><td>{esc(_admin_size_label(usage[key]))}"
+        f"{f'<small>{esc(note)}</small>' if note else ''}</td></tr>"
+        for key, label, note in (
+            ("audit", "审计日志", f"超过 {config.get('auditMaxMb', 32)} MB 后切历史文件"),
+            ("auditHistory", "审计历史文件", f"最多保留 {config.get('auditKeepFiles', 3)} 份"),
+            ("taskLogs", "任务日志", f"单个超过 {config.get('taskLogMaxKb', 512)} KB 后裁剪"),
+            ("packages", "内容包总占用", ""),
+            ("packageHistory", "其中历史版本", f"每个内容包最多保留 {config.get('packageHistoryKeep', 10)} 份"),
+            ("backups", "模块与密钥备份", ""),
+            ("snapshots", "服务器快照", f"最多保留 {config.get('serverSnapshotRetention', 30)} 份"),
+        )
+    )
+    csrf = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
+    return (
+        "<div class='panel'><h2>数据占用</h2>"
+        "<p class='hint'>清理在定时快照的同一个低频循环里执行；需要立刻生效可以手动触发。</p>"
+        f"<div class='table-wrap mb'><table class='table-plain'><tbody>{rows}</tbody></table></div>"
+        f"<form class='inline' method='post' action='/admin/settings/retention/run'>{csrf}"
+        "<button class='button subtle' type='submit'>立即执行清理</button></form></div>"
+    )

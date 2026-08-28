@@ -51,6 +51,11 @@ def default_config() -> dict[str, Any]:
         "primaryAdmin": {},
         "adminAccounts": {},
         "hostAccountAllowlist": [],
+        # 数据保留阈值。此前审计日志、任务日志与内容包历史都无限增长。
+        "auditMaxMb": bounded_config_int(os.getenv("REAMICRO_AUDIT_MAX_MB", "32"), 32, 1),
+        "auditKeepFiles": bounded_config_int(os.getenv("REAMICRO_AUDIT_KEEP_FILES", "3"), 3, 0),
+        "taskLogMaxKb": bounded_config_int(os.getenv("REAMICRO_TASK_LOG_MAX_KB", "512"), 512, 16),
+        "packageHistoryKeep": bounded_config_int(os.getenv("REAMICRO_PACKAGE_HISTORY_KEEP", "10"), 10, 1),
         "moduleUploadEnabled": runtime.env_bool("REAMICRO_MODULE_UPLOAD_ENABLED", False),
         "moduleUploadAllowlist": [],
         "moduleUploadKinds": sorted(runtime.MODULE_UPLOAD_DEFAULT_KINDS),
@@ -78,6 +83,11 @@ def load_config() -> dict[str, Any]:
         config["primaryAdmin"] = config.get("primaryAdmin", {}) if isinstance(config.get("primaryAdmin", {}), dict) else {}
         config["adminAccounts"] = config.get("adminAccounts", {}) if isinstance(config.get("adminAccounts", {}), dict) else {}
         config["hostAccountAllowlist"] = normalized_config_list(config.get("hostAccountAllowlist", []))
+        for key, default, minimum in (
+            ("auditMaxMb", 32, 1), ("auditKeepFiles", 3, 0),
+            ("taskLogMaxKb", 512, 16), ("packageHistoryKeep", 10, 1),
+        ):
+            config[key] = bounded_config_int(config.get(key, default), default, minimum)
         config["moduleUploadEnabled"] = bool(config.get("moduleUploadEnabled", False))
         config["moduleUploadAllowlist"] = normalized_config_list(config.get("moduleUploadAllowlist", []))
         config["moduleUploadKinds"] = module_upload_kinds(config.get("moduleUploadKinds"))
@@ -101,6 +111,11 @@ def save_config(next_config: dict[str, Any]) -> dict[str, Any]:
         safe["primaryAdmin"] = safe.get("primaryAdmin", {}) if isinstance(safe.get("primaryAdmin", {}), dict) else {}
         safe["adminAccounts"] = safe.get("adminAccounts", {}) if isinstance(safe.get("adminAccounts", {}), dict) else {}
         safe["hostAccountAllowlist"] = normalized_config_list(safe.get("hostAccountAllowlist", []))
+        for key, default, minimum in (
+            ("auditMaxMb", 32, 1), ("auditKeepFiles", 3, 0),
+            ("taskLogMaxKb", 512, 16), ("packageHistoryKeep", 10, 1),
+        ):
+            safe[key] = bounded_config_int(safe.get(key, default), default, minimum)
         safe["moduleUploadEnabled"] = bool(safe.get("moduleUploadEnabled", False))
         safe["moduleUploadAllowlist"] = normalized_config_list(safe.get("moduleUploadAllowlist", []))
         safe["moduleUploadKinds"] = module_upload_kinds(safe.get("moduleUploadKinds"))

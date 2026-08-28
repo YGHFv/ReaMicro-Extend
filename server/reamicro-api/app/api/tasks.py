@@ -28,6 +28,7 @@ from app.scheduler import (
 )
 from app.security import task_owner
 from app.state import owner_host_account_id
+from app.retention import purge_orphan_task_logs
 from app.users import touch_user
 from app.state import (
     find_duplicate_task,
@@ -269,7 +270,9 @@ async def delete_task(task_id: str, owner: str = Depends(task_owner)) -> dict[st
     tasks, _ = find_owned_task(task_id, owner)
     tasks.pop(task_id, None)
     save_tasks(tasks)
-    task_log(task_id, "任务已删除")
+    # 原先在这里写一条"任务已删除"日志——那会给已不存在的任务**新建**日志文件，
+    # 正是孤儿日志的来源。任务没了，它的日志也没有保留价值，直接删掉。
+    purge_orphan_task_logs(set(tasks))
     return response({"deleted": True})
 
 

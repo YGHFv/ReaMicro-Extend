@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from app import runtime
 from app.audit import audit_event, task_log
 from app.backups import create_server_snapshot, prune_server_snapshots
+from app.retention import run_retention
 from app.config_store import bounded_config_int, load_config
 from app.crypto import decrypt_secret, encrypt_secret
 from app.executors import execute_reamicro_task, execute_task, redact_message
@@ -260,6 +261,12 @@ async def server_snapshot_loop() -> None:
                 audit_event("scheduled_server_snapshot", metadata={"filename": snapshot.name})
             except Exception as error:
                 audit_event("scheduled_server_snapshot_failed", success=False, metadata={"type": type(error).__name__})
+        # 搭同一个低频循环执行数据保留清理，不额外起后台任务。
+        # 放在快照之后：先留档再清理，清理出问题也有快照可回。
+        try:
+            await asyncio.to_thread(run_retention, config)
+        except Exception as error:
+            audit_event("retention_failed", success=False, metadata={"type": type(error).__name__})
         await asyncio.sleep(max(int(config.get("serverSnapshotSeconds", 86400)), 3600))
 
 

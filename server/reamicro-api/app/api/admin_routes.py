@@ -85,6 +85,7 @@ from app.labels import (
 )
 from app.admin.paging import paginate, pager_html, read_tail_lines
 from app.admin.users_view import admin_users_page
+from app.retention import data_usage, prune_package_history, retention_settings, run_retention
 from app.rule_check import DEFAULT_PROBE_QUERY, RULE_STATUS_LABELS, check_kind_rules, check_package_rules
 from app.source_check import STATUS_LABELS, check_kind, check_package
 from app.security import normalized_admin_permissions
@@ -289,6 +290,9 @@ async def admin_edit_package_post(
         raise HTTPException(status_code=400, detail="依赖必须是 JSON 数组")
     package_dir = manifest_path.parent
     history = package_dir / "history"; history.mkdir(exist_ok=True)
+    # 归档前先裁剪，否则编辑频繁的源会在两次定时清理之间堆出很多份副本。
+    # 上传走 persist_package_payload，那里也有同样一步。
+    prune_package_history(package_kind, package_id, retention_settings().get("packageHistoryKeep", 10))
     old_version = safe_package_segment(current.get("version", "old"))
     archive_dir = history / f"{old_version}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"; archive_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(manifest_path, archive_dir / "manifest.json")
@@ -1020,6 +1024,10 @@ async def admin_settings(
     server_snapshot_enabled: str | None = Form(None),
     server_snapshot_seconds: int = Form(86400),
     server_snapshot_retention: int = Form(30),
+    audit_max_mb: int = Form(32),
+    audit_keep_files: int = Form(3),
+    task_log_max_kb: int = Form(512),
+    package_history_keep: int = Form(10),
     module_upload_enabled: str | None = Form(None),
     module_upload_allowlist: str = Form(""),
     # 后台用复选框提交，未勾选任何类型时由 module_upload_kinds() 回退到默认集合。
@@ -1062,6 +1070,10 @@ async def admin_settings(
         "serverSnapshotRetention": server_snapshot_retention,
         "primaryAdmin": current.get("primaryAdmin", {}),
         "adminAccounts": current.get("adminAccounts", {}),
+        "auditMaxMb": audit_max_mb,
+        "auditKeepFiles": audit_keep_files,
+        "taskLogMaxKb": task_log_max_kb,
+        "packageHistoryKeep": package_history_keep,
         "moduleUploadEnabled": module_upload_enabled is not None and str(module_upload_enabled).lower() not in {"", "0", "false"},
         "moduleUploadAllowlist": [item.strip() for item in module_upload_allowlist.replace(",", "\n").splitlines() if item.strip()],
         "moduleUploadKinds": module_upload_kinds_form(module_upload_kinds),
@@ -1727,4 +1739,31 @@ async def admin_check_kind_rules(
         f"已用关键词“{probe}”检测 {len(reports)} 个{_admin_kind_label(kind)}的规则：{summary or '无可检测内容'}",
         actor=actor,
         section=kind,
+    ))
+
+
+@router.post("/admin/settings/retention/run", response_class=HTMLResponse)
+async def admin_run_retention(
+    csrf_token: str = Form(""),
+    actor: dict[str, Any] = Depends(admin_actor),
+) -> HTMLResponse:
+    """手动执行一次数据保留清理，不必等低频循环。"""
+    config = load_config()
+    require_admin_csrf(config, actor, csrf_token)
+    require_admin_permission(actor, "settings:write")
+    report = await asyncio.to_thread(run_retention, config)
+    parts = []
+    if report["auditRotated"]:
+        parts.append("审计日志已切割")
+    if report["taskLogsTrimmed"]:
+        parts.append(f"裁剪 {report['taskLogsTrimmed']} 个任务日志")
+    if report["orphanLogsRemoved"]:
+        parts.append(f"清理 {report['orphanLogsRemoved']} 个孤儿日志")
+    if report["historyRemoved"]:
+        parts.append(f"删除 {report['historyRemoved']} 份过期历史")
+    return admin_html(admin_page(
+        load_config(),
+        "数据保留清理完成：" + ("、".join(parts) if parts else "当前没有超出阈值的数据"),
+        actor=actor,
+        section="settings",
     ))

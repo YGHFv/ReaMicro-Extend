@@ -505,6 +505,10 @@ def persist_package_payload(
             old_version = safe_package_segment(old_manifest.get("version", "old"))
         except (OSError, ValueError):
             pass
+        # 先裁剪再归档：否则编辑频繁的源会在两次定时清理之间堆出很多份副本。
+        from app.retention import prune_package_history, retention_settings
+
+        prune_package_history(kind, package_id, retention_settings().get("packageHistoryKeep", 10))
         archive_dir = history / f"{old_version}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
         archive_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(manifest_path, archive_dir / "manifest.json")
