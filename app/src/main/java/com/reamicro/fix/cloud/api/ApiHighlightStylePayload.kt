@@ -5,11 +5,15 @@ import com.reamicro.fix.settings.ReaderHighlightStyle
 import org.json.JSONObject
 
 /**
- * 高亮样式内容包的字段编解码。
+ * 高亮样式内容包的字段编解码。上传与安装共用这一份定义。
  *
- * 上传与安装共用这一份定义，避免两边字段对不上——此前安装侧只读浅色字段，
- * 下载来的样式会静默丢掉整套深色配置（而 darkUsesLight 默认 true，
- * 表现是深色下回落成浅色外观，不报错但不对）。
+ * **样式本身不区分深色浅色**。深浅只存在于另外两层：
+ * - 高亮规则各自带 `styleId` 与 `darkStyleId`，决定深浅主题下引用哪个样式；
+ * - 默认样式设置有 `defaultLightStyleId` 与 `defaultDarkStyleId`。
+ *
+ * `ReaderHighlightStyle` 里的 `dark*` 字段是该设定移除前的历史残留，设置界面不再写入，
+ * 恒为默认值（`darkUsesLight = true`，即深色跟随浅色）。所以内容包**不携带**这些字段：
+ * 传了也没有意义，还会让人误以为样式能自带深色外观。
  */
 private const val PAYLOAD_SCHEMA_VERSION = 1
 
@@ -24,13 +28,7 @@ internal fun readHighlightStylePayload(styleRoot: JSONObject, fallbackId: String
         css = styleRoot.optString("css"),
         ninePatchPath = styleRoot.optString("ninePatchPath"),
         ninePatchSlice = styleRoot.optString("ninePatchSlice"),
-        // 缺字段时保持 data class 的默认值：darkUsesLight 默认跟随浅色。
-        darkUsesLight = styleRoot.optBoolean("darkUsesLight", true),
-        darkColor = styleRoot.optString("darkColor"),
-        darkFontFamily = styleRoot.optString("darkFontFamily"),
-        darkCss = styleRoot.optString("darkCss"),
-        darkNinePatchPath = styleRoot.optString("darkNinePatchPath"),
-        darkNinePatchSlice = styleRoot.optString("darkNinePatchSlice"),
+        // dark* 一律留默认值：样式不带深色外观，深浅由规则和默认样式设置决定。
     )
 }
 
@@ -50,15 +48,11 @@ internal fun writeHighlightStylePayload(style: ReaderHighlightStyle): ByteArray 
                 .put("name", style.name)
                 .put("color", style.color)
                 .put("fontFamily", style.fontFamily)
-                .put("css", style.css)
-                .put("darkUsesLight", style.darkUsesLight)
-                .put("darkColor", style.darkColor)
-                .put("darkFontFamily", style.darkFontFamily)
-                .put("darkCss", style.darkCss),
+                .put("css", style.css),
         )
         .toString(2)
         .toByteArray(Charsets.UTF_8)
 
 /** 该样式是否依赖本机图片资源。依赖的会在上传时提示用户，因为对方拿不到这些图。 */
 internal fun highlightStyleUsesLocalAssets(style: ReaderHighlightStyle): Boolean =
-    style.ninePatchPath.isNotBlank() || style.darkNinePatchPath.isNotBlank()
+    style.ninePatchPath.isNotBlank()

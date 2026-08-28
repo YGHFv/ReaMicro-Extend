@@ -29,16 +29,17 @@ STYLE_NAME = "我的高亮"
 
 
 def style_payload(style_id: str = STYLE_ID, name: str = STYLE_NAME, **extra) -> bytes:
+    """模块实际上传的载荷形状。
+
+    样式本身不区分深色浅色——深浅在高亮规则（styleId / darkStyleId）和默认样式设置
+    两层，所以载荷里没有任何 dark* 字段。
+    """
     style = {
         "id": style_id,
         "name": name,
         "color": "#FF8800",
         "fontFamily": "",
         "css": "font-size: 0.9em",
-        "darkUsesLight": False,
-        "darkColor": "#442200",
-        "darkFontFamily": "",
-        "darkCss": "font-size: 0.95em",
     }
     style.update(extra)
     return json.dumps({"schemaVersion": 1, "style": style}, ensure_ascii=False).encode("utf-8")
@@ -89,17 +90,21 @@ class HighlightUploadTest(unittest.TestCase):
         self.assertEqual("highlight_style", manifest["kind"])
         self.assertEqual(STYLE_NAME, manifest["name"], "名称要取 style.name，不能退化成文件名")
 
-    def test_dark_fields_survive_round_trip(self):
-        """深色字段必须完整保存，否则下载方会静默回落成浅色外观。"""
-        data = unwrap(self._upload(style_payload()))
+    def test_payload_is_stored_verbatim(self):
+        """服务器原样保存载荷，不增删字段。"""
+        payload = style_payload()
+        data = unwrap(self._upload(payload))
         package_id = data["package"]["packageId"]
         stored = json.loads(
             (runtime.PACKAGE_ROOT / "highlight_style" / package_id / f"{STYLE_ID}.json").read_text(encoding="utf-8")
         )
-        style = stored["style"]
-        self.assertFalse(style["darkUsesLight"])
-        self.assertEqual("#442200", style["darkColor"])
-        self.assertEqual("font-size: 0.95em", style["darkCss"])
+        self.assertEqual(json.loads(payload.decode()), stored)
+
+    def test_no_dark_fields_in_payload(self):
+        """样式不区分深浅：深浅在高亮规则与默认样式设置两层，载荷里不该有 dark* 字段。"""
+        text = style_payload().decode()
+        for field in ("darkUsesLight", "darkColor", "darkFontFamily", "darkCss", "darkNinePatch"):
+            self.assertNotIn(field, text)
 
     def test_second_upload_of_same_style_links_not_duplicates(self):
         first = unwrap(self._upload(style_payload()))
