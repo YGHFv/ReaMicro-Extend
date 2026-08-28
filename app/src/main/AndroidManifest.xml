@@ -67,9 +67,19 @@
         </receiver>
 
         <receiver
+            android:name=".notification.CloudTaskNotificationReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.reamicro.fix.CLOUD_TASK_NOTIFICATION" />
+            </intent-filter>
+        </receiver>
+
+        <!-- exported=true：闹钟由阅微进程重排时会显式投递到这里，非导出会被系统拒收。 -->
+        <receiver
             android:name=".cloud.api.CloudTaskHeartbeatReceiver"
             android:enabled="true"
-            android:exported="false">
+            android:exported="true">
             <intent-filter>
                 <action android:name="com.reamicro.fix.CLOUD_TASK_HEARTBEAT" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
@@ -96,6 +106,13 @@
 
         <activity
             android:name=".notification.OnlineCompletionNotificationActivity"
+            android:enabled="true"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:theme="@style/NoDisplayTheme" />
+
+        <activity
+            android:name=".notification.CloudTaskNotificationActivity"
             android:enabled="true"
             android:excludeFromRecents="true"
             android:exported="true"

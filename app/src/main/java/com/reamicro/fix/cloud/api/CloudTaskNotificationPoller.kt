@@ -1,17 +1,14 @@
 package com.reamicro.fix.cloud.api
 
-import android.Manifest
 import android.app.AlarmManager
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
+import com.reamicro.fix.notification.CloudTaskNotifications
 import de.robv.android.xposed.XposedBridge
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -53,8 +50,10 @@ object CloudTaskNotificationPoller {
                 if (id.isBlank()) continue
                 val title = item.optString("title").ifBlank { "云端任务消息" }
                 val message = item.optString("message").ifBlank { "任务状态已更新" }
-                if (show(appContext, id, title, message)) acknowledged += id
+                val result = item.optString("result")
+                if (show(appContext, id, title, message, result)) acknowledged += id
             }
+            // 只回执真正投出去的消息；投递失败的留到下次在线重发，避免消息被静默吞掉。
             if (acknowledged.isNotEmpty()) client.acknowledgeNotifications(acknowledged)
             CloudTaskWakeScheduler.schedule(appContext, data.optLong("nextTaskAt", 0L))
         } catch (error: Throwable) {
@@ -65,27 +64,67 @@ object CloudTaskNotificationPoller {
         }
     }
 
-    private fun show(context: Context, id: String, title: String, message: String): Boolean {
-        if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            Handler(Looper.getMainLooper()).post { Toast.makeText(context, "$title：$message", Toast.LENGTH_LONG).show() }
-            return true
+    /**
+     * 投递一条云任务消息。
+     *
+     * 轮询多数时候跑在**阅微进程**里（前台心跳），而 `POST_NOTIFICATIONS` 是按应用授予的：
+     * 在阅微进程里发通知，阅微没授权就只能退化成 Toast，授权了也会挂在阅微名下。
+     * 所以这里把消息交给模块自己的组件，由模块进程用模块的权限和渠道发出——
+     * 与在线补全下载通知同一套路径。三级降级：
+     * 1. 已经在模块进程里（闹钟唤醒）→ 直接发；
+     * 2. 广播给模块的 Receiver（常规路径）；
+     * 3. 广播被后台策略拦掉 → 拉起模块的无界面 Activity，它还能主动申请通知权限；
+     * 4. 全都失败 → Toast，至少让用户看到一次。
+     */
+    private fun show(context: Context, id: String, title: String, message: String, result: String): Boolean {
+        val intent = CloudTaskNotifications.intent(id, title, message, result)
+        if (context.packageName == CloudTaskNotifications.MODULE_PACKAGE_NAME) {
+            if (CloudTaskNotifications.post(context, intent, source = "module-process")) return true
+        } else {
+            if (dispatchToModule(context, intent, id)) return true
         }
-        val manager = context.getSystemService(NotificationManager::class.java) ?: return false
-        if (Build.VERSION.SDK_INT >= 26) {
-            manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "云端任务消息", NotificationManager.IMPORTANCE_DEFAULT))
+        Handler(Looper.getMainLooper()).post {
+            runCatching { Toast.makeText(context, "$title：$message", Toast.LENGTH_LONG).show() }
         }
-        val notification = android.app.Notification.Builder(context, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_notify_more)
-            .setContentTitle(title)
-            .setContentText(message)
-            .setStyle(android.app.Notification.BigTextStyle().bigText(message))
-            .setAutoCancel(true)
-            .build()
-        manager.notify(id.hashCode(), notification)
+        XposedBridge.log("ReaMicro API task notification fell back to toast id=$id")
         return true
     }
 
-    private const val CHANNEL_ID = "reamicro_cloud_tasks"
+    /** 先广播，再用无界面 Activity 兜底。任一成功即认为已投出。 */
+    private fun dispatchToModule(context: Context, intent: Intent, id: String): Boolean {
+        val broadcast = runCatching {
+            context.sendBroadcast(
+                Intent(intent).setClassName(
+                    CloudTaskNotifications.MODULE_PACKAGE_NAME,
+                    CloudTaskNotifications.RECEIVER_CLASS,
+                ),
+            )
+            true
+        }.getOrElse {
+            XposedBridge.log("ReaMicro API task notification broadcast failed id=$id: ${it.message}")
+            false
+        }
+        if (broadcast) return true
+        return runCatching {
+            context.startActivity(
+                Intent(intent)
+                    .setClassName(
+                        CloudTaskNotifications.MODULE_PACKAGE_NAME,
+                        CloudTaskNotifications.ACTIVITY_CLASS,
+                    )
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    .addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
+                    .addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY)
+                    .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            )
+            true
+        }.getOrElse {
+            XposedBridge.log("ReaMicro API task notification activity failed id=$id: ${it.message}")
+            false
+        }
+    }
+
     private const val MIN_POLL_INTERVAL_MS = 30_000L
 }
 
@@ -93,7 +132,13 @@ object CloudTaskNotificationPoller {
 object CloudTaskWakeScheduler {
     fun schedule(context: Context, nextTaskAt: Long = 0L) {
         val alarm = context.getSystemService(AlarmManager::class.java) ?: return
-        val intent = Intent(context, CloudTaskHeartbeatReceiver::class.java).setAction(ACTION_WAKE)
+        // 必须显式指定模块包名。这个方法也会在阅微进程里被调用（前台心跳后重排闹钟），
+        // 那时 Intent(context, CloudTaskHeartbeatReceiver::class.java) 会解析成
+        // 阅微包名 + 模块类名——阅微的 manifest 里没有这个组件，闹钟永远投递不到。
+        val intent = Intent(ACTION_WAKE).setClassName(
+            CloudTaskNotifications.MODULE_PACKAGE_NAME,
+            HEARTBEAT_RECEIVER_CLASS,
+        )
         val pending = PendingIntent.getBroadcast(context, REQUEST_CODE, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val now = System.currentTimeMillis()
         val calendar = java.util.Calendar.getInstance().apply {
@@ -117,6 +162,8 @@ object CloudTaskWakeScheduler {
     }
 
     const val ACTION_WAKE = "com.reamicro.fix.CLOUD_TASK_HEARTBEAT"
+    private const val HEARTBEAT_RECEIVER_CLASS = "com.reamicro.fix.cloud.api.CloudTaskHeartbeatReceiver"
+    internal val heartbeatReceiverClassForTest: String get() = HEARTBEAT_RECEIVER_CLASS
     private const val REQUEST_CODE = 260827
     private const val TASK_FINISH_GRACE_MS = 2 * 60_000L
 }

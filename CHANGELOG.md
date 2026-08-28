@@ -1,5 +1,35 @@
 # 更新记录
 
+## 修复云端任务通知只能显示 Toast - 2026-08-28
+
+云端任务消息此前只弹 Toast，从不出现在系统通知栏。根因是**发通知的进程不对**。
+
+`CloudTaskNotificationPoller` 多数时候跑在**阅微进程**里（前台每 5 分钟心跳），却直接用
+阅微的 Context 检查权限和发通知。而 `POST_NOTIFICATIONS` 是按应用授予的：阅微没授权就走
+`Toast` 分支——这正是你看到的现象；即使阅微授权了，通知也会挂在阅微名下、用阅微的渠道，
+而不是模块的。图标用的 `android.R.drawable.stat_notify_more` 也是系统图标而非模块图标。
+
+在线补全的下载通知之所以正常，是因为它走的是另一条路：hook 在阅微进程里只负责**投递**，
+真正发通知的是模块包里的 `OnlineCompletionNotificationReceiver` / `...Service` / `...Activity`，
+它们跑在模块自己的进程，用模块的权限、渠道和图标。现在云任务通知沿用同一套做法：
+
+- 新增 `CloudTaskNotifications`：统一的投递 Intent 构造与通知构建，用模块图标
+  `ic_notification_reamicro` 和独立渠道 `reamicro_cloud_tasks`（与下载渠道分开，可单独开关）。
+  通知 ID 由消息 ID 派生，同一条消息重复投递只覆盖不堆叠。
+- 新增 `CloudTaskNotificationReceiver`（模块包，exported）：接收投递并在模块进程发通知。
+- 新增 `CloudTaskNotificationActivity`（模块包，无界面）：广播被 OEM 后台策略拦掉时兜底，
+  而且它是唯一能**主动申请** `POST_NOTIFICATIONS` 的入口——首次使用云任务时通常还没授权。
+- 轮询器改为四级降级：已在模块进程（闹钟唤醒）直接发 → 广播给模块 Receiver → 拉起模块
+  Activity → 全失败才用 Toast。只回执真正投出去的消息，投递失败的留到下次在线重发。
+
+顺带修掉同一处的第二个 bug：**闹钟唤醒在阅微进程里重排后永远不会触发**。
+`CloudTaskWakeScheduler.schedule()` 原先用 `Intent(context, CloudTaskHeartbeatReceiver::class.java)`
+构造 PendingIntent，在阅微进程里这会解析成「阅微包名 + 模块类名」，而阅微的 manifest 里
+没有这个组件，闹钟投递不到（`PendingIntent.getBroadcast` 不会报错，只是静默失效）。现在
+显式指定模块包名，`CloudTaskHeartbeatReceiver` 也从 `exported="false"` 改为 `true`，
+否则跨进程显式投递会被系统拒收。这解释了为什么零点和任务完成后的静默唤醒一直没生效——
+消息只能在阅微前台时被拉到。
+
 ## 改用正确的每日签到奖励接口，并补齐端到端测试 - 2026-08-28
 
 ### 领错了奖励
