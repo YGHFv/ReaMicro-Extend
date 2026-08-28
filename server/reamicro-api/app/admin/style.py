@@ -192,6 +192,7 @@ _UTILITIES = """
   padding:10px var(--gap-3);margin-bottom:var(--gap-2);background:var(--surface);
   border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
 .batch-bar select{width:auto;min-width:120px}
+.probe-input{width:auto;min-width:180px}
 .col-check{width:38px}
 .col-check input{margin:0}
 """

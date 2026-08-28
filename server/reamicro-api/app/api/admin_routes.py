@@ -85,6 +85,7 @@ from app.labels import (
 )
 from app.admin.paging import paginate, pager_html, read_tail_lines
 from app.admin.users_view import admin_users_page
+from app.rule_check import DEFAULT_PROBE_QUERY, RULE_STATUS_LABELS, check_kind_rules, check_package_rules
 from app.source_check import STATUS_LABELS, check_kind, check_package
 from app.security import normalized_admin_permissions
 from app.users import (
@@ -1669,3 +1670,61 @@ async def admin_batch_packages(
     if failed:
         parts.append(f"失败 {len(failed)} 个（{'；'.join(failed[:3])}{'…' if len(failed) > 3 else ''}）")
     return admin_html(admin_page(load_config(), "，".join(parts), actor=actor, section=kind))
+
+
+@router.post("/admin/packages/{package_kind}/{package_id}/check-rules", response_class=HTMLResponse)
+async def admin_check_package_rules(
+    package_kind: str,
+    package_id: str,
+    query: str = Form(""),
+    csrf_token: str = Form(""),
+    actor: dict[str, Any] = Depends(admin_actor),
+) -> HTMLResponse:
+    """规则级检测：真发一次搜索，看书源规则还能不能取到书名。"""
+    config = load_config()
+    require_admin_csrf(config, actor, csrf_token)
+    require_admin_permission(actor, "packages:write")
+    kind = safe_package_segment(package_kind)
+    if kind not in runtime.PACKAGE_KINDS:
+        raise HTTPException(status_code=404, detail="内容分类不存在")
+    probe = query.strip() or DEFAULT_PROBE_QUERY
+    report = await asyncio.to_thread(check_package_rules, kind, package_id, probe)
+    label = RULE_STATUS_LABELS.get(report["status"], report["status"])
+    detail = report.get("message", "")
+    samples = "、".join(report.get("names", [])[:3])
+    message = f"{report.get('name', package_id)} 规则检测：{label}"
+    if samples:
+        message += f"（示例结果：{samples}）"
+    elif detail:
+        message += f"（{detail}）"
+    return admin_html(admin_page(load_config(), message, actor=actor, section=kind))
+
+
+@router.post("/admin/content/{package_kind}/check-rules-all", response_class=HTMLResponse)
+async def admin_check_kind_rules(
+    package_kind: str,
+    query: str = Form(""),
+    csrf_token: str = Form(""),
+    actor: dict[str, Any] = Depends(admin_actor),
+) -> HTMLResponse:
+    """批量规则检测。串行执行，避免同时向多个站点发搜索请求。"""
+    config = load_config()
+    require_admin_csrf(config, actor, csrf_token)
+    require_admin_permission(actor, "packages:write")
+    kind = safe_package_segment(package_kind)
+    if kind not in runtime.PACKAGE_KINDS:
+        raise HTTPException(status_code=404, detail="内容分类不存在")
+    probe = query.strip() or DEFAULT_PROBE_QUERY
+    reports = await asyncio.to_thread(check_kind_rules, kind, probe)
+    counts: dict[str, int] = {}
+    for item in reports:
+        counts[item["status"]] = counts.get(item["status"], 0) + 1
+    summary = "、".join(
+        f"{RULE_STATUS_LABELS.get(key, key)} {value} 个" for key, value in sorted(counts.items())
+    )
+    return admin_html(admin_page(
+        load_config(),
+        f"已用关键词“{probe}”检测 {len(reports)} 个{_admin_kind_label(kind)}的规则：{summary or '无可检测内容'}",
+        actor=actor,
+        section=kind,
+    ))

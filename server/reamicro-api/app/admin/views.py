@@ -33,6 +33,7 @@ from app.config_store import (
 )
 from app.crypto import api_key_digest, decrypt_secret
 from app.labels import (
+    status_badge,
     status_tone,
     _admin_action_label,
     _admin_channel_label,
@@ -45,6 +46,7 @@ from app.labels import (
     _admin_task_label,
     _admin_task_status_label,
 )
+from app.rule_check import DEFAULT_PROBE_QUERY, RULE_STATUS_LABELS, stored_rule_check
 from app.source_check import STATUS_LABELS, STATUS_OK, STATUS_SLOW, STATUS_UNREACHABLE, stored_health
 from app.packages import (
     _admin_package_records,
@@ -158,6 +160,13 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
         reachable = sum(1 for r in health["results"] if r.get("status") in (STATUS_OK, STATUS_SLOW))
         if health["results"]:
             health_detail += f" · {reachable}/{len(health['results'])} 个地址可用"
+        # 规则检测结果同样读清单缓存，渲染不触发网络请求。
+        rule = stored_rule_check(item)
+        rule_detail = _admin_time_label(rule["checkedAt"], "从未检测") if rule["checkedAt"] else "从未检测"
+        if rule["matched"]:
+            rule_detail += f" · 取到 {rule['matched']} 条"
+        elif rule["message"]:
+            rule_detail += f" · {rule['message'][:40]}"
         if can_write:
             actions = (
                 f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/edit'>编辑</a> "
@@ -165,7 +174,13 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
                 f"<a class='button subtle' href='/admin/packages/{esc(kind)}/{esc(package_id)}/history'>历史</a> "
                 f"<form class='inline' method='post' action='/admin/packages/{esc(kind)}/{esc(package_id)}/check'>"
                 f"<input type='hidden' name='csrf_token' value='{esc(csrf_token)}'>"
-                f"<button class='button subtle' type='submit'>检测</button></form> "
+                f"<button class='button subtle' type='submit'>检测地址</button></form> "
+                + (
+                    f"<form class='inline' method='post' action='/admin/packages/{esc(kind)}/{esc(package_id)}/check-rules'>"
+                    f"<input type='hidden' name='csrf_token' value='{esc(csrf_token)}'>"
+                    f"<button class='button subtle' type='submit'>检测规则</button></form> "
+                    if kind == "online_source" else ""
+                ) +
                 f"<form class='inline' method='post' action='/admin/packages/{esc(kind)}/{esc(package_id)}/delete'>"
                 f"<input type='hidden' name='csrf_token' value='{esc(csrf_token)}'>"
                 f"<button class='button subtle danger' type='submit'>删除</button></form>"
@@ -183,12 +198,14 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
             f"<small>包 ID {esc(package_id)}{(' · ' + esc(domains)) if domains else ''}</small></td>"
             f"<td>{esc(item.get('version', ''))}<small>{esc(_admin_time_label(item.get('buildTime'), '未记录'))}</small></td>"
             f"<td><span class='status tone-{status_tone(status_value)}'>{esc(_admin_status_label(status_value))}</span></td>"
-            f"<td><span class='status tone-{health_class}'>{esc(STATUS_LABELS.get(health_status, health_status))}</span>"
+            f"<td>{status_badge(health_status, STATUS_LABELS.get(health_status, health_status))}"
             f"<small>{esc(health_detail)}</small></td>"
+            f"<td>{status_badge(rule['status'], RULE_STATUS_LABELS.get(rule['status'], rule['status']))}"
+            f"<small>{esc(rule_detail)}</small></td>"
             f"<td>{esc(_admin_channel_label(item.get('channel', 'stable')))}<small>{esc(dependency)}</small></td>"
             f"<td class='actions'>{actions}</td></tr>"
         )
-    return "".join(rows) or f"<tr><td colspan='{8 if can_write else 7}' class='empty'>没有匹配的内容包</td></tr>"
+    return "".join(rows) or f"<tr><td colspan='{9 if can_write else 8}' class='empty'>没有匹配的内容包</td></tr>"
 
 
 def _admin_release_panel() -> str:
@@ -758,6 +775,13 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
                 f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
                 f"<button class='button subtle' type='submit'>检测全部地址</button></form>"
             )
+            if section == "online_source":
+                batch_check += (
+                    f"<form class='inline' method='post' action='/admin/content/{esc(section)}/check-rules-all'>"
+                    f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
+                    f"<input name='query' placeholder='试搜关键词，默认“{esc(DEFAULT_PROBE_QUERY)}”' class='probe-input'>"
+                    f"<button class='button subtle' type='submit'>检测全部规则</button></form>"
+                )
         content += (
             f"<form class='toolbar' method='get' action='{admin_section_path(section)}'>"
             f"<input name='q' value='{esc(query)}' placeholder='搜索名称、包 ID、版本或别名'>"
@@ -765,7 +789,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
             f"</form>"
             f"{batch_bar}"
             f"<div class='table-wrap'><table><thead><tr>{check_head}<th>类型 / 来源</th><th>内容</th>"
-            f"<th>版本 / 构建时间</th><th>状态</th><th>可用性</th><th>渠道 / 依赖</th><th>操作</th></tr></thead>"
+            f"<th>版本 / 构建时间</th><th>状态</th><th>地址可用性</th><th>规则可用性</th><th>渠道 / 依赖</th><th>操作</th></tr></thead>"
             f"<tbody>{_admin_package_table(page_items, can_packages, query, admin_csrf_token(config, actor))}</tbody></table></div>"
             + pager_html(page_info, admin_section_path(section), {"q": query})
         )

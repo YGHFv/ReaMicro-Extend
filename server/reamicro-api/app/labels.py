@@ -172,6 +172,10 @@ _STATUS_TONES = {
     "offline": TONE_IDLE,
     # 书源可用性
     "ok": TONE_OK,
+    # 书源规则级检测
+    "rules_ok": TONE_OK,
+    "rules_stale": TONE_BAD,
+    "unsupported": TONE_IDLE,
     "slow": TONE_WARN,
     "unreachable": TONE_BAD,
     "blocked": TONE_BAD,
