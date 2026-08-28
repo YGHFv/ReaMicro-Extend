@@ -71,6 +71,16 @@ internal object OnlineChapterUpdatePlanner {
         }
     }
 
+    /**
+     * 章节的稳定标识。
+     *
+     * 只保留能唯一定位章节的那一段（查询参数里的 ID，或路径末尾的 ID 段），
+     * **不带域名与接口路径**——它们对识别章节没有贡献，只会让元数据文件里
+     * 每章都重复一遍完整 URL。抓正文用的完整地址另存在 `url` 字段。
+     *
+     * 取不到可识别 ID 时（路径里没有数字或不透明段）退回归一化后的完整 URL，
+     * 宁可长一点也不能让两个不同章节撞成同一个标识。
+     */
     fun stableSourceChapterId(url: String): String {
         val clean = url.trim()
         if (clean.isBlank()) return ""
@@ -92,6 +102,9 @@ internal object OnlineChapterUpdatePlanner {
                 return "$name:$value"
             }
         }
+        // 没有查询参数就从路径里取 ID 段。REST 风格的书源（.../chapters/789864061）
+        // 全部走这一条，是最常见的形态。
+        pathChapterId(uri)?.let { return it }
         return runCatching {
             URI(
                 uri.scheme?.lowercase(Locale.ROOT),
@@ -105,17 +118,63 @@ internal object OnlineChapterUpdatePlanner {
         }.getOrDefault(clean.substringBefore('#'))
     }
 
+    /**
+     * 从路径里取出章节 ID 段。
+     *
+     * 优先取末尾的纯数字段（`.../chapters/789864061`）；没有数字就取末尾足够长的
+     * 不透明段（哈希、UUID 之类）。分页式路径（`.../read/123/456`）会带上前一段，
+     * 避免不同书的同号章节撞在一起。
+     */
+    private fun pathChapterId(uri: URI): String? {
+        val segments = uri.path
+            ?.split('/')
+            ?.map(String::trim)
+            ?.filter { it.isNotEmpty() && it != "index.html" }
+            ?: return null
+        if (segments.isEmpty()) return null
+        val last = segments.last().substringBeforeLast('.')
+        if (last.isBlank()) return null
+        val isNumeric = last.all(Char::isDigit)
+        val isOpaque = last.length >= OPAQUE_ID_MIN_LENGTH && last.all { it.isLetterOrDigit() || it == '-' || it == '_' }
+        if (!isNumeric && !isOpaque) return null
+        // 末段是纯数字时，若前一段也是纯数字，说明是「书 ID / 章节 ID」这类分页路径，
+        // 两段一起才唯一。只取末段会让不同书的同号章节撞成一个标识。
+        val previous = segments.dropLast(1).lastOrNull()?.substringBeforeLast('.')
+        if (isNumeric && previous != null && previous.all(Char::isDigit) && previous.isNotBlank()) {
+            return "$previous/$last"
+        }
+        return last
+    }
+
+    /**
+     * 匹配用的归一形式。
+     *
+     * 已下载图书的元数据里存的是**旧格式的完整 URL**，新算出来的是短 ID，
+     * 直接比对会全部对不上，更新时每一章都被判成新章节重下。
+     * 所以两边都先过这个函数：完整 URL 会被压成同样的短 ID，短 ID 原样返回。
+     */
+    fun sourceChapterMatchKey(value: String): String {
+        val clean = value.trim()
+        if (clean.isBlank()) return ""
+        // 已经是短 ID（不含协议分隔符）就不用再处理。
+        if (!clean.contains("://")) return clean
+        return stableSourceChapterId(clean)
+    }
+
     fun plan(
         storedChapters: List<StoredOnlineChapter>,
         remoteChapters: List<RemoteOnlineChapter>,
     ): List<OnlineChapterUpdateSlot> {
         val unused = storedChapters.indices.toMutableSet()
-        val bySourceId = queueBy(storedChapters) { it.sourceChapterId.takeIf(String::isNotBlank) }
+        // 两边都归一：已存章节可能是旧格式的完整 URL，远端是新的短 ID。
+        val bySourceId = queueBy(storedChapters) {
+            sourceChapterMatchKey(it.sourceChapterId).takeIf(String::isNotBlank)
+        }
         val byLegacyIdentity = queueBy(storedChapters) {
             if (it.sourceChapterId.isBlank()) legacyIdentity(it.volumeTitle, it.title) else null
         }
         return remoteChapters.mapIndexed { remoteIndex, remote ->
-            val storedIndex = takeUnused(bySourceId[remote.sourceChapterId], unused)
+            val storedIndex = takeUnused(bySourceId[sourceChapterMatchKey(remote.sourceChapterId)], unused)
                 ?: takeUnused(byLegacyIdentity[legacyIdentity(remote.volumeTitle, remote.title)], unused)
             OnlineChapterUpdateSlot(remoteIndex, storedIndex?.let(storedChapters::get))
         }
@@ -160,6 +219,9 @@ internal object OnlineChapterUpdatePlanner {
                 if (element.localName == localName || element.nodeName.substringAfter(':') == localName) add(element)
             }
         }
+
+    /** 不透明 ID（哈希、UUID 等）至少这么长才当作标识，避免把 "read"、"txt" 之类的词当成 ID。 */
+    private const val OPAQUE_ID_MIN_LENGTH = 8
 
     private val SOURCE_CHAPTER_ID_QUERY_NAMES = listOf(
         "itemid",
