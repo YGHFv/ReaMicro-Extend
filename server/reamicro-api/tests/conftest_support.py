@@ -1,0 +1,168 @@
+"""端到端测试共用的服务器隔离与客户端构造。
+
+所有路径常量都是模块级全局，直接改 main 上的属性即可把一整个服务器实例
+重定向到临时目录，互不干扰。
+"""
+import base64
+import importlib
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from fastapi.testclient import TestClient
+
+from app import main
+
+ADMIN_USER = "owner"
+ADMIN_PASSWORD = "owner-password-12345"
+HOST_ACCOUNT_ID = "3"
+
+
+def isolate(root: Path) -> None:
+    """把服务器的全部持久化路径指到 root 下。"""
+    main.CONFIG_ROOT = root / "config"
+    main.CONFIG_PATH = main.CONFIG_ROOT / "server.json"
+    main.PACKAGE_ROOT = root / "packages"
+    main.RELEASE_ROOT = root / "releases" / "module"
+    main.RELEASE_STATUS_PATH = main.RELEASE_ROOT / "sync-status.json"
+    main.BACKUP_ROOT = root / "backups"
+    main.SECRET_BACKUP_ROOT = root / "backups" / "secrets"
+    main.SERVER_BACKUP_ROOT = root / "backups" / "server"
+    main.TASK_ROOT = root / "tasks"
+    main.TASKS_PATH = main.TASK_ROOT / "tasks.json"
+    main.TASK_LOG_ROOT = main.TASK_ROOT / "logs"
+    main.AUDIT_ROOT = root / "audit"
+    main.AUDIT_PATH = main.AUDIT_ROOT / "events.jsonl"
+    main.ACCOUNT_ROOT = root / "accounts"
+    main.ACCOUNT_PATH = main.ACCOUNT_ROOT / "credentials.json"
+    main.STATE_DB_PATH = root / "state" / "reamicro.sqlite3"
+    main.SECRET_KEY = "test-secret-key-for-end-to-end-suite"
+    main.SIGNING_PRIVATE_KEY_FILE = ""
+    main.GITHUB_WEBHOOK_SECRET = ""
+    main.ADMIN_COOKIE_SECURE = False
+    main.state_store = None
+    main.rate_buckets.clear()
+    main.metrics_counters.update({"requests": 0, "errors": 0, "rate_limited": 0})
+    main.metrics_routes.clear()
+
+
+def base_config(**overrides) -> dict:
+    config = {
+        **main.default_config(),
+        "authMode": "host_account_allowlist",
+        "hostAccountAllowlist": [HOST_ACCOUNT_ID],
+        "primaryAdmin": {
+            "username": ADMIN_USER,
+            "passwordHash": main.password_hash(ADMIN_PASSWORD),
+        },
+        "adminAccounts": {},
+        "minModuleVersion": "2.0.0",
+    }
+    config.update(overrides)
+    return main.save_config(config)
+
+
+def client() -> TestClient:
+    """不触发 startup 事件，避免后台调度循环干扰测试。"""
+    return TestClient(main.app, raise_server_exceptions=False)
+
+
+def module_headers(account_id: str = HOST_ACCOUNT_ID, **extra) -> dict:
+    headers = {"X-ReaMicro-Host-Account-Id": account_id, "Accept": "application/json"}
+    headers.update(extra)
+    return headers
+
+
+def admin_auth() -> tuple[str, str]:
+    return (ADMIN_USER, ADMIN_PASSWORD)
+
+
+def admin_csrf(actor_role: str = "primary", username: str = ADMIN_USER) -> str:
+    actor = {"username": username, "role": actor_role, "permissions": [], "needsSetup": False}
+    return main.admin_csrf_token(main.load_config(), actor)
+
+
+def seed_package(kind: str = "online_source", package_id: str = "example-com", **manifest_overrides) -> dict:
+    """写入一个已发布内容包（含 payload 与一份历史版本）。"""
+    package_dir = main.PACKAGE_ROOT / kind / package_id
+    package_dir.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"bookSourceName": "示例书源", "bookSourceUrl": "https://example.com"}, ensure_ascii=False).encode("utf-8")
+    (package_dir / "source.json").write_bytes(payload)
+    manifest = {
+        "packageId": package_id,
+        "kind": kind,
+        "version": "1.2.0",
+        "buildTime": 1750000000000,
+        "schemaVersion": 1,
+        "minModuleVersion": "2.0.0",
+        "sha256": main.hashlib.sha256(payload).hexdigest(),
+        "signature": "",
+        "payload": "source.json",
+        "contentId": "online_example",
+        "name": "示例书源",
+        "description": "端到端测试内容包",
+        "domains": ["example.com"],
+        "aliases": ["online_example"],
+        "status": "published",
+        "channel": "stable",
+        "dependencies": [],
+    }
+    manifest.update(manifest_overrides)
+    (package_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    history = package_dir / "history" / "1.1.0-1740000000000"
+    history.mkdir(parents=True, exist_ok=True)
+    old_payload = json.dumps({"bookSourceName": "旧版示例书源"}, ensure_ascii=False).encode("utf-8")
+    (history / "source.json").write_bytes(old_payload)
+    (history / "manifest.json").write_text(
+        json.dumps({**manifest, "version": "1.1.0", "sha256": main.hashlib.sha256(old_payload).hexdigest()}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def seed_credential(credential_id: str = "rea_1", owner: str = f"host:{HOST_ACCOUNT_ID}") -> dict:
+    credential = {
+        "id": credential_id,
+        "owner": owner,
+        "type": "reamicro",
+        "label": "阅微账号",
+        "accountId": HOST_ACCOUNT_ID,
+        "secretEncrypted": main.encrypt_secret({"token": "token-value", "baseUrl": "https://example.invalid/"}),
+        "createdAt": 1750000000000,
+        "updatedAt": 1750000000000,
+        "enabled": True,
+        "health": "unverified",
+    }
+    main.save_credentials({**main.load_credentials(), credential_id: credential})
+    return credential
+
+
+def seed_task(task_id: str = "task_1", owner: str = f"host:{HOST_ACCOUNT_ID}", task_type: str = "yeshe_checkin", **overrides) -> dict:
+    task = {
+        "id": task_id,
+        "owner": owner,
+        "taskType": task_type,
+        "credentialId": "rea_1",
+        "requestEncrypted": main.encrypt_secret({"credentialId": "rea_1"}),
+        "schedule": {"intervalSeconds": 86400, "timeOfDay": "00:05", "timezoneOffsetMinutes": 480},
+        "status": "scheduled",
+        "enabled": True,
+        "createdAt": 1750000000000,
+        "nextRunAt": 1750000000000,
+        "runCount": 0,
+    }
+    task.update(overrides)
+    main.save_tasks({**main.load_tasks(), task_id: task})
+    return task
+
+
+def b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def unwrap(response) -> dict:
+    """取出统一响应包裹里的 data。"""
+    body = response.json()
+    return body.get("data") if isinstance(body, dict) and "data" in body else body

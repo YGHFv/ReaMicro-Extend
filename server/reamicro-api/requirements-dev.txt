@@ -1,0 +1,3 @@
+# 端到端测试依赖：FastAPI TestClient 需要 httpx。
+-r requirements.txt
+httpx==0.28.1
