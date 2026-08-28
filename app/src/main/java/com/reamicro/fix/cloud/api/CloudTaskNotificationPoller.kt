@@ -150,16 +150,29 @@ object CloudTaskWakeScheduler {
         }
         val taskWake = nextTaskAt.takeIf { it > now }?.plus(TASK_FINISH_GRACE_MS) ?: Long.MAX_VALUE
         val triggerAt = minOf(calendar.timeInMillis, taskWake)
+        val exact = canScheduleExact(alarm)
         runCatching {
-            if (Build.VERSION.SDK_INT >= 31 && !alarm.canScheduleExactAlarms()) {
-                alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
-            } else {
+            if (exact) {
                 alarm.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+            } else {
+                // 非精确闹钟在 Doze 下可能被推迟数小时，只作为拿不到精确权限时的兜底。
+                alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
             }
         }.onFailure {
             alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
         }
+        XposedBridge.log(
+            "ReaMicro API cloud task alarm scheduled exact=$exact at=$triggerAt " +
+                "(in ${(triggerAt - now) / 60_000} min)",
+        )
     }
+
+    /** Android 12+ 未获精确闹钟授权时只能用非精确闹钟。 */
+    fun canScheduleExact(alarm: AlarmManager): Boolean =
+        Build.VERSION.SDK_INT < 31 || runCatching { alarm.canScheduleExactAlarms() }.getOrDefault(false)
+
+    fun canScheduleExact(context: Context): Boolean =
+        context.getSystemService(AlarmManager::class.java)?.let(::canScheduleExact) ?: false
 
     const val ACTION_WAKE = "com.reamicro.fix.CLOUD_TASK_HEARTBEAT"
     private const val HEARTBEAT_RECEIVER_CLASS = "com.reamicro.fix.cloud.api.CloudTaskHeartbeatReceiver"

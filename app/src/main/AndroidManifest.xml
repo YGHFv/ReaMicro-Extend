@@ -7,6 +7,15 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!--
+      Android 12+ 不申请 SCHEDULE_EXACT_ALARM 时 canScheduleExactAlarms() 恒为 false，
+      云任务闹钟会降级到 setAndAllowWhileIdle——该 API 在 Doze 下可能被推迟数小时。
+      USE_EXACT_ALARM（Android 13+）适用于闹钟/日程类应用，声明后系统默认授予、
+      用户不能撤销；SCHEDULE_EXACT_ALARM 作为 12 及部分 13 ROM 的回退，需要用户手动授权。
+    -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <queries>
         <package android:name="app.zhendong.reamicro" />

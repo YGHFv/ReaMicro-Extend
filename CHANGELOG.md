@@ -1,5 +1,22 @@
 # 更新记录
 
+## 修复精确闹钟未申请导致通知延迟，新增后台唤醒自检 - 2026-08-28
+
+manifest 里没有申请 `SCHEDULE_EXACT_ALARM`，Android 12+ 上 `canScheduleExactAlarms()`
+恒为 false，云任务闹钟于是**静默降级**到 `setAndAllowWhileIdle`——该 API 在 Doze 下可能被
+推迟数小时，而界面上完全看不出发生了降级。
+
+- 补充 `SCHEDULE_EXACT_ALARM`（Android 12 起需用户授权）与 `USE_EXACT_ALARM`
+  （Android 13 起系统默认授予、用户不可撤销），以及
+  `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` 用于引导放行电池优化。
+- 闹钟排布时把走的是精确还是非精确路径写进日志，便于事后核对。
+- 新增 `CloudTaskWakeDiagnostics`：自检精确闹钟、电池优化、通知权限三项，检查的都是
+  **模块包**而非阅微包（闹钟与通知都由模块进程承担）。云端任务弹窗里显示自检结论和逐项
+  说明，缺哪项就显示对应的跳转按钮；部分 ROM 屏蔽标准 action 时回退到应用详情页。
+- 自检文案明确区分影响范围：签到、抽卡、云端阅读都在服务器执行，与手机是否在线无关，
+  未放行只影响**结果通知的时效**，不影响任务本身。
+
+
 ## 修复云端任务通知只能显示 Toast - 2026-08-28
 
 云端任务消息此前只弹 Toast，从不出现在系统通知栏。根因是**发通知的进程不对**。

@@ -270,6 +270,68 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
         val status = TextView(activity).apply { setTextColor(colors.body); text = "凭据将在服务器端加密保存，模块设置备份不包含该密钥。" }
         card.addView(status, apiServerRowParams(activity))
 
+        // 后台唤醒自检。任务本身在服务器执行，这里检查的只是"结果通知能否及时到达"。
+        val wakeStatus = TextView(activity).apply { setTextColor(colors.body); setPadding(24, 8, 24, 8) }
+        card.addView(wakeStatus, apiServerRowParams(activity))
+        val wakeActions = settingsDialogActions(activity)
+        card.addView(wakeActions)
+
+        fun refreshWakeStatus() {
+            val report = com.reamicro.fix.cloud.api.CloudTaskWakeDiagnostics.inspect(activity.applicationContext)
+            wakeStatus.text = buildString {
+                append(report.summary())
+                append('\n')
+                append(report.details().joinToString("\n"))
+                if (!report.healthy) append("\n任务仍会在服务器按时执行，未放行只影响通知时效。")
+            }
+            wakeActions.removeAllViews()
+            if (report.healthy) return
+            val diagnostics = com.reamicro.fix.cloud.api.CloudTaskWakeDiagnostics
+            if (!report.exactAlarmAllowed) {
+                wakeActions.addView(
+                    settingsDialogButton(activity, "允许精确闹钟", colors, SettingsDialogButtonRole.Neutral).apply {
+                        setOnClickListener {
+                            if (!diagnostics.launchFirstAvailable(activity, diagnostics.exactAlarmSettingsIntent(), diagnostics.moduleDetailsIntent())) {
+                                showToast("无法打开系统设置，请手动在模块的应用信息里允许闹钟")
+                            }
+                        }
+                    },
+                    settingsDialogButtonParams(activity),
+                )
+            }
+            if (!report.batteryUnrestricted) {
+                wakeActions.addView(
+                    settingsDialogButton(activity, "放行电池优化", colors, SettingsDialogButtonRole.Neutral).apply {
+                        setOnClickListener {
+                            if (!diagnostics.launchFirstAvailable(activity, diagnostics.batteryOptimizationIntent(), diagnostics.moduleDetailsIntent())) {
+                                showToast("无法打开系统设置，请手动把模块的耗电策略改为无限制")
+                            }
+                        }
+                    },
+                    settingsDialogButtonParams(activity),
+                )
+            }
+            if (!report.notificationAllowed) {
+                wakeActions.addView(
+                    settingsDialogButton(activity, "开启通知", colors, SettingsDialogButtonRole.Neutral).apply {
+                        setOnClickListener {
+                            if (!diagnostics.launchFirstAvailable(activity, diagnostics.notificationSettingsIntent(), diagnostics.moduleDetailsIntent())) {
+                                showToast("无法打开系统设置，请手动允许模块发送通知")
+                            }
+                        }
+                    },
+                    settingsDialogButtonParams(activity),
+                )
+            }
+            wakeActions.addView(
+                settingsDialogButton(activity, "重新检测", colors, SettingsDialogButtonRole.Neutral).apply {
+                    setOnClickListener { refreshWakeStatus() }
+                },
+                settingsDialogButtonParams(activity),
+            )
+        }
+        refreshWakeStatus()
+
         fun applyCloudConfig(credentials: List<com.reamicro.fix.cloud.api.ReaMicroCredential>, tasks: List<com.reamicro.fix.cloud.api.CloudTask>) {
             credentialIds.clear()
             credentialIds.addAll(credentials.map { it.id })
