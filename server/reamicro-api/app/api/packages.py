@@ -24,6 +24,8 @@ from app.config_store import (
 )
 from app.labels import _admin_kind_label
 from app.packages import (
+    MATCH_REASON_LABELS,
+    absorb_match_hints,
     module_package_summary,
     parse_module_upload_item,
     _admin_package_records,
@@ -102,7 +104,9 @@ async def match_packages(request: Request, owner: str = Depends(task_owner)) -> 
     results = []
     for item in items:
         parsed = parse_module_upload_item(item)
-        manifest = find_matching_package(parsed["kind"], parsed["name"], parsed["domains"], parsed["identities"])
+        manifest = find_matching_package(
+            parsed["kind"], parsed["name"], parsed["domains"], parsed["identities"], parsed["names"],
+        )
         entry: dict[str, Any] = {"kind": parsed["kind"], "name": parsed["name"], "contentId": parsed["contentId"], "matched": manifest is not None}
         if manifest is not None:
             entry["package"] = module_package_summary(manifest, parsed["kind"])
@@ -131,13 +135,24 @@ async def module_upload_package(request: Request, owner: str = Depends(module_up
         raise HTTPException(status_code=413, detail=response(code="PAYLOAD_TOO_LARGE", message=f"内容文件超过 {runtime.MODULE_UPLOAD_MAX_BYTES // (1024 * 1024)} MB"))
     filename = safe_payload_filename(str(payload.get("payloadName", "")) or f"{kind}.json")
     validate_package_payload(kind, filename, body)
-    existing = find_matching_package(kind, parsed["name"], parsed["domains"], parsed["identities"])
+    existing = find_matching_package(
+        kind, parsed["name"], parsed["domains"], parsed["identities"], parsed["names"],
+    )
     if existing is not None:
-        # 同名同域视为同一个源：不覆盖服务器内容，只把关联信息回给模块用于后续更新。
-        audit_event("module_upload_linked", actor=owner, success=True, metadata={"kind": kind, "packageId": existing.get("packageId", "")})
+        # 名称与地址各命中一项即视为同一个源：不覆盖服务器内容，只回关联信息供后续更新。
+        # 同时把本次带来的新名称与新地址并入清单——源改名或换域名后，
+        # 集合里同时留着新旧两套，用旧信息的客户端也不会失联。
+        matched = absorb_match_hints(kind, existing, parsed)
+        reason = MATCH_REASON_LABELS.get(str(existing.get("_matchReason", "")), "名称与地址匹配")
+        audit_event(
+            "module_upload_linked",
+            actor=owner,
+            success=True,
+            metadata={"kind": kind, "packageId": matched.get("packageId", ""), "matchReason": str(existing.get("_matchReason", ""))},
+        )
         return response(
-            {"uploaded": False, "linked": True, "package": module_package_summary(existing, kind)},
-            message="服务器已存在同名同域的源，已自动关联",
+            {"uploaded": False, "linked": True, "package": module_package_summary(matched, kind)},
+            message=f"服务器已存在同一个源（{reason}），已自动关联",
         )
     metadata = infer_package_metadata(kind, filename, body)
     detected_domains = sorted(parsed["domains"] | {
@@ -167,6 +182,8 @@ async def module_upload_package(request: Request, owner: str = Depends(module_up
         channel="stable",
         dependencies=[],
         owner=owner,
+        names=sorted(parsed["names"]),
+        primary=parsed["primaryDomain"],
     )
     audit_event("module_upload_created", actor=owner, success=True, metadata={"kind": kind, "packageId": package_id, "version": manifest.get("version", "")})
     return response(

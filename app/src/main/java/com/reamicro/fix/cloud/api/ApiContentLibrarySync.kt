@@ -112,6 +112,8 @@ class ApiContentLibrarySync(
                 sourceId = item.localContentId,
                 packageId = summary.packageId,
                 aliases = summary.aliases + summary.contentId + item.identities,
+                // 服务器合并后的名称集合写回本地，下次上报就带上全部历史名称。
+                names = summary.names + summary.name + item.name,
             )
         }
         manager.link(summary.kind, summary.packageId, item.localContentId)
@@ -128,8 +130,12 @@ class ApiContentLibrarySync(
             ApiLibraryItem(
                 kind = ApiPackageKind.ONLINE_SOURCE,
                 name = source.name,
+                // 本机记录过的历史名称一起交给服务器：源改过名时旧名仍能命中。
+                names = linkedSetOf(source.name) + OnlineSourceStore.knownNames(context, source.id),
                 contentId = source.id,
                 domains = domains,
+                // bookSourceUrl 是书源自己声明的入口，作为主地址。
+                primaryDomain = normalizeSourceDomain(source.sourceUrl),
                 identities = (source.aliases + source.id + source.sourceUrl).filterTo(linkedSetOf()) { it.isNotBlank() },
                 payloadName = "${safeName(source.id)}.json",
                 payload = bytes,
@@ -157,6 +163,7 @@ class ApiContentLibrarySync(
                     name = name,
                     contentId = id,
                     domains = domains,
+                    primaryDomain = domains.firstOrNull().orEmpty(),
                     identities = linkedSetOf(id, file.name, manifest.optString("entryClass").trim())
                         .filterTo(linkedSetOf()) { it.isNotBlank() },
                     payloadName = file.name,

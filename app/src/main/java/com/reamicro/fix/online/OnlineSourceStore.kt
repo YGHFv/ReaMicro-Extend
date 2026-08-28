@@ -228,6 +228,7 @@ object OnlineSourceStore {
         sourceId: String,
         packageId: String,
         aliases: Set<String>,
+        names: Set<String> = emptySet(),
     ): Boolean {
         val dir = sourceDir(context)
         val file = dir.listFiles()
@@ -239,12 +240,37 @@ object OnlineSourceStore {
             ?: return false
         return runCatching {
             val merged = (aliases + sourceId).filterTo(linkedSetOf()) { it.isNotBlank() }
-            val payload = injectPackageIdentity(file.readBytes(), sourceId, packageId, merged)
+            val payload = injectPackageIdentity(file.readBytes(), sourceId, packageId, merged, names)
             val temp = File(dir, ".${file.name}.tmp")
             FileOutputStream(temp).use { it.write(payload) }
             if (file.exists()) file.setWritable(true)
             temp.renameTo(file)
         }.getOrDefault(false)
+    }
+
+    /**
+     * 该书源在本机记录过的名称集合。服务器按"任一名称命中"匹配，
+     * 所以改过名的源要把旧名一起带上，否则关联会断。
+     */
+    fun knownNames(context: Context?, sourceId: String): Set<String> {
+        context ?: return emptySet()
+        val file = sourceDir(context).listFiles()
+            ?.firstOrNull { candidate ->
+                candidate.isFile && candidate.extension.lowercase() in sourceExtensions && runCatching {
+                    parseSingleSource(candidate.readBytes(), candidate.nameWithoutExtension, candidate.name).id == sourceId
+                }.getOrDefault(false)
+            }
+            ?: return emptySet()
+        return runCatching {
+            val text = file.readBytes().toString(Charsets.UTF_8).trim()
+            val root = if (text.startsWith("[")) JSONArray(text).optJSONObject(0) else JSONObject(text)
+            buildSet {
+                val array = root?.optJSONArray("reamicroSourceNames")
+                if (array != null) for (index in 0 until array.length()) {
+                    array.optString(index).takeIf(String::isNotBlank)?.let(::add)
+                }
+            }
+        }.getOrDefault(emptySet())
     }
 
     fun matchesIdentity(source: OnlineSourceEntry, candidate: String): Boolean =
@@ -371,6 +397,7 @@ object OnlineSourceStore {
         sourceId: String,
         packageId: String,
         aliases: Set<String>,
+        names: Set<String> = emptySet(),
     ): ByteArray {
         val text = bytes.toString(Charsets.UTF_8).trim()
         val root = if (text.startsWith("[")) {
@@ -378,9 +405,17 @@ object OnlineSourceStore {
             require(array.length() == 1) { "一次最多导入一个在线源" }
             array.optJSONObject(0) ?: error("在线源格式不正确")
         } else JSONObject(text)
+        // 名称集合累积保留：服务器和本机各自记过的名字都留着，改名后仍能互相匹配。
+        val existingNames = buildSet {
+            val array = root.optJSONArray("reamicroSourceNames")
+            if (array != null) for (index in 0 until array.length()) {
+                array.optString(index).takeIf(String::isNotBlank)?.let(::add)
+            }
+        }
         root.put("reamicroSourceId", sourceId)
             .put("reamicroPackageId", packageId)
             .put("reamicroSourceAliases", JSONArray(aliases.toList()))
+            .put("reamicroSourceNames", JSONArray((existingNames + names).filter(String::isNotBlank)))
         return root.toString(2).toByteArray(Charsets.UTF_8)
     }
 

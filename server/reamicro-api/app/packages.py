@@ -280,11 +280,13 @@ def resolve_package_identity(kind: str, requested_id: str, requested_content_id:
     targets = {item.casefold() for item in metadata.get("identity", []) if item}
     if requested_content_id.strip():
         targets.add(requested_content_id.strip().casefold())
-    name = str(metadata.get("name", "")).strip().casefold()
     for path, manifest in manifests:
-        values = {str(manifest.get(key, "")).strip().casefold() for key in ("packageId", "contentId", "name") if manifest.get(key)}
+        # 只按稳定标识复用（packageId / contentId / 别名）。
+        # **不能只凭名称相同就复用**：两个无关的源可能同名，那会让上传方接管别人的包。
+        # 名称参与匹配的路径在 find_matching_package，那里同时要求地址或标识命中。
+        values = {str(manifest.get(key, "")).strip().casefold() for key in ("packageId", "contentId") if manifest.get(key)}
         values.update(str(item).strip().casefold() for item in manifest.get("aliases", []) if item)
-        if targets.intersection(values) or (name and name == str(manifest.get("name", "")).strip().casefold()):
+        if targets.intersection(values):
             return safe_package_segment(str(manifest.get("packageId", path.parent.name))), manifest
     identity_seed = next((str(item) for item in metadata.get("identity", []) if item), "")
     identity_seed = re.sub(r"^[a-z]+://(?:www\.)?", "", identity_seed, flags=re.IGNORECASE).split("/")[0]
@@ -299,27 +301,98 @@ def resolve_package_identity(kind: str, requested_id: str, requested_content_id:
     return safe_package_segment(candidate), None
 
 
-def find_matching_package(kind: str, name: str, domains: set[str], identities: set[str]) -> dict[str, Any] | None:
-    """按“名称 + 域名”定位服务器上的同一个源；没有域名时退化为“名称 + 稳定标识”。"""
-    target_name = normalize_match_name(name)
-    if not target_name:
+def package_match_names(manifest: dict[str, Any]) -> set[str]:
+    """内容包用于比对的名称集合：当前名称 + 历史用过的名称。
+
+    源改名很常见，只认当前名称会导致改名后无法关联。`names` 在每次关联或上传时累积，
+    集合越大后续匹配越准。
+    """
+    values = [manifest.get("name", "")]
+    entry = manifest.get("names")
+    if isinstance(entry, (list, tuple, set)):
+        values.extend(entry)
+    return {value for value in (normalize_match_name(item) for item in values) if value}
+
+
+def primary_domain(manifest: dict[str, Any]) -> str:
+    """主地址。显式 `primaryDomain` 优先，否则取 domains 的第一项。"""
+    explicit = normalize_source_domain(str(manifest.get("primaryDomain", "")))
+    if explicit:
+        return explicit
+    for item in manifest.get("domains", []) or []:
+        domain = normalize_source_domain(str(item))
+        if domain:
+            return domain
+    return ""
+
+
+def ordered_domains(manifest: dict[str, Any]) -> list[str]:
+    """按主地址在前排序的地址列表，去重保序。"""
+    result: list[str] = []
+    primary = primary_domain(manifest)
+    if primary:
+        result.append(primary)
+    for item in manifest.get("domains", []) or []:
+        domain = normalize_source_domain(str(item))
+        if domain and domain not in result:
+            result.append(domain)
+    return result
+
+
+def find_matching_package(
+    kind: str,
+    name: str,
+    domains: set[str],
+    identities: set[str],
+    names: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """定位服务器上的同一个源。
+
+    **名称与地址两类各命中至少一项**才算同一个源。两边都支持多值：
+
+    - 名称：当前名称 + 历史用过的名称（`names`）。源改名后旧名仍留在集合里，
+      所以改名不会导致失联。
+    - 地址：全部访问地址（主地址 + 备用镜像）。换域名后旧域名仍在集合里，
+      所以换域名也不会失联。
+
+    只要新旧集合在名称上有一项交集、在地址上也有一项交集，就判定为同一个源。
+    坚持两类都要命中是为了防冒用：只对名称，两个无关的源可能同名；只对地址，
+    同一站点上的不同源会被撞在一起。
+
+    没有任何地址的内容（关联源、样式包等）退化为"名称 + 稳定标识"，同理要求两项都中。
+    """
+    target_names = {value for value in (normalize_match_name(item) for item in (names or set())) if value}
+    primary_name = normalize_match_name(name)
+    if primary_name:
+        target_names.add(primary_name)
+    if not target_names:
         return None
     target_domains = {domain for domain in (normalize_source_domain(item) for item in domains) if domain}
     target_identities = {str(item).strip().casefold() for item in identities if str(item).strip()}
+
     for path, manifest in _package_manifests(kind):
         manifest.setdefault("kind", kind)
         manifest.setdefault("packageId", path.parent.name)
-        if normalize_match_name(manifest.get("name", "")) != target_name:
+        if not target_names & package_match_names(manifest):
             continue
         manifest_domains = package_match_domains(manifest)
         if target_domains and manifest_domains:
             if target_domains & manifest_domains:
+                manifest["_matchReason"] = "name+domain"
                 return manifest
+            # 名称相同但地址完全不重叠：很可能是同名的不同源，不关联。
             continue
-        # 关联源等没有域名的内容只靠名称容易误判，要求稳定标识同时命中。
+        # 没有可比对的地址时退化为标识，仍然要求与名称同时命中。
         if target_identities & package_match_identities(manifest):
+            manifest["_matchReason"] = "name+identity"
             return manifest
     return None
+
+
+MATCH_REASON_LABELS = {
+    "name+domain": "名称与访问地址均有一项匹配",
+    "name+identity": "名称与稳定标识均有一项匹配",
+}
 
 
 def next_package_version(current: Any) -> str:
@@ -409,6 +482,8 @@ def persist_package_payload(
     dependencies: list[dict[str, Any]],
     signature: str = "",
     owner: str = "",
+    names: list[str] | None = None,
+    primary: str = "",
 ) -> dict[str, Any]:
     """把内容包写入数据卷：旧版本进 history，清单与 payload 原子替换。"""
     package_dir = (runtime.PACKAGE_ROOT / kind / package_id).resolve()
@@ -436,6 +511,8 @@ def persist_package_payload(
             old_payload_path = old_payload
     build_time = int(datetime.now(timezone.utc).timestamp() * 1000)
     digest = hashlib.sha256(body).hexdigest()
+    # 地址累积保留旧域名：换域名后用旧域名的客户端仍要能匹配上。
+    merged_domains, merged_primary = merge_domains(domains, primary=primary)
     manifest = {
         "packageId": package_id,
         "kind": kind,
@@ -448,8 +525,11 @@ def persist_package_payload(
         "payload": filename,
         "contentId": content_id,
         "aliases": aliases,
-        "domains": domains,
+        "domains": merged_domains,
+        "primaryDomain": merged_primary,
         "name": name,
+        # 历史名称累积保留：源改名后用旧名的客户端仍要能匹配上。
+        "names": merge_match_names(names or [], name),
         "description": description,
         "status": status_value,
         "channel": channel,
@@ -502,8 +582,12 @@ def _admin_package_payload(package_dir: Path, manifest: dict[str, Any]) -> tuple
 
 
 def normalize_match_name(value: Any) -> str:
-    """内容名称的比较形式：折叠空白并忽略大小写。"""
-    return " ".join(str(value or "").split()).casefold()
+    """内容名称的比较形式：去掉全部空白并忽略大小写。
+
+    中文源名的空格很随意（"示例 书源" 与 "示例书源" 通常是同一个源），折叠成单空格
+    仍会判成不同。这里直接删空白。放宽带来的误判由"必须同时命中地址或标识"兜住。
+    """
+    return "".join(str(value or "").split()).casefold()
 
 
 def package_match_identities(manifest: dict[str, Any]) -> set[str]:
@@ -525,6 +609,11 @@ def parse_module_upload_item(item: Any) -> dict[str, Any]:
     name = _metadata_text(item.get("name"))
     if not name:
         raise HTTPException(status_code=400, detail=response(code="INVALID_PAYLOAD", message="内容名称不能为空"))
+    raw_names = item.get("names")
+    if not isinstance(raw_names, (list, tuple, set)):
+        raw_names = [raw_names] if raw_names else []
+    names = {text for text in (_metadata_text(value) for value in list(raw_names)[:12]) if text}
+    names.add(name)
     raw_domains = item.get("domains")
     if not isinstance(raw_domains, (list, tuple, set)):
         raw_domains = [raw_domains] if raw_domains else []
@@ -537,7 +626,16 @@ def parse_module_upload_item(item: Any) -> dict[str, Any]:
         for text in (_metadata_text(value)[:240] for value in list(raw_identities)[:12] + [item.get("contentId", "")])
         if text
     }
-    return {"kind": kind, "name": name, "domains": domains, "identities": identities, "contentId": _metadata_text(item.get("contentId"))[:240]}
+    return {
+        "kind": kind,
+        "name": name,
+        "names": names,
+        "domains": domains,
+        "identities": identities,
+        "contentId": _metadata_text(item.get("contentId"))[:240],
+        # 模块可以指明主地址；没指明就用第一个。
+        "primaryDomain": normalize_source_domain(str(item.get("primaryDomain", ""))),
+    }
 
 
 def module_package_summary(manifest: dict[str, Any], kind: str) -> dict[str, Any]:
@@ -552,6 +650,93 @@ def module_package_summary(manifest: dict[str, Any], kind: str) -> dict[str, Any
         "name": str(manifest.get("name", "")),
         "status": str(manifest.get("status", "published")),
         "aliases": [str(value) for value in manifest.get("aliases", []) if str(value).strip()][:50],
-        "domains": sorted(package_match_domains(manifest)),
+        "names": sorted(package_match_names(manifest)),
+        # 有序：主地址在前，模块据此决定优先访问哪个。
+        "domains": ordered_domains(manifest) or sorted(package_match_domains(manifest)),
+        "primaryDomain": primary_domain(manifest),
+        "matchReason": str(manifest.get("_matchReason", "")),
         "downloadUrl": f"/v1/packages/{manifest.get('kind', kind)}/{package_id}/download",
     }
+
+
+def merge_match_names(existing: Any, *incoming: Any) -> list[str]:
+    """累积名称集合。源改名后旧名要留着，否则用旧名的客户端会失联。"""
+    values: list[Any] = []
+    for group in (existing, *incoming):
+        if isinstance(group, (list, tuple, set)):
+            values.extend(group)
+        elif group:
+            values.append(group)
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _metadata_text(value)
+        key = normalize_match_name(text)
+        if not text or not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+        if len(result) >= 30:
+            break
+    return result
+
+
+def merge_domains(existing: Any, *incoming: Any, primary: str = "") -> tuple[list[str], str]:
+    """累积地址集合并确定主地址。换域名后旧域名要留着，否则老客户端会失联。
+
+    返回 (有序地址列表, 主地址)。主地址若给定且有效则置顶，否则沿用原有第一项。
+    """
+    values: list[Any] = []
+    for group in (existing, *incoming):
+        if isinstance(group, (list, tuple, set)):
+            values.extend(group)
+        elif group:
+            values.append(group)
+    ordered: list[str] = []
+    for value in values:
+        domain = normalize_source_domain(str(value))
+        if domain and domain not in ordered:
+            ordered.append(domain)
+    chosen = normalize_source_domain(primary)
+    if chosen:
+        if chosen in ordered:
+            ordered.remove(chosen)
+        ordered.insert(0, chosen)
+    return ordered[:30], (ordered[0] if ordered else "")
+
+
+def absorb_match_hints(kind: str, manifest: dict[str, Any], parsed: dict[str, Any]) -> dict[str, Any]:
+    """把本次关联带来的新名称与新地址并入清单，但**不改动内容本身**。
+
+    源改名或换域名时，模块提交的名称/地址与服务器上记录的只有部分重叠。把两边的
+    并集写回去，下一次无论用新名新域还是旧名旧域都能匹配上。
+
+    只动匹配用的元数据（names / domains / primaryDomain），版本、payload、摘要一律不碰——
+    模块用户不应能通过关联改写共享内容库。
+    """
+    package_id = safe_package_segment(str(manifest.get("packageId", "")))
+    manifest_path = runtime.PACKAGE_ROOT / safe_package_segment(kind) / package_id / "manifest.json"
+    if not manifest_path.is_file():
+        return manifest
+    try:
+        stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return manifest
+    names = merge_match_names(stored.get("names", []), stored.get("name", ""), parsed.get("names", set()))
+    # 主地址保持服务器原有选择：模块不应通过关联抢占主地址。
+    domains, primary = merge_domains(
+        stored.get("domains", []),
+        parsed.get("domains", set()),
+        primary=primary_domain(stored),
+    )
+    if names == stored.get("names") and domains == stored.get("domains") and primary == stored.get("primaryDomain"):
+        stored["_matchReason"] = manifest.get("_matchReason", "")
+        return stored
+    stored["names"] = names
+    stored["domains"] = domains
+    stored["primaryDomain"] = primary
+    temp = manifest_path.with_suffix(".tmp")
+    temp.write_text(json.dumps(stored, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(manifest_path)
+    stored["_matchReason"] = manifest.get("_matchReason", "")
+    return stored

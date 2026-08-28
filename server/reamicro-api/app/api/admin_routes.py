@@ -93,6 +93,11 @@ from app.users import (
     upsert_user,
 )
 from app.packages import (
+    merge_domains,
+    merge_match_names,
+    ordered_domains,
+    package_match_names,
+    primary_domain,
     _admin_package_payload,
     _metadata_text,
     infer_package_metadata,
@@ -228,7 +233,7 @@ async def admin_edit_package_get(package_kind: str, package_id: str, actor: dict
     csrf = f"<input type='hidden' name='csrf_token' value='{esc(admin_csrf_token(config, actor))}'>"
     status_options = "".join(f"<option value='{status}' {'selected' if manifest.get('status', 'published') == status else ''}>{_admin_status_label(status)}</option>" for status in ('published', 'draft', 'testing', 'unpublished'))
     channel_options = "".join(f"<option value='{channel}' {'selected' if manifest.get('channel', 'stable') == channel else ''}>{_admin_channel_label(channel)}</option>" for channel in ('stable', 'beta', 'nightly'))
-    body = f"<div class='panel'><p class='muted'>当前版本 {esc(manifest.get('version', ''))}，构建于 {esc(_admin_time_label(manifest.get('buildTime'), '未记录'))}。保存后旧版本自动归档到历史，可随时回滚。</p><form method='post' action='/admin/packages/{esc(package_kind)}/{esc(package_id)}/edit'>{csrf}<div class='grid-2'><label>版本号<input name='version' value='{esc(manifest.get('version', ''))}' required></label><label>内容文件名<input name='filename' value='{esc(filename)}' required></label><label>稳定内容 ID<input name='content_id' value='{esc(manifest.get('contentId', ''))}'></label><label>名称<input name='name' value='{esc(manifest.get('name', package_id))}'></label><label>发布状态<select name='status_value'>{status_options}</select></label><label>发布渠道<select name='channel'>{channel_options}</select></label></div><label>访问地址（每行一个，第一行为主地址，其余为备用镜像）<textarea name='domains' style='min-height:90px' placeholder='example.com&#10;mirror.example.net'>{esc(chr(10).join(str(item) for item in manifest.get('domains', [])))}</textarea></label><label>别名（逗号分隔）<input name='aliases' value='{esc(','.join(str(item) for item in manifest.get('aliases', [])))}'></label><label>依赖 JSON<textarea name='dependencies'>{esc(json.dumps(manifest.get('dependencies', []), ensure_ascii=False, indent=2))}</textarea></label><label>内容<textarea name='payload_text' style='min-height:320px'>{esc(text)}</textarea></label><div class='inline'><button class='button' type='submit'>保存新版本</button> <a class='button subtle' href='/admin/packages/{esc(package_kind)}/{esc(package_id)}/preview'>取消</a></div></form></div>"
+    body = f"<div class='panel'><p class='muted'>当前版本 {esc(manifest.get('version', ''))}，构建于 {esc(_admin_time_label(manifest.get('buildTime'), '未记录'))}。保存后旧版本自动归档到历史，可随时回滚。</p><form method='post' action='/admin/packages/{esc(package_kind)}/{esc(package_id)}/edit'>{csrf}<div class='grid-2'><label>版本号<input name='version' value='{esc(manifest.get('version', ''))}' required></label><label>内容文件名<input name='filename' value='{esc(filename)}' required></label><label>稳定内容 ID<input name='content_id' value='{esc(manifest.get('contentId', ''))}'></label><label>名称<input name='name' value='{esc(manifest.get('name', package_id))}'></label><label>发布状态<select name='status_value'>{status_options}</select></label><label>发布渠道<select name='channel'>{channel_options}</select></label></div><label>访问地址（每行一个，支持多地址）<textarea name='domains' style='min-height:90px' placeholder='example.com&#10;mirror.example.net'>{esc(chr(10).join(ordered_domains(manifest)))}</textarea></label><label>主地址（留空则用第一行）<input name='primary_domain' value='{esc(primary_domain(manifest))}' placeholder='example.com'></label><label>历史名称（每行一个。源改名后旧名要留着，用旧名的客户端才能继续关联）<textarea name='names' style='min-height:70px'>{esc(chr(10).join(sorted(package_match_names(manifest))))}</textarea></label><label>别名（逗号分隔）<input name='aliases' value='{esc(','.join(str(item) for item in manifest.get('aliases', [])))}'></label><label>依赖 JSON<textarea name='dependencies'>{esc(json.dumps(manifest.get('dependencies', []), ensure_ascii=False, indent=2))}</textarea></label><label>内容<textarea name='payload_text' style='min-height:320px'>{esc(text)}</textarea></label><div class='inline'><button class='button' type='submit'>保存新版本</button> <a class='button subtle' href='/admin/packages/{esc(package_kind)}/{esc(package_id)}/preview'>取消</a></div></form></div>"
     return HTMLResponse(_admin_shell(
         "编辑 · " + str(manifest.get("name", package_id)),
         body,
@@ -254,6 +259,8 @@ async def admin_edit_package_post(
     channel: str = Form("stable"),
     dependencies: str = Form("[]"),
     domains: str = Form(""),
+    primary_domain_value: str = Form("", alias="primary_domain"),
+    names: str = Form(""),
     payload_text: str = Form(""),
     csrf_token: str = Form(""),
     actor: dict[str, Any] = Depends(admin_actor),
@@ -283,16 +290,19 @@ async def admin_edit_package_post(
     if old_payload.is_file() and old_payload.parent == package_dir:
         shutil.copy2(old_payload, archive_dir / old_payload.name)
     build_time = int(datetime.now(timezone.utc).timestamp() * 1000); digest = hashlib.sha256(body).hexdigest()
-    # 访问地址：管理员手填的排在前面（第一行是主地址），再补上从内容里识别出的，去重保序。
-    edited_domains: list[str] = []
-    for line in domains.replace(",", "\n").splitlines():
-        domain = normalize_source_domain(line)
-        if domain and domain not in edited_domains:
-            edited_domains.append(domain)
-    for value in package_match_domains({**current, "domains": [], "aliases": metadata.get("identity", [])}):
-        if value not in edited_domains:
-            edited_domains.append(value)
-    manifest = {**current, "packageId": package_id, "kind": package_kind, "version": version, "buildTime": build_time, "sha256": digest, "payload": filename, "contentId": stable_id, "aliases": merge_package_aliases(current.get("aliases", []), metadata.get("identity", []), aliases), "domains": edited_domains, "name": name.strip() or (str(current.get("name", "")) if not metadata.get("explicitName") else "") or str(metadata.get("name") or package_id), "status": status_value, "channel": channel, "dependencies": dependency_items}
+    # 访问地址：管理员手填的在前，再补上从内容识别出的；主地址单独指定后置顶。
+    edited_domains, edited_primary = merge_domains(
+        domains.replace(",", "\n").splitlines(),
+        package_match_domains({**current, "domains": [], "aliases": metadata.get("identity", [])}),
+        primary=primary_domain_value,
+    )
+    # 历史名称累积：源改名后旧名要留着，用旧名的客户端才能继续关联。
+    edited_names = merge_match_names(
+        names.replace(",", "\n").splitlines(),
+        name.strip() or current.get("name", ""),
+        current.get("names", []),
+    )
+    manifest = {**current, "packageId": package_id, "kind": package_kind, "version": version, "buildTime": build_time, "sha256": digest, "payload": filename, "contentId": stable_id, "aliases": merge_package_aliases(current.get("aliases", []), metadata.get("identity", []), aliases), "domains": edited_domains, "primaryDomain": edited_primary, "names": edited_names, "name": name.strip() or (str(current.get("name", "")) if not metadata.get("explicitName") else "") or str(metadata.get("name") or package_id), "status": status_value, "channel": channel, "dependencies": dependency_items}
     # 地址变了就作废上次检测结果，避免显示过期的可用性。
     if edited_domains != [str(item) for item in current.get("domains", [])]:
         manifest.pop("healthCheck", None)

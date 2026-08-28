@@ -358,11 +358,56 @@ class MultiUrlEditTest(unittest.TestCase):
     def _manifest(self) -> dict:
         return json.loads((runtime.PACKAGE_ROOT / "online_source" / "example-com" / "manifest.json").read_text(encoding="utf-8"))
 
-    def test_edit_form_exposes_domains_field(self):
+    def test_edit_form_exposes_domains_names_and_primary(self):
         page = self.client.get("/admin/packages/online_source/example-com/edit", auth=admin_auth()).text
         self.assertIn("name='domains'", page)
-        self.assertIn("第一行为主地址", page)
+        self.assertIn("name='primary_domain'", page)
+        self.assertIn("name='names'", page)
         self.assertIn("example.com", page)
+
+    def test_edit_sets_explicit_primary_domain(self):
+        response = self.client.post(
+            "/admin/packages/online_source/example-com/edit",
+            auth=admin_auth(),
+            data={
+                "csrf_token": self.csrf,
+                "version": "1.5.0",
+                "filename": "source.json",
+                "payload_text": json.dumps({"bookSourceName": "示例书源"}, ensure_ascii=False),
+                "domains": "backup.example.net\nmain.example.org",
+                "primary_domain": "main.example.org",
+                "status_value": "published",
+                "channel": "stable",
+                "dependencies": "[]",
+            },
+        )
+        self.assertEqual(200, response.status_code, response.text[:300])
+        manifest = self._manifest()
+        self.assertEqual("main.example.org", manifest["primaryDomain"])
+        self.assertEqual("main.example.org", manifest["domains"][0], "主地址要排在最前")
+        self.assertIn("backup.example.net", manifest["domains"])
+
+    def test_edit_accumulates_historical_names(self):
+        response = self.client.post(
+            "/admin/packages/online_source/example-com/edit",
+            auth=admin_auth(),
+            data={
+                "csrf_token": self.csrf,
+                "version": "1.6.0",
+                "filename": "source.json",
+                "payload_text": json.dumps({"bookSourceName": "新名字"}, ensure_ascii=False),
+                "name": "新名字",
+                "names": "旧名字\n更早的名字",
+                "domains": "example.com",
+                "status_value": "published",
+                "channel": "stable",
+                "dependencies": "[]",
+            },
+        )
+        self.assertEqual(200, response.status_code, response.text[:300])
+        names = self._manifest()["names"]
+        for expected in ("新名字", "旧名字", "更早的名字"):
+            self.assertIn(expected, names)
 
     def test_edit_saves_multiple_domains_in_order(self):
         response = self.client.post(

@@ -38,7 +38,11 @@ data class ApiLibraryItem(
     val kind: ApiPackageKind,
     val name: String,
     val contentId: String,
+    /** 名称集合：当前名称加上本机记录过的历史名称。服务器按"任一名称命中"匹配。 */
+    val names: Set<String> = emptySet(),
     val domains: Set<String>,
+    /** 主地址。留空时服务器取 domains 的第一项。 */
+    val primaryDomain: String = "",
     val identities: Set<String>,
     val payloadName: String,
     val payload: ByteArray,
@@ -48,9 +52,15 @@ data class ApiLibraryItem(
     fun toDescriptorJson(): JSONObject = JSONObject()
         .put("kind", kind.wireValue)
         .put("name", name)
+        .put("names", JSONArray((names + name).filter(String::isNotBlank)))
         .put("contentId", contentId)
-        .put("domains", JSONArray(domains.toList()))
+        .put("domains", JSONArray(orderedDomains()))
+        .put("primaryDomain", primaryDomain)
         .put("identities", JSONArray(identities.toList()))
+
+    /** 主地址在前的地址列表，便于服务器沿用同一顺序。 */
+    fun orderedDomains(): List<String> =
+        (listOf(primaryDomain) + domains).filter(String::isNotBlank).distinct()
 
     override fun equals(other: Any?): Boolean =
         other is ApiLibraryItem && kind == other.kind && contentId == other.contentId
@@ -67,8 +77,20 @@ data class ApiPackageSummary(
     val buildTime: Long,
     val name: String,
     val aliases: Set<String>,
+    val names: Set<String> = emptySet(),
+    val domains: List<String> = emptyList(),
+    val primaryDomain: String = "",
+    /** 服务器给出的命中依据，仅用于提示。 */
+    val matchReason: String = "",
 ) {
     companion object {
+        private fun stringSet(json: JSONObject, key: String): Set<String> = buildSet {
+            val array = json.optJSONArray(key) ?: return@buildSet
+            for (index in 0 until array.length()) {
+                array.optString(index).takeIf(String::isNotBlank)?.let(::add)
+            }
+        }
+
         fun fromJson(json: JSONObject): ApiPackageSummary? {
             val kind = ApiPackageKind.fromWireValue(json.optString("kind")) ?: return null
             val packageId = json.optString("packageId").trim().ifBlank { return null }
@@ -79,12 +101,11 @@ data class ApiPackageSummary(
                 version = json.optString("version"),
                 buildTime = json.optLong("buildTime", 0L),
                 name = json.optString("name"),
-                aliases = buildSet {
-                    val array = json.optJSONArray("aliases") ?: return@buildSet
-                    for (index in 0 until array.length()) {
-                        array.optString(index).takeIf(String::isNotBlank)?.let(::add)
-                    }
-                },
+                aliases = stringSet(json, "aliases"),
+                names = stringSet(json, "names"),
+                domains = stringSet(json, "domains").toList(),
+                primaryDomain = json.optString("primaryDomain"),
+                matchReason = json.optString("matchReason"),
             )
         }
     }
