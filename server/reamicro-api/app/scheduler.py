@@ -28,6 +28,19 @@ from app.state import (
 )
 
 
+YESHE_DRAW_TRIGGER_EVENT = "yeshe_checkin_reward_claimed"
+
+
+def normalized_task_schedule(task_type: str, schedule: dict[str, Any]) -> dict[str, Any]:
+    """抽卡是签到奖励事件任务，其余任务保留原定时配置。"""
+    if task_type == "yeshe_draw_card":
+        return {"event": YESHE_DRAW_TRIGGER_EVENT}
+    value = dict(schedule)
+    if value.get("timeOfDay"):
+        value["timeOfDay"] = normalized_time_of_day(value.get("timeOfDay"))
+    return value
+
+
 def task_interval(task: dict[str, Any]) -> int:
     schedule = task.get("schedule", {})
     if isinstance(schedule, dict):
@@ -43,6 +56,8 @@ def task_interval(task: dict[str, Any]) -> int:
 
 
 def next_task_run(task: dict[str, Any], now_ms: int | None = None) -> int:
+    if task.get("taskType") == "yeshe_draw_card":
+        return 0
     now_ms = now_ms or int(datetime.now(timezone.utc).timestamp() * 1000)
     override = bounded_config_int(task.pop("nextRunAtOverride", 0), 0, 0)
     if override > now_ms:
@@ -77,7 +92,7 @@ def recover_interrupted_tasks() -> int:
             continue
         task["status"] = "scheduled"
         task["lastMessage"] = "服务器重启后已恢复中断任务"
-        task["nextRunAt"] = now + 60_000
+        task["nextRunAt"] = 0 if task.get("taskType") == "yeshe_draw_card" else now + 60_000
         recovered += 1
     if recovered:
         save_tasks(tasks)
@@ -116,7 +131,7 @@ def apply_task_action(task: dict[str, Any], action: str, now: int | None = None)
     if action == "resume":
         task["status"] = "scheduled"
         task["enabled"] = True
-        task["nextRunAt"] = now
+        task["nextRunAt"] = 0 if task.get("taskType") == "yeshe_draw_card" else now
         return f"任务 {task_id} 已恢复"
     if action == "cancel":
         task["status"] = "cancelled"
@@ -188,8 +203,11 @@ async def task_scheduler_loop() -> None:
                 if not task.get("enabled", True) or task.get("status") in {"paused", "cancelled", "running"}:
                     continue
                 if task.get("taskType") == "yeshe_draw_card" and not task.get("triggeredByCheckinReward"):
-                    task["status"] = "scheduled"
-                    task["nextRunAt"] = 0
+                    if task.get("status") != "scheduled" or bounded_config_int(task.get("nextRunAt", 0), 0, 0) != 0 or task.get("schedule") != {"event": YESHE_DRAW_TRIGGER_EVENT}:
+                        task["status"] = "scheduled"
+                        task["nextRunAt"] = 0
+                        task["schedule"] = {"event": YESHE_DRAW_TRIGGER_EVENT}
+                        changed = True
                     continue
                 next_run = int(task.get("nextRunAt", 0))
                 if next_run > now:

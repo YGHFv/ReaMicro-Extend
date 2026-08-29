@@ -46,10 +46,7 @@ class CloudTaskManager(private val client: ApiServerClient) {
     ): CloudTask {
         val body = JSONObject()
             .put("taskType", taskType)
-            .put("schedule", JSONObject()
-                .put("intervalSeconds", 86_400)
-                .put("timeOfDay", timeOfDay)
-                .put("timezoneOffsetMinutes", 480))
+            .put("schedule", cloudAutomationSchedule(taskType, timeOfDay))
             .put("request", request.put("credentialId", credentialId))
         return parseCloudTask(client.createTask(body))
     }
@@ -61,10 +58,7 @@ class CloudTaskManager(private val client: ApiServerClient) {
         timeOfDay: String,
         request: JSONObject = JSONObject(),
     ): CloudTask {
-        val schedule = JSONObject()
-            .put("intervalSeconds", 86_400)
-            .put("timeOfDay", timeOfDay)
-            .put("timezoneOffsetMinutes", 480)
+        val schedule = cloudAutomationSchedule(taskType, timeOfDay)
         val taskRequest = request.put("credentialId", credentialId)
         val existing = list().firstOrNull { it.taskType == taskType && it.credentialId == credentialId }
         return if (existing == null) {
@@ -128,6 +122,16 @@ class CloudTaskManager(private val client: ApiServerClient) {
     }
 
 }
+
+internal fun cloudAutomationSchedule(taskType: String, timeOfDay: String): JSONObject =
+    if (taskType == "yeshe_draw_card") {
+        JSONObject().put("event", "yeshe_checkin_reward_claimed")
+    } else {
+        JSONObject()
+            .put("intervalSeconds", 86_400)
+            .put("timeOfDay", timeOfDay)
+            .put("timezoneOffsetMinutes", 480)
+    }
 
 internal fun parseCloudTask(root: JSONObject): CloudTask {
     val data = root.optJSONObject("data") ?: root

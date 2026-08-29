@@ -6,6 +6,14 @@ import org.junit.Test
 
 class CloudTaskManagerTest {
     @Test
+    fun `draw task uses reward event instead of daily time`() {
+        val schedule = cloudAutomationSchedule("yeshe_draw_card", "00:05")
+
+        assertEquals("yeshe_checkin_reward_claimed", schedule.getString("event"))
+        assertEquals(false, schedule.has("timeOfDay"))
+    }
+
+    @Test
     fun `parses safe automation configuration`() {
         val task = parseCloudTask(JSONObject("""
             {

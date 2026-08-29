@@ -123,7 +123,8 @@ def _admin_task_detail(task: dict[str, Any]) -> str:
         if retry_count:
             parts.append(f"领取重试：已重试 {retry_count} 次")
     elif task_type == "yeshe_draw_card":
-        parts.append(f"每日抽卡：{int(request.get('dailyLimit', 1) or 1)} 次")
+        parts.append("触发方式：签到奖励领取完成后")
+        parts.append(f"每日抽卡上限：{int(request.get('dailyLimit', 1) or 1)} 次")
     elif task_type == "cloud_auto_read":
         parts.append(f"阅读时长：{int(request.get('durationMinutes', 30) or 30)} 分钟")
         books = request.get("books") if isinstance(request.get("books"), list) else []
@@ -824,7 +825,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
                 f"<label>任务类型<select name='task_type'><option value='yeshe_checkin'>野社零点签到</option>"
                 f"<option value='yeshe_draw_card'>野社自动抽卡</option><option value='cloud_auto_read'>云端自动阅读</option>"
                 f"<option value='http'>通用 HTTPS 请求</option></select></label>"
-                f"<label>每日执行时间（北京时间 HH:MM）<input name='time_of_day' value='00:05'></label>"
+                f"<label>每日执行时间（仅签到和阅读，HH:MM）<input name='time_of_day' value='00:05'></label>"
                 f"<label>同步密钥<select name='credential_id'>{credential_options}</select></label>"
                 # 非 http 任务的归属跟随所选同步密钥，这里只作为 http 任务的兜底归属。
                 f"<label>任务所有者（仅自定义 HTTP 任务使用；阅微任务自动跟随所选同步密钥）"

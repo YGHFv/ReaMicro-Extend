@@ -23,7 +23,7 @@ from app.responses import response
 from app.scheduler import (
     find_owned_task,
     next_task_run,
-    normalized_time_of_day,
+    normalized_task_schedule,
     public_task,
 )
 from app.security import task_owner
@@ -74,8 +74,7 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
     schedule = payload.get("schedule", {})
     if not isinstance(schedule, dict):
         raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务 schedule 必须是对象"))
-    if schedule.get("timeOfDay"):
-        schedule["timeOfDay"] = normalized_time_of_day(schedule.get("timeOfDay"))
+    schedule = normalized_task_schedule(task_type, schedule)
     task_id = "task_" + secrets.token_hex(10)
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     task = {
@@ -87,7 +86,7 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
         "status": "scheduled",
         "enabled": bool(payload.get("enabled", True)),
         "createdAt": now,
-        "nextRunAt": int(payload.get("nextRunAt", now)),
+        "nextRunAt": 0 if task_type == "yeshe_draw_card" else int(payload.get("nextRunAt", now)),
         "runCount": 0,
         "maxRetries": max(0, min(int(payload.get("maxRetries", 3) or 3), 10)),
         "consecutiveFailures": 0,
@@ -188,6 +187,7 @@ async def pause_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str
     tasks, task = find_owned_task(task_id, owner)
     task["status"] = "paused"
     task["enabled"] = False
+    task["nextRunAt"] = 0
     save_tasks(tasks)
     task_log(task_id, "任务已暂停")
     return response(public_task(task))
@@ -198,7 +198,7 @@ async def resume_task(task_id: str, owner: str = Depends(task_owner)) -> dict[st
     tasks, task = find_owned_task(task_id, owner)
     task["status"] = "scheduled"
     task["enabled"] = True
-    task["nextRunAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+    task["nextRunAt"] = 0 if task.get("taskType") == "yeshe_draw_card" else int(datetime.now(timezone.utc).timestamp() * 1000)
     save_tasks(tasks)
     task_log(task_id, "任务已恢复")
     return response(public_task(task))
@@ -237,9 +237,7 @@ async def configure_task(task_id: str, request: Request, owner: str = Depends(ta
         schedule = payload.get("schedule")
         if not isinstance(schedule, dict):
             raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务 schedule 必须是对象"))
-        if schedule.get("timeOfDay"):
-            schedule["timeOfDay"] = normalized_time_of_day(schedule.get("timeOfDay"))
-        task["schedule"] = schedule
+        task["schedule"] = normalized_task_schedule(str(task.get("taskType", "")), schedule)
     if "request" in payload:
         request_value = payload.get("request") or {}
         if not isinstance(request_value, dict):

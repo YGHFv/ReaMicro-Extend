@@ -22,6 +22,7 @@ private data class CloudAutomationTaskSpec(
     val title: String,
     val description: String,
     val autoRead: Boolean = false,
+    val rewardTriggered: Boolean = false,
 )
 
 private const val CLOUD_AUTOMATION_LOG_PREFIX = "[ReaMicroFix/CloudAutomation]"
@@ -35,7 +36,8 @@ private val CLOUD_AUTOMATION_TASKS = listOf(
     CloudAutomationTaskSpec(
         taskType = "yeshe_draw_card",
         title = "野社自动抽卡",
-        description = "签到奖励领取后自动执行抽卡",
+        description = "签到奖励领取完成后自动执行一次抽卡",
+        rewardTriggered = true,
     ),
     CloudAutomationTaskSpec(
         taskType = "cloud_auto_read",
@@ -208,15 +210,19 @@ private fun ReaMicroSettingsHook.cloudAutomationTaskSubtitle(
     serverCredential == null || task == null -> "未配置 · ${spec.description}"
     else -> buildString {
         append(if (task.enabled) "已启用" else "已关闭")
-        append(" · 每天 ")
-        append(task.timeOfDay.ifBlank { "00:05" })
+        if (spec.rewardTriggered) {
+            append(" · 签到奖励领取后触发")
+        } else {
+            append(" · 每天 ")
+            append(task.timeOfDay.ifBlank { "00:05" })
+        }
         if (spec.autoRead) {
             append(" · ")
             append(task.durationMinutes)
             append(" 分钟 · ")
             append(if (task.books.isEmpty()) "最近阅读" else "${task.books.size} 本指定图书")
         }
-        if (task.enabled && task.nextRunAt > 0L) {
+        if (!spec.rewardTriggered && task.enabled && task.nextRunAt > 0L) {
             append("\n下次执行 ")
             append(formatCloudAutomationTime(task.nextRunAt))
         }
@@ -358,23 +364,33 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
             setSingleLine(false)
         }
         card.addView(account, apiServerRowParams(activity))
-        card.addView(time, apiServerRowParams(activity))
+        if (!spec.rewardTriggered) {
+            card.addView(time, apiServerRowParams(activity))
+        }
         if (spec.autoRead) {
             card.addView(duration, apiServerRowParams(activity))
             card.addView(books, apiServerRowParams(activity))
         }
         val status = TextView(activity).apply {
             setTextColor(colors.body)
-            text = if (task == null) "保存后即完成配置" else "保存会更新当前任务配置"
+            text = when {
+                spec.rewardTriggered -> "启用后将在签到奖励领取完成时自动抽卡，不按固定时间执行"
+                task == null -> "保存后即完成配置"
+                else -> "保存会更新当前任务配置"
+            }
             setPadding(24, 8, 24, 8)
         }
         card.addView(status, apiServerRowParams(activity))
         val actions = settingsDialogActions(activity)
         val saveButton = settingsDialogButton(activity, "保存", colors, SettingsDialogButtonRole.Primary)
         saveButton.setOnClickListener {
-            val normalizedTime = runCatching { normalizeCloudAutomationTime(time.text.toString()) }
-                .onFailure { status.text = it.message ?: "执行时间无效" }
-                .getOrNull() ?: return@setOnClickListener
+            val normalizedTime = if (spec.rewardTriggered) {
+                "00:05"
+            } else {
+                runCatching { normalizeCloudAutomationTime(time.text.toString()) }
+                    .onFailure { status.text = it.message ?: "执行时间无效" }
+                    .getOrNull() ?: return@setOnClickListener
+            }
             val durationMinutes = if (spec.autoRead) {
                 duration.text.toString().toIntOrNull()?.takeIf { it in 1..720 }
                     ?: run {

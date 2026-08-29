@@ -124,7 +124,7 @@ from app.releases import sync_module_release
 from app.responses import response
 from app.scheduler import (
     apply_task_action,
-    normalized_time_of_day,
+    normalized_task_schedule,
 )
 from app.security import (
     admin_actor,
@@ -1377,16 +1377,16 @@ async def admin_create_task(
             "owner": owner,
             "taskType": task_type,
             "credentialId": credential_id.strip(),
-            "schedule": {
+            "schedule": normalized_task_schedule(task_type, {
                 "intervalSeconds": max(interval_seconds, 60),
-                "timeOfDay": normalized_time_of_day(time_of_day) if task_type in {"yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"} else "",
+                "timeOfDay": time_of_day if task_type in {"yeshe_checkin", "cloud_auto_read"} else "",
                 "timezoneOffsetMinutes": 480,
-            },
+            }),
             "requestEncrypted": encrypt_secret(request_value),
             "status": "scheduled",
             "enabled": True,
             "createdAt": now,
-            "nextRunAt": now,
+            "nextRunAt": 0 if task_type == "yeshe_draw_card" else now,
             "runCount": 0,
             "maxRetries": 3,
             "consecutiveFailures": 0,

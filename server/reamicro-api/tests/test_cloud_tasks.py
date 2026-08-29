@@ -163,6 +163,16 @@ class CloudTaskSecurityTest(unittest.TestCase):
         self.assertIn("测试图书", detail)
         self.assertNotIn("{", detail)
 
+    def test_draw_task_detail_describes_reward_event(self):
+        task = {
+            "taskType": "yeshe_draw_card",
+            "schedule": {"event": "yeshe_checkin_reward_claimed"},
+            "requestEncrypted": crypto.encrypt_secret({"dailyLimit": 1}),
+        }
+        detail = admin_views._admin_task_detail(task)
+        self.assertIn("签到奖励领取完成后", detail)
+        self.assertNotIn("执行时间：每日", detail)
+
     def test_daily_time_validation(self):
         self.assertEqual(scheduler.normalized_time_of_day("7:05"), "07:05")
         with self.assertRaises(ValueError):
@@ -186,6 +196,22 @@ class CloudTaskSecurityTest(unittest.TestCase):
         self.assertEqual((task["status"], task["enabled"], task["nextRunAt"]), ("scheduled", True, 2000))
         with self.assertRaises(ValueError):
             scheduler.apply_task_action(task, "invalid", 3000)
+
+    def test_draw_task_waits_for_checkin_reward_event(self):
+        task = {
+            "id": "task_draw",
+            "taskType": "yeshe_draw_card",
+            "status": "paused",
+            "enabled": False,
+            "schedule": {"timeOfDay": "00:05"},
+            "nextRunAt": 123,
+        }
+        self.assertEqual(0, scheduler.next_task_run(task, 1000))
+        scheduler.apply_task_action(task, "resume", 2000)
+        self.assertEqual(0, task["nextRunAt"])
+        scheduler.apply_task_action(task, "run", 3000)
+        self.assertEqual(3000, task["nextRunAt"])
+        self.assertTrue(task["triggeredByCheckinReward"])
 
     def test_idempotency_storage(self):
         store = runtime.get_state_store()

@@ -346,6 +346,32 @@ class ApiTaskLifecycleTest(unittest.TestCase):
         self.assertEqual(200, deleted.status_code)
         self.assertNotIn(task_id, state.load_tasks())
 
+    def test_draw_task_is_saved_as_reward_event(self):
+        created = self.client.post(
+            "/v1/tasks",
+            headers=module_headers(),
+            json={
+                "taskType": "yeshe_draw_card",
+                "schedule": {"intervalSeconds": 86400, "timeOfDay": "00:05"},
+                "request": {"credentialId": "rea_1"},
+            },
+        )
+        self.assertEqual(200, created.status_code)
+        task = unwrap(created)
+        self.assertEqual({"event": "yeshe_checkin_reward_claimed"}, task["schedule"])
+        self.assertEqual(0, task["nextRunAt"])
+
+        task_id = task["id"]
+        resumed = unwrap(self.client.post(f"/v1/tasks/{task_id}/resume", headers=module_headers()))
+        self.assertEqual(0, resumed["nextRunAt"])
+        configured = unwrap(self.client.post(
+            f"/v1/tasks/{task_id}/configure",
+            headers=module_headers(),
+            json={"enabled": True, "schedule": {"timeOfDay": "06:30"}},
+        ))
+        self.assertEqual({"event": "yeshe_checkin_reward_claimed"}, configured["schedule"])
+        self.assertEqual(0, configured["nextRunAt"])
+
     def test_task_isolation_across_accounts(self):
         base_config(hostAccountAllowlist=[HOST_ACCOUNT_ID, "7"])
         seed_task("task_mine", owner=f"host:{HOST_ACCOUNT_ID}")
