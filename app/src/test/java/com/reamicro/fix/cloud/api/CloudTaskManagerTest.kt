@@ -26,6 +26,7 @@ class CloudTaskManagerTest {
                 "schedule": {"timeOfDay": "07:05"},
                 "configuration": {
                   "durationMinutes": 45,
+                  "dailyLimit": 0,
                   "books": [{"cloudBookId": 7, "name": "测试图书"}]
                 },
                 "nextRunAt": 1234,
@@ -36,6 +37,7 @@ class CloudTaskManagerTest {
 
         assertEquals("07:05", task.timeOfDay)
         assertEquals(45, task.durationMinutes)
+        assertEquals(0, task.dailyDrawLimit)
         assertEquals(listOf(CloudTaskBook(7, "测试图书")), task.books)
         assertEquals(true, task.enabled)
     }
@@ -53,6 +55,7 @@ class CloudTaskManagerTest {
 
         assertEquals("00:05", task.timeOfDay)
         assertEquals(30, task.durationMinutes)
+        assertEquals(3, task.dailyDrawLimit)
         assertEquals(emptyList<CloudTaskBook>(), task.books)
     }
 }

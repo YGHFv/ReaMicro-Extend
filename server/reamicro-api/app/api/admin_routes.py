@@ -1327,6 +1327,7 @@ async def admin_create_task(
     request_body: str = Form(""),
     credential_id: str = Form(""),
     duration_minutes: int = Form(30),
+    daily_limit: int = Form(3),
     recent_limit: int = Form(1),
     book_limit: int = Form(1),
     time_of_day: str = Form("00:00"),
@@ -1352,6 +1353,7 @@ async def admin_create_task(
             "body": request_body,
             "credentialId": credential_id.strip(),
             "durationMinutes": max(1, min(duration_minutes, 720)),
+            "dailyLimit": max(0, min(daily_limit, 20)),
             "recentLimit": max(1, min(recent_limit, 20)),
             "bookLimit": max(1, min(book_limit, 10)),
         }

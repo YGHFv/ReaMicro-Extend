@@ -124,7 +124,8 @@ def _admin_task_detail(task: dict[str, Any]) -> str:
             parts.append(f"领取重试：已重试 {retry_count} 次")
     elif task_type == "yeshe_draw_card":
         parts.append("触发方式：签到奖励领取完成后")
-        parts.append(f"每日抽卡上限：{int(request.get('dailyLimit', 1) or 1)} 次")
+        daily_limit = min(20, bounded_config_int(request.get("dailyLimit", 3), 3, 0))
+        parts.append("每日抽卡上限：抽完全部彩筹" if daily_limit == 0 else f"每日抽卡上限：{daily_limit} 次")
     elif task_type == "cloud_auto_read":
         parts.append(f"阅读时长：{int(request.get('durationMinutes', 30) or 30)} 分钟")
         books = request.get("books") if isinstance(request.get("books"), list) else []
@@ -830,6 +831,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
                 # 非 http 任务的归属跟随所选同步密钥，这里只作为 http 任务的兜底归属。
                 f"<label>任务所有者（仅自定义 HTTP 任务使用；阅微任务自动跟随所选同步密钥）"
                 f"<input name='owner' value='admin'></label>"
+                f"<label>每日抽卡上限（0-20，0 表示抽完全部彩筹）<input name='daily_limit' type='number' min='0' max='20' value='3'></label>"
                 f"<label>阅读时长（分钟，1-720）<input name='duration_minutes' type='number' min='1' max='720' value='30'></label>"
                 f"<label>最近阅读取用数量（1-20）<input name='recent_limit' type='number' min='1' max='20' value='1'></label>"
                 f"</div>"

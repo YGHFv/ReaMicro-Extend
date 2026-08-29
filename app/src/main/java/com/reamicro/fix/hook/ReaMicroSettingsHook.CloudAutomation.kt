@@ -36,7 +36,7 @@ private val CLOUD_AUTOMATION_TASKS = listOf(
     CloudAutomationTaskSpec(
         taskType = "yeshe_draw_card",
         title = "野社自动抽卡",
-        description = "签到奖励领取完成后自动执行一次抽卡",
+        description = "签到奖励领取完成后按配置自动抽卡",
         rewardTriggered = true,
     ),
     CloudAutomationTaskSpec(
@@ -212,6 +212,8 @@ private fun ReaMicroSettingsHook.cloudAutomationTaskSubtitle(
         append(if (task.enabled) "已启用" else "已关闭")
         if (spec.rewardTriggered) {
             append(" · 签到奖励领取后触发")
+            append(" · ")
+            append(if (task.dailyDrawLimit == 0) "抽完全部彩筹" else "每日最多 ${task.dailyDrawLimit} 次")
         } else {
             append(" · 每天 ")
             append(task.timeOfDay.ifBlank { "00:05" })
@@ -354,6 +356,14 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
         val duration = apiServerEdit(activity, colors, "云端阅读时长（分钟）", (task?.durationMinutes ?: 30).toString()).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
         }
+        val drawLimit = apiServerEdit(
+            activity,
+            colors,
+            "每日抽卡上限（0-20，0 表示抽完全部彩筹）",
+            (task?.dailyDrawLimit ?: 3).toString(),
+        ).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
         val books = apiServerEdit(
             activity,
             colors,
@@ -367,6 +377,9 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
         if (!spec.rewardTriggered) {
             card.addView(time, apiServerRowParams(activity))
         }
+        if (spec.rewardTriggered) {
+            card.addView(drawLimit, apiServerRowParams(activity))
+        }
         if (spec.autoRead) {
             card.addView(duration, apiServerRowParams(activity))
             card.addView(books, apiServerRowParams(activity))
@@ -374,7 +387,7 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
         val status = TextView(activity).apply {
             setTextColor(colors.body)
             text = when {
-                spec.rewardTriggered -> "启用后将在签到奖励领取完成时自动抽卡，不按固定时间执行"
+                spec.rewardTriggered -> "启用后将在签到奖励领取完成时自动抽卡；填写 0 会抽到彩筹用完，不按固定时间执行"
                 task == null -> "保存后即完成配置"
                 else -> "保存会更新当前任务配置"
             }
@@ -400,6 +413,15 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
             } else {
                 30
             }
+            val dailyDrawLimit = if (spec.rewardTriggered) {
+                drawLimit.text.toString().toIntOrNull()?.takeIf { it in 0..20 }
+                    ?: run {
+                        status.text = "每日抽卡上限应为 0 到 20；0 表示抽完全部彩筹"
+                        return@setOnClickListener
+                    }
+            } else {
+                3
+            }
             val selectedBooks = if (spec.autoRead) {
                 runCatching { parseCloudReadingBooks(books.text.toString()) }
                     .onFailure { status.text = it.message ?: "自定义图书格式无效" }
@@ -422,6 +444,9 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
                         currentCredential.accountId,
                     ).id
                     val request = JSONObject()
+                    if (spec.rewardTriggered) {
+                        request.put("dailyLimit", dailyDrawLimit)
+                    }
                     if (spec.autoRead) {
                         request.put("durationMinutes", durationMinutes)
                         if (selectedBooks.length() > 0) {

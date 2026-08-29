@@ -191,6 +191,24 @@ REWARD_NOT_READY_PATTERNS = (
 )
 
 
+LOTTERY_BALANCE_EXHAUSTED_PATTERNS = (
+    "彩筹不足",
+    "彩筹不够",
+    "没有足够彩筹",
+    "余额不足",
+    "insufficient balance",
+)
+
+
+def lottery_balance_exhausted(*values: Any) -> bool:
+    """判断抽卡回复是否表示彩筹已经耗尽。"""
+    text = " ".join(
+        json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value or "")
+        for value in values
+    ).lower()
+    return any(pattern in text for pattern in LOTTERY_BALANCE_EXHAUSTED_PATTERNS)
+
+
 def timestamp_millis(value: Any) -> int:
     """兼容阅微响应中的秒级和毫秒级时间戳。"""
     try:
@@ -262,23 +280,67 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
         if not task.pop("triggeredByCheckinReward", False):
             task["waitingForCheckinReward"] = True
             return "success", "野社自动抽卡等待签到奖励领取完成后触发"
-        daily_limit = max(1, min(int(request.get("dailyLimit", 1) or 1), 20))
+        daily_limit = min(bounded_config_int(request.get("dailyLimit", 3), 3, 0), 20)
         today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
-        if task.get("dailyCounterDate") == today and int(task.get("dailyCounter", 0)) >= daily_limit:
+        used_today = bounded_config_int(task.get("dailyCounter", 0), 0, 0) if task.get("dailyCounterDate") == today else 0
+        if daily_limit > 0 and used_today >= daily_limit:
             return "success", f"野社今日抽卡已达到上限 {daily_limit} 次"
-        status_code, body, raw = json_http_request(base_url, token, configured_body, str(request.get("endpoint") or "rest/lottery/lottery-v2"))
-        if status_code in (401, 403, 429):
-            return "paused", f"阅微认证/风控响应 HTTP {status_code}"
-        if status_code < 200 or status_code >= 300:
-            return "failed", f"抽卡请求 HTTP {status_code}: {redact_message(raw)}"
-        previous_date = task.get("dailyCounterDate")
-        task["dailyCounterDate"] = today
-        task["dailyCounter"] = int(task.get("dailyCounter", 0)) + 1 if previous_date == today else 1
-        summary = lottery_result_summary(body)
-        task["lastDrawResult"] = summary
-        task["lastDrawAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+        if daily_limit == 0:
+            status_code, user_info, raw = json_http_request(
+                base_url,
+                token,
+                {},
+                str(request.get("userInfoEndpoint") or "rest/user/get-user-info"),
+            )
+            if status_code in (401, 403, 429):
+                return "paused", f"读取彩筹余额时触发阅微认证/风控响应 HTTP {status_code}"
+            if status_code < 200 or status_code >= 300:
+                return "failed", f"读取彩筹余额失败 HTTP {status_code}: {redact_message(raw)}"
+            business_error = reamicro_business_error(user_info)
+            if business_error:
+                return "failed", f"读取彩筹余额失败：{business_error}"
+            gem_value = nested_value(user_info, "data", "gem")
+            if gem_value is None:
+                return "failed", "阅微用户信息响应缺少彩筹余额 gem"
+            draw_target = bounded_config_int(gem_value, 0, 0)
+        else:
+            draw_target = daily_limit - used_today
+        endpoint = str(request.get("endpoint") or "rest/lottery/lottery-v2")
+        summaries: list[str] = []
+        balance_exhausted = False
+
+        def completed_draw_detail() -> str:
+            return "；".join(f"第 {index} 次：{item}" for index, item in enumerate(summaries, 1))
+
+        while len(summaries) < draw_target:
+            status_code, body, raw = json_http_request(base_url, token, configured_body, endpoint)
+            if status_code in (401, 403, 429):
+                detail = f"；已完成：{completed_draw_detail()}" if summaries else ""
+                return "paused", f"阅微认证/风控响应 HTTP {status_code}{detail}"
+            business_error = reamicro_business_error(body) if 200 <= status_code < 300 else ""
+            if lottery_balance_exhausted(body, raw, business_error):
+                balance_exhausted = True
+                break
+            if status_code < 200 or status_code >= 300:
+                detail = f"；已完成：{completed_draw_detail()}" if summaries else ""
+                return "failed", f"抽卡请求 HTTP {status_code}: {redact_message(raw)}{detail}"
+            if business_error:
+                detail = f"；已完成：{completed_draw_detail()}" if summaries else ""
+                return "failed", f"抽卡失败：{business_error}{detail}"
+            summary = lottery_result_summary(body)
+            summaries.append(summary)
+            task["dailyCounterDate"] = today
+            task["dailyCounter"] = used_today + len(summaries)
+            task["lastDrawResult"] = completed_draw_detail()
+            task["lastDrawAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
         task["waitingForCheckinReward"] = False
-        return "success", f"野社自动抽卡完成（今日 {task['dailyCounter']}/{daily_limit}）：{summary}"
+        if not summaries:
+            return "success", "野社彩筹已全部用完，本次没有可执行的抽卡"
+        detail = completed_draw_detail()
+        task["lastDrawResult"] = detail
+        if daily_limit == 0 or balance_exhausted:
+            return "success", f"野社自动抽卡完成 {len(summaries)} 次，彩筹已全部用完：{detail}"
+        return "success", f"野社自动抽卡完成 {len(summaries)} 次（今日 {task['dailyCounter']}/{daily_limit}）：{detail}"
     if task_type == "yeshe_checkin":
         china_zone = timezone(timedelta(hours=8))
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)

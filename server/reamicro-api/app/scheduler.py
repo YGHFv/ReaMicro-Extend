@@ -301,6 +301,10 @@ def public_task(task: dict[str, Any], include_request: bool = False) -> dict[str
             request_value = {}
     if include_request:
         value["request"] = request_value
+    elif task.get("taskType") == "yeshe_draw_card":
+        value["configuration"] = {
+            "dailyLimit": min(20, bounded_config_int(request_value.get("dailyLimit", 3), 3, 0)),
+        }
     elif task.get("taskType") == "cloud_auto_read":
         books = request_value.get("books", [])
         value["configuration"] = {

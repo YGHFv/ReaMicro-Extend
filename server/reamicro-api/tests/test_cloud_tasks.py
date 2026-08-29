@@ -7,7 +7,7 @@ import io
 import json
 import zipfile
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
@@ -171,7 +171,19 @@ class CloudTaskSecurityTest(unittest.TestCase):
         }
         detail = admin_views._admin_task_detail(task)
         self.assertIn("签到奖励领取完成后", detail)
+        self.assertIn("1 次", detail)
         self.assertNotIn("执行时间：每日", detail)
+
+    def test_draw_task_public_configuration_supports_exhaust_mode(self):
+        task = {
+            "id": "task_draw",
+            "owner": "host:3",
+            "taskType": "yeshe_draw_card",
+            "requestEncrypted": crypto.encrypt_secret({"credentialId": "rea_1", "dailyLimit": 0, "token": "secret"}),
+        }
+        public = scheduler.public_task(task)
+        self.assertEqual({"dailyLimit": 0}, public["configuration"])
+        self.assertNotIn("secret", str(public))
 
     def test_daily_time_validation(self):
         self.assertEqual(scheduler.normalized_time_of_day("7:05"), "07:05")
@@ -218,6 +230,110 @@ class CloudTaskSecurityTest(unittest.TestCase):
         value = {"code": "OK", "data": {"id": "task_1"}}
         store.save_idempotency("account:alice", "create_task", "request-1", value, 100_000_000)
         self.assertEqual(store.get_idempotency("account:alice", "create_task", "request-1"), value)
+
+
+class DrawCardExecutorTest(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        isolate(Path(self.temp_dir.name), secret_key="test-secret-key")
+        state.save_credentials({
+            "rea_1": {
+                "id": "rea_1",
+                "owner": "host:3",
+                "enabled": True,
+                "secretEncrypted": crypto.encrypt_secret({"token": "test-token"}),
+            },
+        })
+        self.original_request = executors.json_http_request
+
+    def tearDown(self):
+        executors.json_http_request = self.original_request
+        self.temp_dir.cleanup()
+
+    def task(self, request=None, **extra):
+        value = {
+            "id": "task_draw",
+            "owner": "host:3",
+            "taskType": "yeshe_draw_card",
+            "credentialId": "rea_1",
+            "requestEncrypted": crypto.encrypt_secret({"credentialId": "rea_1", **(request or {})}),
+            "triggeredByCheckinReward": True,
+        }
+        value.update(extra)
+        return value
+
+    @staticmethod
+    def draw_response(name, quality="", count=1):
+        return 200, {"code": 0, "data": {"result": {"name": name, "quality": quality, "count": count}}}, ""
+
+    def stub_responses(self, responses):
+        pending = list(responses)
+        calls = []
+
+        def request(url, token, payload, endpoint="", timeout=45):
+            calls.append((url, endpoint, payload))
+            return pending.pop(0)
+
+        executors.json_http_request = request
+        return calls
+
+    def test_default_limit_draws_three_times_and_reports_each_result(self):
+        calls = self.stub_responses([
+            self.draw_response("端砚", "珍品"),
+            self.draw_response("阅历", count=5),
+            self.draw_response("彩筹", count=3),
+        ])
+        task = self.task()
+
+        result, message = executors.execute_reamicro_task(task)
+
+        self.assertEqual("success", result)
+        self.assertEqual(3, len(calls))
+        self.assertEqual(3, task["dailyCounter"])
+        self.assertIn("第 1 次：端砚（珍品）", message)
+        self.assertIn("第 2 次：阅历 ×5", message)
+        self.assertIn("第 3 次：彩筹 ×3", message)
+
+    def test_finite_limit_only_draws_remaining_daily_count(self):
+        calls = self.stub_responses([self.draw_response("端砚")])
+        today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+        task = self.task({"dailyLimit": 3}, dailyCounterDate=today, dailyCounter=2)
+
+        result, message = executors.execute_reamicro_task(task)
+
+        self.assertEqual("success", result)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(3, task["dailyCounter"])
+        self.assertIn("今日 3/3", message)
+
+    def test_zero_limit_draws_until_balance_is_exhausted(self):
+        calls = self.stub_responses([
+            (200, {"code": 0, "data": {"gem": 3}}, ""),
+            self.draw_response("端砚", "珍品"),
+            self.draw_response("阅历", count=5),
+            (200, {"code": 400, "message": "彩筹不足"}, ""),
+        ])
+        task = self.task({"dailyLimit": 0})
+
+        result, message = executors.execute_reamicro_task(task)
+
+        self.assertEqual("success", result)
+        self.assertEqual(4, len(calls))
+        self.assertEqual("rest/user/get-user-info", calls[0][1])
+        self.assertEqual(2, task["dailyCounter"])
+        self.assertIn("完成 2 次，彩筹已全部用完", message)
+        self.assertIn("第 1 次：端砚（珍品）", message)
+        self.assertIn("第 2 次：阅历 ×5", message)
+
+    def test_non_balance_business_error_is_not_reported_as_success(self):
+        calls = self.stub_responses([(200, {"code": 500, "message": "服务异常"}, "")])
+        task = self.task({"dailyLimit": 3})
+
+        result, message = executors.execute_reamicro_task(task)
+
+        self.assertEqual("failed", result)
+        self.assertEqual(1, len(calls))
+        self.assertIn("服务异常", message)
 
 
 class AdminSecurityTest(unittest.TestCase):
