@@ -263,8 +263,12 @@ class DrawCardExecutorTest(unittest.TestCase):
         return value
 
     @staticmethod
-    def draw_response(name, quality="", count=1):
-        return 200, {"code": 0, "data": {"result": {"name": name, "quality": quality, "count": count}}}, ""
+    def wish_response(*items):
+        props = [
+            {"id": index, "name": name, "quality": quality, "type": "PROP"}
+            for index, (name, quality) in enumerate(items, 1)
+        ]
+        return 200, {"code": 0, "data": {"success": True, "message": "祈愿成功", "props": props}}, ""
 
     def stub_responses(self, responses):
         pending = list(responses)
@@ -279,9 +283,9 @@ class DrawCardExecutorTest(unittest.TestCase):
 
     def test_default_limit_draws_three_times_and_reports_each_result(self):
         calls = self.stub_responses([
-            self.draw_response("端砚", "珍品"),
-            self.draw_response("阅历", count=5),
-            self.draw_response("彩筹", count=3),
+            self.wish_response(("端砚", "RED")),
+            self.wish_response(("阅历", "GREEN")),
+            self.wish_response(("花笺", "BLUE")),
         ])
         task = self.task()
 
@@ -289,13 +293,15 @@ class DrawCardExecutorTest(unittest.TestCase):
 
         self.assertEqual("success", result)
         self.assertEqual(3, len(calls))
+        self.assertTrue(all(call[1] == "rest/community/wish" for call in calls))
+        self.assertTrue(all(call[2] == {"count": 1} for call in calls))
         self.assertEqual(3, task["dailyCounter"])
-        self.assertIn("第 1 次：端砚（珍品）", message)
-        self.assertIn("第 2 次：阅历 ×5", message)
-        self.assertIn("第 3 次：彩筹 ×3", message)
+        self.assertIn("第 1 次：端砚（RED）", message)
+        self.assertIn("第 2 次：阅历（GREEN）", message)
+        self.assertIn("第 3 次：花笺（BLUE）", message)
 
     def test_finite_limit_only_draws_remaining_daily_count(self):
-        calls = self.stub_responses([self.draw_response("端砚")])
+        calls = self.stub_responses([self.wish_response(("端砚", "GREY"))])
         today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
         task = self.task({"dailyLimit": 3}, dailyCounterDate=today, dailyCounter=2)
 
@@ -306,12 +312,26 @@ class DrawCardExecutorTest(unittest.TestCase):
         self.assertEqual(3, task["dailyCounter"])
         self.assertIn("今日 3/3", message)
 
-    def test_zero_limit_draws_until_balance_is_exhausted(self):
+    def test_finite_limit_uses_nine_draw_when_remaining_allows(self):
+        nine_props = tuple((f"九连奖品{index}", "GREY") for index in range(1, 10))
+        calls = self.stub_responses([self.wish_response(*nine_props)])
+        task = self.task({"dailyLimit": 9})
+
+        result, message = executors.execute_reamicro_task(task)
+
+        self.assertEqual("success", result)
+        self.assertEqual(1, len(calls))
+        self.assertEqual({"count": 9}, calls[0][2])
+        self.assertEqual(9, task["dailyCounter"])
+        self.assertIn("完成 9 次（今日 9/9）", message)
+
+    def test_zero_limit_uses_nine_draw_then_single_draws_to_exhaust_balance(self):
+        nine_props = tuple((f"九连奖品{index}", "GREY") for index in range(1, 10))
         calls = self.stub_responses([
-            (200, {"code": 0, "data": {"gem": 3}}, ""),
-            self.draw_response("端砚", "珍品"),
-            self.draw_response("阅历", count=5),
-            (200, {"code": 400, "message": "彩筹不足"}, ""),
+            (200, {"code": 0, "data": {"gem": 11}}, ""),
+            self.wish_response(*nine_props),
+            self.wish_response(("端砚", "RED")),
+            self.wish_response(("花笺", "BLUE")),
         ])
         task = self.task({"dailyLimit": 0})
 
@@ -320,10 +340,22 @@ class DrawCardExecutorTest(unittest.TestCase):
         self.assertEqual("success", result)
         self.assertEqual(4, len(calls))
         self.assertEqual("rest/user/get-user-info", calls[0][1])
-        self.assertEqual(2, task["dailyCounter"])
-        self.assertIn("完成 2 次，彩筹已全部用完", message)
-        self.assertIn("第 1 次：端砚（珍品）", message)
-        self.assertIn("第 2 次：阅历 ×5", message)
+        self.assertEqual([9, 1, 1], [call[2]["count"] for call in calls[1:]])
+        self.assertEqual(11, task["dailyCounter"])
+        self.assertIn("获得 11 项，消耗 11 枚彩筹", message)
+        self.assertIn("第 1 次：九连奖品1（GREY）", message)
+        self.assertIn("第 10 次：端砚（RED）", message)
+        self.assertIn("第 11 次：花笺（BLUE）", message)
+
+    def test_legacy_lottery_endpoint_is_migrated_to_current_wish_endpoint(self):
+        calls = self.stub_responses([self.wish_response(("端砚", "RED"))])
+        task = self.task({"dailyLimit": 1, "endpoint": "rest/lottery/lottery-v2"})
+
+        result, _ = executors.execute_reamicro_task(task)
+
+        self.assertEqual("success", result)
+        self.assertEqual("rest/community/wish", calls[0][1])
+        self.assertEqual({"count": 1}, calls[0][2])
 
     def test_non_balance_business_error_is_not_reported_as_success(self):
         calls = self.stub_responses([(200, {"code": 500, "message": "服务异常"}, "")])

@@ -72,18 +72,24 @@ def reamicro_business_error(body: Any) -> str:
     return f"阅微业务码 {code}：{redact_message(str(message))}"
 
 
-def lottery_result_summary(body: Any) -> str:
-    """从阅微抽卡响应中提取适合通知展示的结果。"""
-    result = nested_value(body, "data", "result") or nested_value(body, "result") or nested_value(body, "data")
+def lottery_result_summaries(body: Any) -> list[str]:
+    """从阅微祈愿响应中提取每一项具体结果。"""
+    result = (
+        nested_value(body, "data", "props")
+        or nested_value(body, "props")
+        or nested_value(body, "data", "result")
+        or nested_value(body, "result")
+        or nested_value(body, "data")
+    )
     if isinstance(result, str):
         text = result.strip()
         if text.startswith(("{", "[")):
             try:
                 result = json.loads(text)
             except ValueError:
-                return redact_message(text)
+                return [redact_message(text)]
         else:
-            return redact_message(text)
+            return [redact_message(text)]
     items = result if isinstance(result, list) else [result] if isinstance(result, dict) else []
     summaries: list[str] = []
     for item in items:
@@ -99,7 +105,12 @@ def lottery_result_summary(body: Any) -> str:
             if count not in (None, "", 1, "1"):
                 summary += f" ×{count}"
             summaries.append(summary)
-    return "、".join(summaries[:10]) or redact_message(json.dumps(result if result is not None else body, ensure_ascii=False)[:300])
+    return summaries or [redact_message(json.dumps(result if result is not None else body, ensure_ascii=False)[:300])]
+
+
+def lottery_result_summary(body: Any) -> str:
+    """兼容需要单行展示祈愿结果的调用方。"""
+    return "、".join(lottery_result_summaries(body))
 
 
 def credential_for_task(task: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -305,15 +316,20 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             draw_target = bounded_config_int(gem_value, 0, 0)
         else:
             draw_target = daily_limit - used_today
-        endpoint = str(request.get("endpoint") or "rest/lottery/lottery-v2")
+        configured_endpoint = str(request.get("endpoint") or "").strip()
+        endpoint = configured_endpoint if configured_endpoint and "lottery" not in configured_endpoint else "rest/community/wish"
         summaries: list[str] = []
+        consumed = 0
         balance_exhausted = False
 
         def completed_draw_detail() -> str:
             return "；".join(f"第 {index} 次：{item}" for index, item in enumerate(summaries, 1))
 
-        while len(summaries) < draw_target:
-            status_code, body, raw = json_http_request(base_url, token, configured_body, endpoint)
+        while consumed < draw_target:
+            request_count = 9 if draw_target - consumed >= 9 else 1
+            wish_body = dict(configured_body) if isinstance(configured_body, dict) else {}
+            wish_body["count"] = request_count
+            status_code, body, raw = json_http_request(base_url, token, wish_body, endpoint)
             if status_code in (401, 403, 429):
                 detail = f"；已完成：{completed_draw_detail()}" if summaries else ""
                 return "paused", f"阅微认证/风控响应 HTTP {status_code}{detail}"
@@ -323,14 +339,19 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
                 break
             if status_code < 200 or status_code >= 300:
                 detail = f"；已完成：{completed_draw_detail()}" if summaries else ""
-                return "failed", f"抽卡请求 HTTP {status_code}: {redact_message(raw)}{detail}"
+                return "failed", f"祈愿请求 HTTP {status_code}: {redact_message(raw)}{detail}"
             if business_error:
                 detail = f"；已完成：{completed_draw_detail()}" if summaries else ""
-                return "failed", f"抽卡失败：{business_error}{detail}"
-            summary = lottery_result_summary(body)
-            summaries.append(summary)
+                return "failed", f"祈愿失败：{business_error}{detail}"
+            wish_success = nested_value(body, "data", "success")
+            if wish_success is False:
+                message = nested_value(body, "data", "message") or "阅微未返回失败原因"
+                detail = f"；已完成：{completed_draw_detail()}" if summaries else ""
+                return "failed", f"祈愿失败：{redact_message(str(message))}{detail}"
+            summaries.extend(lottery_result_summaries(body))
+            consumed += request_count
             task["dailyCounterDate"] = today
-            task["dailyCounter"] = used_today + len(summaries)
+            task["dailyCounter"] = used_today + consumed
             task["lastDrawResult"] = completed_draw_detail()
             task["lastDrawAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
         task["waitingForCheckinReward"] = False
@@ -339,8 +360,8 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
         detail = completed_draw_detail()
         task["lastDrawResult"] = detail
         if daily_limit == 0 or balance_exhausted:
-            return "success", f"野社自动抽卡完成 {len(summaries)} 次，彩筹已全部用完：{detail}"
-        return "success", f"野社自动抽卡完成 {len(summaries)} 次（今日 {task['dailyCounter']}/{daily_limit}）：{detail}"
+            return "success", f"野社自动祈愿获得 {len(summaries)} 项，消耗 {consumed} 枚彩筹，彩筹已全部用完：{detail}"
+        return "success", f"野社自动祈愿完成 {consumed} 次（今日 {task['dailyCounter']}/{daily_limit}）：{detail}"
     if task_type == "yeshe_checkin":
         china_zone = timezone(timedelta(hours=8))
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
