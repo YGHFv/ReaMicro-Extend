@@ -225,6 +225,7 @@ internal sealed class InjectedRoute(val title: String) {
     object ProfileBackgroundSettings : InjectedRoute("\u4e3b\u9875\u8865\u5168")
     object CloudCompletionSettings : InjectedRoute("\u4e91\u76d8\u8865\u5168")
     object ApiServerSettings : InjectedRoute("\u0041\u0050\u0049 \u670d\u52a1\u5668\u8bbe\u7f6e")
+    object CloudAutomationSettings : InjectedRoute("\u4e91\u7aef\u4efb\u52a1")
     object RotationCompletionSettings : InjectedRoute("\u65cb\u8f6c\u8865\u5168")
     object AccountSwitch : InjectedRoute(ACCOUNT_SWITCH_TITLE)
     object OnlineCompletionSettings : InjectedRoute(ONLINE_COMPLETION_TITLE)

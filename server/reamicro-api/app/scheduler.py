@@ -271,13 +271,31 @@ async def server_snapshot_loop() -> None:
 
 
 def public_task(task: dict[str, Any], include_request: bool = False) -> dict[str, Any]:
-    value = {key: item for key, item in task.items() if key != "requestEncrypted"}
+    value = {key: item for key, item in task.items() if key not in {"request", "requestEncrypted"}}
     value["credentialId"] = task_credential_id(task)
-    if include_request and task.get("requestEncrypted"):
+    plaintext_request = task.get("request")
+    request_value: dict[str, Any] = plaintext_request if isinstance(plaintext_request, dict) else {}
+    if task.get("requestEncrypted"):
         try:
-            value["request"] = decrypt_secret(str(task["requestEncrypted"]))
+            decrypted = decrypt_secret(str(task["requestEncrypted"]))
+            request_value = decrypted if isinstance(decrypted, dict) else {}
         except Exception:
-            value["request"] = {}
+            request_value = {}
+    if include_request:
+        value["request"] = request_value
+    elif task.get("taskType") == "cloud_auto_read":
+        books = request_value.get("books", [])
+        value["configuration"] = {
+            "durationMinutes": min(720, bounded_config_int(request_value.get("durationMinutes", 30), 30, 1)),
+            "books": [
+                {
+                    "cloudBookId": bounded_config_int(book.get("cloudBookId", book.get("bookId", 0)), 0, 0),
+                    "name": str(book.get("name", ""))[:200],
+                }
+                for book in books
+                if isinstance(book, dict) and bounded_config_int(book.get("cloudBookId", book.get("bookId", 0)), 0, 0) > 0
+            ],
+        }
     return value
 
 

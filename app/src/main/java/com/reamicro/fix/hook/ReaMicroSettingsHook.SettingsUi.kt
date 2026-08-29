@@ -217,6 +217,7 @@ internal fun ReaMicroSettingsHook.renderInjectedSettingsScreen(route: InjectedRo
             InjectedRoute.ProfileBackgroundSettings -> renderProfileBackgroundSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.CloudCompletionSettings -> renderCloudCompletionSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.ApiServerSettings -> renderApiServerSettingsContent(innerPaddings, innerComposer)
+            InjectedRoute.CloudAutomationSettings -> renderCloudAutomationSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.RotationCompletionSettings -> renderRotationCompletionSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.AccountSwitch -> renderAccountSwitchContent(innerPaddings, innerComposer)
             InjectedRoute.OnlineCompletionSettings -> renderOnlineCompletionSettingsContent(innerPaddings, innerComposer)
@@ -1034,7 +1035,10 @@ internal fun ReaMicroSettingsHook.renderApiServerSettingsContent(innerPaddings: 
                 key = "api_cloud_automation",
                 title = "云端签到、抽卡与自动阅读",
                 subtitle = "上传阅微登录密钥后由服务器执行，可选择最近阅读或自定义图书",
-                onClick = { openCloudAutomationDialog() },
+                onClick = {
+                    resetCloudAutomationState()
+                    openNestedInjectedRoute(InjectedRoute.CloudAutomationSettings)
+                },
             ),
         )
         addLazyItem(lazyListScope, "api_server_settings_card".hashCode()) { itemComposer ->

@@ -111,7 +111,7 @@ def _admin_task_detail(task: dict[str, Any]) -> str:
     if not isinstance(request, dict):
         request = {}
     if task_type == "yeshe_checkin":
-        parts.append("奖励领取：签到后 8 小时（周奖励，每周一次）")
+        parts.append("奖励领取：每日轶闻完成后按返回的结束时间自动领取")
         if task.get("lastCheckinAt"):
             parts.append(f"上次签到：{_admin_time_label(task.get('lastCheckinAt'))}")
         if task.get("lastClaimAt"):

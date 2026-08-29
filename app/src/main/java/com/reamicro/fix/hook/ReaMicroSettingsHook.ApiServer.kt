@@ -841,7 +841,7 @@ internal fun ReaMicroSettingsHook.openCredentialBackupDialog() {
     }
 }
 
-private fun ReaMicroSettingsHook.apiServerEdit(
+internal fun ReaMicroSettingsHook.apiServerEdit(
     activity: android.app.Activity,
     colors: ReaMicroSettingsHook.SettingsDialogColors,
     hint: String,
@@ -912,7 +912,7 @@ private fun ReaMicroSettingsHook.apiServerTypeface(activity: android.app.Activit
     return file?.let { runCatching { Typeface.createFromFile(it) }.getOrNull() } ?: Typeface.DEFAULT
 }
 
-private fun apiServerRowParams(activity: android.app.Activity): LinearLayout.LayoutParams =
+internal fun apiServerRowParams(activity: android.app.Activity): LinearLayout.LayoutParams =
     LinearLayout.LayoutParams(
         android.view.ViewGroup.LayoutParams.MATCH_PARENT,
         android.view.ViewGroup.LayoutParams.WRAP_CONTENT,

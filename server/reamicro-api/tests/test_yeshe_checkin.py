@@ -1,9 +1,8 @@
 """野社每日签到与签到奖励领取回归测试。
 
-历史问题：要领的是每日签到 8 小时后解锁的任务奖励，但代码调的是文社**周**奖励接口
-`claim-literary-society-weekly-reward`。那个奖励早就领过，接口一直回
-"上一周奖励已领取"，被当成可重试失败，于是每天「5 分钟 ×3」+「23:59 最后重试」。
-正确链路（阅微 2.3.1 反编译确认）是 rest/task/get-my-task-list + rest/task/receive-reward。
+阅微 2.3.1 的签到与奖励领取都调用 complete-daily-lore，并传同一个 userLoreId。
+领取按钮只在 isFinish=true 且 claimed=false 时启用；成功后客户端把 claimed 更新为 true。
+通用任务中心的 get-my-task-list / receive-reward 与野社每日轶闻奖励无关。
 """
 import sys
 import tempfile
@@ -63,15 +62,25 @@ class YesheCheckinClaimTest(unittest.TestCase):
         defaults.update(overrides)
         return self._task(**defaults)
 
-    def _stub(self, task_list, claim_response=(200, {"data": {"success": True}}, "{}")):
-        """打桩阅微接口：轶闻已签到，任务列表与领取结果按参数给出。"""
+    def _stub(self, lore=None, claim_response=(200, {"code": 0, "data": None}, "{}")):
+        """打桩阅微接口：默认轶闻已签到、奖励待领取。"""
+        lore = lore or {
+            "code": 0,
+            "data": {
+                "id": 99,
+                "isFinish": True,
+                "claimed": False,
+                "exp": 5,
+                "gem": 3,
+                "propName": "端砚",
+            },
+        }
+
         def fake(url, token, payload, endpoint="", timeout=45):
             self.calls.append((endpoint, payload if isinstance(payload, dict) else {}))
             if "get-daily-lore" in endpoint:
-                return 200, {"data": {"id": 99, "isFinish": True}}, "{}"
-            if "get-my-task-list" in endpoint:
-                return task_list
-            if "receive-reward" in endpoint:
+                return 200, lore, "{}"
+            if "complete-daily-lore" in endpoint:
                 return claim_response
             return 200, {"data": {}}, "{}"
         executors.json_http_request = fake
@@ -79,116 +88,83 @@ class YesheCheckinClaimTest(unittest.TestCase):
     def _endpoints(self) -> list[str]:
         return [endpoint for endpoint, _ in self.calls]
 
-    def _claimed_ids(self) -> list[str]:
-        return [str(payload.get("id")) for endpoint, payload in self.calls if "receive-reward" in endpoint]
+    def _completed_lore_ids(self) -> list[str]:
+        return [str(payload.get("userLoreId")) for endpoint, payload in self.calls if "complete-daily-lore" in endpoint]
 
-    # ---------- 核心：正确的接口 ----------
+    # ---------- 核心：与阅微领取按钮使用同一接口 ----------
 
-    def test_uses_daily_task_endpoints_not_weekly_reward(self):
-        self._stub((200, {"data": {"tasks": [{"id": "t1", "status": 2, "content": "每日签到"}]}}, "{}"))
+    def test_claims_by_completing_same_daily_lore(self):
+        self._stub()
         task = self._due_task()
         result, message = executors.execute_reamicro_task(task)
         self.assertEqual("success", result)
-        self.assertIn("rest/task/get-my-task-list", self._endpoints())
-        self.assertIn("rest/task/receive-reward", self._endpoints())
-        self.assertNotIn(
-            "rest/community/claim-literary-society-weekly-reward",
-            self._endpoints(),
-            "绝不能再调文社周奖励接口",
-        )
+        self.assertEqual(["99"], self._completed_lore_ids())
+        self.assertNotIn("rest/task/get-my-task-list", self._endpoints())
+        self.assertNotIn("rest/task/receive-reward", self._endpoints())
+        self.assertNotIn("rest/community/claim-literary-society-weekly-reward", self._endpoints())
         self.assertIn("领取成功", message)
-        self.assertEqual(["t1"], self._claimed_ids())
 
-    def test_claims_every_claimable_task(self):
-        self._stub((200, {"data": {"tasks": [
-            {"id": "t1", "status": 2, "content": "每日签到"},
-            {"id": "t2", "status": 2, "content": "阅读 30 分钟"},
-            {"id": "t3", "status": 1, "content": "已领过的"},
-            {"id": "t4", "status": 0, "content": "还没完成"},
-        ]}}, "{}"))
-        task = self._due_task()
-        result, message = executors.execute_reamicro_task(task)
-        self.assertEqual("success", result)
-        self.assertEqual(["t1", "t2"], self._claimed_ids(), "只领 status=2 的项")
-        self.assertIn("2 项", message)
+    def test_reward_notification_contains_specific_rewards(self):
+        self._stub()
+        _, message = executors.execute_reamicro_task(self._due_task())
+        self.assertIn("阅历 5 点", message)
+        self.assertIn("彩筹 3 枚", message)
+        self.assertIn("端砚", message)
 
-    def test_query_type_is_daily(self):
-        self._stub((200, {"data": {"tasks": []}}, "{}"))
-        executors.execute_reamicro_task(self._due_task())
-        payload = next(p for e, p in self.calls if "get-my-task-list" in e)
-        self.assertEqual(executors.DAILY_TASK_QUERY_TYPE, payload["queryType"])
+    def test_reward_notification_contains_prop_quality(self):
+        self._stub(lore={"code": 0, "data": {
+            "id": 99, "isFinish": True, "claimed": False,
+            "propName": "端砚", "propQuality": "珍品",
+        }})
+        _, message = executors.execute_reamicro_task(self._due_task())
+        self.assertIn("端砚（珍品）", message)
 
     # ---------- 三类非失败情形 ----------
 
-    def test_already_claimed_is_success_without_retry(self):
-        self._stub((200, {"data": {"tasks": [{"id": "t1", "status": 1, "content": "每日签到"}]}}, "{}"))
+    def test_already_claimed_in_lore_is_success_without_request(self):
+        self._stub(lore={"code": 0, "data": {
+            "id": 99, "isFinish": True, "claimed": True, "exp": 5, "gem": 3,
+        }})
         task = self._due_task()
         result, message = executors.execute_reamicro_task(task)
         self.assertEqual("success", result)
         self.assertIn("此前已领取", message)
-        self.assertNotIn("自动重试", message)
-        self.assertEqual(0, task["claimRetryCount"])
-        self.assertNotIn("nextRunAtOverride", task)
-        self.assertEqual([], self._claimed_ids(), "已领取不应再调领取接口")
+        self.assertIn("阅历 5 点", message)
+        self.assertEqual([], self._completed_lore_ids(), "claimed=true 不应重复调用领取接口")
+        self.assertTrue(task.get("claimJustCompleted"), "已领取也要放行联动抽卡")
 
-    def test_locked_reward_waits_without_retry(self):
-        """奖励还没解锁：不算失败，也不进重试循环。"""
-        self._stub((200, {"data": {"tasks": [{"id": "t1", "status": 0, "content": "还没完成"}]}}, "{}"))
+    def test_already_claimed_business_error_is_terminal(self):
+        self._stub(claim_response=(200, {"code": 400, "message": "该奖励已领取"}, "{}"))
         task = self._due_task()
         result, message = executors.execute_reamicro_task(task)
         self.assertEqual("success", result)
-        self.assertIn("暂无可领取", message)
+        self.assertIn("此前已领取", message)
         self.assertEqual(0, task["claimRetryCount"])
-        self.assertNotIn("nextRunAtOverride", task)
-        self.assertNotIn("claimCompletedDate", task, "未领取不应标记为今日已完成")
+        self.assertTrue(task.get("claimJustCompleted"))
 
-    def test_single_item_already_claimed_does_not_abort_batch(self):
-        """某一项回"已领取"时继续领其余项。"""
-        responses = iter([
-            (200, {"data": {"success": False, "message": "该奖励已领取"}}, "{}"),
-            (200, {"data": {"success": True, "message": "领取成功"}}, "{}"),
-        ])
-        def fake(url, token, payload, endpoint="", timeout=45):
-            self.calls.append((endpoint, payload if isinstance(payload, dict) else {}))
-            if "get-daily-lore" in endpoint:
-                return 200, {"data": {"id": 99, "isFinish": True}}, "{}"
-            if "get-my-task-list" in endpoint:
-                return 200, {"data": {"tasks": [
-                    {"id": "t1", "status": 2, "content": "甲"},
-                    {"id": "t2", "status": 2, "content": "乙"},
-                ]}}, "{}"
-            if "receive-reward" in endpoint:
-                return next(responses)
-            return 200, {"data": {}}, "{}"
-        executors.json_http_request = fake
-        result, message = executors.execute_reamicro_task(self._due_task())
-        self.assertEqual("success", result)
-        self.assertEqual(["t1", "t2"], self._claimed_ids())
-        self.assertIn("2 项", message)
-
-    def test_already_claimed_triggers_linked_draw(self):
-        self._stub((200, {"data": {"tasks": [{"id": "t1", "status": 1, "content": "每日签到"}]}}, "{}"))
+    def test_locked_reward_schedules_another_check(self):
+        self._stub(claim_response=(200, {"code": 400, "message": "未到领取时间"}, "{}"))
         task = self._due_task()
-        executors.execute_reamicro_task(task)
-        self.assertTrue(task.get("claimJustCompleted"), "已领取也要放行联动抽卡")
+        before = int(datetime.now(timezone.utc).timestamp() * 1000)
+        result, message = executors.execute_reamicro_task(task)
+        self.assertEqual("success", result)
+        self.assertIn("5 分钟后再次检查", message)
+        self.assertEqual(0, task["claimRetryCount"])
+        self.assertGreaterEqual(task["nextRunAtOverride"], before + 5 * 60_000)
+        self.assertNotIn("claimCompletedDate", task)
+        self.assertFalse(task.get("claimJustCompleted"), "没领到奖励不应触发抽卡")
 
     def test_granted_triggers_linked_draw(self):
-        self._stub((200, {"data": {"tasks": [{"id": "t1", "status": 2, "content": "每日签到"}]}}, "{}"))
+        self._stub()
         task = self._due_task()
         executors.execute_reamicro_task(task)
         self.assertTrue(task.get("claimJustCompleted"))
-
-    def test_locked_does_not_trigger_linked_draw(self):
-        self._stub((200, {"data": {"tasks": []}}, "{}"))
-        task = self._due_task()
-        executors.execute_reamicro_task(task)
-        self.assertFalse(task.get("claimJustCompleted"), "没领到奖励不应触发抽卡")
 
     # ---------- 每天都要重新领 ----------
 
     def test_claims_again_next_day(self):
         """每日奖励必须每天都领，不能被任何"已完成"标记长期压掉。"""
-        self._stub((200, {"data": {"tasks": [{"id": "t1", "status": 2, "content": "每日签到"}]}}, "{}"))
+        self._stub()
         task = self._due_task()
         executors.execute_reamicro_task(task)
         self.assertEqual(datetime.now(CHINA).date().isoformat(), task["claimCompletedDate"])
@@ -202,21 +178,20 @@ class YesheCheckinClaimTest(unittest.TestCase):
         self.assertIn("8 小时后自动领取", message)
 
     def test_same_day_second_run_skips_claim(self):
-        self._stub((200, {"data": {"tasks": [{"id": "t1", "status": 2, "content": "每日签到"}]}}, "{}"))
+        self._stub()
         task = self._due_task()
         executors.execute_reamicro_task(task)
         self.calls.clear()
         result, message = executors.execute_reamicro_task(task)
         self.assertEqual("success", result)
         self.assertIn("今日已领取", message)
-        self.assertEqual([], self._claimed_ids(), "同一天不重复领取")
+        self.assertEqual([], self._completed_lore_ids(), "同一天不重复领取")
 
     # ---------- 真实失败仍走重试 ----------
 
     def test_genuine_claim_failure_retries(self):
         self._stub(
-            (200, {"data": {"tasks": [{"id": "t1", "status": 2, "content": "每日签到"}]}}, "{}"),
-            claim_response=(200, {"data": {"success": False, "message": "服务器繁忙，请稍后再试"}}, "{}"),
+            claim_response=(200, {"code": 500, "message": "服务器繁忙，请稍后再试"}, "{}"),
         )
         task = self._due_task()
         result, message = executors.execute_reamicro_task(task)
@@ -228,32 +203,22 @@ class YesheCheckinClaimTest(unittest.TestCase):
 
     def test_genuine_failure_escalates_to_final_attempt(self):
         self._stub(
-            (200, {"data": {"tasks": [{"id": "t1", "status": 2, "content": "每日签到"}]}}, "{}"),
-            claim_response=(200, {"data": {"success": False, "message": "服务器繁忙"}}, "{}"),
+            claim_response=(200, {"code": 500, "message": "服务器繁忙"}, "{}"),
         )
         result, message = executors.execute_reamicro_task(self._due_task(claimRetryCount=3))
         self.assertEqual("success", result)
         self.assertIn("23:59 最后重试", message)
 
-    def test_task_list_http_error_retries(self):
-        self._stub((500, {}, "internal error"))
+    def test_claim_http_error_retries(self):
+        self._stub(claim_response=(500, {}, "internal error"))
         task = self._due_task()
         result, message = executors.execute_reamicro_task(task)
         self.assertEqual("success", result)
         self.assertIn("第 1/3 次", message)
-        self.assertEqual([], self._claimed_ids())
-
-    def test_auth_failure_pauses_on_list(self):
-        self._stub((401, {}, "unauthorized"))
-        result, message = executors.execute_reamicro_task(self._due_task())
-        self.assertEqual("paused", result)
-        self.assertIn("401", message)
+        self.assertEqual(["99"], self._completed_lore_ids())
 
     def test_auth_failure_pauses_on_claim(self):
-        self._stub(
-            (200, {"data": {"tasks": [{"id": "t1", "status": 2, "content": "每日签到"}]}}, "{}"),
-            claim_response=(429, {}, "rate limited"),
-        )
+        self._stub(claim_response=(429, {}, "rate limited"))
         result, message = executors.execute_reamicro_task(self._due_task())
         self.assertEqual("paused", result)
         self.assertIn("429", message)
@@ -261,7 +226,7 @@ class YesheCheckinClaimTest(unittest.TestCase):
     # ---------- 其余不变 ----------
 
     def test_waiting_period_unchanged(self):
-        self._stub((200, {"data": {"tasks": []}}, "{}"))
+        self._stub()
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         task = self._task(
             lastCheckinDate=datetime.now(CHINA).date().isoformat(),
@@ -270,7 +235,33 @@ class YesheCheckinClaimTest(unittest.TestCase):
         result, message = executors.execute_reamicro_task(task)
         self.assertEqual("success", result)
         self.assertIn("8 小时后自动领取", message)
-        self.assertNotIn("rest/task/get-my-task-list", self._endpoints())
+        self.assertEqual([], self._completed_lore_ids())
+
+    def test_response_end_time_controls_claim_schedule(self):
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        end_seconds = (now_ms + 30 * 60_000) // 1000
+        self._stub(lore={"code": 0, "data": {
+            "id": 99, "isFinish": True, "claimed": False, "endTime": end_seconds,
+        }})
+        task = self._task(lastCheckinDate="")
+        result, message = executors.execute_reamicro_task(task)
+        self.assertEqual("success", result)
+        self.assertIn("8 小时后自动领取", message)
+        self.assertEqual(end_seconds * 1000, task["claimDueAt"])
+        self.assertEqual(end_seconds * 1000, task["nextRunAtOverride"])
+
+    def test_millisecond_end_time_is_preserved(self):
+        timestamp = 1_787_968_800_000
+        self.assertEqual(timestamp, executors.timestamp_millis(timestamp))
+
+    def test_initial_checkin_business_error_is_not_success(self):
+        self._stub(
+            lore={"code": 0, "data": {"id": 99, "isFinish": False, "claimed": False}},
+            claim_response=(200, {"code": 500, "message": "签到失败"}, "{}"),
+        )
+        result, message = executors.execute_reamicro_task(self._task())
+        self.assertEqual("failed", result)
+        self.assertIn("阅微业务码 500", message)
 
     def test_claim_already_granted_patterns(self):
         detect = executors.claim_reward_already_granted
@@ -281,17 +272,10 @@ class YesheCheckinClaimTest(unittest.TestCase):
         self.assertTrue(detect("", {"data": {"claimed": True}}))
         self.assertFalse(detect("", {"data": {"claimed": False}}))
 
-    def test_tolerates_alternate_list_shapes(self):
-        """响应结构是从反编译推的，兼容 data.list 与 data 直接是数组两种形态。"""
-        for body in (
-            {"data": {"list": [{"id": "t1", "status": 2, "content": "每日签到"}]}},
-            {"data": [{"id": "t1", "status": 2, "content": "每日签到"}]},
-        ):
-            self.calls.clear()
-            self._stub((200, body, "{}"))
-            result, _ = executors.execute_reamicro_task(self._due_task())
-            self.assertEqual("success", result)
-            self.assertEqual(["t1"], self._claimed_ids(), f"未能解析 {list(body['data'])}")
+    def test_reward_not_ready_patterns(self):
+        for text in ("未达到领取条件", "尚未解锁", "未到领取时间", "暂不可领取"):
+            self.assertTrue(executors.reward_not_ready(text), f"{text} 应判定为尚未解锁")
+        self.assertFalse(executors.reward_not_ready("服务器繁忙"))
 
 
 if __name__ == "__main__":

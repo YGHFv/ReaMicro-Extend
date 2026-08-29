@@ -1,7 +1,7 @@
 """云端任务的实际执行。
 
-野社签到分两步：先 complete-daily-lore 完成签到，签到 8 小时后奖励解锁，再走
-rest/task/get-my-task-list + rest/task/receive-reward 领取每日任务奖励。
+野社签到分两步：先 complete-daily-lore 完成签到，签到 8 小时后奖励解锁，再用同一个
+complete-daily-lore 接口和同一个 userLoreId 领取奖励。阅微界面的“领取奖励”按钮也是这条链路。
 注意不要与文社**周**奖励（claim-literary-society-weekly-reward）搞混——那是另一个奖励，
 早年误用它导致每天都拿到"上一周奖励已领取"并被判成可重试失败。
 """
@@ -17,7 +17,6 @@ from app import runtime
 from app.audit import audit_event
 from app.config_store import bounded_config_int, load_config
 from app.crypto import decrypt_secret, encrypt_secret
-from app.packages import _metadata_text
 from app.state import load_credentials, save_credentials, task_credential_id
 
 
@@ -123,75 +122,36 @@ def credential_for_task(task: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
     return request, secret
 
 
-def claim_daily_task_rewards(base_url: str, token: str, request: dict[str, Any]) -> tuple[str, str, str]:
-    """领取野社每日签到任务奖励（签到 8 小时后解锁）。
+def claim_daily_lore_reward(base_url: str, token: str, request: dict[str, Any], user_lore_id: int) -> tuple[str, str]:
+    """用阅微实际的每日轶闻完成接口领取签到奖励。
 
-    返回 (结果, 面向用户的说明, 明细)。结果取值：
+    返回 (结果, 面向用户的说明)。结果取值：
     - granted：本次领到了奖励
     - already：奖励此前已领取
     - locked：奖励还没解锁，等下一轮定时执行，不算失败
     - paused：命中认证或风控，任务应暂停
     - failed：真实错误，交由调用方走重试逻辑
     """
-    list_endpoint = str(request.get("taskListEndpoint") or "rest/task/get-my-task-list")
-    claim_endpoint = str(request.get("claimEndpoint") or "rest/task/receive-reward")
-    query_type = bounded_config_int(request.get("taskQueryType", DAILY_TASK_QUERY_TYPE), DAILY_TASK_QUERY_TYPE, 0)
-    status_code, body, raw = json_http_request(
-        base_url, token, {"pageNum": 1, "pageSize": 50, "queryType": query_type}, list_endpoint,
-    )
+    endpoint = str(request.get("completeEndpoint") or "rest/community/complete-daily-lore")
+    status_code, body, raw = json_http_request(base_url, token, {"userLoreId": user_lore_id}, endpoint)
     if status_code in (401, 403, 429):
-        return "paused", f"阅微认证/风控响应 HTTP {status_code}", ""
+        return "paused", f"阅微认证/风控响应 HTTP {status_code}"
     if status_code < 200 or status_code >= 300:
-        return "failed", f"获取野社任务列表失败 HTTP {status_code}: {redact_message(raw)}", ""
-    tasks = nested_value(body, "data", "tasks")
-    if not isinstance(tasks, list):
-        tasks = nested_value(body, "data", "list") or nested_value(body, "data") or []
-    if isinstance(tasks, dict):
-        tasks = [tasks]
-    if not isinstance(tasks, list):
-        tasks = []
-    claimable, claimed = [], []
-    for item in tasks:
-        if not isinstance(item, dict):
-            continue
-        item_id = item.get("id") or item.get("taskId")
-        if not item_id:
-            continue
-        item_status = bounded_config_int(item.get("status", 0), 0, 0)
-        if item_status == DAILY_TASK_STATUS_CLAIMABLE:
-            claimable.append((str(item_id), _metadata_text(item.get("content")) or str(item_id)))
-        elif item_status == DAILY_TASK_STATUS_CLAIMED:
-            claimed.append(_metadata_text(item.get("content")) or str(item_id))
-    if not claimable:
-        if claimed:
-            return "already", "签到奖励此前已领取", "、".join(claimed[:5])
-        # 既没有待领取也没有已领取：奖励还没解锁，下一轮再看。
-        return "locked", "暂无可领取的签到奖励，等待下一次检查", ""
-    granted, errors = [], []
-    for item_id, label in claimable[:20]:
-        claim_status, claim_body, claim_raw = json_http_request(base_url, token, {"id": item_id}, claim_endpoint)
-        if claim_status in (401, 403, 429):
-            return "paused", f"阅微认证/风控响应 HTTP {claim_status}", ""
-        message = nested_value(claim_body, "data", "message") or nested_value(claim_body, "message") or ""
-        ok = 200 <= claim_status < 300 and nested_value(claim_body, "data", "success") is not False
-        # 单项回"已领取"不中断整批，继续领其余项。
-        if ok or (200 <= claim_status < 300 and claim_reward_already_granted(message, claim_body)):
-            granted.append(label)
-            continue
-        errors.append(f"{label}：{redact_message(str(message) or claim_raw)}")
-    if granted and not errors:
-        return "granted", f"签到奖励领取成功（{len(granted)} 项）", "、".join(granted[:5])
-    if granted:
-        return "granted", f"签到奖励部分领取成功（{len(granted)} 项）", "；".join(errors[:3])
-    return "failed", "、".join(errors[:3]) or "签到奖励领取失败", ""
+        return "failed", f"签到奖励领取失败 HTTP {status_code}: {redact_message(raw)}"
+
+    message = nested_value(body, "data", "message") or nested_value(body, "message") or nested_value(body, "msg") or ""
+    business_error = reamicro_business_error(body)
+    if not business_error:
+        return "granted", "签到奖励领取成功"
+    if claim_reward_already_granted(message, body):
+        return "already", "签到奖励此前已领取"
+    if reward_not_ready(message):
+        return "locked", "签到奖励尚未解锁，5 分钟后再次检查"
+    return "failed", business_error
 
 
 def claim_reward_already_granted(message: Any, body: Any = None) -> bool:
-    """判断领取周奖励的失败回复是否其实表示"早就领过了"。
-
-    阅微在重复领取时返回 HTTP 200 + `data.success=false` + "上一周奖励已领取"。
-    这是终态而非可重试错误，必须和真正的领取失败区分开。
-    """
+    """判断失败回复是否其实表示奖励早已领取。"""
     text = str(message or "")
     if any(pattern in text for pattern in CLAIM_ALREADY_GRANTED_PATTERNS):
         return True
@@ -201,6 +161,11 @@ def claim_reward_already_granted(message: Any, body: Any = None) -> bool:
         if nested_value(body, "data", key) is True:
             return True
     return False
+
+
+def reward_not_ready(message: Any) -> bool:
+    text = str(message or "")
+    return any(pattern in text for pattern in REWARD_NOT_READY_PATTERNS)
 
 
 # 阅微对重复领取的回复文案。命中任意一条即视为奖励已到账的终态，不再重试。
@@ -216,16 +181,41 @@ CLAIM_ALREADY_GRANTED_PATTERNS = (
 )
 
 
-# 每日任务状态（取自阅微 2.3.1 DailyTask.status 的界面分支）：
-# 2 = 已完成待领取，1 = 已领取，0 = 未完成。
-DAILY_TASK_STATUS_CLAIMABLE = 2
+REWARD_NOT_READY_PATTERNS = (
+    "未达到领取条件",
+    "尚未解锁",
+    "暂未解锁",
+    "未到领取时间",
+    "暂不可领取",
+    "尚不可领取",
+)
 
 
-DAILY_TASK_STATUS_CLAIMED = 1
+def timestamp_millis(value: Any) -> int:
+    """兼容阅微响应中的秒级和毫秒级时间戳。"""
+    try:
+        timestamp = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    if timestamp <= 0:
+        return 0
+    return timestamp * 1000 if timestamp < 100_000_000_000 else timestamp
 
 
-# get-my-task-list 的 queryType：日常任务传 1。
-DAILY_TASK_QUERY_TYPE = 1
+def daily_lore_reward_summary(lore: Any) -> str:
+    """从每日轶闻响应提取领取通知需要的奖励明细。"""
+    rewards: list[str] = []
+    exp = bounded_config_int(nested_value(lore, "data", "exp"), 0, 0)
+    gem = bounded_config_int(nested_value(lore, "data", "gem"), 0, 0)
+    if exp > 0:
+        rewards.append(f"阅历 {exp} 点")
+    if gem > 0:
+        rewards.append(f"彩筹 {gem} 枚")
+    prop_name = str(nested_value(lore, "data", "propName") or "").strip()
+    prop_quality = str(nested_value(lore, "data", "propQuality") or "").strip()
+    if prop_name:
+        rewards.append(f"{prop_name}（{prop_quality}）" if prop_quality else prop_name)
+    return "、".join(rewards)
 
 
 def execute_http_task(task: dict[str, Any]) -> tuple[str, str]:
@@ -299,9 +289,11 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
         if status_code < 200 or status_code >= 300:
             return "failed", f"获取野社每日轶闻失败 HTTP {status_code}: {redact_message(raw)}"
         lore_id = nested_value(lore, "data", "id") or nested_value(lore, "data", "loreId") or nested_value(lore, "id")
-        claimed = bool(nested_value(lore, "data", "isFinish") or nested_value(lore, "data", "claimed"))
-        checkin_message = "野社零点签到已完成" if claimed else ""
-        if not claimed:
+        is_finished = bool(nested_value(lore, "data", "isFinish"))
+        reward_claimed = bool(nested_value(lore, "data", "claimed"))
+        reward_summary = daily_lore_reward_summary(lore)
+        checkin_message = "野社零点签到已完成" if is_finished else ""
+        if not is_finished:
             if not lore_id:
                 return "failed", "阅微每日轶闻响应缺少 userLoreId"
             status_code, body, raw = json_http_request(base_url, token, {"userLoreId": int(lore_id)}, str(request.get("completeEndpoint") or "rest/community/complete-daily-lore"))
@@ -309,37 +301,52 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
                 return "paused", f"阅微认证/风控响应 HTTP {status_code}"
             if status_code < 200 or status_code >= 300:
                 return "failed", f"野社签到提交失败 HTTP {status_code}: {redact_message(raw)}"
+            business_error = reamicro_business_error(body)
+            if business_error:
+                return "failed", f"野社签到提交失败：{business_error}"
             checkin_message = "野社零点签到完成"
         if task.get("lastCheckinDate") != today:
             task["lastCheckinDate"] = today
-            task["lastCheckinAt"] = now_ms
-            task["claimDueAt"] = now_ms + 8 * 3_600_000
+            complete_time = timestamp_millis(nested_value(lore, "data", "completeTime"))
+            task["lastCheckinAt"] = complete_time or now_ms
+            end_time = timestamp_millis(nested_value(lore, "data", "endTime"))
+            task["claimDueAt"] = end_time or (complete_time + 8 * 3_600_000 if complete_time else now_ms + 8 * 3_600_000)
             task["claimRetryCount"] = 0
             task["claimFinalAttemptDate"] = ""
             task["claimCompletedDate"] = ""
         if task.get("claimCompletedDate") == today:
             return "success", f"{checkin_message or '野社签到状态已检查'}，签到奖励今日已领取"
+        if reward_claimed:
+            task["lastClaimAt"] = now_ms
+            task["claimCompletedDate"] = today
+            task["claimRetryCount"] = 0
+            task["claimFinalAttemptDate"] = ""
+            task["claimJustCompleted"] = True
+            detail = f"：{reward_summary}" if reward_summary else ""
+            return "success", f"{checkin_message or '野社签到状态已检查'}，签到奖励此前已领取{detail}"
         claim_due_at = bounded_config_int(task.get("claimDueAt", 0), now_ms + 8 * 3_600_000, 0)
         if now_ms < claim_due_at:
             task["nextRunAtOverride"] = claim_due_at
             return "success", f"{checkin_message or '野社签到状态已检查'}，奖励将在签到 8 小时后自动领取"
 
-        # 要领的是每日签到任务奖励（签到 8 小时后解锁），走 rest/task 那套接口：
-        # 先取任务列表，再对 status=2（已完成待领取）的项逐个 receive-reward。
-        claim_result, claim_message, claim_detail = claim_daily_task_rewards(base_url, token, request)
+        if not lore_id:
+            return "failed", "阅微每日轶闻响应缺少 userLoreId，无法领取签到奖励"
+        # 阅微界面的“领取奖励”会再次调用 complete-daily-lore，并继续传当前轶闻的 id。
+        claim_result, claim_message = claim_daily_lore_reward(base_url, token, request, int(lore_id))
         if claim_result == "paused":
             return "paused", claim_message
         if claim_result in {"granted", "already", "locked"}:
             task["claimRetryCount"] = 0
             task["claimFinalAttemptDate"] = ""
             if claim_result == "locked":
-                # 奖励尚未解锁不是失败，等下一轮定时执行即可，不进重试循环。
+                # 奖励尚未解锁不是失败，但必须在当天继续检查，不能等到次日签到。
+                task["nextRunAtOverride"] = now_ms + 5 * 60_000
                 return "success", f"{checkin_message or '野社签到状态已检查'}，{claim_message}"
             task["lastClaimAt"] = now_ms
             task["claimCompletedDate"] = today
             # 已领取状态同样放行联动抽卡，否则抽卡会一直等在"等待签到奖励领取完成"。
             task["claimJustCompleted"] = True
-            detail = f"：{claim_detail}" if claim_detail else ""
+            detail = f"：{reward_summary}" if reward_summary else ""
             return "success", f"{checkin_message or '野社签到状态已检查'}，{claim_message}{detail}"
 
         retry_count = bounded_config_int(task.get("claimRetryCount", 0), 0, 0) + 1
@@ -389,6 +396,7 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
         rotation = int(task.get("bookRotation", 0)) % max(len(books), 1)
         books = books[rotation:] + books[:rotation]
         completed = 0
+        completed_books: list[str] = []
         for book in books:
             if not isinstance(book, dict):
                 continue
@@ -411,11 +419,15 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             if business_error:
                 return "failed", f"上报阅读时长失败：{business_error}"
             completed += 1
+            completed_books.append(str(book.get("name") or book.get("bookName") or f"图书 {cloud_id}").strip())
         if completed:
             task["dailyReadDate"] = today
             task["dailyReadMinutes"] = used_today + duration_minutes
             task["bookRotation"] = rotation + completed
-        return ("success", f"云端自动阅读完成 {completed} 本，累计 {duration_minutes} 分钟") if completed else ("failed", "没有找到可阅读的图书")
+        if completed:
+            book_summary = "、".join(completed_books)
+            return "success", f"云端自动阅读完成 {completed} 本：{book_summary}；累计 {duration_minutes} 分钟"
+        return "failed", "没有找到可阅读的图书"
     return "failed", f"未知阅微任务类型：{task_type}"
 
 

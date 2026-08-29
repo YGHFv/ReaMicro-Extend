@@ -9,8 +9,16 @@ data class CloudTask(
     val credentialId: String,
     val status: String,
     val enabled: Boolean,
+    val timeOfDay: String,
+    val durationMinutes: Int,
+    val books: List<CloudTaskBook>,
     val nextRunAt: Long,
     val lastMessage: String,
+)
+
+data class CloudTaskBook(
+    val cloudBookId: Long,
+    val name: String,
 )
 
 data class ReaMicroCredential(
@@ -27,7 +35,7 @@ class CloudTaskManager(private val client: ApiServerClient) {
             .put("taskType", taskType)
             .put("schedule", JSONObject().put("intervalSeconds", scheduleSeconds.coerceAtLeast(60)))
             .put("request", request)
-        return parse(client.createTask(body))
+        return parseCloudTask(client.createTask(body))
     }
 
     fun createAutomation(
@@ -43,7 +51,7 @@ class CloudTaskManager(private val client: ApiServerClient) {
                 .put("timeOfDay", timeOfDay)
                 .put("timezoneOffsetMinutes", 480))
             .put("request", request.put("credentialId", credentialId))
-        return parse(client.createTask(body))
+        return parseCloudTask(client.createTask(body))
     }
 
     fun saveAutomation(
@@ -65,9 +73,9 @@ class CloudTaskManager(private val client: ApiServerClient) {
                 .put("enabled", enabled)
                 .put("schedule", schedule)
                 .put("request", taskRequest)
-            parse(client.createTask(body))
+            parseCloudTask(client.createTask(body))
         } else {
-            parse(client.configureTask(existing.id, JSONObject()
+            parseCloudTask(client.configureTask(existing.id, JSONObject()
                 .put("enabled", enabled)
                 .put("schedule", schedule)
                 .put("request", taskRequest)))
@@ -77,14 +85,14 @@ class CloudTaskManager(private val client: ApiServerClient) {
     fun list(): List<CloudTask> {
         val json = client.listTasks()
         val items = json.optJSONObject("data")?.optJSONArray("items") ?: JSONArray()
-        return (0 until items.length()).mapNotNull { items.optJSONObject(it)?.let(::parse) }
+        return (0 until items.length()).mapNotNull { items.optJSONObject(it)?.let(::parseCloudTask) }
     }
 
-    fun pause(id: String) = parse(client.taskAction(id, "pause"))
-    fun resume(id: String) = parse(client.taskAction(id, "resume"))
-    fun cancel(id: String) = parse(client.taskAction(id, "cancel"))
+    fun pause(id: String) = parseCloudTask(client.taskAction(id, "pause"))
+    fun resume(id: String) = parseCloudTask(client.taskAction(id, "resume"))
+    fun cancel(id: String) = parseCloudTask(client.taskAction(id, "cancel"))
 
-    fun runNow(id: String) = parse(client.taskAction(id, "run"))
+    fun runNow(id: String) = parseCloudTask(client.taskAction(id, "run"))
 
     fun credentials(): List<ReaMicroCredential> {
         val items = client.listReaMicroCredentials().optJSONObject("data")?.optJSONArray("items") ?: JSONArray()
@@ -119,17 +127,31 @@ class CloudTaskManager(private val client: ApiServerClient) {
         client.deleteReaMicroCredential(id)
     }
 
-    private fun parse(root: JSONObject): CloudTask {
-        val data = root.optJSONObject("data") ?: root
-        return CloudTask(
-            id = data.optString("id"),
-            taskType = data.optString("taskType"),
-            credentialId = data.optString("credentialId"),
-            status = data.optString("status"),
-            enabled = data.optBoolean("enabled", false),
-            nextRunAt = data.optLong("nextRunAt", 0L),
-            lastMessage = data.optString("lastMessage"),
+}
+
+internal fun parseCloudTask(root: JSONObject): CloudTask {
+    val data = root.optJSONObject("data") ?: root
+    val configuration = data.optJSONObject("configuration") ?: JSONObject()
+    val booksJson = configuration.optJSONArray("books") ?: JSONArray()
+    val books = (0 until booksJson.length()).mapNotNull { index ->
+        val item = booksJson.optJSONObject(index) ?: return@mapNotNull null
+        val cloudBookId = item.optLong("cloudBookId", item.optLong("bookId", 0L))
+        if (cloudBookId <= 0L) return@mapNotNull null
+        CloudTaskBook(
+            cloudBookId = cloudBookId,
+            name = item.optString("name"),
         )
     }
-
+    return CloudTask(
+        id = data.optString("id"),
+        taskType = data.optString("taskType"),
+        credentialId = data.optString("credentialId"),
+        status = data.optString("status"),
+        enabled = data.optBoolean("enabled", false),
+        timeOfDay = data.optJSONObject("schedule")?.optString("timeOfDay").orEmpty(),
+        durationMinutes = configuration.optInt("durationMinutes", 30).coerceIn(1, 720),
+        books = books,
+        nextRunAt = data.optLong("nextRunAt", 0L),
+        lastMessage = data.optString("lastMessage"),
+    )
 }

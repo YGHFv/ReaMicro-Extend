@@ -73,6 +73,7 @@ class CloudAutoReadTest(unittest.TestCase):
 
         self.assertEqual("success", result)
         self.assertIn("完成 1 本", message)
+        self.assertIn("测试图书", message)
         endpoints = [endpoint for endpoint, _ in self.calls]
         self.assertEqual([
             "rest/reader/get-read-record-list",

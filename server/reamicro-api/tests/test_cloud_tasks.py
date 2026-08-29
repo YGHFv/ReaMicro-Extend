@@ -50,12 +50,24 @@ class CloudTaskSecurityTest(unittest.TestCase):
             "id": "task_1",
             "owner": "account:alice",
             "taskType": "cloud_auto_read",
-            "requestEncrypted": crypto.encrypt_secret({"credentialId": "rea_1", "token": "secret-token"}),
+            "request": {"token": "legacy-plaintext-token"},
+            "requestEncrypted": crypto.encrypt_secret({
+                "credentialId": "rea_1",
+                "token": "secret-token",
+                "durationMinutes": 45,
+                "books": [{"bookId": 7, "name": "测试图书", "token": "book-secret"}],
+            }),
         }
         public = scheduler.public_task(task)
         self.assertNotIn("requestEncrypted", public)
         self.assertNotIn("secret-token", str(public))
+        self.assertNotIn("legacy-plaintext-token", str(public))
+        self.assertNotIn("book-secret", str(public))
         self.assertEqual(public["credentialId"], "rea_1")
+        self.assertEqual(public["configuration"], {
+            "durationMinutes": 45,
+            "books": [{"cloudBookId": 7, "name": "测试图书"}],
+        })
 
     def test_credential_isolation(self):
         state.save_credentials({
