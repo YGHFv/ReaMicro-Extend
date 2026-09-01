@@ -367,8 +367,8 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
         val books = apiServerEdit(
             activity,
             colors,
-            "自定义图书：每行 cloudBookId|书名；留空读取最近阅读",
-            task?.books?.joinToString("\n") { "${it.cloudBookId}|${it.name}" }.orEmpty(),
+            "自定义图书：每行 bookId|书名；留空读取最近阅读",
+            task?.books?.joinToString("\n") { "${it.bookId}|${it.name}" }.orEmpty(),
         ).apply {
             minLines = 3
             setSingleLine(false)
@@ -590,7 +590,6 @@ private fun parseCloudReadingBooks(raw: String): JSONArray {
             require(id > 0L) { "自定义图书 ID 必须大于 0" }
             put(
                 JSONObject()
-                    .put("cloudBookId", id)
                     .put("bookId", id)
                     .put("name", parts.getOrNull(1)?.trim().orEmpty()),
             )

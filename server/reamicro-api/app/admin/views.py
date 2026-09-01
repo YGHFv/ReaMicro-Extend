@@ -817,7 +817,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
                 f"<th>运行状态</th><th>最近结果</th><th>下次执行</th><th>操作</th></tr></thead><tbody>{task_table}</tbody></table></div></div>"
             )
         if section == "tasks":
-            book_example = '[{"cloudBookId":123,"bookId":123,"name":"书名"}]'
+            book_example = '[{"bookId":123,"name":"书名"}]'
             task_form = (
                 f"<div class='panel'><h2>创建云端任务</h2>"
                 f"<p class='muted'>同一所有者、同步密钥和任务类型只保留一个任务；重复创建会更新已有任务而不是新增。</p>"

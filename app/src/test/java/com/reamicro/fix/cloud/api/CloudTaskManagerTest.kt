@@ -27,7 +27,7 @@ class CloudTaskManagerTest {
                 "configuration": {
                   "durationMinutes": 45,
                   "dailyLimit": 0,
-                  "books": [{"cloudBookId": 7, "name": "测试图书"}]
+                  "books": [{"bookId": 7, "name": "测试图书"}]
                 },
                 "nextRunAt": 1234,
                 "lastMessage": "执行成功"
@@ -40,6 +40,20 @@ class CloudTaskManagerTest {
         assertEquals(0, task.dailyDrawLimit)
         assertEquals(listOf(CloudTaskBook(7, "测试图书")), task.books)
         assertEquals(true, task.enabled)
+    }
+
+    @Test
+    fun `parses legacy cloud book id as configured user book id`() {
+        val task = parseCloudTask(JSONObject("""
+            {
+              "taskType": "cloud_auto_read",
+              "configuration": {
+                "books": [{"cloudBookId": 7, "name": "旧版配置"}]
+              }
+            }
+        """.trimIndent()))
+
+        assertEquals(listOf(CloudTaskBook(7, "旧版配置")), task.books)
     }
 
     @Test

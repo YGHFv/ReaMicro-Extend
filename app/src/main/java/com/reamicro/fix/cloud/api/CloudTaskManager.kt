@@ -18,7 +18,7 @@ data class CloudTask(
 )
 
 data class CloudTaskBook(
-    val cloudBookId: Long,
+    val bookId: Long,
     val name: String,
 )
 
@@ -140,10 +140,10 @@ internal fun parseCloudTask(root: JSONObject): CloudTask {
     val booksJson = configuration.optJSONArray("books") ?: JSONArray()
     val books = (0 until booksJson.length()).mapNotNull { index ->
         val item = booksJson.optJSONObject(index) ?: return@mapNotNull null
-        val cloudBookId = item.optLong("cloudBookId", item.optLong("bookId", 0L))
-        if (cloudBookId <= 0L) return@mapNotNull null
+        val bookId = item.optLong("bookId", item.optLong("cloudBookId", 0L))
+        if (bookId <= 0L) return@mapNotNull null
         CloudTaskBook(
-            cloudBookId = cloudBookId,
+            bookId = bookId,
             name = item.optString("name"),
         )
     }

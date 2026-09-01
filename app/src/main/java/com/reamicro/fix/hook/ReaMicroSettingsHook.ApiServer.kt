@@ -259,7 +259,7 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
         val label = apiServerEdit(activity, colors, "凭据名称", currentCredential?.label?.ifBlank { "阅微账号" } ?: "阅微账号")
         val time = apiServerEdit(activity, colors, "每日执行时间，例如 00:05", "00:05")
         val duration = apiServerEdit(activity, colors, "云端阅读时长（分钟）", "30")
-        val customBook = apiServerEdit(activity, colors, "自定义图书：每行 cloudBookId|书名；留空读取最近阅读", "").apply {
+        val customBook = apiServerEdit(activity, colors, "自定义图书：每行 bookId|书名；留空读取最近阅读", "").apply {
             minLines = 3
             setSingleLine(false)
         }
@@ -431,7 +431,6 @@ private fun parseCloudReadingBooks(raw: String): org.json.JSONArray {
             val parts = line.split('|', limit = 2)
             val id = parts.first().trim().toLongOrNull() ?: error("自定义图书 ID 无效：${parts.first()}")
             put(org.json.JSONObject()
-                .put("cloudBookId", id)
                 .put("bookId", id)
                 .put("name", parts.getOrNull(1)?.trim().orEmpty()))
         }

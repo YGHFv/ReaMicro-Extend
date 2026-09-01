@@ -66,7 +66,7 @@ class CloudTaskSecurityTest(unittest.TestCase):
         self.assertEqual(public["credentialId"], "rea_1")
         self.assertEqual(public["configuration"], {
             "durationMinutes": 45,
-            "books": [{"cloudBookId": 7, "name": "测试图书"}],
+            "books": [{"bookId": 7, "name": "测试图书"}],
         })
 
     def test_credential_isolation(self):
@@ -553,7 +553,8 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertIn("csrf_token", page)
         # 自定义图书示例属于任务表单，此前是概览页上一段没有任何引用的隐藏 template。
         tasks_page = admin_views.admin_page(config, actor=actor, section="tasks")
-        self.assertIn("cloudBookId", tasks_page)
+        self.assertIn("bookId", tasks_page)
+        self.assertNotIn("cloudBookId", tasks_page)
         self.assertNotIn("cloud-book-example", page)
 
     def test_admin_navigation_uses_stable_clickable_paths(self):

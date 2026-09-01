@@ -311,11 +311,11 @@ def public_task(task: dict[str, Any], include_request: bool = False) -> dict[str
             "durationMinutes": min(720, bounded_config_int(request_value.get("durationMinutes", 30), 30, 1)),
             "books": [
                 {
-                    "cloudBookId": bounded_config_int(book.get("cloudBookId", book.get("bookId", 0)), 0, 0),
+                    "bookId": bounded_config_int(book.get("bookId", book.get("cloudBookId", 0)), 0, 0),
                     "name": str(book.get("name", ""))[:200],
                 }
                 for book in books
-                if isinstance(book, dict) and bounded_config_int(book.get("cloudBookId", book.get("bookId", 0)), 0, 0) > 0
+                if isinstance(book, dict) and bounded_config_int(book.get("bookId", book.get("cloudBookId", 0)), 0, 0) > 0
             ],
         }
     return value

@@ -449,6 +449,7 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
         return "success", f"签到奖励今日最终领取仍失败：{redact_message(str(claim_message))}"
     if task_type == "cloud_auto_read":
         books = request.get("books") if isinstance(request.get("books"), list) else []
+        uses_recent_books = not books
         if not books:
             recent_endpoint = str(request.get("recentEndpoint") or "rest/reader/get-read-record-list")
             status_code, record_body, raw = json_http_request(
@@ -483,15 +484,18 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
         for book in books:
             if not isinstance(book, dict):
                 continue
-            raw_cloud_id = book.get("cloudBookId") or book.get("bookId") or book.get("id")
+            raw_book_id = book.get("bookId")
+            if not uses_recent_books and raw_book_id in (None, ""):
+                # 兼容旧版自定义图书配置；最近阅读响应不得回退到公共云书 ID。
+                raw_book_id = book.get("cloudBookId")
             try:
-                cloud_id = int(str(raw_cloud_id).strip())
+                book_id = int(str(raw_book_id).strip())
             except (TypeError, ValueError):
                 continue
-            if cloud_id <= 0:
+            if book_id <= 0:
                 continue
             china_date = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
-            time_payload = {"list": [{"bookId": cloud_id, "date": china_date, "duration": duration_seconds, "verify": ""}]}
+            time_payload = {"list": [{"bookId": book_id, "date": china_date, "duration": duration_seconds, "verify": ""}]}
             time_endpoint = str(request.get("timeEndpoint") or "rest/reader/update-read-time-by-date")
             time_status, time_body, time_raw = json_http_request(base_url, token, time_payload, time_endpoint)
             if time_status in (401, 403, 429):
@@ -502,7 +506,7 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             if business_error:
                 return "failed", f"上报阅读时长失败：{business_error}"
             completed += 1
-            completed_books.append(str(book.get("name") or book.get("bookName") or f"图书 {cloud_id}").strip())
+            completed_books.append(str(book.get("name") or book.get("bookName") or f"图书 {book_id}").strip())
         if completed:
             task["dailyReadDate"] = today
             task["dailyReadMinutes"] = used_today + duration_minutes

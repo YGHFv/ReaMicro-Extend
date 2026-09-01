@@ -59,6 +59,7 @@ class CloudAutoReadTest(unittest.TestCase):
                     "message": "success",
                     "data": {"list": [{
                         "bookId": "123",
+                        "cloudBookId": "999",
                         "progress": 0.42,
                         "name": "测试图书",
                         "cfi": "epubcfi(/6/2!/4/1:0)",
@@ -81,6 +82,48 @@ class CloudAutoReadTest(unittest.TestCase):
         ], endpoints)
         self.assertNotIn("rest/reader/update-read-progress", endpoints)
         self.assertEqual(123, self.calls[1][1]["list"][0]["bookId"])
+
+    def test_recent_book_does_not_fall_back_to_public_cloud_book_id(self):
+        def fake(url, token, payload, endpoint="", timeout=45):
+            self.calls.append((endpoint, payload))
+            if endpoint == "rest/reader/get-read-record-list":
+                return 200, {
+                    "code": 0,
+                    "message": "success",
+                    "data": {"list": [{
+                        "cloudBookId": "999",
+                        "name": "缺少用户图书 ID",
+                    }]},
+                }, "{}"
+            self.fail(f"调用了未预期的阅微接口：{endpoint}")
+
+        executors.json_http_request = fake
+        result, message = executors.execute_reamicro_task(self.task())
+
+        self.assertEqual("failed", result)
+        self.assertEqual("没有找到可阅读的图书", message)
+        self.assertEqual(["rest/reader/get-read-record-list"], [endpoint for endpoint, _ in self.calls])
+
+    def test_legacy_custom_cloud_book_id_remains_compatible(self):
+        def fake(url, token, payload, endpoint="", timeout=45):
+            self.calls.append((endpoint, payload))
+            if endpoint == "rest/reader/update-read-time-by-date":
+                return 200, {"code": 0, "message": "success", "data": {}}, "{}"
+            self.fail(f"调用了未预期的阅微接口：{endpoint}")
+
+        task = self.task()
+        task["requestEncrypted"] = crypto.encrypt_secret({
+            "credentialId": "rea_1",
+            "durationMinutes": 30,
+            "books": [{"cloudBookId": "456", "name": "旧版自定义图书"}],
+        })
+        executors.json_http_request = fake
+        result, message = executors.execute_reamicro_task(task)
+
+        self.assertEqual("success", result)
+        self.assertIn("旧版自定义图书", message)
+        self.assertEqual(["rest/reader/update-read-time-by-date"], [endpoint for endpoint, _ in self.calls])
+        self.assertEqual(456, self.calls[0][1]["list"][0]["bookId"])
 
     def test_http_200_business_error_is_not_reported_as_empty_book_list(self):
         def fake(url, token, payload, endpoint="", timeout=45):
