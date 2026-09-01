@@ -73,7 +73,8 @@ class CloudAutoReadTest(unittest.TestCase):
         result, message = executors.execute_reamicro_task(self.task())
 
         self.assertEqual("success", result)
-        self.assertIn("完成 1 本", message)
+        self.assertIn("测试图书", message)
+        self.assertIn("30 分钟", message)
         self.assertIn("测试图书", message)
         endpoints = [endpoint for endpoint, _ in self.calls]
         self.assertEqual([

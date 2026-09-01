@@ -24,6 +24,7 @@ class CloudTaskNotificationDispatchTest {
             CloudTaskNotifications.EXTRA_TITLE,
             CloudTaskNotifications.EXTRA_TEXT,
             CloudTaskNotifications.EXTRA_RESULT,
+            CloudTaskNotifications.EXTRA_ITEMS,
         )
         assertEquals("extra 键名不能重复", keys.size, keys.toSet().size)
         assertTrue("extra 键名不能为空", keys.none(String::isBlank))
@@ -58,6 +59,14 @@ class CloudTaskNotificationDispatchTest {
         assertEquals(first, CloudTaskNotifications.notificationIdForTest("msg_1"))
         assertNotEquals(first, CloudTaskNotifications.notificationIdForTest("msg_2"))
         assertTrue("通知 ID 必须为正", first > 0)
+    }
+
+    @Test
+    fun `抽卡品质优先级从高到低稳定`() {
+        assertTrue(cloudTaskQualityPriorityForTest("RED") > cloudTaskQualityPriorityForTest("PURPLE"))
+        assertTrue(cloudTaskQualityPriorityForTest("PURPLE") > cloudTaskQualityPriorityForTest("BLUE"))
+        assertTrue(cloudTaskQualityPriorityForTest("BLUE") > cloudTaskQualityPriorityForTest("GREEN"))
+        assertTrue(cloudTaskQualityPriorityForTest("GREEN") > cloudTaskQualityPriorityForTest("GREY"))
     }
 
     @Test

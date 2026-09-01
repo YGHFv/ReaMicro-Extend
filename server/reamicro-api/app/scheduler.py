@@ -247,7 +247,7 @@ async def task_scheduler_loop() -> None:
                     enqueue_task_notification(task, result, message, finished_at)
                     linked_draw = await asyncio.to_thread(execute_linked_draw_task, tasks, task, finished_at)
                     if linked_draw:
-                        task["lastMessage"] = f"{message}；{linked_draw[1]}"
+                        task["lastMessage"] = message
                     changed = True
                     save_tasks(tasks)
                 finally:

@@ -102,22 +102,26 @@ class YesheCheckinClaimTest(unittest.TestCase):
         self.assertNotIn("rest/task/get-my-task-list", self._endpoints())
         self.assertNotIn("rest/task/receive-reward", self._endpoints())
         self.assertNotIn("rest/community/claim-literary-society-weekly-reward", self._endpoints())
-        self.assertIn("领取成功", message)
+        self.assertIn("奖励已领取", message)
 
     def test_reward_notification_contains_specific_rewards(self):
         self._stub()
-        _, message = executors.execute_reamicro_task(self._due_task())
-        self.assertIn("阅历 5 点", message)
-        self.assertIn("彩筹 3 枚", message)
-        self.assertIn("端砚", message)
+        task = self._due_task()
+        _, message = executors.execute_reamicro_task(task)
+        self.assertIn("阅历 x5", message)
+        self.assertIn("彩筹 x3", message)
+        self.assertIn("端砚 x1", message)
 
     def test_reward_notification_contains_prop_quality(self):
         self._stub(lore={"code": 0, "data": {
             "id": 99, "isFinish": True, "claimed": False,
             "propName": "端砚", "propQuality": "珍品",
         }})
-        _, message = executors.execute_reamicro_task(self._due_task())
-        self.assertIn("端砚（珍品）", message)
+        task = self._due_task()
+        _, message = executors.execute_reamicro_task(task)
+        self.assertIn("端砚 x1", message)
+        self.assertNotIn("珍品", message)
+        self.assertEqual("PURPLE", task["notificationItems"][0]["quality"])
 
     # ---------- 三类非失败情形 ----------
 
@@ -128,8 +132,8 @@ class YesheCheckinClaimTest(unittest.TestCase):
         task = self._due_task()
         result, message = executors.execute_reamicro_task(task)
         self.assertEqual("success", result)
-        self.assertIn("此前已领取", message)
-        self.assertIn("阅历 5 点", message)
+        self.assertIn("奖励已领取", message)
+        self.assertIn("阅历 x5", message)
         self.assertEqual([], self._completed_lore_ids(), "claimed=true 不应重复调用领取接口")
         self.assertTrue(task.get("claimJustCompleted"), "已领取也要放行联动抽卡")
 
@@ -138,7 +142,7 @@ class YesheCheckinClaimTest(unittest.TestCase):
         task = self._due_task()
         result, message = executors.execute_reamicro_task(task)
         self.assertEqual("success", result)
-        self.assertIn("此前已领取", message)
+        self.assertIn("奖励已领取", message)
         self.assertEqual(0, task["claimRetryCount"])
         self.assertTrue(task.get("claimJustCompleted"))
 
@@ -175,7 +179,7 @@ class YesheCheckinClaimTest(unittest.TestCase):
         result, message = executors.execute_reamicro_task(task)
         self.assertEqual("success", result)
         self.assertEqual("", task["claimCompletedDate"], "跨天必须清掉当日领取标记")
-        self.assertIn("8 小时后自动领取", message)
+        self.assertIn("奖励待领取", message)
 
     def test_same_day_second_run_skips_claim(self):
         self._stub()
@@ -196,8 +200,8 @@ class YesheCheckinClaimTest(unittest.TestCase):
         task = self._due_task()
         result, message = executors.execute_reamicro_task(task)
         self.assertEqual("success", result)
-        self.assertIn("第 1/3 次", message)
-        self.assertIn("5 分钟后自动重试", message)
+        self.assertNotIn("第 1/3 次", message)
+        self.assertIn("5 分钟后重试", message)
         self.assertEqual(1, task["claimRetryCount"])
         self.assertIn("nextRunAtOverride", task)
 
@@ -214,7 +218,8 @@ class YesheCheckinClaimTest(unittest.TestCase):
         task = self._due_task()
         result, message = executors.execute_reamicro_task(task)
         self.assertEqual("success", result)
-        self.assertIn("第 1/3 次", message)
+        self.assertNotIn("第 1/3 次", message)
+        self.assertIn("5 分钟后重试", message)
         self.assertEqual(["99"], self._completed_lore_ids())
 
     def test_auth_failure_pauses_on_claim(self):
@@ -234,7 +239,7 @@ class YesheCheckinClaimTest(unittest.TestCase):
         )
         result, message = executors.execute_reamicro_task(task)
         self.assertEqual("success", result)
-        self.assertIn("8 小时后自动领取", message)
+        self.assertIn("奖励待领取", message)
         self.assertEqual([], self._completed_lore_ids())
 
     def test_response_end_time_controls_claim_schedule(self):
@@ -246,7 +251,7 @@ class YesheCheckinClaimTest(unittest.TestCase):
         task = self._task(lastCheckinDate="")
         result, message = executors.execute_reamicro_task(task)
         self.assertEqual("success", result)
-        self.assertIn("8 小时后自动领取", message)
+        self.assertIn("奖励待领取", message)
         self.assertEqual(end_seconds * 1000, task["claimDueAt"])
         self.assertEqual(end_seconds * 1000, task["nextRunAtOverride"])
 

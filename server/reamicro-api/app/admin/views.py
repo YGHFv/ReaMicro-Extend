@@ -103,7 +103,7 @@ def _admin_task_detail(task: dict[str, Any]) -> str:
     time_of_day = str(schedule.get("timeOfDay", "")).strip()
     parts: list[str] = []
     if time_of_day:
-        parts.append(f"执行时间：每日 {time_of_day}")
+        parts.append(f"每日 {time_of_day}")
     try:
         request = decrypt_secret(str(task.get("requestEncrypted", ""))) if task.get("requestEncrypted") else {}
     except Exception:
@@ -111,32 +111,46 @@ def _admin_task_detail(task: dict[str, Any]) -> str:
     if not isinstance(request, dict):
         request = {}
     if task_type == "yeshe_checkin":
-        parts.append("奖励领取：每日轶闻完成后按返回的结束时间自动领取")
-        if task.get("lastCheckinAt"):
-            parts.append(f"上次签到：{_admin_time_label(task.get('lastCheckinAt'))}")
-        if task.get("lastClaimAt"):
-            parts.append(f"上次领取：{_admin_time_label(task.get('lastClaimAt'))}")
-        claimed_date = str(task.get("claimCompletedDate", ""))
-        if claimed_date:
-            parts.append(f"奖励领取日期：{claimed_date}")
+        parts.append("按返回时间领取奖励")
         retry_count = bounded_config_int(task.get("claimRetryCount", 0), 0, 0)
         if retry_count:
-            parts.append(f"领取重试：已重试 {retry_count} 次")
+            parts.append(f"已重试 {retry_count} 次")
     elif task_type == "yeshe_draw_card":
-        parts.append("触发方式：签到奖励领取完成后")
+        parts.append("签到领奖后触发")
         daily_limit = min(20, bounded_config_int(request.get("dailyLimit", 3), 3, 0))
-        parts.append("每日抽卡上限：抽完全部彩筹" if daily_limit == 0 else f"每日抽卡上限：{daily_limit} 次")
+        parts.append("抽完全部彩筹" if daily_limit == 0 else f"每日最多 {daily_limit} 抽")
     elif task_type == "cloud_auto_read":
-        parts.append(f"阅读时长：{int(request.get('durationMinutes', 30) or 30)} 分钟")
+        parts.append(f"{int(request.get('durationMinutes', 30) or 30)} 分钟")
         books = request.get("books") if isinstance(request.get("books"), list) else []
         if books:
             names = [str(item.get("name") or item.get("bookName") or item.get("title") or item.get("bookId") or "未命名") for item in books if isinstance(item, dict)]
-            parts.append("阅读图书：" + "、".join(names[:3]) + (" 等" if len(names) > 3 else ""))
+            parts.append("、".join(names[:3]) + (" 等" if len(names) > 3 else ""))
         else:
-            parts.append(f"阅读图书：最近阅读记录（{int(request.get('recentLimit', 1) or 1)} 本）")
+            parts.append(f"最近阅读 {int(request.get('recentLimit', 1) or 1)} 本")
     elif task_type == "http":
-        parts.append(f"请求：{str(request.get('method', 'GET')).upper()} {str(request.get('url', ''))[:80]}")
-    return "；".join(parts) or "未配置详细参数"
+        parts.append(f"{str(request.get('method', 'GET')).upper()} {str(request.get('url', ''))[:80]}")
+    return " · ".join(parts) or "未配置"
+
+
+def _admin_result_items(items: Any) -> str:
+    """渲染通知物品；品质只用于文字颜色，不额外显示枚举值。"""
+    if not isinstance(items, list):
+        return ""
+    supported = {"red", "orange", "gold", "yellow", "purple", "blue", "green", "grey", "gray"}
+    parts: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        quality = str(item.get("quality", "")).strip().lower()
+        quality_class = f" quality-{quality}" if quality in supported else ""
+        count = bounded_config_int(item.get("count", 1), 1, 1)
+        parts.append(
+            f"<span class='result-item{quality_class}'>{html.escape(name)} x{count}</span>"
+        )
+    return f"<div class='result-items'>{''.join(parts)}</div>" if parts else ""
 
 
 def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: str = "", csrf_token: str = "") -> str:
@@ -206,7 +220,7 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
             f"<td>{status_badge(rule['status'], RULE_STATUS_LABELS.get(rule['status'], rule['status']))}"
             f"<small>{esc(rule_detail)}</small></td>"
             f"<td>{esc(_admin_channel_label(item.get('channel', 'stable')))}<small>{esc(dependency)}</small></td>"
-            f"<td class='actions'>{actions}</td></tr>"
+            f"<td class='actions'><div class='action-group'>{actions}</div></td></tr>"
         )
     return "".join(rows) or f"<tr><td colspan='{9 if can_write else 8}' class='empty'>没有匹配的内容包</td></tr>"
 
@@ -423,9 +437,12 @@ def _admin_presence_panel() -> str:
     for item in notifications[:30]:
         delivered = bounded_config_int(item.get("deliveredAt", 0), 0, 0)
         result = str(item.get("result", ""))
+        notification_detail = _admin_result_items(item.get("items"))
+        if not notification_detail:
+            notification_detail = f"<small>{esc(item.get('message', '') or '无消息内容')}</small>"
         notification_rows.append(
             f"<tr><td>{esc(item.get('title', '') or '任务消息')}"
-            f"<small>{esc(item.get('message', '') or '无消息内容')}</small></td>"
+            f"{notification_detail}</td>"
             f"<td>{esc(_admin_owner_label(item.get('owner', '')))}</td>"
             f"<td><span class='status tone-{status_tone(result)}'>{esc(_admin_result_label(result))}</span></td>"
             f"<td><span class='status tone-{'ok' if delivered else 'warn'}'>{'已送达' if delivered else '待发送'}</span>"
@@ -436,8 +453,7 @@ def _admin_presence_panel() -> str:
     pending_total = sum(1 for item in notifications if not item.get("deliveredAt"))
     return (
         f"<div class='panel'><h2>模块在线状态</h2>"
-        f"<p class='muted'>阅微在前台时模块每 5 分钟上报一次心跳，另外在零点和云端任务完成后由系统闹钟唤醒上报；服务器按 10 分钟租约判断在线。"
-        f"消息在心跳响应里下发，模块显示成功后回执，未回执的会保留到下次在线。</p>"
+        f"<p class='hint'>模块心跳用于判断在线并下发待发送通知，收到回执后标记送达。</p>"
         f"<div class='table-wrap'><table><thead><tr><th>来源账号</th><th>连接状态</th><th>模块版本</th><th>上报来源</th><th>最近心跳</th></tr></thead>"
         f"<tbody>{presence_table}</tbody></table></div></div>"
         f"<div class='panel'><h2>任务消息队列</h2>"
@@ -673,14 +689,14 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
                 f"<button class='button subtle danger' name='action' value='delete' type='submit'>删除</button></form>"
             )
         credential_rows.append(
-            f"<tr><td><strong>{esc(credential.get('label', '阅微账号'))}</strong><small><code>{esc(credential_id)}</code></small></td>"
-            f"<td>{esc(credential.get('accountId', '') or '未提供')}</td>"
-            f"<td>{esc(_admin_owner_label(owner))}<small>{esc(owner_display)}</small></td>"
-            f"<td><span class='status tone-{status_tone(health)}'>{esc(_admin_health_label(health))}</span>"
+            f"<tr><td data-label='密钥'><strong>{esc(credential.get('label', '阅微账号'))}</strong><small><code>{esc(credential_id)}</code></small></td>"
+            f"<td data-label='阅微账号 ID'>{esc(credential.get('accountId', '') or '未提供')}</td>"
+            f"<td data-label='来源账号'>{esc(_admin_owner_label(owner))}<small>{esc(owner_display)}</small></td>"
+            f"<td data-label='验证状态'><span class='status tone-{status_tone(health)}'>{esc(_admin_health_label(health))}</span>"
             f"<small>{esc(credential.get('lastVerifyMessage', '') or '暂无验证说明')}</small></td>"
-            f"<td>{esc(_admin_time_label(credential.get('updatedAt', 0), '未记录'))}"
+            f"<td data-label='更新时间'>{esc(_admin_time_label(credential.get('updatedAt', 0), '未记录'))}"
             f"<small>最近使用 {esc(_admin_time_label(credential.get('lastUsedAt', 0), '从未使用'))}</small></td>"
-            f"<td class='actions'>{credential_actions or no_permission_note}</td></tr>"
+            f"<td class='actions' data-label='操作'>{credential_actions or no_permission_note}</td></tr>"
         )
     credential_table = "".join(credential_rows) or "<tr><td colspan='6' class='empty'>暂无模块上传的阅微同步密钥</td></tr>"
     credential_options = "<option value=''>不使用凭据</option>" + "".join(
@@ -707,20 +723,23 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
                 task_actions = f"<form class='inline' method='post' action='/admin/tasks/action'>{csrf_html}<input type='hidden' name='task_id' value='{task_id}'>{''.join(buttons)}</form>"
         last_result = str(task.get("lastResult", ""))
         result_note = f"<small>{esc(_admin_result_label(last_result))}</small>" if last_result else ""
-        task_rows.append(
-            f"<tr><td><strong>{esc(_admin_task_label(task.get('taskType', '')))}</strong>"
-            f"<small>{esc(_admin_time_label(task.get('createdAt'), '未记录'))} 创建</small></td>"
-            f"<td>{esc(_admin_owner_label(task.get('owner', '')))}</td>"
-            f"<td>{esc(task_credential_id(task) or '未关联')}</td>"
-            f"<td>{esc(_admin_task_detail(task))}</td>"
-            f"<td><span class='status tone-{status_tone(task_status)}'>{esc(_admin_task_status_label(task_status))}</span>"
-            f"<small>{'已启用' if task.get('enabled', True) else '已停用'}</small></td>"
-            f"<td>{esc(task.get('lastMessage', '') or '暂无执行记录')}{result_note}</td>"
-            f"<td>{esc(_admin_time_label(task.get('nextRunAt', 0)))}"
-            f"<small>{esc(_admin_time_detail(task.get('nextRunAt', 0)))}</small></td>"
-            f"<td class='actions'><a class='button subtle' href='/admin/tasks/{task_id}/logs'>日志</a> {task_actions}</td></tr>"
+        result_items = _admin_result_items(task.get("lastDrawItems"))
+        result_text = result_items or esc(task.get("lastMessage", "") or "暂无执行记录")
+        next_run = (
+            "签到领奖后触发"
+            if task.get("taskType") == "yeshe_draw_card"
+            else _admin_time_label(task.get("nextRunAt", 0))
         )
-    task_table = "".join(task_rows) or "<tr><td colspan='8' class='empty'>暂无云端任务</td></tr>"
+        task_rows.append(
+            f"<tr><td data-label='任务 / 账号'><strong>{esc(_admin_task_label(task.get('taskType', '')))}</strong>"
+            f"<small>{esc(_admin_owner_label(task.get('owner', '')))} · {esc(task_credential_id(task) or '未关联密钥')}</small></td>"
+            f"<td class='task-summary' data-label='配置'>{esc(_admin_task_detail(task))}</td>"
+            f"<td data-label='状态 / 下次执行'><span class='status tone-{status_tone(task_status)}'>{esc(_admin_task_status_label(task_status))}</span>"
+            f"<small>{'已启用' if task.get('enabled', True) else '已停用'} · 下次 {esc(next_run)}</small></td>"
+            f"<td class='result-text' data-label='最近结果'>{result_text}{result_note}</td>"
+            f"<td class='actions' data-label='操作'><a class='button subtle' href='/admin/tasks/{task_id}/logs'>日志</a> {task_actions}</td></tr>"
+        )
+    task_table = "".join(task_rows) or "<tr><td colspan='5' class='empty'>暂无云端任务</td></tr>"
     if section in {"overview", "packages", *runtime.PACKAGE_KINDS}:
         selected = section if section in runtime.PACKAGE_KINDS else ""
         visible = [item for item in records if not selected or item.get("kind") == selected]
@@ -786,10 +805,9 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
                     f"<button class='button subtle' type='submit'>检测全部规则</button></form>"
                 )
         content += (
-            f"<form class='toolbar' method='get' action='{admin_section_path(section)}'>"
+            f"<div class='toolbar'><form class='search-form' method='get' action='{admin_section_path(section)}'>"
             f"<input name='q' value='{esc(query)}' placeholder='搜索名称、包 ID、版本或别名'>"
-            f"<button class='button' type='submit'>搜索</button>{clear_button}{batch_check}"
-            f"</form>"
+            f"<button class='button' type='submit'>搜索</button>{clear_button}</form>{batch_check}</div>"
             f"{batch_bar}"
             f"<div class='table-wrap'><table><thead><tr>{check_head}<th>类型 / 来源</th><th>内容</th>"
             f"<th>版本 / 构建时间</th><th>状态</th><th>地址可用性</th><th>规则可用性</th><th>渠道 / 依赖</th><th>操作</th></tr></thead>"
@@ -808,39 +826,50 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
                 f"<div><strong>{sum(1 for value in all_tasks.values() if value.get('status') == 'failed')}</strong><span>执行失败任务</span></div>"
                 f"</div>"
                 f"<div class='panel'><h2>阅微同步密钥</h2>"
-                f"<p class='muted'>密钥只保存加密密文，不显示原文。一个阅微账号 ID 对应一个同步密钥；重新同步会更新该账号的原记录。"
-                f"删除密钥会自动暂停依赖它的任务。</p>"
-                f"<div class='table-wrap'><table><thead><tr><th>密钥名称</th><th>阅微账号 ID</th><th>来源账号</th>"
+                f"<p class='hint'>每个阅微账号只保留一个加密密钥；删除后依赖任务会自动暂停。</p>"
+                f"<div class='table-wrap'><table class='responsive-table'><thead><tr><th>密钥名称</th><th>阅微账号 ID</th><th>来源账号</th>"
                 f"<th>验证状态</th><th>更新 / 使用时间</th><th>操作</th></tr></thead><tbody>{credential_table}</tbody></table></div></div>"
                 f"<div class='panel'><h2>任务运行状态</h2>"
-                f"<div class='table-wrap'><table><thead><tr><th>任务</th><th>来源账号</th><th>同步密钥 ID</th><th>任务详情</th>"
-                f"<th>运行状态</th><th>最近结果</th><th>下次执行</th><th>操作</th></tr></thead><tbody>{task_table}</tbody></table></div></div>"
+                f"<div class='table-wrap'><table class='task-table responsive-table'><thead><tr><th>任务 / 账号</th><th>配置</th>"
+                f"<th>状态 / 下次执行</th><th>最近结果</th><th>操作</th></tr></thead><tbody>{task_table}</tbody></table></div></div>"
             )
         if section == "tasks":
             book_example = '[{"bookId":123,"name":"书名"}]'
             task_form = (
                 f"<div class='panel'><h2>创建云端任务</h2>"
-                f"<p class='muted'>同一所有者、同步密钥和任务类型只保留一个任务；重复创建会更新已有任务而不是新增。</p>"
-                f"<form method='post' action='/admin/tasks/create'>{csrf_html}"
-                f"<div class='grid-2'>"
-                f"<label>任务类型<select name='task_type'><option value='yeshe_checkin'>野社零点签到</option>"
+                f"<p class='hint'>选择任务类型后只显示相关配置；同账号同类型再次保存会更新原任务。</p>"
+                f"<form id='task-create-form' method='post' action='/admin/tasks/create'>{csrf_html}"
+                f"<div class='form-grid'>"
+                f"<label>任务类型<select name='task_type' id='task-type'><option value='yeshe_checkin'>野社零点签到</option>"
                 f"<option value='yeshe_draw_card'>野社自动抽卡</option><option value='cloud_auto_read'>云端自动阅读</option>"
                 f"<option value='http'>通用 HTTPS 请求</option></select></label>"
-                f"<label>每日执行时间（仅签到和阅读，HH:MM）<input name='time_of_day' value='00:05'></label>"
-                f"<label>同步密钥<select name='credential_id'>{credential_options}</select></label>"
+                f"<label class='task-field' data-task-types='yeshe_checkin,cloud_auto_read'>每日执行时间<input name='time_of_day' type='time' value='00:05'></label>"
+                f"<label class='task-field' data-task-types='yeshe_checkin,yeshe_draw_card,cloud_auto_read'>同步密钥<select name='credential_id'>{credential_options}</select></label>"
                 # 非 http 任务的归属跟随所选同步密钥，这里只作为 http 任务的兜底归属。
-                f"<label>任务所有者（仅自定义 HTTP 任务使用；阅微任务自动跟随所选同步密钥）"
-                f"<input name='owner' value='admin'></label>"
-                f"<label>每日抽卡上限（0-20，0 表示抽完全部彩筹）<input name='daily_limit' type='number' min='0' max='20' value='3'></label>"
-                f"<label>阅读时长（分钟，1-720）<input name='duration_minutes' type='number' min='1' max='720' value='30'></label>"
-                f"<label>最近阅读取用数量（1-20）<input name='recent_limit' type='number' min='1' max='20' value='1'></label>"
+                f"<label class='task-field' data-task-types='http'>任务所有者<input name='owner' value='admin'></label>"
+                f"<label class='task-field' data-task-types='yeshe_draw_card'>每日抽卡上限<input name='daily_limit' type='number' min='0' max='20' value='3'><small>0 表示抽完全部彩筹</small></label>"
+                f"<label class='task-field' data-task-types='cloud_auto_read'>阅读时长（分钟）<input name='duration_minutes' type='number' min='1' max='720' value='30'></label>"
+                f"<label class='task-field' data-task-types='cloud_auto_read'>最近阅读数量<input name='recent_limit' type='number' min='1' max='20' value='1'></label>"
+                f"<label class='task-field' data-task-types='cloud_auto_read'>每次阅读图书数<input name='book_limit' type='number' min='1' max='10' value='1'></label>"
+                f"<label class='task-field' data-task-types='http'>执行间隔（秒）<input name='interval_seconds' type='number' min='60' value='86400'></label>"
+                f"<label class='task-field' data-task-types='http'>请求方法<select name='request_method'><option>POST</option><option>GET</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select></label>"
+                f"<label class='task-field' data-task-types='http'>请求地址<input name='request_url' type='url' placeholder='https://example.com/api'></label>"
                 f"</div>"
-                f"<label>自定义图书 JSON（留空则读取阅微最近阅读记录）"
+                f"<label class='task-field' data-task-types='cloud_auto_read'>自定义图书 JSON"
                 f"<textarea name='request_body' placeholder='{html.escape(book_example, quote=True)}'></textarea></label>"
-                f"<p class='muted flush'>自定义图书格式示例：<code>{html.escape(book_example)}</code></p>"
-                f"<button class='button' type='submit'>创建任务</button></form></div>"
+                f"<div class='task-field form-grid' data-task-types='http'>"
+                f"<label>请求头 JSON<textarea class='textarea-sm' name='request_headers' placeholder='{{}}'>{{}}</textarea></label>"
+                f"<label>请求体<textarea class='textarea-sm' name='request_body'></textarea></label></div>"
+                f"<div class='form-actions'><button class='button' type='submit'>保存任务</button></div></form></div>"
             )
-            content = f"<div class='page-head'><div><p class='eyebrow'>自动化</p><h1>云端任务</h1><p class='muted'>配置、查看和控制自动阅读、签到、抽卡任务。每个阅微账号只保留一个同步密钥，重新同步会更新原密钥。</p></div></div>{task_credentials}{task_form}"
+            task_script = (
+                "<script>(()=>{const select=document.getElementById('task-type');if(!select)return;"
+                "const sync=()=>document.querySelectorAll('[data-task-types]').forEach(node=>{"
+                "const active=node.dataset.taskTypes.split(',').includes(select.value);node.hidden=!active;"
+                "node.querySelectorAll('input,textarea,select').forEach(input=>input.disabled=!active)});"
+                "select.addEventListener('change',sync);sync()})();</script>"
+            )
+            content = f"<div class='page-head'><div><p class='eyebrow'>自动化</p><h1>云端任务</h1><p class='muted'>管理自动阅读、签到、抽卡与自定义请求。</p></div></div>{task_credentials}{task_form}{task_script}"
         elif section == "settings":
             content = _admin_settings_content(config, actor, csrf_html)
         else:

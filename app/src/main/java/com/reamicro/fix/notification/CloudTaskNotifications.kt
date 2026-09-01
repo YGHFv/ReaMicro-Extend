@@ -27,6 +27,7 @@ object CloudTaskNotifications {
     const val EXTRA_TITLE = "title"
     const val EXTRA_TEXT = "text"
     const val EXTRA_RESULT = "result"
+    const val EXTRA_ITEMS = "items"
 
     const val MODULE_PACKAGE_NAME = "com.reamicro.fix"
     const val RECEIVER_CLASS = "com.reamicro.fix.notification.CloudTaskNotificationReceiver"
@@ -35,7 +36,7 @@ object CloudTaskNotifications {
     private const val LOG_TAG = "ReaMicroNotify"
 
     /** 构造投递用的 Intent；调用方再决定走广播还是 Activity。 */
-    fun intent(messageId: String, title: String, text: String, result: String): Intent =
+    fun intent(messageId: String, title: String, text: String, result: String, itemsJson: String = ""): Intent =
         Intent(ACTION_POST).apply {
             addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
             addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
@@ -43,6 +44,7 @@ object CloudTaskNotifications {
             putExtra(EXTRA_TITLE, title)
             putExtra(EXTRA_TEXT, text)
             putExtra(EXTRA_RESULT, result)
+            putExtra(EXTRA_ITEMS, itemsJson)
         }
 
     fun hasPermission(context: Context): Boolean =
@@ -58,6 +60,7 @@ object CloudTaskNotifications {
         val messageId = intent.getStringExtra(EXTRA_ID).orEmpty().ifBlank { return false }
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { "云端任务消息" }
         val text = intent.getStringExtra(EXTRA_TEXT).orEmpty().ifBlank { "任务状态已更新" }
+        val displayText = cloudTaskNotificationText(text, intent.getStringExtra(EXTRA_ITEMS).orEmpty())
         if (!hasPermission(context)) {
             ModuleAndroidLog.legacy(LOG_TAG, "cloud task notification permission denied source=$source")
             return false
@@ -78,8 +81,8 @@ object CloudTaskNotifications {
             builder
                 .setSmallIcon(R.drawable.ic_notification_reamicro)
                 .setContentTitle(title)
-                .setContentText(text)
-                .setStyle(Notification.BigTextStyle().bigText(text))
+                .setContentText(displayText)
+                .setStyle(Notification.BigTextStyle().bigText(displayText))
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(true)
             // 用消息 ID 派生通知 ID，同一条消息重复投递只会覆盖而不是堆叠。

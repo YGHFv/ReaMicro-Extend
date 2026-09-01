@@ -273,17 +273,24 @@ def merge_duplicate_credentials() -> int:
 def enqueue_task_notification(task: dict[str, Any], result: str, message: str, finished_at: int) -> str:
     notification_id = "msg_" + secrets.token_hex(10)
     items = load_notifications()
-    items[notification_id] = {
+    compact_message = " ".join(str(message).split())
+    if len(compact_message) > 220:
+        compact_message = compact_message[:217].rstrip() + "..."
+    notification = {
         "id": notification_id,
         "owner": str(task.get("owner", "")),
         "taskId": str(task.get("id", "")),
         "taskType": str(task.get("taskType", "")),
         "result": result,
-        "title": _task_title_label(task.get("taskType", "")) + ("执行完成" if result == "success" else "执行异常"),
-        "message": message,
+        "title": _task_title_label(task.get("taskType", "")) + ("" if result == "success" else "异常"),
+        "message": compact_message,
         "createdAt": finished_at,
         "deliveredAt": 0,
     }
+    result_items = task.get("notificationItems")
+    if isinstance(result_items, list) and result_items:
+        notification["items"] = [dict(item) for item in result_items if isinstance(item, dict)]
+    items[notification_id] = notification
     # 每个用户最多保留最近 200 条，防止长期离线无限增长。
     owned = sorted((item for item in items.values() if item.get("owner") == task.get("owner")), key=lambda item: int(item.get("createdAt", 0)), reverse=True)
     for expired in owned[200:]:

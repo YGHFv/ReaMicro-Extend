@@ -51,7 +51,8 @@ object CloudTaskNotificationPoller {
                 val title = item.optString("title").ifBlank { "云端任务消息" }
                 val message = item.optString("message").ifBlank { "任务状态已更新" }
                 val result = item.optString("result")
-                if (show(appContext, id, title, message, result)) acknowledged += id
+                val resultItems = item.optJSONArray("items")?.toString().orEmpty()
+                if (show(appContext, id, title, message, result, resultItems)) acknowledged += id
             }
             // 只回执真正投出去的消息；投递失败的留到下次在线重发，避免消息被静默吞掉。
             if (acknowledged.isNotEmpty()) client.acknowledgeNotifications(acknowledged)
@@ -76,8 +77,15 @@ object CloudTaskNotificationPoller {
      * 3. 广播被后台策略拦掉 → 拉起模块的无界面 Activity，它还能主动申请通知权限；
      * 4. 全都失败 → Toast，至少让用户看到一次。
      */
-    private fun show(context: Context, id: String, title: String, message: String, result: String): Boolean {
-        val intent = CloudTaskNotifications.intent(id, title, message, result)
+    private fun show(
+        context: Context,
+        id: String,
+        title: String,
+        message: String,
+        result: String,
+        resultItems: String,
+    ): Boolean {
+        val intent = CloudTaskNotifications.intent(id, title, message, result, resultItems)
         if (context.packageName == CloudTaskNotifications.MODULE_PACKAGE_NAME) {
             if (CloudTaskNotifications.post(context, intent, source = "module-process")) return true
         } else {

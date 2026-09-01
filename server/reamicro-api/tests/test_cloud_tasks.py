@@ -141,11 +141,26 @@ class CloudTaskSecurityTest(unittest.TestCase):
         self.assertEqual(set(state.load_tasks()), {"task_new", "task_other"})
 
     def test_task_notification_waits_for_acknowledgement(self):
-        task = {"id": "task_1", "owner": "host:3", "taskType": "yeshe_checkin"}
+        task = {
+            "id": "task_1",
+            "owner": "host:3",
+            "taskType": "yeshe_checkin",
+            "notificationItems": [{"name": "端砚", "quality": "RED", "count": 1}],
+        }
         notification_id = state.enqueue_task_notification(task, "success", "签到完成", 1000)
         item = state.load_notifications()[notification_id]
         self.assertEqual(item["owner"], "host:3")
         self.assertEqual(item["deliveredAt"], 0)
+        self.assertEqual("野社零点签到", item["title"])
+        self.assertEqual(task["notificationItems"], item["items"])
+
+    def test_task_notification_compacts_whitespace_and_long_text(self):
+        task = {"id": "task_1", "owner": "host:3", "taskType": "http"}
+        notification_id = state.enqueue_task_notification(task, "failed", "请求失败\n\n" + "详情" * 150, 1000)
+        item = state.load_notifications()[notification_id]
+        self.assertNotIn("\n", item["message"])
+        self.assertLessEqual(len(item["message"]), 220)
+        self.assertTrue(item["message"].endswith("..."))
 
     def test_presence_storage_records_online_lease(self):
         state.save_presence({"host:3": {"owner": "host:3", "lastSeenAt": 1000, "onlineUntil": 601000}})
@@ -170,9 +185,9 @@ class CloudTaskSecurityTest(unittest.TestCase):
             "requestEncrypted": crypto.encrypt_secret({"dailyLimit": 1}),
         }
         detail = admin_views._admin_task_detail(task)
-        self.assertIn("签到奖励领取完成后", detail)
-        self.assertIn("1 次", detail)
-        self.assertNotIn("执行时间：每日", detail)
+        self.assertIn("签到领奖后触发", detail)
+        self.assertIn("1 抽", detail)
+        self.assertNotIn("每日 00", detail)
 
     def test_draw_task_public_configuration_supports_exhaust_mode(self):
         task = {
@@ -281,7 +296,7 @@ class DrawCardExecutorTest(unittest.TestCase):
         executors.json_http_request = request
         return calls
 
-    def test_default_limit_draws_three_times_and_reports_each_result(self):
+    def test_default_limit_draws_three_times_and_reports_aggregated_sorted_result(self):
         calls = self.stub_responses([
             self.wish_response(("端砚", "RED")),
             self.wish_response(("阅历", "GREEN")),
@@ -296,9 +311,10 @@ class DrawCardExecutorTest(unittest.TestCase):
         self.assertTrue(all(call[1] == "rest/community/wish" for call in calls))
         self.assertTrue(all(call[2] == {"count": 1} for call in calls))
         self.assertEqual(3, task["dailyCounter"])
-        self.assertIn("第 1 次：端砚（RED）", message)
-        self.assertIn("第 2 次：阅历（GREEN）", message)
-        self.assertIn("第 3 次：花笺（BLUE）", message)
+        self.assertEqual("端砚 x1、花笺 x1、阅历 x1", message)
+        self.assertEqual(["RED", "BLUE", "GREEN"], [item["quality"] for item in task["lastDrawItems"]])
+        self.assertNotIn("第 1 次", message)
+        self.assertNotIn("（", message)
 
     def test_finite_limit_only_draws_remaining_daily_count(self):
         calls = self.stub_responses([self.wish_response(("端砚", "GREY"))])
@@ -310,7 +326,7 @@ class DrawCardExecutorTest(unittest.TestCase):
         self.assertEqual("success", result)
         self.assertEqual(1, len(calls))
         self.assertEqual(3, task["dailyCounter"])
-        self.assertIn("今日 3/3", message)
+        self.assertEqual("端砚 x1", message)
 
     def test_finite_limit_uses_nine_draw_when_remaining_allows(self):
         nine_props = tuple((f"九连奖品{index}", "GREY") for index in range(1, 10))
@@ -323,7 +339,8 @@ class DrawCardExecutorTest(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.assertEqual({"count": 9}, calls[0][2])
         self.assertEqual(9, task["dailyCounter"])
-        self.assertIn("完成 9 次（今日 9/9）", message)
+        self.assertIn("九连奖品1 x1", message)
+        self.assertNotIn("完成 9 次", message)
 
     def test_zero_limit_uses_nine_draw_then_single_draws_to_exhaust_balance(self):
         nine_props = tuple((f"九连奖品{index}", "GREY") for index in range(1, 10))
@@ -342,10 +359,25 @@ class DrawCardExecutorTest(unittest.TestCase):
         self.assertEqual("rest/user/get-user-info", calls[0][1])
         self.assertEqual([9, 1, 1], [call[2]["count"] for call in calls[1:]])
         self.assertEqual(11, task["dailyCounter"])
-        self.assertIn("获得 11 项，消耗 11 枚彩筹", message)
-        self.assertIn("第 1 次：九连奖品1（GREY）", message)
-        self.assertIn("第 10 次：端砚（RED）", message)
-        self.assertIn("第 11 次：花笺（BLUE）", message)
+        self.assertTrue(message.startswith("端砚 x1、花笺 x1"))
+        self.assertIn("九连奖品1 x1", message)
+        self.assertNotIn("第 1 次", message)
+        self.assertNotIn("GREY", message)
+
+    def test_duplicate_items_are_merged_and_keep_high_quality_first(self):
+        calls = self.stub_responses([
+            self.wish_response(("花笺", "BLUE")),
+            self.wish_response(("端砚", "RED")),
+            self.wish_response(("花笺", "BLUE")),
+        ])
+        task = self.task()
+
+        result, message = executors.execute_reamicro_task(task)
+
+        self.assertEqual("success", result)
+        self.assertEqual(3, len(calls))
+        self.assertEqual("端砚 x1、花笺 x2", message)
+        self.assertEqual(2, task["lastDrawItems"][1]["count"])
 
     def test_legacy_lottery_endpoint_is_migrated_to_current_wish_endpoint(self):
         calls = self.stub_responses([self.wish_response(("端砚", "RED"))])

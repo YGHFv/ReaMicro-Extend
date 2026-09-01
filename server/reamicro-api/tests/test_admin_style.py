@@ -146,6 +146,21 @@ class StyleConsistencyTest(unittest.TestCase):
         """卡片数量变化时不该再靠内联样式覆盖列数。"""
         self.assertIn("auto-fit", ADMIN_STYLE)
 
+    def test_shared_controls_cover_switches_actions_and_record_lists(self):
+        """用户、任务和普通后台页必须共用同一套控件语义。"""
+        for selector in (".form-grid{", ".form-actions{", ".check-list{", ".record-list{", ".actions>form"):
+            self.assertIn(selector, ADMIN_STYLE)
+        self.assertNotIn("letter-spacing:-", ADMIN_STYLE)
+
+    def test_dense_pages_use_unified_layout_classes(self):
+        users = self.client.get("/admin/users", auth=admin_auth()).text
+        tasks = self.client.get("/admin/tasks", auth=admin_auth()).text
+        self.assertIn("record-list", users)
+        self.assertIn("record-form", users)
+        self.assertIn("task-table", tasks)
+        self.assertIn("data-task-types", tasks)
+        self.assertIn("form-actions", tasks)
+
 
 class PaginationTest(unittest.TestCase):
     def test_paginate_slices_and_reports(self):

@@ -149,8 +149,9 @@ class AdminPageRenderTest(unittest.TestCase):
                 "taskId": "task_1",
                 "taskType": "yeshe_checkin",
                 "result": "success",
-                "title": "野社零点签到执行完成",
-                "message": "签到完成",
+                "title": "野社零点签到",
+                "message": "端砚 x1",
+                "items": [{"name": "端砚", "quality": "RED", "count": 1}],
                 "createdAt": int(RAW_TIMESTAMP),
                 "deliveredAt": 0,
             },
@@ -213,7 +214,10 @@ class AdminPageRenderTest(unittest.TestCase):
         self.assertIn("任务消息队列", page)
         self.assertIn("2.4.0", page)
         self.assertIn("在线", page)
-        self.assertIn("野社零点签到执行完成", page)
+        self.assertIn("野社零点签到", page)
+        self.assertIn("class='result-item quality-red'", page)
+        self.assertIn("端砚 x1", page)
+        self.assertNotIn("端砚（RED）", page)
         self.assert_no_raw_values(page, "overview")
 
     def test_security_page_exposes_every_managed_action(self):

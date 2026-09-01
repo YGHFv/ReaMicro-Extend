@@ -72,8 +72,49 @@ def reamicro_business_error(body: Any) -> str:
     return f"阅微业务码 {code}：{redact_message(str(message))}"
 
 
-def lottery_result_summaries(body: Any) -> list[str]:
-    """从阅微祈愿响应中提取每一项具体结果。"""
+LOTTERY_QUALITY_PRIORITY = {
+    "RED": 70,
+    "ORANGE": 65,
+    "GOLD": 65,
+    "YELLOW": 60,
+    "PURPLE": 50,
+    "BLUE": 40,
+    "GREEN": 30,
+    "GREY": 20,
+    "GRAY": 20,
+}
+
+LOTTERY_QUALITY_ALIASES = {
+    "红": "RED",
+    "红色": "RED",
+    "绝品": "RED",
+    "传说": "RED",
+    "橙": "ORANGE",
+    "橙色": "ORANGE",
+    "金": "GOLD",
+    "金色": "GOLD",
+    "紫": "PURPLE",
+    "紫色": "PURPLE",
+    "珍品": "PURPLE",
+    "蓝": "BLUE",
+    "蓝色": "BLUE",
+    "精品": "BLUE",
+    "绿": "GREEN",
+    "绿色": "GREEN",
+    "良品": "GREEN",
+    "灰": "GREY",
+    "灰色": "GREY",
+    "普通": "GREY",
+}
+
+
+def normalize_lottery_quality(value: Any) -> str:
+    quality = str(value or "").strip().upper()
+    return LOTTERY_QUALITY_ALIASES.get(quality, quality)
+
+
+def lottery_result_items(body: Any) -> list[dict[str, Any]]:
+    """从阅微祈愿响应中提取结构化物品，供后台与通知统一渲染。"""
     result = (
         nested_value(body, "data", "props")
         or nested_value(body, "props")
@@ -87,30 +128,63 @@ def lottery_result_summaries(body: Any) -> list[str]:
             try:
                 result = json.loads(text)
             except ValueError:
-                return [redact_message(text)]
+                return [{"name": redact_message(text), "quality": "", "count": 1}]
         else:
-            return [redact_message(text)]
+            return [{"name": redact_message(text), "quality": "", "count": 1}]
     items = result if isinstance(result, list) else [result] if isinstance(result, dict) else []
-    summaries: list[str] = []
+    parsed: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
             continue
         name = item.get("name") or item.get("cardName") or item.get("propName") or item.get("title") or item.get("result")
         quality = item.get("quality") or item.get("cardQuality") or item.get("propQuality") or item.get("rarity")
-        count = item.get("count") or item.get("quantity") or item.get("num")
         if name:
-            summary = str(name)
-            if quality:
-                summary += f"（{quality}）"
-            if count not in (None, "", 1, "1"):
-                summary += f" ×{count}"
-            summaries.append(summary)
-    return summaries or [redact_message(json.dumps(result if result is not None else body, ensure_ascii=False)[:300])]
+            count = bounded_config_int(item.get("count") or item.get("quantity") or item.get("num") or 1, 1, 1)
+            parsed.append({
+                "name": str(name).strip(),
+                "quality": normalize_lottery_quality(quality),
+                "count": count,
+            })
+    if parsed:
+        return parsed
+    fallback = redact_message(json.dumps(result if result is not None else body, ensure_ascii=False)[:300])
+    return [{"name": fallback, "quality": "", "count": 1}]
+
+
+def aggregate_lottery_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """合并同名同品质物品，并按品质从高到低稳定排序。"""
+    merged: dict[tuple[str, str], int] = {}
+    for item in items:
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        quality = normalize_lottery_quality(item.get("quality", ""))
+        count = bounded_config_int(item.get("count", 1), 1, 1)
+        merged[(name, quality)] = merged.get((name, quality), 0) + count
+    result = [
+        {"name": name, "quality": quality, "count": count}
+        for (name, quality), count in merged.items()
+    ]
+    result.sort(key=lambda item: (
+        -LOTTERY_QUALITY_PRIORITY.get(str(item.get("quality", "")), 0),
+        str(item.get("name", "")).casefold(),
+    ))
+    return result
+
+
+def lottery_items_summary(items: list[dict[str, Any]]) -> str:
+    """生成不重复品质文字的紧凑结果，例如“端砚 x1、花笺 x2”。"""
+    return "、".join(f"{item['name']} x{item['count']}" for item in aggregate_lottery_items(items))
+
+
+def lottery_result_summaries(body: Any) -> list[str]:
+    """兼容旧调用方，返回已聚合的紧凑物品文本。"""
+    return [f"{item['name']} x{item['count']}" for item in aggregate_lottery_items(lottery_result_items(body))]
 
 
 def lottery_result_summary(body: Any) -> str:
     """兼容需要单行展示祈愿结果的调用方。"""
-    return "、".join(lottery_result_summaries(body))
+    return lottery_items_summary(lottery_result_items(body))
 
 
 def credential_for_task(task: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -231,20 +305,25 @@ def timestamp_millis(value: Any) -> int:
     return timestamp * 1000 if timestamp < 100_000_000_000 else timestamp
 
 
-def daily_lore_reward_summary(lore: Any) -> str:
-    """从每日轶闻响应提取领取通知需要的奖励明细。"""
-    rewards: list[str] = []
+def daily_lore_reward_items(lore: Any) -> list[dict[str, Any]]:
+    """从每日轶闻响应提取结构化奖励明细。"""
+    rewards: list[dict[str, Any]] = []
     exp = bounded_config_int(nested_value(lore, "data", "exp"), 0, 0)
     gem = bounded_config_int(nested_value(lore, "data", "gem"), 0, 0)
     if exp > 0:
-        rewards.append(f"阅历 {exp} 点")
+        rewards.append({"name": "阅历", "quality": "", "count": exp})
     if gem > 0:
-        rewards.append(f"彩筹 {gem} 枚")
+        rewards.append({"name": "彩筹", "quality": "", "count": gem})
     prop_name = str(nested_value(lore, "data", "propName") or "").strip()
     prop_quality = str(nested_value(lore, "data", "propQuality") or "").strip()
     if prop_name:
-        rewards.append(f"{prop_name}（{prop_quality}）" if prop_quality else prop_name)
-    return "、".join(rewards)
+        rewards.append({"name": prop_name, "quality": normalize_lottery_quality(prop_quality), "count": 1})
+    return rewards
+
+
+def daily_lore_reward_summary(lore: Any) -> str:
+    """生成签到奖励的紧凑通知文本。"""
+    return lottery_items_summary(daily_lore_reward_items(lore))
 
 
 def execute_http_task(task: dict[str, Any]) -> tuple[str, str]:
@@ -281,6 +360,7 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
     base_url = str(secret.get("baseUrl") or "https://api.reamicro.zhendong.ltd/").strip()
     token = str(secret.get("token"))
     task_type = str(task.get("taskType"))
+    task.pop("notificationItems", None)
     configured_body = request.get("body", {})
     if isinstance(configured_body, str):
         try:
@@ -290,12 +370,12 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
     if task_type == "yeshe_draw_card":
         if not task.pop("triggeredByCheckinReward", False):
             task["waitingForCheckinReward"] = True
-            return "success", "野社自动抽卡等待签到奖励领取完成后触发"
+            return "success", "等待签到奖励领取后触发"
         daily_limit = min(bounded_config_int(request.get("dailyLimit", 3), 3, 0), 20)
         today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
         used_today = bounded_config_int(task.get("dailyCounter", 0), 0, 0) if task.get("dailyCounterDate") == today else 0
         if daily_limit > 0 and used_today >= daily_limit:
-            return "success", f"野社今日抽卡已达到上限 {daily_limit} 次"
+            return "success", f"今日已达到 {daily_limit} 抽上限"
         if daily_limit == 0:
             status_code, user_info, raw = json_http_request(
                 base_url,
@@ -318,12 +398,18 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             draw_target = daily_limit - used_today
         configured_endpoint = str(request.get("endpoint") or "").strip()
         endpoint = configured_endpoint if configured_endpoint and "lottery" not in configured_endpoint else "rest/community/wish"
-        summaries: list[str] = []
+        draw_items: list[dict[str, Any]] = []
         consumed = 0
-        balance_exhausted = False
 
         def completed_draw_detail() -> str:
-            return "；".join(f"第 {index} 次：{item}" for index, item in enumerate(summaries, 1))
+            return lottery_items_summary(draw_items)
+
+        def remember_draw_result() -> None:
+            aggregated = aggregate_lottery_items(draw_items)
+            task["lastDrawItems"] = aggregated
+            task["notificationItems"] = aggregated
+            task["lastDrawResult"] = lottery_items_summary(aggregated)
+            task["lastDrawAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
 
         while consumed < draw_target:
             request_count = 9 if draw_target - consumed >= 9 else 1
@@ -331,37 +417,33 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             wish_body["count"] = request_count
             status_code, body, raw = json_http_request(base_url, token, wish_body, endpoint)
             if status_code in (401, 403, 429):
-                detail = f"；已完成：{completed_draw_detail()}" if summaries else ""
+                detail = f"；已获得：{completed_draw_detail()}" if draw_items else ""
                 return "paused", f"阅微认证/风控响应 HTTP {status_code}{detail}"
             business_error = reamicro_business_error(body) if 200 <= status_code < 300 else ""
             if lottery_balance_exhausted(body, raw, business_error):
-                balance_exhausted = True
                 break
             if status_code < 200 or status_code >= 300:
-                detail = f"；已完成：{completed_draw_detail()}" if summaries else ""
+                detail = f"；已获得：{completed_draw_detail()}" if draw_items else ""
                 return "failed", f"祈愿请求 HTTP {status_code}: {redact_message(raw)}{detail}"
             if business_error:
-                detail = f"；已完成：{completed_draw_detail()}" if summaries else ""
+                detail = f"；已获得：{completed_draw_detail()}" if draw_items else ""
                 return "failed", f"祈愿失败：{business_error}{detail}"
             wish_success = nested_value(body, "data", "success")
             if wish_success is False:
                 message = nested_value(body, "data", "message") or "阅微未返回失败原因"
-                detail = f"；已完成：{completed_draw_detail()}" if summaries else ""
+                detail = f"；已获得：{completed_draw_detail()}" if draw_items else ""
                 return "failed", f"祈愿失败：{redact_message(str(message))}{detail}"
-            summaries.extend(lottery_result_summaries(body))
+            draw_items.extend(lottery_result_items(body))
             consumed += request_count
             task["dailyCounterDate"] = today
             task["dailyCounter"] = used_today + consumed
-            task["lastDrawResult"] = completed_draw_detail()
-            task["lastDrawAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+            remember_draw_result()
         task["waitingForCheckinReward"] = False
-        if not summaries:
-            return "success", "野社彩筹已全部用完，本次没有可执行的抽卡"
+        if not draw_items:
+            return "success", "彩筹已用完"
         detail = completed_draw_detail()
-        task["lastDrawResult"] = detail
-        if daily_limit == 0 or balance_exhausted:
-            return "success", f"野社自动祈愿获得 {len(summaries)} 项，消耗 {consumed} 枚彩筹，彩筹已全部用完：{detail}"
-        return "success", f"野社自动祈愿完成 {consumed} 次（今日 {task['dailyCounter']}/{daily_limit}）：{detail}"
+        remember_draw_result()
+        return "success", detail
     if task_type == "yeshe_checkin":
         china_zone = timezone(timedelta(hours=8))
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -374,8 +456,8 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
         lore_id = nested_value(lore, "data", "id") or nested_value(lore, "data", "loreId") or nested_value(lore, "id")
         is_finished = bool(nested_value(lore, "data", "isFinish"))
         reward_claimed = bool(nested_value(lore, "data", "claimed"))
-        reward_summary = daily_lore_reward_summary(lore)
-        checkin_message = "野社零点签到已完成" if is_finished else ""
+        reward_items = daily_lore_reward_items(lore)
+        reward_summary = lottery_items_summary(reward_items)
         if not is_finished:
             if not lore_id:
                 return "failed", "阅微每日轶闻响应缺少 userLoreId"
@@ -387,7 +469,6 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             business_error = reamicro_business_error(body)
             if business_error:
                 return "failed", f"野社签到提交失败：{business_error}"
-            checkin_message = "野社零点签到完成"
         if task.get("lastCheckinDate") != today:
             task["lastCheckinDate"] = today
             complete_time = timestamp_millis(nested_value(lore, "data", "completeTime"))
@@ -398,19 +479,20 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             task["claimFinalAttemptDate"] = ""
             task["claimCompletedDate"] = ""
         if task.get("claimCompletedDate") == today:
-            return "success", f"{checkin_message or '野社签到状态已检查'}，签到奖励今日已领取"
+            return "success", "今日已领取"
         if reward_claimed:
             task["lastClaimAt"] = now_ms
             task["claimCompletedDate"] = today
             task["claimRetryCount"] = 0
             task["claimFinalAttemptDate"] = ""
             task["claimJustCompleted"] = True
+            task["notificationItems"] = reward_items
             detail = f"：{reward_summary}" if reward_summary else ""
-            return "success", f"{checkin_message or '野社签到状态已检查'}，签到奖励此前已领取{detail}"
+            return "success", f"奖励已领取{detail}"
         claim_due_at = bounded_config_int(task.get("claimDueAt", 0), now_ms + 8 * 3_600_000, 0)
         if now_ms < claim_due_at:
             task["nextRunAtOverride"] = claim_due_at
-            return "success", f"{checkin_message or '野社签到状态已检查'}，奖励将在签到 8 小时后自动领取"
+            return "success", "签到完成，奖励待领取"
 
         if not lore_id:
             return "failed", "阅微每日轶闻响应缺少 userLoreId，无法领取签到奖励"
@@ -424,29 +506,30 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             if claim_result == "locked":
                 # 奖励尚未解锁不是失败，但必须在当天继续检查，不能等到次日签到。
                 task["nextRunAtOverride"] = now_ms + 5 * 60_000
-                return "success", f"{checkin_message or '野社签到状态已检查'}，{claim_message}"
+                return "success", "奖励尚未解锁，5 分钟后再次检查"
             task["lastClaimAt"] = now_ms
             task["claimCompletedDate"] = today
             # 已领取状态同样放行联动抽卡，否则抽卡会一直等在"等待签到奖励领取完成"。
             task["claimJustCompleted"] = True
+            task["notificationItems"] = reward_items
             detail = f"：{reward_summary}" if reward_summary else ""
-            return "success", f"{checkin_message or '野社签到状态已检查'}，{claim_message}{detail}"
+            return "success", f"奖励已领取{detail}"
 
         retry_count = bounded_config_int(task.get("claimRetryCount", 0), 0, 0) + 1
         task["claimRetryCount"] = retry_count
         local_now = datetime.fromtimestamp(now_ms / 1000, china_zone)
         if retry_count <= 3:
             task["nextRunAtOverride"] = now_ms + 5 * 60_000
-            return "success", f"签到奖励领取失败（第 {retry_count}/3 次），5 分钟后自动重试：{redact_message(str(claim_message))}"
+            return "success", f"奖励领取失败，5 分钟后重试：{redact_message(str(claim_message))}"
         if task.get("claimFinalAttemptDate") != today:
             final_at = local_now.replace(hour=23, minute=59, second=0, microsecond=0)
             if final_at <= local_now:
                 final_at = local_now + timedelta(minutes=1)
             task["claimFinalAttemptDate"] = today
             task["nextRunAtOverride"] = int(final_at.timestamp() * 1000)
-            return "success", f"签到奖励连续领取失败，已安排今日 23:59 最后重试：{redact_message(str(claim_message))}"
+            return "success", f"奖励领取失败，23:59 最后重试：{redact_message(str(claim_message))}"
         task["claimFinalFailedDate"] = today
-        return "success", f"签到奖励今日最终领取仍失败：{redact_message(str(claim_message))}"
+        return "success", f"今日奖励领取失败：{redact_message(str(claim_message))}"
     if task_type == "cloud_auto_read":
         books = request.get("books") if isinstance(request.get("books"), list) else []
         uses_recent_books = not books
@@ -475,7 +558,7 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
         used_today = int(task.get("dailyReadMinutes", 0)) if task.get("dailyReadDate") == today else 0
         duration_minutes = min(duration_minutes, max(daily_limit_minutes - used_today, 0))
         if duration_minutes <= 0:
-            return "success", f"云端阅读今日已达到 {daily_limit_minutes} 分钟上限"
+            return "success", f"今日已达到 {daily_limit_minutes} 分钟上限"
         duration_seconds = duration_minutes * 60
         rotation = int(task.get("bookRotation", 0)) % max(len(books), 1)
         books = books[rotation:] + books[:rotation]
@@ -513,7 +596,7 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             task["bookRotation"] = rotation + completed
         if completed:
             book_summary = "、".join(completed_books)
-            return "success", f"云端自动阅读完成 {completed} 本：{book_summary}；累计 {duration_minutes} 分钟"
+            return "success", f"{book_summary} · {duration_minutes} 分钟"
         return "failed", "没有找到可阅读的图书"
     return "failed", f"未知阅微任务类型：{task_type}"
 

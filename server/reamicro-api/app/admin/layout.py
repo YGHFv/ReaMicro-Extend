@@ -157,7 +157,7 @@ def admin_login_page(message: str = "") -> str:
         f"<form method='post' action='/admin/login'>"
         f"<label>管理员用户名<input name='username' autocomplete='username' required></label>"
         f"<label>密码<input type='password' name='password' autocomplete='current-password' required></label>"
-        f"<button type='submit'>登录</button></form>"
+        f"<button class='button' type='submit'>登录</button></form>"
         f"<small>主管理员与子管理员使用同一个登录入口。会话通过 HttpOnly Cookie 保存。</small>"
     )
     return _admin_auth_shell("登录", "请输入后台管理员账号。", body)
@@ -174,7 +174,7 @@ def admin_setup_page(message: str = "", actor: dict[str, Any] | None = None) -> 
         f"<label>主管理员用户名<input name='username' value='{html.escape(runtime.ADMIN_USERNAME, quote=True)}' autocomplete='username' required></label>"
         f"<label>新密码（至少 12 位）<input type='password' name='password' minlength='12' autocomplete='new-password' required></label>"
         f"<label>确认新密码<input type='password' name='password_confirm' minlength='12' autocomplete='new-password' required></label>"
-        f"<button type='submit'>完成初始化</button></form>"
+        f"<button class='button' type='submit'>完成初始化</button></form>"
         f"<small>初始化信息保存于 /data/config/server.json，密码只保存 PBKDF2 哈希。完成后环境变量中的引导密码立即失效。</small>"
     )
     return _admin_auth_shell(
