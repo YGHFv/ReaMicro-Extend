@@ -155,16 +155,24 @@ class ReaderImportOverwriteHook(
                             )
                         }
                         OverwriteDecision.INDEPENDENT -> {
-                            if (conflict.byUuid) {
-                                val newUuid = UUID.randomUUID().toString()
-                                val newOpf = opf.withUuid(newUuid)
+                            // 独立导入必须让这次导入拿到一个全新的身份，否则宿主会按 uuid / uri
+                            // 命中旧书，用户点了「独立导入」结果仍变成覆盖导入。
+                            // 此前只在 byUuid 冲突时才改写 uuid —— 书名或 URL 冲突时整段变成空操作。
+                            val newUuid = UUID.randomUUID().toString()
+                            val newOpf = opf.withUuid(newUuid)
+                            // withUuid 出错时静默返回原对象，必须回读校验改写是否真的生效。
+                            if (resolveImportUuid(newOpf).orEmpty() == newUuid) {
                                 param.args[2] = newOpf
                                 copyBookDirForIndependentUuid(param.args?.getOrNull(1), newUuid, newOpf)?.let { newBookDir ->
                                     param.args[1] = newBookDir
                                 }
                                 XposedBridge.log("$LOG_PREFIX independent import generated uuid and book dir: $uuid -> $newUuid")
+                            } else {
+                                XposedBridge.log(
+                                    "$LOG_PREFIX independent import could NOT rewrite uuid; host may still overwrite: uuid=$uuid",
+                                )
                             }
-                            if (conflict.byUrl && uriOverride.isNotBlank()) {
+                            if (uriOverride.isNotBlank()) {
                                 param.args[3] = "$uriOverride#reamicro-independent-${System.currentTimeMillis()}"
                             }
                         }
@@ -317,7 +325,27 @@ class ReaderImportOverwriteHook(
                 )
             }
             OverwriteDecision.INDEPENDENT -> {
-                XposedBridge.log("$LOG_PREFIX importBook reused pre-import independent decision: uuid=$uuid")
+                // 预检阶段本应已把 opf 的 uuid 改写并落盘。但 withUuid 失败时会静默返回原对象，
+                // 那样这里会带着**旧 uuid** 进来 → 宿主按 uuid 命中旧书 → 又变成覆盖导入。
+                // 因此在这一步回读校验，必要时兜底重做一次。
+                val conflictingUuid = preDecision.oldUuid
+                if (conflictingUuid.isNullOrBlank() || uuid == conflictingUuid) {
+                    val newUuid = UUID.randomUUID().toString()
+                    val newOpf = opf.withUuid(newUuid)
+                    if (resolveImportUuid(newOpf).orEmpty() == newUuid) {
+                        param.args[2] = newOpf
+                        copyBookDirForIndependentUuid(param.args?.getOrNull(1), newUuid, newOpf)?.let { newBookDir ->
+                            param.args[1] = newBookDir
+                        }
+                        XposedBridge.log("$LOG_PREFIX importBook independent fallback applied: $uuid -> $newUuid")
+                    } else {
+                        XposedBridge.log(
+                            "$LOG_PREFIX importBook independent fallback FAILED (uuid rewrite unavailable): uuid=$uuid",
+                        )
+                    }
+                } else {
+                    XposedBridge.log("$LOG_PREFIX importBook reused pre-import independent decision: uuid=$uuid")
+                }
             }
             OverwriteDecision.CANCEL -> {
                 cancelImport(param)
