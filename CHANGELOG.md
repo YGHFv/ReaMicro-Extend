@@ -9,6 +9,7 @@
   - 模块：`CloudTaskLocalRunner.runDue` 与 `dispatchCompletion`、`ApiServerClient.claimDeviceTask` / `completeDeviceTask`。`CloudTaskLocalRunner` 保留为任务执行逻辑库（`runTask` 等仍被 `LocalTaskRunner` 复用）。
   - 服务器：`POST /v1/tasks/claim` 与 `POST /v1/tasks/{id}/complete` 两个端点，以及仅被它们使用的 import（`credential_for_task`、`enqueue_task_notification`、`task_credential_id`）。
   - `scheduler.py` 调度循环里的 `executionMode == "device"` 跳过判断一并移除——迁移后不存在设备任务，保留反而会让漏网任务永不执行。
+- 新增 `tests/test_device_execution_retired.py`（10 项回归）：覆盖创建/配置时的 executionMode 降级与租约清理、存量迁移（在途任务重新排期 / 事件型抽卡保持 nextRunAt=0 / server 任务不动 / 幂等）、心跳路径迁移且不影响原有返回字段、调度循环确实执行 server 任务、旧设备端点已不可用。原测试套件对 device 路径**零覆盖**（`grep executionMode tests/` 为空），这批用例补上了这一段。
 - 模块 versionCode 更新为 56（versionName 维持 2.3.2）。
 
 ## 账号快照与账号配置页修复 - 2026-09-10
