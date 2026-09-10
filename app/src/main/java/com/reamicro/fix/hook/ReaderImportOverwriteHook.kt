@@ -81,6 +81,18 @@ class ReaderImportOverwriteHook(
     private var repositoryRef: WeakReference<Any>? = null
     private val pendingPreImportDecisions = ConcurrentHashMap<String, PreImportDecision>()
 
+    /**
+     * 刚刚被用户取消过的导入（key -> 时间戳）。
+     *
+     * 取消是靠抛异常中止导入的，异常会一路逃出 importBook 到宿主的 WorkerManager。宿主若对
+     * 这次导入做了重试，重试时预决策已消费、又会重新弹一次冲突窗——用户随手点掉就变成覆盖导入，
+     * 表现就是"点了取消导入，结果还是覆盖导入"。这里把取消按 uuid 记一小段时间，重试直接再取消。
+     *
+     * 只按 uuid（读不到 uuid 时才退化为按书名）作键：同一个文件重试必然 uuid 相同，而书名相同的
+     * 另一个文件不会被误伤。
+     */
+    private val recentlyCancelledImports = ConcurrentHashMap<String, Long>()
+
     fun install(): Boolean {
         return runCatching {
             val bookshelfClass = XposedHelpers.findClass(BOOKSHELF_REPOSITORY_CLASS, classLoader)
@@ -112,6 +124,15 @@ class ReaderImportOverwriteHook(
 
                     consumePreImportDecision(uuid, title)?.let { preDecision ->
                         applyPreImportDecision(param, opf, uuid, preDecision)
+                        return
+                    }
+
+                    // 用户刚刚取消过这次导入：宿主重试时不要再弹一次冲突窗（弹了多半会被随手点掉，
+                    // 结果就是"取消导入"最终变成覆盖导入），直接继续取消。
+                    if (isRecentlyCancelled(uuid, title)) {
+                        rememberCancelledImport(uuid, title)
+                        cancelImport(param)
+                        XposedBridge.log("$LOG_PREFIX overwrite import re-cancelled (recent user cancellation): title=$title, uuid=$uuid")
                         return
                     }
 
@@ -177,6 +198,7 @@ class ReaderImportOverwriteHook(
                             }
                         }
                         OverwriteDecision.CANCEL -> {
+                            rememberCancelledImport(uuid, title)
                             cancelImport(param)
                             XposedBridge.log("$LOG_PREFIX overwrite import cancelled: title=$title, uuid=$uuid")
                             return
@@ -237,6 +259,13 @@ class ReaderImportOverwriteHook(
                     val title = resolveImportTitle(opf, null) ?: return
                     val uuid = resolveImportUuid(opf).orEmpty()
                     val signaledOnlineImport = OnlineCompletionImportSignal.matches(uuid, title, "")
+                    // 用户刚刚取消过这次导入：宿主重试时直接再取消，不要再弹一次冲突窗。
+                    if (isRecentlyCancelled(uuid, title)) {
+                        rememberCancelledImport(uuid, title)
+                        cancelImport(param)
+                        XposedBridge.log("$LOG_PREFIX pre-import re-cancelled (recent user cancellation): title=$title, uuid=$uuid")
+                        return
+                    }
                     val conflict = findImportConflict(repository, uuid, "", title) ?: return
                     val existingBook = conflict.oldBook
                     XposedBridge.log(
@@ -280,6 +309,7 @@ class ReaderImportOverwriteHook(
                             XposedBridge.log("$LOG_PREFIX pre-import independent uuid generated: $uuid -> $newUuid, title=$title")
                         }
                         OverwriteDecision.CANCEL -> {
+                            rememberCancelledImport(uuid, title)
                             cancelImport(param)
                             XposedBridge.log("$LOG_PREFIX pre-import conflict cancelled: title=$title, uuid=$uuid")
                         }
@@ -348,6 +378,7 @@ class ReaderImportOverwriteHook(
                 }
             }
             OverwriteDecision.CANCEL -> {
+                rememberCancelledImport(uuid, preDecision.oldTitle)
                 cancelImport(param)
             }
         }
@@ -744,6 +775,28 @@ class ReaderImportOverwriteHook(
     private fun decisionKey(uuid: String, title: String): String =
         "${uuid.trim()}|${title.normalizedBookTitle()}"
 
+    /** 取消记忆的键：优先 uuid，读不到才退化为书名，避免误伤同名但不同的文件。 */
+    private fun cancellationKey(uuid: String, title: String): String =
+        uuid.trim().ifBlank { title.normalizedBookTitle() }
+
+    private fun rememberCancelledImport(uuid: String, title: String) {
+        val key = cancellationKey(uuid, title)
+        if (key.isBlank()) return
+        recentlyCancelledImports[key] = System.currentTimeMillis()
+        clearExpiredCancellations()
+    }
+
+    private fun isRecentlyCancelled(uuid: String, title: String): Boolean {
+        clearExpiredCancellations()
+        val key = cancellationKey(uuid, title)
+        return key.isNotBlank() && recentlyCancelledImports.containsKey(key)
+    }
+
+    private fun clearExpiredCancellations() {
+        val now = System.currentTimeMillis()
+        recentlyCancelledImports.entries.removeAll { (_, at) -> now - at > CANCELLATION_TTL_MS }
+    }
+
     private fun rememberPreImportDecision(uuid: String, title: String, decision: PreImportDecision) {
         pendingPreImportDecisions[decisionKey(uuid, title)] = decision
         clearExpiredPreImportDecisions()
@@ -1121,6 +1174,7 @@ class ReaderImportOverwriteHook(
         const val ONLINE_COMPLETION_BOOK_PREFIX = "reamicro-online-book://"
         const val ONLINE_COMPLETION_UUID_PREFIX = "reamicro-online-"
         const val PRE_IMPORT_DECISION_TTL_MS = 120_000L
+        const val CANCELLATION_TTL_MS = 120_000L
         const val POST_IMPORT_METADATA_SYNC_DELAY_MS = 2_500L
         val REAMICRO_MD5_REGEX = Regex("^[0-9a-fA-F]{32}$")
     }

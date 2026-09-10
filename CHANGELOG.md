@@ -1,5 +1,17 @@
 # 更新记录
 
+## 修复覆盖检查的独立导入与取消导入 - 2026-09-10
+
+用户反馈：覆盖检查弹窗里选「独立导入」或「取消导入」，结果依旧是正常覆盖导入。
+
+- **独立导入没有真正"独立"（两处）**
+  - `importBook` 路径此前只在 `conflict.byUuid` 为真时才改写 uuid，而"同一本书但 uuid 不同"（按书名或 URL 命中的常见冲突）时 `byUuid=false`，整段 INDEPENDENT 变成**空操作**，导入带着原 uuid 继续走，宿主按 uuid 命中旧书 → 实际执行了覆盖导入。现在无条件生成新 uuid，并**回读校验**改写是否真的生效（`withUuid` 失败时会静默返回原对象），同时修正 uri 后缀。
+  - `applyPreImportDecision` 路径的 INDEPENDENT 原本只有一行日志，完全依赖预检阶段已把 uuid 改写落盘；那次改写一旦静默失败，这里同样带着旧 uuid 退化成覆盖导入。现在会回读校验，必要时兜底重做。
+- **取消导入增加"取消记忆"**：现场日志显示取消分支确实执行、异常也确实抛出了 `importBook`（堆栈到 `WorkerManager$enqueueImport$2.invokeSuspend`），也就是说那一次导入是被中止的。问题在于宿主对这次导入的重试：重试时预决策已被消费，会**再弹一次冲突窗**，用户随手点掉就变成覆盖导入。现在把取消按 uuid 记 120 秒，重试直接再取消而不再弹窗（只按 uuid 作键，读不到 uuid 才退化为书名，避免误伤同名文件）。
+- 新增日志：`independent import could NOT rewrite uuid` / `importBook independent fallback applied|FAILED` / `overwrite import re-cancelled`。
+
+模块 versionCode 更新为 58（versionName 维持 2.3.2）。
+
 ## 修复本地任务定时自启 + 任务记录 - 2026-09-10
 
 **定时自启修不好有两个独立根因，缺一不可：**
