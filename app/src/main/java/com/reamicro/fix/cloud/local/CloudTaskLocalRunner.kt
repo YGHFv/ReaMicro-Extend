@@ -1,44 +1,21 @@
 package com.reamicro.fix.cloud.local
 
 import com.reamicro.fix.association.network.HttpClient
-import com.reamicro.fix.cloud.api.ApiServerClient
-import com.reamicro.fix.cloud.api.ApiServerSettingsStore
-import com.reamicro.fix.notification.CloudTaskNotifications
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.LocalDate
 import java.time.ZoneId
 
-/** 在模块进程中执行设备模式的阅微自动任务。凭据仅存在当前调用栈，租约结束后立即丢弃。 */
+/**
+ * 阅微自动任务的执行逻辑库，由本地任务 [LocalTaskRunner] 调用。
+ *
+ * 早前这里还负责「设备模式」：向服务器领 device 租约、在模块进程代跑云端任务，再把结果
+ * 回报服务器（`runDue` + `dispatchCompletion`）。云端任务已改回服务器执行，该路径整体移除；
+ * 本对象现在只保留与传输方式无关的任务实现——签到、抽卡、自动阅读、行商通知。
+ */
 object CloudTaskLocalRunner {
-    fun runDue(context: android.content.Context, maxTasks: Int = 3): Int {
-        val appContext = context.applicationContext
-        val client = ApiServerClient(ApiServerSettingsStore { appContext })
-        var completed = 0
-        repeat(maxTasks.coerceIn(1, 8)) {
-            val claim = runCatching { client.claimDeviceTask() }.getOrElse { return@repeat }
-            val data = claim.optJSONObject("data") ?: claim
-            val task = data.optJSONObject("task") ?: return@repeat
-            val taskId = task.optString("id")
-            val leaseToken = data.optString("leaseToken")
-            if (taskId.isBlank() || leaseToken.isBlank()) return@repeat
-            val request = data.optJSONObject("request") ?: JSONObject()
-            val credential = data.optJSONObject("credential") ?: JSONObject()
-            val outcome = runCatching {
-                runTask(task.optString("taskType"), task, request, credential)
-            }.getOrElse { Outcome("failed", it.message ?: "本地任务执行失败") }
-            val completedResponse = runCatching {
-                client.completeDeviceTask(taskId, leaseToken, outcome.result, outcome.message, outcome.state, outcome.notify)
-            }.getOrNull()
-            if (completedResponse != null) dispatchCompletion(appContext, client, completedResponse)
-            completed++
-        }
-        return completed
-    }
-
     /**
-     * 执行一条阅微自动任务。device 租约（云端）与本地任务两条路径共用同一套执行逻辑，
-     * 仅数据来源不同（服务器租约 vs 本地存储）。行商通知任务的暂停/续跑通过返回的 state 表达。
+     * 执行一条阅微自动任务。任务运行状态通过返回的 state 表达，由调用方决定如何落盘。
      */
     internal fun runTask(taskType: String, task: JSONObject, request: JSONObject, credential: JSONObject): Outcome =
         when (taskType) {
@@ -250,22 +227,6 @@ object CloudTaskLocalRunner {
             .put("dailyReadMinutes", usedToday + duration)
             .put("bookRotation", rotation + completedBooks)
         return Outcome("success", "${names.joinToString("、")} · $duration 分钟", state)
-    }
-
-    private fun dispatchCompletion(context: android.content.Context, client: ApiServerClient, response: JSONObject) {
-        val data = response.optJSONObject("data") ?: response
-        val notification = data.optJSONObject("notification") ?: return
-        val id = notification.optString("id").ifBlank { return }
-        val intent = CloudTaskNotifications.intent(
-            id,
-            notification.optString("title").ifBlank { "云端任务消息" },
-            notification.optString("message").ifBlank { "任务状态已更新" },
-            notification.optString("result"),
-            notification.optJSONArray("items")?.toString().orEmpty(),
-        )
-        if (CloudTaskNotifications.post(context, intent, source = "local-task")) {
-            runCatching { client.acknowledgeNotifications(listOf(id)) }
-        }
     }
 
     private fun postReaMicro(baseUrl: String, token: String, body: JSONObject, endpoint: String): JSONObject {

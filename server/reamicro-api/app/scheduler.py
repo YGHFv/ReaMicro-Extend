@@ -1,7 +1,9 @@
 """任务调度循环与执行记账。
 
-调度**不依赖模块在线**：服务器继续执行 server 模式任务；device 模式任务由模块租约领取执行。
-模块离线时 device 模式会等待下一次唤醒，server 模式不受影响。
+调度**不依赖模块在线**：所有云端任务都在服务器执行。模块进程只负责展示配置、投递结果
+通知，以及执行不依赖服务器的**本地任务**（见模块侧 LocalTaskStore/LocalTaskRunner）。
+历史上存在过的 device 模式（模块领租约代跑云端任务）已废弃，由
+[migrate_device_tasks_to_server] 在启动时把存量任务迁回服务器。
 """
 import asyncio
 import json
@@ -108,6 +110,35 @@ def recover_interrupted_tasks() -> int:
     return recovered
 
 
+def migrate_device_tasks_to_server() -> int:
+    """把历史上落在设备（模块进程）执行的云端任务迁回服务器执行。
+
+    device 模式已废弃：云端任务一律由服务器执行，模块进程只跑不依赖服务器的本地任务。
+    迁移时一并清掉设备租约残留；device 任务常把 nextRunAt 置 0 等模块唤醒，迁回后要重新
+    排期，否则调度循环会把它当成"已到期"而立刻补跑。抽卡是事件型任务，nextRunAt 保持 0。
+    """
+    tasks = load_tasks()
+    migrated = 0
+    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    for task in tasks.values():
+        if task.get("executionMode", "server") != "device":
+            continue
+        task["executionMode"] = "server"
+        task.pop("deviceLeaseToken", None)
+        task.pop("deviceLeaseUntil", None)
+        if task.get("taskType") != "yeshe_draw_card" and int(task.get("nextRunAt", 0) or 0) <= 0:
+            task["nextRunAt"] = now + 60_000
+        if task.get("status") == "running":
+            task["status"] = "scheduled"
+            task["lastMessage"] = "设备执行模式已废弃，任务已迁回服务器执行"
+        migrated += 1
+    if migrated:
+        save_tasks(tasks)
+        audit_event("device_tasks_migrated_to_server", metadata={"count": migrated})
+        print(f"migrated {migrated} device task(s) back to server execution", flush=True)
+    return migrated
+
+
 def normalized_time_of_day(value: Any) -> str:
     text = str(value or "").strip()
     try:
@@ -209,8 +240,6 @@ async def task_scheduler_loop() -> None:
             changed = False
             for task_id, task in tasks.items():
                 if not task.get("enabled", True) or task.get("status") in {"paused", "cancelled", "running"}:
-                    continue
-                if task.get("executionMode", "server") == "device":
                     continue
                 if task.get("taskType") == "yeshe_draw_card" and not task.get("triggeredByCheckinReward"):
                     if task.get("status") != "scheduled" or bounded_config_int(task.get("nextRunAt", 0), 0, 0) != 0 or task.get("schedule") != {"event": YESHE_DRAW_TRIGGER_EVENT}:

@@ -41,6 +41,7 @@ from app.api import tasks as tasks_routes
 from app.audit import audit_event
 from app.responses import response
 from app.scheduler import (
+    migrate_device_tasks_to_server,
     recover_interrupted_tasks,
     release_sync_loop,
     server_snapshot_loop,
@@ -165,5 +166,7 @@ async def start_release_sync() -> None:
         asyncio.create_task(release_sync_loop())
     if runtime.RUN_SCHEDULER:
         recover_interrupted_tasks()
+        # device 模式已废弃，启动时把存量设备任务迁回服务器执行，否则它们不会被调度。
+        migrate_device_tasks_to_server()
         asyncio.create_task(task_scheduler_loop())
         asyncio.create_task(server_snapshot_loop())

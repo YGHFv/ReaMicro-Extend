@@ -320,24 +320,6 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
             .put("buildTime", com.reamicro.fix.BuildConfig.BUILD_TIME),
     )
 
-    fun claimDeviceTask(taskId: String = ""): JSONObject = taskRequest(
-        "POST",
-        "/v1/tasks/claim",
-        JSONObject().apply { if (taskId.isNotBlank()) put("taskId", taskId) },
-    )
-
-    fun completeDeviceTask(taskId: String, leaseToken: String, result: String, message: String, state: JSONObject = JSONObject(), notify: Boolean = true): JSONObject =
-        taskRequest(
-            "POST",
-            "/v1/tasks/${java.net.URLEncoder.encode(taskId, "UTF-8")}/complete",
-            JSONObject()
-                .put("leaseToken", leaseToken)
-                .put("result", result)
-                .put("message", message)
-                .put("state", state)
-                .put("notify", notify),
-        )
-
     fun listReaMicroCredentials(): JSONObject = taskRequest("GET", "/v1/credentials/reamicro", null)
 
     fun saveReaMicroCredential(body: JSONObject): JSONObject = taskRequest("POST", "/v1/credentials/reamicro", body)

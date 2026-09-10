@@ -1,5 +1,16 @@
 # 更新记录
 
+## 清除设备执行模式残留 - 2026-09-10
+
+- 新增 `migrate_device_tasks_to_server()`：把历史上落在设备（模块进程）执行的云端任务迁回服务器执行。迁移会清掉 `deviceLeaseToken`/`deviceLeaseUntil` 租约残留、把 `running` 状态复位为 `scheduled`，并把 `nextRunAt` 为 0 的非事件任务重新排到 60 秒后（device 任务常把 nextRunAt 置 0 等模块唤醒，直接迁回会被当成已到期立刻补跑）；抽卡是事件型任务，保持 0。迁移幂等。
+  - 服务器启动（`main.py` 与 `worker.py` 两条入口）各调用一次；模块心跳（`presence_heartbeat`）也会顺手迁移，无需等服务器重启。原「首次心跳把老任务切成 device」的反向迁移已删除。
+  - `create_task` / `configure_task` 不再接受 device：无论客户端传什么一律落成 `server` 并清租约。
+- 清除已确认的死代码（云端任务改回服务器执行后整条 device 链路不再可达）：
+  - 模块：`CloudTaskLocalRunner.runDue` 与 `dispatchCompletion`、`ApiServerClient.claimDeviceTask` / `completeDeviceTask`。`CloudTaskLocalRunner` 保留为任务执行逻辑库（`runTask` 等仍被 `LocalTaskRunner` 复用）。
+  - 服务器：`POST /v1/tasks/claim` 与 `POST /v1/tasks/{id}/complete` 两个端点，以及仅被它们使用的 import（`credential_for_task`、`enqueue_task_notification`、`task_credential_id`）。
+  - `scheduler.py` 调度循环里的 `executionMode == "device"` 跳过判断一并移除——迁移后不存在设备任务，保留反而会让漏网任务永不执行。
+- 模块 versionCode 更新为 56（versionName 维持 2.3.2）。
+
 ## 账号快照与账号配置页修复 - 2026-09-10
 
 - 云端任务修正回**服务器执行**：`cloudTaskExecutionMode` 一律回传 `server`，模块进程不再领取设备租约；服务器上遗留的 device 任务会在下次保存配置时自动迁移。模块进程只保留不依赖服务器的**本地任务**（`LocalTaskStore` + `LocalTaskRunner`）。
