@@ -42,21 +42,24 @@ object CloudTaskLocalRunner {
         businessError(body)?.let { return Outcome("failed", "获取行商状态失败：$it") }
         val trip = parseMerchantTrip(body)
         val pollAgain = now + TRAVELING_MERCHANT_POLL_MS
+        // 这趟行商用的城池/本金/车马就是「上次行商配置」的来源：阅微只在内存里保存用户选择，
+        // 重启即丢，所以由我们记下来，供自动开新行商时留空沿用。
+        val remembered = rememberedMerchantConfig(task, trip)
         if (!trip.hasTrip) {
-            return Outcome("success", "当前没有进行中的行商", merchantState(pollAgain, lastNotified), notify = false)
+            return Outcome("success", "当前没有进行中的行商", merchantState(pollAgain, lastNotified, remembered), notify = false)
         }
         when (merchantPhase(trip, now)) {
             MerchantPhase.SETTLED, MerchantPhase.NOTIFIED -> {
-                return Outcome("success", "行商已结算", merchantState(pollAgain, lastNotified), notify = false)
+                return Outcome("success", "行商已结算", merchantState(pollAgain, lastNotified, remembered), notify = false)
             }
             MerchantPhase.IN_TRANSIT -> {
                 val resumeAt = trip.endTimeMs + TRAVELING_MERCHANT_ARRIVE_GRACE_MS
                 val message = "行商进行中，预计 ${formatMerchantEpoch(trip.endTimeMs)} 完成"
-                return Outcome("success", message, merchantState(resumeAt, lastNotified), notify = false)
+                return Outcome("success", message, merchantState(resumeAt, lastNotified, remembered), notify = false)
             }
             MerchantPhase.ARRIVED -> {
                 if (trip.tripId == lastNotified) {
-                    return Outcome("success", "行商已通知，等待结算", merchantState(pollAgain, lastNotified), notify = false)
+                    return Outcome("success", "行商已通知，等待结算", merchantState(pollAgain, lastNotified, remembered), notify = false)
                 }
                 var message = merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal)
                 val autoComplete = request.optBoolean("merchantAutoComplete", false)
@@ -67,34 +70,70 @@ object CloudTaskLocalRunner {
                         message += "（自动完成失败：$settleError）"
                     } else {
                         message += "，已自动完成行商"
-                        val started = maybeStartMerchant(baseUrl, token, request)
-                        if (started) message += "并开启新行商"
+                        val start = startResult(baseUrl, token, request, remembered)
+                        if (start != null) message += "并开启新行商" else message += "（未能开启新行商：${merchantStartHint(remembered)}）"
                     }
                 }
-                return Outcome("success", message, merchantState(pollAgain, trip.tripId), notify = true)
+                return Outcome("success", message, merchantState(pollAgain, trip.tripId, remembered), notify = true)
             }
         }
     }
 
-    /** 配置齐全（城池 + 本金 + 车马）时开启新行商，返回是否成功发起。 */
-    private fun maybeStartMerchant(baseUrl: String, token: String, request: JSONObject): Boolean {
-        val cityCode = request.optString("merchantCityCode")
-        val principal = request.optLong("merchantPrincipal", 0L)
-        val transportId = request.optLong("merchantTransportId", 0L)
-        if (cityCode.isBlank() || principal <= 0L || transportId <= 0L) return false
+    /**
+     * 解析本次要用于开新行商的参数：**用户填了就用用户的，留空则沿用上次行商配置**。
+     * 上次配置优先取当前这趟行商实际使用的参数（最准确），没有则用历史记录。
+     */
+    private fun rememberedMerchantConfig(task: JSONObject, trip: MerchantTrip): MerchantConfig = MerchantConfig(
+        cityCode = trip.cityCode.ifBlank { task.optString(LocalTaskStore.KEY_MERCHANT_LAST_CITY) },
+        transportId = trip.transportId.takeIf { it > 0L } ?: task.optLong(LocalTaskStore.KEY_MERCHANT_LAST_TRANSPORT, 0L),
+        principal = trip.principal.takeIf { it > 0L } ?: task.optLong(LocalTaskStore.KEY_MERCHANT_LAST_PRINCIPAL, 0L),
+    )
+
+    /** 用户填了的字段优先；留空的字段沿用它记住的上次行商配置。 */
+    internal fun resolveStartConfig(request: JSONObject, remembered: MerchantConfig): MerchantConfig = MerchantConfig(
+        cityCode = request.optString("merchantCityCode").trim().ifBlank { remembered.cityCode },
+        transportId = request.optLong("merchantTransportId", 0L).takeIf { it > 0L } ?: remembered.transportId,
+        principal = request.optLong("merchantPrincipal", 0L).takeIf { it > 0L } ?: remembered.principal,
+    )
+
+    private fun merchantStartHint(config: MerchantConfig): String = when {
+        config.cityCode.isBlank() -> "缺少城池，请先跑一趟行商或手动填写 cityCode"
+        config.transportId <= 0L -> "缺少车马，请先跑一趟行商或手动填写 transportId"
+        config.principal <= 0L -> "缺少本金，请先跑一趟行商或手动填写本金"
+        else -> "参数不完整"
+    }
+
+    /** 配置齐全时开启新行商，返回是否成功发起；不齐全返回 null。 */
+    private fun startResult(baseUrl: String, token: String, request: JSONObject, remembered: MerchantConfig): Boolean? {
+        val config = resolveStartConfig(request, remembered)
+        if (!config.isComplete) return null
+        return maybeStartMerchant(baseUrl, token, request, config)
+    }
+
+    /** 用给定参数开启新行商。 */
+    private fun maybeStartMerchant(baseUrl: String, token: String, request: JSONObject, config: MerchantConfig): Boolean {
         val payload = JSONObject()
-            .put("cityCode", cityCode)
-            .put("principal", principal)
-            .put("transportId", transportId)
+            .put("cityCode", config.cityCode)
+            .put("principal", config.principal)
+            .put("transportId", config.transportId)
         val started = runCatching {
             postReaMicro(baseUrl, token, payload, request.optString("startEndpoint").ifBlank { "rest/community/start-traveling-merchant" })
         }.getOrNull() ?: return false
         return businessError(started) == null
     }
 
-    private fun merchantState(nextRunAt: Long, lastNotifiedTripId: Long): JSONObject = JSONObject()
+    /** 行商启动参数；[isComplete] 表示三项都可用。 */
+    internal data class MerchantConfig(val cityCode: String, val transportId: Long, val principal: Long) {
+        val isComplete: Boolean get() = cityCode.isNotBlank() && transportId > 0L && principal > 0L
+    }
+
+    private fun merchantState(nextRunAt: Long, lastNotifiedTripId: Long, config: MerchantConfig): JSONObject = JSONObject()
         .put("nextRunAtOverride", nextRunAt)
         .put("merchantLastNotifiedTripId", lastNotifiedTripId)
+        // 落盘「上次行商配置」，供下次自动开新行商留空时沿用。
+        .put(LocalTaskStore.KEY_MERCHANT_LAST_CITY, config.cityCode)
+        .put(LocalTaskStore.KEY_MERCHANT_LAST_TRANSPORT, config.transportId)
+        .put(LocalTaskStore.KEY_MERCHANT_LAST_PRINCIPAL, config.principal)
 
     private fun runCheckin(task: JSONObject, request: JSONObject, credential: JSONObject): Outcome {
         val baseUrl = credential.optString("baseUrl").ifBlank { return Outcome("failed", "阅微服务器地址为空") }
@@ -261,6 +300,9 @@ object CloudTaskLocalRunner {
             settlementAmount = trip.optLong("settlementAmount", 0L),
             principal = trip.optLong("principal", 0L),
             eventTitle = trip.optString("eventTitle"),
+            // 这趟行商实际使用的参数，作为「上次行商配置」的来源。
+            cityCode = trip.optString("cityCode"),
+            transportId = trip.optLong("transportId", 0L),
         )
     }
 
@@ -293,6 +335,8 @@ object CloudTaskLocalRunner {
         val settlementAmount: Long = 0L,
         val principal: Long = 0L,
         val eventTitle: String = "",
+        val cityCode: String = "",
+        val transportId: Long = 0L,
     )
 
     internal data class Outcome(

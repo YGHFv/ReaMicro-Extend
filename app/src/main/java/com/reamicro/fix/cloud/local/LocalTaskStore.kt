@@ -37,6 +37,14 @@ data class LocalTaskBook(
     val name: String,
 )
 
+/** 一条本地任务执行记录。前后台（宿主/模块）各写各的，UI 合并展示。 */
+data class LocalTaskRecord(
+    val at: Long,
+    val taskType: String,
+    val result: String,
+    val message: String,
+)
+
 /**
  * 本地自动任务存储。与云端任务不同，本地任务的凭据（阅微 token）只保存在本机，
  * 用 Android Keystore AES/GCM 加密，按阅微账号（accountId）分组保存到 SharedPreferences。
@@ -155,6 +163,115 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
         return prefs.all.keys.filterTo(linkedSetOf()) { accountId -> list(accountId).any { it.enabled } }
     }
 
+    /** 追加一条执行记录；只保留最近 [MAX_RECORDS] 条，避免无限增长。 */
+    fun appendRecord(
+        accountId: String,
+        taskType: String,
+        result: String,
+        message: String,
+        at: Long = System.currentTimeMillis(),
+    ) {
+        if (accountId.isBlank()) return
+        editAccount(accountId) { root, _ ->
+            val records = root.optJSONArray(KEY_RECORDS) ?: JSONArray()
+            records.put(
+                JSONObject()
+                    .put("at", at)
+                    .put("taskType", taskType)
+                    .put("result", result)
+                    .put("message", message),
+            )
+            val trimmed = JSONArray()
+            for (index in (records.length() - MAX_RECORDS).coerceAtLeast(0) until records.length()) {
+                trimmed.put(records.opt(index))
+            }
+            root.put(KEY_RECORDS, trimmed)
+        }
+    }
+
+    /** 读取某账号的执行记录，最新在前。 */
+    fun records(accountId: String): List<LocalTaskRecord> {
+        val array = readAccount(accountId)?.optJSONArray(KEY_RECORDS) ?: return emptyList()
+        return (0 until array.length()).mapNotNull { index ->
+            val item = array.optJSONObject(index) ?: return@mapNotNull null
+            LocalTaskRecord(
+                at = item.optLong("at", 0L),
+                taskType = item.optString("taskType"),
+                result = item.optString("result"),
+                message = item.optString("message"),
+            )
+        }.sortedByDescending { it.at }
+    }
+
+    fun clearRecords(accountId: String) {
+        if (accountId.isBlank()) return
+        editAccount(accountId) { root, _ -> root.put(KEY_RECORDS, JSONArray()) }
+    }
+
+    /**
+     * 组装下发给模块进程的镜像载荷：所有账号的任务配置 + **明文** token。
+     *
+     * 必须带明文 token：Android Keystore 的密钥按应用（UID）隔离，宿主进程加密的 token
+     * 模块进程根本解不开，只能由模块收到后用自己的密钥重新加密落盘。
+     */
+    fun mirrorPayload(): JSONObject {
+        val prefs = prefs() ?: return JSONObject()
+        val accounts = JSONObject()
+        for (storageKey in prefs.all.keys) {
+            if (!storageKey.startsWith(KEY_ACCOUNT_PREFIX)) continue
+            val accountId = storageKey.removePrefix(KEY_ACCOUNT_PREFIX)
+            if (accountId.isBlank()) continue
+            val root = runCatching { JSONObject(prefs.getString(storageKey, null) ?: "") }.getOrNull() ?: continue
+            accounts.put(
+                accountId,
+                JSONObject()
+                    .put(KEY_TOKEN, decrypt(root.optString(KEY_TOKEN, null)))
+                    .put(KEY_TASKS, root.optJSONObject(KEY_TASKS) ?: JSONObject()),
+            )
+        }
+        return JSONObject().put(KEY_ACCOUNTS, accounts)
+    }
+
+    /**
+     * 模块进程侧：把宿主广播下来的配置写入本机存储。
+     *
+     * 只覆盖配置字段，**保留本进程已积累的运行时状态**（下次执行时间、每日计数、已通知 tripId 等）；
+     * 否则每次镜像都会把后台跑出来的进度冲掉，签到奖励领取、抽卡计数、行商去重都会失忆。
+     */
+    fun applyMirror(accountId: String, tasks: JSONObject, token: String) {
+        if (accountId.isBlank()) return
+        editAccount(accountId) { root, existing ->
+            val next = JSONObject()
+            tasks.keys().forEach { taskType ->
+                val incoming = tasks.optJSONObject(taskType) ?: return@forEach
+                val merged = JSONObject()
+                for (configKey in CONFIG_KEYS) {
+                    if (incoming.has(configKey)) merged.put(configKey, incoming.get(configKey))
+                }
+                merged.put(KEY_TASK_TYPE, taskType)
+                val current = existing.optJSONObject(taskType)
+                if (current != null) {
+                    for (stateKey in RUNTIME_STATE_KEYS) {
+                        if (current.has(stateKey)) merged.put(stateKey, current.get(stateKey))
+                    }
+                }
+                if (!merged.has(KEY_NEXT_RUN_AT)) {
+                    // 首次下发：启用的任务立即排一次，关闭的置 0。
+                    merged.put(KEY_NEXT_RUN_AT, if (merged.optBoolean(KEY_ENABLED, false)) System.currentTimeMillis() else 0L)
+                }
+                next.put(taskType, merged)
+            }
+            // 整体替换：宿主删掉的任务在模块侧也要消失，否则模块会继续按旧配置执行。
+            // 必须原地改 existing（editAccount 在块返回后会把同一个对象写回 root）。
+            val staleTypes = ArrayList<String>()
+            val iterator = existing.keys()
+            while (iterator.hasNext()) staleTypes.add(iterator.next())
+            staleTypes.forEach { existing.remove(it) }
+            next.keys().forEach { existing.put(it, next.get(it)) }
+            if (token.isNotBlank()) root.put(KEY_TOKEN, encrypt(token))
+        }
+    }
+
     private fun parseTask(taskType: String, obj: JSONObject): LocalTask {
         val booksJson = obj.optJSONArray(KEY_BOOKS) ?: JSONArray()
         val books = (0 until booksJson.length()).mapNotNull { index ->
@@ -258,9 +375,10 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
 
     companion object {
         const val PREFS_NAME = "reamicro_local_tasks"
-        private const val KEY_ACCOUNT_PREFIX = "account_"
-        private const val KEY_TASKS = "tasks"
-        private const val KEY_TOKEN = "token"
+        internal const val KEY_ACCOUNT_PREFIX = "account_"
+        private const val KEY_ACCOUNTS = "accounts"
+        internal const val KEY_TASKS = "tasks"
+        internal const val KEY_TOKEN = "token"
         private const val KEY_TASK_TYPE = "taskType"
         private const val KEY_ENABLED = "enabled"
         private const val KEY_TIME_OF_DAY = "timeOfDay"
@@ -282,7 +400,21 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
             "dailyReadDate", "dailyReadMinutes", "bookRotation",
             "lastCheckinDate", "lastCheckinAt", "claimDueAt", "claimCompletedDate",
             "merchantLastNotifiedTripId", "merchantPausedUntil", "merchantStartAfterSettle",
+            // 上次观察到的行商参数：自动开新行商未填城池/本金/车马时沿用。
+            KEY_MERCHANT_LAST_CITY, KEY_MERCHANT_LAST_TRANSPORT, KEY_MERCHANT_LAST_PRINCIPAL,
         )
+
+        internal const val KEY_MERCHANT_LAST_CITY = "merchantLastCityCode"
+        internal const val KEY_MERCHANT_LAST_TRANSPORT = "merchantLastTransportId"
+        internal const val KEY_MERCHANT_LAST_PRINCIPAL = "merchantLastPrincipal"
+        // 镜像只下发这些「配置」字段；其余（运行时状态）由各自进程保留。
+        private val CONFIG_KEYS = setOf(
+            KEY_ENABLED, KEY_TIME_OF_DAY, KEY_DURATION_MINUTES, KEY_DAILY_DRAW_LIMIT, KEY_BOOKS,
+            KEY_MERCHANT_AUTO_COMPLETE, KEY_MERCHANT_CITY_CODE, KEY_MERCHANT_PRINCIPAL, KEY_MERCHANT_TRANSPORT_ID,
+        )
+        // 执行记录只保留最近若干条，避免 SharedPreferences 无限增长。
+        private const val KEY_RECORDS = "records"
+        internal const val MAX_RECORDS = 100
 
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val KEY_ALIAS = "reamicro-local-task-credentials"

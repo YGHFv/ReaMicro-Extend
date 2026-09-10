@@ -7,13 +7,31 @@ import android.widget.TextView
 import com.reamicro.fix.cloud.api.ApiServerClient
 import com.reamicro.fix.cloud.api.ApiServerSettingsStore
 import com.reamicro.fix.cloud.api.CloudTaskManager
+import com.reamicro.fix.cloud.api.CloudTaskWakeScheduler
 import com.reamicro.fix.cloud.local.LocalTask
 import com.reamicro.fix.cloud.local.LocalTaskBook
+import com.reamicro.fix.cloud.local.LocalTaskMirror
+import com.reamicro.fix.cloud.local.LocalTaskRecord
 import com.reamicro.fix.cloud.local.LocalTaskStore
 import com.reamicro.fix.hook.settings.*
 import de.robv.android.xposed.XposedBridge
 
 private const val LOCAL_AUTOMATION_LOG_PREFIX = "[ReaMicroFix/LocalAutomation]"
+
+/**
+ * 配置变更后统一下发镜像并重排闹钟。
+ *
+ * 两件事缺一不可：
+ * 1. **镜像**：设置页在宿主进程写的是宿主的 prefs，而闹钟唤醒后执行任务的模块进程读的是
+ *    自己的 prefs，不同步过去后台就是空配置（表现为"设了任务却从不自启"）。
+ * 2. **排闹钟**：`schedule()` 此前只在云端轮询/模块 provider 路径被调用，用户在设置页启用
+ *    本地任务时从不排程，没有 API 服务器时闹钟根本不存在。
+ */
+private fun ReaMicroSettingsHook.publishLocalAutomationChange() {
+    val appContext = activityProvider()?.applicationContext ?: return
+    LocalTaskMirror.push(appContext)
+    runCatching { CloudTaskWakeScheduler.schedule(appContext) }
+}
 
 /**
  * 本地「自动任务」页。任务列表与配置项与云端任务保持一致，但配置与阅微 token 都保存在本机
@@ -57,6 +75,15 @@ internal fun ReaMicroSettingsHook.renderLocalAutomationSettingsContent(innerPadd
                 onClick = ::openLocalAutomationWakeDialog,
             ),
         )
+        // 任务记录放在最下面：配置页要的「以配置为主」，记录属于事后回查。
+        val historyRows = listOf(
+            ActionRow(
+                key = "local_automation_records",
+                title = "任务记录",
+                subtitle = localAutomationRecordsSummary(),
+                onClick = ::openLocalAutomationRecordsDialog,
+            ),
+        )
         addLazyItem(lazyListScope, "local_automation_account_card".hashCode()) { itemComposer ->
             renderHostActionCard(accountRows, itemComposer)
         }
@@ -65,6 +92,9 @@ internal fun ReaMicroSettingsHook.renderLocalAutomationSettingsContent(innerPadd
         }
         addLazyItem(lazyListScope, "local_automation_utility_card".hashCode()) { itemComposer ->
             renderHostActionCard(utilityRows, itemComposer)
+        }
+        addLazyItem(lazyListScope, "local_automation_history_card".hashCode()) { itemComposer ->
+            renderHostActionCard(historyRows, itemComposer)
         }
         targetUnit()
     }
@@ -107,6 +137,118 @@ private fun ReaMicroSettingsHook.ensureLocalAutomationLoaded() {
 
 private fun ReaMicroSettingsHook.localAutomationTask(taskType: String): LocalTask? =
     localAutomationTasks.firstOrNull { it.taskType == taskType }
+
+/** 前台（宿主进程）写下的执行记录。后台记录由模块进程写，需另行拉取。 */
+private fun ReaMicroSettingsHook.localRecords(accountId: String): List<LocalTaskRecord> {
+    if (accountId.isBlank()) return emptyList()
+    val appContext = activityProvider()?.applicationContext ?: return emptyList()
+    return runCatching { LocalTaskStore { appContext }.records(accountId) }.getOrDefault(emptyList())
+}
+
+private fun ReaMicroSettingsHook.localAutomationRecordsSummary(): String {
+    val accountId = localAutomationAccountId
+    if (accountId.isBlank()) return "查看历史执行结果"
+    val count = localRecords(accountId).size
+    return if (count == 0) "暂无记录 · 点击查看" else "本机已记录 $count 条执行结果"
+}
+
+private fun ReaMicroSettingsHook.openLocalAutomationRecordsDialog() {
+    val activity = activityProvider() ?: return
+    val accountId = localAutomationAccountId
+    if (accountId.isBlank()) {
+        showToast("请先在阅微登录账号")
+        return
+    }
+    activity.runOnUiThread {
+        val colors = SettingsDialogColors(activity)
+        val dialog = Dialog(activity)
+        val card = settingsDialogCard(activity, colors)
+        card.addView(settingsDialogTitle(activity, "任务记录", colors))
+        val status = TextView(activity).apply {
+            setTextColor(colors.body)
+            setPadding(24, 8, 24, 8)
+            text = "正在读取……"
+        }
+        card.addView(status, apiServerRowParams(activity))
+        val list = android.widget.LinearLayout(activity).apply { orientation = android.widget.LinearLayout.VERTICAL }
+        card.addView(list, apiServerRowParams(activity))
+
+        fun render(hostRecords: List<LocalTaskRecord>, moduleRecords: List<LocalTaskRecord>, moduleReachable: Boolean) {
+            // 前后台各写各的记录（宿主进程 / 模块进程），按时间戳合并后统一展示。
+            val merged = (hostRecords + moduleRecords).sortedByDescending { it.at }.take(LOCAL_RECORD_DISPLAY_LIMIT)
+            list.removeAllViews()
+            status.text = when {
+                merged.isEmpty() && !moduleReachable ->
+                    "暂无记录。后台记录需要模块被唤醒过一次后才能读取（可先用模块自检里的截图确认权限）。"
+                merged.isEmpty() -> "暂无执行记录。任务执行后会在这里留下结果。"
+                !moduleReachable ->
+                    "共 ${merged.size} 条（含前台记录）。模块未启动，后台执行记录暂不可读——这不代表后台没执行。"
+                else -> "共 ${merged.size} 条，最新在前。"
+            }
+            merged.forEach { record ->
+                list.addView(
+                    TextView(activity).apply {
+                        setTextColor(if (record.result == "success") colors.title else colors.destructiveText)
+                        setPadding(24, 6, 24, 6)
+                        text = buildString {
+                            append(formatLocalRecordTime(record.at))
+                            append(" · ")
+                            append(localTaskTitleOf(record.taskType))
+                            append(" · ")
+                            append(if (record.result == "success") "成功" else record.result)
+                            append('\n')
+                            append(record.message)
+                        }
+                    },
+                )
+            }
+        }
+
+        Thread {
+            val hostRecords = localRecords(accountId)
+            val moduleRecords = runCatching {
+                com.reamicro.fix.cloud.api.readModuleLocalTaskRecords(activity.applicationContext, accountId)
+            }.getOrDefault(emptyList())
+            activity.runOnUiThread {
+                render(hostRecords, moduleRecords, moduleRecords.isNotEmpty())
+            }
+        }.apply { isDaemon = true; start() }
+
+        val actions = settingsDialogActions(activity)
+        actions.addView(
+            settingsDialogButton(activity, "清空记录", colors, SettingsDialogButtonRole.Neutral).apply {
+                setOnClickListener {
+                    val appContext = activity.applicationContext
+                    runCatching { LocalTaskStore { appContext }.clearRecords(accountId) }
+                    dialog.dismiss()
+                    showToast("本机记录已清空（后台记录需模块启动后另行清空）")
+                }
+            },
+            settingsDialogButtonParams(activity),
+        )
+        actions.addView(
+            settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply {
+                setOnClickListener { dialog.dismiss() }
+            },
+            settingsDialogButtonParams(activity),
+        )
+        card.addView(actions)
+        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, dismissOnThemeChange = true)
+    }
+}
+
+private fun localTaskTitleOf(taskType: String): String = when (taskType) {
+    "yeshe_checkin" -> "野社签到"
+    "yeshe_draw_card" -> "野社抽卡"
+    "cloud_auto_read" -> "自动阅读"
+    "traveling_merchant" -> "行商通知"
+    else -> taskType
+}
+
+private fun formatLocalRecordTime(at: Long): String =
+    java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(at))
+
+private const val LOCAL_RECORD_DISPLAY_LIMIT = 60
 
 private fun ReaMicroSettingsHook.localAutomationAccountSubtitle(
     current: AccountCompletionController.CurrentCloudCredential?,
@@ -219,6 +361,7 @@ private fun ReaMicroSettingsHook.setLocalAutomationTaskEnabled(
         val appContext = activity.applicationContext
         Thread { runCatching { com.reamicro.fix.cloud.local.LocalTaskRunner.runDue(appContext) } }.start()
     }
+    publishLocalAutomationChange()
     showToast(if (enabled) "已启用${spec.title}" else "已停用${spec.title}")
     return enabled
 }
@@ -267,11 +410,11 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
             setSingleLine(false)
         }
         val merchantAutoComplete = settingsDialogSwitchRow(activity, "自动完成行商", task?.merchantAutoComplete == true, colors)
-        val merchantCity = apiServerEdit(activity, colors, "新行商城池 cityCode（自动开新行商用）", task?.merchantCityCode.orEmpty())
-        val merchantPrincipal = apiServerEdit(activity, colors, "新行商本金（铜）", (task?.merchantPrincipal?.takeIf { it > 0L })?.toString().orEmpty()).apply {
+        val merchantCity = apiServerEdit(activity, colors, "新行商城池 cityCode（留空沿用上次行商）", task?.merchantCityCode.orEmpty())
+        val merchantPrincipal = apiServerEdit(activity, colors, "新行商本金（铜，留空沿用上次）", (task?.merchantPrincipal?.takeIf { it > 0L })?.toString().orEmpty()).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
         }
-        val merchantTransport = apiServerEdit(activity, colors, "新行商车马 transportId", (task?.merchantTransportId?.takeIf { it > 0L })?.toString().orEmpty()).apply {
+        val merchantTransport = apiServerEdit(activity, colors, "新行商车马 transportId（留空沿用上次）", (task?.merchantTransportId?.takeIf { it > 0L })?.toString().orEmpty()).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
         }
         card.addView(account, apiServerRowParams(activity))
@@ -290,7 +433,7 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
         val status = TextView(activity).apply {
             setTextColor(colors.body)
             text = when {
-                spec.merchant -> "每 4 小时检查行商，进行中时暂停到完成时刻再通知；默认只通知不自动完成。开启自动完成后可填城池/本金/车马以自动开启新行商"
+                spec.merchant -> "每 4 小时检查行商，进行中时暂停到完成时刻再通知；默认只通知不自动完成。开启自动完成行商后，城池/本金/车马留空会沿用上次行商的配置"
                 spec.rewardTriggered -> "启用后按每日上限抽卡；填写 0 会抽到彩筹用完"
                 task == null -> "保存后即完成配置"
                 else -> "保存会更新当前任务配置"
@@ -347,6 +490,7 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
                 val appContext = activity.applicationContext
                 Thread { runCatching { com.reamicro.fix.cloud.local.LocalTaskRunner.runDue(appContext) } }.start()
             }
+            publishLocalAutomationChange()
             reloadLocalAutomationState()
         }
         actions.addView(saveButton, settingsDialogButtonParams(activity))
@@ -447,6 +591,7 @@ internal fun ReaMicroSettingsHook.disableLocalAutomationTask(accountId: String, 
         val store = LocalTaskStore { activity.applicationContext }
         if (store.get(accountId, taskType)?.enabled == true) {
             store.setEnabled(accountId, taskType, false)
+            publishLocalAutomationChange()
             if (localAutomationAccountId == accountId) {
                 localAutomationTasks = store.list(accountId)
                 bumpLocalAutomationVersion()

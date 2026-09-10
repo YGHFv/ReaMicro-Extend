@@ -20,7 +20,12 @@ object CloudTaskNotificationPoller {
     fun poll(context: Context, source: String = "foreground", force: Boolean = false) {
         val appContext = context.applicationContext
         val store = ApiServerSettingsStore { appContext }
-        if (!store.get().enabled) return
+        if (!store.get().enabled) {
+            // API 服务器没启用也要排闹钟：本地自动任务完全不依赖服务器，它们同样需要被唤醒。
+            // 此前这里直接 return，导致只用本地任务的用户永远排不上闹钟、任务从不自启。
+            CloudTaskWakeScheduler.schedule(appContext)
+            return
+        }
         val now = System.currentTimeMillis()
         if ((!force && now - lastPollAt < MIN_POLL_INTERVAL_MS) || !running.compareAndSet(false, true)) return
         lastPollAt = now
@@ -67,7 +72,14 @@ object CloudTaskNotificationPoller {
             if (acknowledged.isNotEmpty()) client.acknowledgeNotifications(acknowledged)
             CloudTaskWakeScheduler.schedule(appContext, data.optLong("nextTaskAt", 0L))
         } catch (error: Throwable) {
-            XposedBridge.log("ReaMicro API task notification poll failed: ${error.message}")
+            // 网络类失败是常态而非故障：用户可能没网，或自建服务器暂时不可达（DNS 解析不了、
+            // 连接被中断）。这类失败会自愈，不能每次轮询都打一条 error 把日志刷满，
+            // 因此限流成最多每 30 分钟一条提示。
+            if (isTransientNetworkFailure(error)) {
+                logNetworkFailureThrottled(error)
+            } else {
+                XposedBridge.log("ReaMicro API task notification poll failed: ${error.message}")
+            }
             CloudTaskWakeScheduler.schedule(appContext)
         } finally {
             running.set(false)
@@ -143,6 +155,43 @@ object CloudTaskNotificationPoller {
     }
 
     private const val MIN_POLL_INTERVAL_MS = 30_000L
+
+    /**
+     * 是否属于可自愈的网络类失败（DNS 解析失败、连接中断、超时、无路由）。
+     *
+     * 这类失败在自建服务器或移动网络下很常见，重试即可，不该按故障记录。
+     */
+    private fun isTransientNetworkFailure(error: Throwable): Boolean {
+        if (error is java.net.UnknownHostException ||
+            error is java.net.ConnectException ||
+            error is java.net.SocketTimeoutException ||
+            error is java.net.NoRouteToHostException ||
+            error is java.net.SocketException
+        ) {
+            return true
+        }
+        val message = error.message.orEmpty()
+        return TRANSIENT_NETWORK_MESSAGES.any { it in message }
+    }
+
+    private fun logNetworkFailureThrottled(error: Throwable) {
+        val now = System.currentTimeMillis()
+        if (now - lastNetworkFailureLogAtMs < NETWORK_FAILURE_LOG_INTERVAL_MS) return
+        lastNetworkFailureLogAtMs = now
+        XposedBridge.log("ReaMicro API server unreachable (will keep retrying): ${error.message}")
+    }
+
+    @Volatile private var lastNetworkFailureLogAtMs = 0L
+    private const val NETWORK_FAILURE_LOG_INTERVAL_MS = 30 * 60_000L
+    private val TRANSIENT_NETWORK_MESSAGES = listOf(
+        "No address associated with hostname",
+        "Unable to resolve host",
+        "Software caused connection abort",
+        "Connection reset",
+        "Connection refused",
+        "timed out",
+        "timeout",
+    )
 }
 
 /** 使用系统闹钟在零点和下一次云任务完成附近静默唤醒模块。 */

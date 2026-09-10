@@ -1,5 +1,23 @@
 # 更新记录
 
+## 修复本地任务定时自启 + 任务记录 - 2026-09-10
+
+**定时自启修不好有两个独立根因，缺一不可：**
+
+- **根因一：从不排闹钟。** `CloudTaskWakeScheduler.schedule()` 此前只在云端轮询与模块 provider 路径被调用；用户在设置页启用/保存本地任务时**从不排程**，且 `CloudTaskNotificationPoller.poll()` 在 API 服务器未启用时**直接 return**——只用本地任务、没配服务器的用户，闹钟根本不存在。
+  - 现在：启用/保存/停用本地任务、以及每次执行完之后都会重排闹钟；`poll()` 在服务器未启用时也会排程（本地任务不依赖服务器）。
+- **根因二：宿主与模块读的不是同一份存储。** 设置页跑在阅微进程，`LocalTaskStore { activity.applicationContext }` 写的是**宿主**的 SharedPreferences；而闹钟唤醒后的 `LocalTaskRunner.runDue` 跑在**模块**进程，读的是模块自己的存储——读到的是空配置。Keystore 密钥也按 UID 隔离，宿主加密的 token 模块根本解不开。
+  - 现在：新增 `LocalTaskMirror` + `LocalTaskMirrorReceiver`，每次配置变更用**显式组件的广播**（`FLAG_INCLUDE_STOPPED_PACKAGES`）把配置连同明文 token 下发到模块，模块用自己的 Keystore 重新加密落盘。`applyMirror` 是整体替换，宿主删掉的任务在模块侧也会消失。
+  - 为什么不用 provider：模块 App 没有 LAUNCHER activity，装完可能从未启动过、一直处于 stopped 状态，而 **stopped 应用的 provider 无法被解析**——调用方拿到 `Unknown authority`，这正是 API 设置镜像长期失败的原因。广播则能投递给 stopped 应用并顺带解除该状态（云端通知一直走的就是这条路）。
+
+**本地自动任务新增「任务记录」**：页面最下方新增入口，点击查看执行历史（时间 / 任务 / 结果 / 详情）。前后台各写各的（宿主进程与模块进程存储隔离），UI 按时间戳合并展示；模块未启动时只能读到前台记录，界面会明确说明而不是假装没执行。
+
+**行商「自动完成并开新行商」留空时沿用上次配置**：阅微只在 ViewModel 内存里保存用户选中的城池/车马/本金，重启即丢，所以由模块记住这趟行商实际使用的参数；下次用户留空时逐项沿用（填了的字段仍以用户为准）。参数仍不齐时会提示具体缺哪一项。
+
+**报错日志降噪**：DNS 解析失败、连接中断、超时这类可自愈的网络失败不再每次轮询都打 error（限流为每 30 分钟一条）；provider 镜像失败改为明确说明"模块尚未启动"的降级提示，不再当作故障。
+
+模块 versionCode 更新为 57（versionName 维持 2.3.2）。
+
 ## 清除设备执行模式残留 - 2026-09-10
 
 - 新增 `migrate_device_tasks_to_server()`：把历史上落在设备（模块进程）执行的云端任务迁回服务器执行。迁移会清掉 `deviceLeaseToken`/`deviceLeaseUntil` 租约残留、把 `running` 状态复位为 `scheduled`，并把 `nextRunAt` 为 0 的非事件任务重新排到 60 秒后（device 任务常把 nextRunAt 置 0 等模块唤醒，直接迁回会被当成已到期立刻补跑）；抽卡是事件型任务，保持 0。迁移幂等。

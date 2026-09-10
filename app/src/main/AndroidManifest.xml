@@ -98,6 +98,17 @@
             </intent-filter>
         </receiver>
 
+        <!-- 接收宿主（阅微进程）下发的本地任务配置。explicit component + 带
+             FLAG_INCLUDE_STOPPED_PACKAGES 的广播才能投递到未启动过的模块，而 provider 做不到。 -->
+        <receiver
+            android:name=".cloud.local.LocalTaskMirrorReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.reamicro.fix.LOCAL_TASK_MIRROR" />
+            </intent-filter>
+        </receiver>
+
         <receiver
             android:name=".tts.ReadAloudCommandReceiver"
             android:enabled="true"
