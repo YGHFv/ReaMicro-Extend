@@ -48,7 +48,10 @@ class ReaMicroHookEntry {
         override fun run() {
             val activity = currentActivityRef?.get()
             if (activity != null) {
-                CloudTaskNotificationPoller.poll(activity.applicationContext, source = "foreground-heartbeat")
+                val appContext = activity.applicationContext
+                CloudTaskNotificationPoller.poll(appContext, source = "foreground-heartbeat")
+                // 前台心跳时也跑一次本地自动任务，保证 App 在前台时行商等任务及时执行。
+                Thread { runCatching { com.reamicro.fix.cloud.local.LocalTaskRunner.runDue(appContext) } }.start()
                 heartbeatHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS)
             }
         }
@@ -267,6 +270,8 @@ class ReaMicroHookEntry {
                         profileBackgroundHook.refreshRandomImageFor(activity)
                         ApiPackageAutoUpdater.checkIfDue(activity.applicationContext, moduleSettings)
                         CloudTaskNotificationPoller.poll(activity.applicationContext)
+                        val appContext = activity.applicationContext
+                        Thread { runCatching { com.reamicro.fix.cloud.local.LocalTaskRunner.runDue(appContext) } }.start()
                         startForegroundHeartbeat()
                         XposedBridge.log("$LOG_PREFIX MainActivity.onCreate hooked")
                     }
@@ -290,6 +295,7 @@ class ReaMicroHookEntry {
                             currentActivityRef = WeakReference(activity)
                             currentActivityResumed = true
                             moduleSettings.attachContext(activity)
+                            mirrorApiSettings(activity)
                             installExternalFeatures(classLoader)
                             RotationOrientationController.apply(activity, moduleSettings.snapshot())
                             profileBackgroundHook.refreshRandomImageFor(activity)
@@ -385,8 +391,9 @@ class ReaMicroHookEntry {
 
     private fun mirrorApiSettings(activity: Activity) {
         if (apiSettingsMirrored) return
-        ApiServerSettingsStore { activity.applicationContext }.get().mirrorToModule(activity.applicationContext)
-        apiSettingsMirrored = true
+        apiSettingsMirrored = ApiServerSettingsStore { activity.applicationContext }
+            .get()
+            .mirrorToModule(activity.applicationContext)
     }
 
     private fun installExternalFeatures(classLoader: ClassLoader) {

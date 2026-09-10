@@ -1,0 +1,348 @@
+package com.reamicro.fix.cloud.local
+
+import com.reamicro.fix.association.network.HttpClient
+import com.reamicro.fix.cloud.api.ApiServerClient
+import com.reamicro.fix.cloud.api.ApiServerSettingsStore
+import com.reamicro.fix.notification.CloudTaskNotifications
+import org.json.JSONArray
+import org.json.JSONObject
+import java.time.LocalDate
+import java.time.ZoneId
+
+/** 在模块进程中执行设备模式的阅微自动任务。凭据仅存在当前调用栈，租约结束后立即丢弃。 */
+object CloudTaskLocalRunner {
+    fun runDue(context: android.content.Context, maxTasks: Int = 3): Int {
+        val appContext = context.applicationContext
+        val client = ApiServerClient(ApiServerSettingsStore { appContext })
+        var completed = 0
+        repeat(maxTasks.coerceIn(1, 8)) {
+            val claim = runCatching { client.claimDeviceTask() }.getOrElse { return@repeat }
+            val data = claim.optJSONObject("data") ?: claim
+            val task = data.optJSONObject("task") ?: return@repeat
+            val taskId = task.optString("id")
+            val leaseToken = data.optString("leaseToken")
+            if (taskId.isBlank() || leaseToken.isBlank()) return@repeat
+            val request = data.optJSONObject("request") ?: JSONObject()
+            val credential = data.optJSONObject("credential") ?: JSONObject()
+            val outcome = runCatching {
+                runTask(task.optString("taskType"), task, request, credential)
+            }.getOrElse { Outcome("failed", it.message ?: "本地任务执行失败") }
+            val completedResponse = runCatching {
+                client.completeDeviceTask(taskId, leaseToken, outcome.result, outcome.message, outcome.state, outcome.notify)
+            }.getOrNull()
+            if (completedResponse != null) dispatchCompletion(appContext, client, completedResponse)
+            completed++
+        }
+        return completed
+    }
+
+    /**
+     * 执行一条阅微自动任务。device 租约（云端）与本地任务两条路径共用同一套执行逻辑，
+     * 仅数据来源不同（服务器租约 vs 本地存储）。行商通知任务的暂停/续跑通过返回的 state 表达。
+     */
+    internal fun runTask(taskType: String, task: JSONObject, request: JSONObject, credential: JSONObject): Outcome =
+        when (taskType) {
+            "yeshe_checkin" -> runCheckin(task, request, credential)
+            "yeshe_draw_card" -> runDrawCard(task, request, credential)
+            "cloud_auto_read" -> runAutoRead(task, request, credential)
+            "traveling_merchant" -> runMerchantNotify(task, request, credential)
+            else -> Outcome("failed", "模块暂不支持此任务类型")
+        }
+
+    /**
+     * 行商通知：每次执行拉取行商状态。
+     * - 无活跃行商：静默等待，下次 4 小时后再查。
+     * - 行商在途（now < endTime）：把下次检查排到 endTime，暂停 4 小时轮询。
+     * - 行商已抵达（now >= endTime 且未结算、未通知过）：发出「收益/亏损」通知；
+     *   若开启自动完成，则结算并（在配置齐全时）开启新行商。
+     */
+    internal fun runMerchantNotify(task: JSONObject, request: JSONObject, credential: JSONObject): Outcome {
+        val baseUrl = credential.optString("baseUrl").ifBlank { REAMICRO_BASE_URL }
+        val token = credential.optString("token").ifBlank { return Outcome("paused", "阅微登录凭据无效") }
+        val now = System.currentTimeMillis()
+        val lastNotified = task.optLong("merchantLastNotifiedTripId", 0L)
+        val body = postReaMicro(baseUrl, token, request.optJSONObject("body") ?: JSONObject(), request.optString("endpoint").ifBlank { "rest/community/get-traveling-merchant" })
+        businessError(body)?.let { return Outcome("failed", "获取行商状态失败：$it") }
+        val trip = parseMerchantTrip(body)
+        val pollAgain = now + TRAVELING_MERCHANT_POLL_MS
+        if (!trip.hasTrip) {
+            return Outcome("success", "当前没有进行中的行商", merchantState(pollAgain, lastNotified), notify = false)
+        }
+        when (merchantPhase(trip, now)) {
+            MerchantPhase.SETTLED, MerchantPhase.NOTIFIED -> {
+                return Outcome("success", "行商已结算", merchantState(pollAgain, lastNotified), notify = false)
+            }
+            MerchantPhase.IN_TRANSIT -> {
+                val resumeAt = trip.endTimeMs + TRAVELING_MERCHANT_ARRIVE_GRACE_MS
+                val message = "行商进行中，预计 ${formatMerchantEpoch(trip.endTimeMs)} 完成"
+                return Outcome("success", message, merchantState(resumeAt, lastNotified), notify = false)
+            }
+            MerchantPhase.ARRIVED -> {
+                if (trip.tripId == lastNotified) {
+                    return Outcome("success", "行商已通知，等待结算", merchantState(pollAgain, lastNotified), notify = false)
+                }
+                var message = merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal)
+                val autoComplete = request.optBoolean("merchantAutoComplete", false)
+                if (autoComplete && trip.tripId > 0L) {
+                    val settle = postReaMicro(baseUrl, token, JSONObject().put("tripId", trip.tripId), request.optString("settleEndpoint").ifBlank { "rest/community/settle-traveling-merchant" })
+                    val settleError = businessError(settle)
+                    if (settleError != null) {
+                        message += "（自动完成失败：$settleError）"
+                    } else {
+                        message += "，已自动完成行商"
+                        val started = maybeStartMerchant(baseUrl, token, request)
+                        if (started) message += "并开启新行商"
+                    }
+                }
+                return Outcome("success", message, merchantState(pollAgain, trip.tripId), notify = true)
+            }
+        }
+    }
+
+    /** 配置齐全（城池 + 本金 + 车马）时开启新行商，返回是否成功发起。 */
+    private fun maybeStartMerchant(baseUrl: String, token: String, request: JSONObject): Boolean {
+        val cityCode = request.optString("merchantCityCode")
+        val principal = request.optLong("merchantPrincipal", 0L)
+        val transportId = request.optLong("merchantTransportId", 0L)
+        if (cityCode.isBlank() || principal <= 0L || transportId <= 0L) return false
+        val payload = JSONObject()
+            .put("cityCode", cityCode)
+            .put("principal", principal)
+            .put("transportId", transportId)
+        val started = runCatching {
+            postReaMicro(baseUrl, token, payload, request.optString("startEndpoint").ifBlank { "rest/community/start-traveling-merchant" })
+        }.getOrNull() ?: return false
+        return businessError(started) == null
+    }
+
+    private fun merchantState(nextRunAt: Long, lastNotifiedTripId: Long): JSONObject = JSONObject()
+        .put("nextRunAtOverride", nextRunAt)
+        .put("merchantLastNotifiedTripId", lastNotifiedTripId)
+
+    private fun runCheckin(task: JSONObject, request: JSONObject, credential: JSONObject): Outcome {
+        val baseUrl = credential.optString("baseUrl").ifBlank { return Outcome("failed", "阅微服务器地址为空") }
+        val token = credential.optString("token").ifBlank { return Outcome("paused", "阅微登录凭据无效") }
+        val body = postReaMicro(baseUrl, token, request.optJSONObject("body") ?: JSONObject(), request.optString("endpoint").ifBlank { "rest/community/get-daily-lore" })
+        val error = businessError(body)
+        if (error != null) return Outcome("failed", "获取每日轶闻失败：$error")
+        val data = body.optJSONObject("data") ?: JSONObject()
+        val loreId = data.optLong("id", data.optLong("loreId", body.optLong("id", 0L)))
+        var claimed = data.optBoolean("claimed", false)
+        var claimDueAt = task.optLong("claimDueAt", 0L).takeIf { it > 0L }
+            ?: data.optLong("endTime", 0L).let { if (it > 0L && it < 100_000_000_000L) it * 1_000L else it }
+        if (!data.optBoolean("isFinish", false)) {
+            if (loreId <= 0L) return Outcome("failed", "阅微每日轶闻响应缺少 userLoreId")
+            val complete = postReaMicro(baseUrl, token, JSONObject().put("userLoreId", loreId), request.optString("completeEndpoint").ifBlank { "rest/community/complete-daily-lore" })
+            val completeError = businessError(complete)
+            if (completeError != null) return Outcome("failed", "野社签到提交失败：$completeError")
+            claimed = (complete.optJSONObject("data") ?: complete).optBoolean("claimed", false)
+        }
+        if (!claimed && claimDueAt > 0L && System.currentTimeMillis() >= claimDueAt && loreId > 0L) {
+            val claim = postReaMicro(baseUrl, token, JSONObject().put("userLoreId", loreId), request.optString("completeEndpoint").ifBlank { "rest/community/complete-daily-lore" })
+            val claimError = businessError(claim)
+            if (claimError != null) return Outcome("failed", "签到奖励领取失败：$claimError")
+            claimed = (claim.optJSONObject("data") ?: claim).optBoolean("claimed", true)
+        }
+        val today = LocalDate.now(ZoneId.of("Asia/Shanghai")).toString()
+        if (claimDueAt <= 0L) claimDueAt = System.currentTimeMillis() + 8L * 3_600_000L
+        val state = JSONObject()
+            .put("lastCheckinDate", today)
+            .put("lastCheckinAt", System.currentTimeMillis())
+            .put("claimDueAt", claimDueAt)
+            .put("nextRunAtOverride", if (claimed) 0L else claimDueAt)
+            .put("claimCompletedDate", if (claimed) today else "")
+            .put("claimJustCompleted", claimed)
+        return Outcome("success", if (claimed) "签到完成，奖励已领取" else "签到完成，等待奖励解锁", state)
+    }
+
+    private fun runDrawCard(task: JSONObject, request: JSONObject, credential: JSONObject): Outcome {
+        val baseUrl = credential.optString("baseUrl").ifBlank { return Outcome("failed", "阅微服务器地址为空") }
+        val token = credential.optString("token").ifBlank { return Outcome("paused", "阅微登录凭据无效") }
+        val configuredLimit = request.optInt("dailyLimit", 3).coerceIn(0, 20)
+        val today = LocalDate.now(ZoneId.of("Asia/Shanghai")).toString()
+        val usedToday = if (task.optString("dailyCounterDate") == today) task.optInt("dailyCounter", 0).coerceAtLeast(0) else 0
+        val target = if (configuredLimit == 0) {
+            val info = postReaMicro(baseUrl, token, JSONObject(), request.optString("userInfoEndpoint").ifBlank { "rest/user/get-user-info" })
+            val infoError = businessError(info)
+            if (infoError != null) return Outcome("failed", "读取彩筹余额失败：$infoError")
+            (info.optJSONObject("data")?.optInt("gem", 0) ?: 0).coerceAtLeast(0)
+        } else (configuredLimit - usedToday).coerceAtLeast(0)
+        if (target <= 0) return Outcome("success", "今日没有可用彩筹")
+        val endpoint = request.optString("endpoint").ifBlank { "rest/community/wish" }
+        val items = mutableListOf<JSONObject>()
+        var consumed = 0
+        while (consumed < target) {
+            val count = minOf(9, target - consumed)
+            val wishBody = (request.optJSONObject("body") ?: JSONObject()).put("count", count)
+            val wish = postReaMicro(baseUrl, token, wishBody, endpoint)
+            val error = businessError(wish)
+            if (error != null) return Outcome("failed", "祈愿失败：$error", drawState(items, usedToday + consumed))
+            val result = wish.optJSONObject("data")?.optJSONArray("props")
+                ?: wish.optJSONArray("props")
+                ?: JSONArray()
+            for (index in 0 until result.length()) {
+                val item = result.optJSONObject(index) ?: continue
+                items += JSONObject()
+                    .put("name", item.optString("name").ifBlank { item.optString("propName", "物品") })
+                    .put("quality", item.optString("quality").ifBlank { item.optString("rarity") })
+                    .put("count", item.optInt("count", item.optInt("quantity", 1)).coerceAtLeast(1))
+            }
+            consumed += count
+        }
+        val summary = items.groupBy { "${it.optString("name")}\u0000${it.optString("quality")}" }
+            .entries.joinToString("、") { (_, values) -> "${values.first().optString("name")} x${values.sumOf { it.optInt("count", 1) }}" }
+        return Outcome("success", if (summary.isBlank()) "抽卡完成" else summary, drawState(items, usedToday + consumed))
+    }
+
+    private fun drawState(items: List<JSONObject>, consumed: Int): JSONObject = JSONObject()
+        .put("dailyCounterDate", LocalDate.now(ZoneId.of("Asia/Shanghai")).toString())
+        .put("dailyCounter", consumed)
+        .put("lastDrawItems", JSONArray(items))
+        .put("lastDrawResult", items.joinToString("、") { it.optString("name") })
+        .put("lastDrawAt", System.currentTimeMillis())
+
+    private fun runAutoRead(task: JSONObject, request: JSONObject, credential: JSONObject): Outcome {
+        val baseUrl = credential.optString("baseUrl").ifBlank { return Outcome("failed", "阅微服务器地址为空") }
+        val token = credential.optString("token").ifBlank { return Outcome("paused", "阅微登录凭据无效") }
+        val configuredBooks = request.optJSONArray("books") ?: JSONArray()
+        val books = if (configuredBooks.length() > 0) {
+            configuredBooks
+        } else {
+            val recent = postReaMicro(
+                baseUrl,
+                token,
+                JSONObject().put("pageNum", 1).put("pageSize", request.optInt("recentLimit", 1).coerceIn(1, 10)),
+                request.optString("recentEndpoint").ifBlank { "rest/reader/get-read-record-list" },
+            )
+            businessError(recent)?.let { return Outcome("failed", "读取最近阅读记录失败：$it") }
+            recent.optJSONObject("data")?.optJSONArray("list")
+                ?: recent.optJSONArray("list")
+                ?: JSONArray()
+        }
+        val durationMinutes = request.optInt("durationMinutes", 30).coerceIn(1, 720)
+        val dailyLimit = request.optInt("dailyLimitMinutes", 720).coerceIn(durationMinutes, 1_440)
+        val today = LocalDate.now(ZoneId.of("Asia/Shanghai")).toString()
+        val usedToday = if (task.optString("dailyReadDate") == today) task.optInt("dailyReadMinutes", 0).coerceAtLeast(0) else 0
+        val duration = minOf(durationMinutes, (dailyLimit - usedToday).coerceAtLeast(0))
+        if (duration <= 0) return Outcome("success", "今日已达到 ${dailyLimit} 分钟上限")
+        val rotation = task.optInt("bookRotation", 0).coerceAtLeast(0) % books.length().coerceAtLeast(1)
+        var completedBooks = 0
+        val names = mutableListOf<String>()
+        for (offset in 0 until books.length().coerceAtMost(10)) {
+            val book = books.optJSONObject((rotation + offset) % books.length()) ?: continue
+            val bookId = book.optLong("bookId", book.optLong("cloudBookId", 0L))
+            if (bookId <= 0L) continue
+            val payload = JSONObject().put("list", JSONArray().put(
+                JSONObject()
+                    .put("bookId", bookId)
+                    .put("date", today)
+                    .put("duration", duration * 60)
+                    .put("verify", ""),
+            ))
+            val result = postReaMicro(baseUrl, token, payload, request.optString("timeEndpoint").ifBlank { "rest/reader/update-read-time-by-date" })
+            businessError(result)?.let { return Outcome("failed", "上报阅读时长失败：$it") }
+            completedBooks++
+            names += book.optString("name").ifBlank { book.optString("bookName").ifBlank { "图书 $bookId" } }
+        }
+        if (completedBooks == 0) return Outcome("failed", "没有找到可阅读的图书")
+        val state = JSONObject()
+            .put("dailyReadDate", today)
+            .put("dailyReadMinutes", usedToday + duration)
+            .put("bookRotation", rotation + completedBooks)
+        return Outcome("success", "${names.joinToString("、")} · $duration 分钟", state)
+    }
+
+    private fun dispatchCompletion(context: android.content.Context, client: ApiServerClient, response: JSONObject) {
+        val data = response.optJSONObject("data") ?: response
+        val notification = data.optJSONObject("notification") ?: return
+        val id = notification.optString("id").ifBlank { return }
+        val intent = CloudTaskNotifications.intent(
+            id,
+            notification.optString("title").ifBlank { "云端任务消息" },
+            notification.optString("message").ifBlank { "任务状态已更新" },
+            notification.optString("result"),
+            notification.optJSONArray("items")?.toString().orEmpty(),
+        )
+        if (CloudTaskNotifications.post(context, intent, source = "local-task")) {
+            runCatching { client.acknowledgeNotifications(listOf(id)) }
+        }
+    }
+
+    private fun postReaMicro(baseUrl: String, token: String, body: JSONObject, endpoint: String): JSONObject {
+        val raw = HttpClient.postBytes(
+            baseUrl.trimEnd('/') + "/" + endpoint.trimStart('/'),
+            body.toString().toByteArray(Charsets.UTF_8),
+            "application/json",
+            mapOf("Authorization" to "Bearer $token", "platform" to "android", "Accept" to "application/json"),
+            45_000,
+            45_000,
+        )
+        return JSONObject(raw)
+    }
+
+    private fun businessError(body: JSONObject): String? {
+        val code = body.optInt("code", 0)
+        if (code == 0 || code == 200) return null
+        return body.optString("message").ifBlank { body.optString("msg") }.ifBlank { "业务码 $code" }
+    }
+
+    /** 从行商响应解析活跃行商。字段名与宿主 TravelingMerchantTrip 对齐；endTime 为秒级 epoch。 */
+    internal fun parseMerchantTrip(body: JSONObject): MerchantTrip {
+        val data = body.optJSONObject("data") ?: body
+        val trip = data.optJSONObject("activeTrip") ?: return MerchantTrip(hasTrip = false)
+        val endTimeRaw = trip.optLong("endTime", 0L)
+        val endTimeMs = if (endTimeRaw in 1 until 100_000_000_000L) endTimeRaw * 1_000L else endTimeRaw
+        return MerchantTrip(
+            hasTrip = true,
+            tripId = trip.optLong("id", 0L),
+            status = trip.optString("status"),
+            endTimeMs = endTimeMs,
+            settlementAmount = trip.optLong("settlementAmount", 0L),
+            principal = trip.optLong("principal", 0L),
+            eventTitle = trip.optString("eventTitle"),
+        )
+    }
+
+    internal fun merchantPhase(trip: MerchantTrip, now: Long): MerchantPhase = when {
+        !trip.hasTrip -> MerchantPhase.SETTLED
+        trip.status.equals("SETTLED", ignoreCase = true) -> MerchantPhase.SETTLED
+        trip.endTimeMs <= 0L -> MerchantPhase.IN_TRANSIT
+        now < trip.endTimeMs -> MerchantPhase.IN_TRANSIT
+        else -> MerchantPhase.ARRIVED
+    }
+
+    /** 组装行商完成通知正文：事件标题 + 收益/亏损（结算额 − 本金）。 */
+    internal fun merchantProfitText(eventTitle: String, settlementAmount: Long, principal: Long): String {
+        val delta = settlementAmount - principal
+        val profit = if (delta >= 0L) "收益 +$delta" else "亏损 $delta"
+        val title = eventTitle.ifBlank { "行商" }
+        return "$title · $profit"
+    }
+
+    private fun formatMerchantEpoch(epochMs: Long): String =
+        if (epochMs <= 0L) "未知" else MERCHANT_TIME_FORMAT.format(java.util.Date(epochMs))
+
+    internal enum class MerchantPhase { IN_TRANSIT, ARRIVED, SETTLED, NOTIFIED }
+
+    internal data class MerchantTrip(
+        val hasTrip: Boolean,
+        val tripId: Long = 0L,
+        val status: String = "",
+        val endTimeMs: Long = 0L,
+        val settlementAmount: Long = 0L,
+        val principal: Long = 0L,
+        val eventTitle: String = "",
+    )
+
+    internal data class Outcome(
+        val result: String,
+        val message: String,
+        val state: JSONObject = JSONObject(),
+        val notify: Boolean = true,
+    )
+
+    internal const val REAMICRO_BASE_URL = "https://api.reamicro.zhendong.ltd/"
+    private const val TRAVELING_MERCHANT_POLL_MS = 4L * 3_600_000L
+    private const val TRAVELING_MERCHANT_ARRIVE_GRACE_MS = 60_000L
+    private val MERCHANT_TIME_FORMAT = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+}

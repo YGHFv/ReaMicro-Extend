@@ -32,7 +32,16 @@ object CloudTaskNotificationPoller {
     fun pollBlocking(context: Context, source: String = "alarm") {
         val appContext = context.applicationContext
         val store = ApiServerSettingsStore { appContext }
-        if (!store.get().enabled || !running.compareAndSet(false, true)) return
+        val settings = store.get()
+        XposedBridge.log(
+            "ReaMicro API wake source=$source enabled=${settings.enabled} " +
+                "baseUrl=${settings.baseUrl.isNotBlank()} auth=${settings.authMode.wireValue} " +
+                "hostAccountId=${settings.hostAccountId.isNotBlank()}",
+        )
+        if (!settings.enabled || settings.baseUrl.isBlank() || !running.compareAndSet(false, true)) {
+            if (!settings.enabled || settings.baseUrl.isBlank()) CloudTaskWakeScheduler.schedule(appContext)
+            return
+        }
         lastPollAt = System.currentTimeMillis()
         perform(appContext, store, source)
     }
@@ -157,17 +166,24 @@ object CloudTaskWakeScheduler {
             set(java.util.Calendar.MILLISECOND, 0)
         }
         val taskWake = nextTaskAt.takeIf { it > now }?.plus(TASK_FINISH_GRACE_MS) ?: Long.MAX_VALUE
-        val triggerAt = minOf(calendar.timeInMillis, taskWake)
+        // 本地自动任务（含行商 endTime）也纳入排程，让行商完成时刻能较准时唤醒。
+        val localWake = runCatching {
+            com.reamicro.fix.cloud.local.LocalTaskStore { context.applicationContext }.earliestNextRunAt()
+        }.getOrDefault(0L).takeIf { it > now } ?: Long.MAX_VALUE
+        // 服务器没有任务时间、网络失败或系统错过闹钟时，固定短周期保证模块仍能自行恢复。
+        val fallbackWake = now + FALLBACK_POLL_INTERVAL_MS
+        val triggerAt = minOf(calendar.timeInMillis, taskWake, localWake, fallbackWake)
         val exact = canScheduleExact(alarm)
         runCatching {
             if (exact) {
                 alarm.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
             } else {
-                // 非精确闹钟在 Doze 下可能被推迟数小时，只作为拿不到精确权限时的兜底。
-                alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+                // AlarmClock 属于系统允许的用户可见闹钟，即使没有 SCHEDULE_EXACT_ALARM
+                // 也能在 Doze 中准时唤醒；比 setAndAllowWhileIdle 更适合自动任务。
+                alarm.setAlarmClock(AlarmManager.AlarmClockInfo(triggerAt, pending), pending)
             }
         }.onFailure {
-            alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+            runCatching { alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending) }
         }
         XposedBridge.log(
             "ReaMicro API cloud task alarm scheduled exact=$exact at=$triggerAt " +
@@ -187,4 +203,5 @@ object CloudTaskWakeScheduler {
     internal val heartbeatReceiverClassForTest: String get() = HEARTBEAT_RECEIVER_CLASS
     private const val REQUEST_CODE = 260827
     private const val TASK_FINISH_GRACE_MS = 2 * 60_000L
+    private const val FALLBACK_POLL_INTERVAL_MS = 15 * 60_000L
 }

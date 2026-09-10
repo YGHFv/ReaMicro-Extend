@@ -218,6 +218,7 @@ internal fun ReaMicroSettingsHook.renderInjectedSettingsScreen(route: InjectedRo
             InjectedRoute.CloudCompletionSettings -> renderCloudCompletionSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.ApiServerSettings -> renderApiServerSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.CloudAutomationSettings -> renderCloudAutomationSettingsContent(innerPaddings, innerComposer)
+            InjectedRoute.LocalAutomationSettings -> renderLocalAutomationSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.RotationCompletionSettings -> renderRotationCompletionSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.AccountSwitch -> renderAccountSwitchContent(innerPaddings, innerComposer)
             InjectedRoute.OnlineCompletionSettings -> renderOnlineCompletionSettingsContent(innerPaddings, innerComposer)
@@ -684,7 +685,17 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
         } else {
             emptyList()
         }
-        val actionRows = debugRows + listOf(
+        // \u300c\u81ea\u52a8\u4efb\u52a1\u300d\u5165\u53e3\u59cb\u7ec8\u53ef\u89c1\uff08\u4e0d\u53d7\u8c03\u8bd5\u89e3\u9501\u9650\u5236\uff09\uff0c\u4f4d\u7f6e\u7d27\u8ddf\u300cAPI \u670d\u52a1\u5668\u8bbe\u7f6e\u300d\u4e4b\u4e0b\u3002
+        val localAutomationRow = ActionRow(
+            key = "about_completion_local_automation",
+            title = "\u81ea\u52a8\u4efb\u52a1",
+            subtitle = "\u672c\u5730\u81ea\u52a8\u7b7e\u5230\u3001\u62bd\u5361\u3001\u9605\u8bfb\u4e0e\u884c\u5546\u901a\u77e5\uff0c\u914d\u7f6e\u4fdd\u5b58\u5728\u672c\u673a",
+            onClick = {
+                resetLocalAutomationState()
+                openNestedInjectedRoute(InjectedRoute.LocalAutomationSettings)
+            },
+        )
+        val actionRows = debugRows + localAutomationRow + listOf(
             ActionRow(
                 key = "about_completion_hook_report",
                 title = "\u6a21\u5757\u81ea\u68c0",

@@ -469,6 +469,13 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
             business_error = reamicro_business_error(body)
             if business_error:
                 return "failed", f"野社签到提交失败：{business_error}"
+            # 部分阅微版本只在提交签到后返回奖励解锁时间，必须优先采用该时间，
+            # 否则服务器会误把奖励安排到错误的 8 小时窗口。
+            completed_data = body.get("data") if isinstance(body, dict) else None
+            completed_data = completed_data if isinstance(completed_data, dict) else body
+            completed_end = timestamp_millis(completed_data.get("endTime")) if isinstance(completed_data, dict) else 0
+            if completed_end:
+                task["claimDueAt"] = completed_end
         if task.get("lastCheckinDate") != today:
             task["lastCheckinDate"] = today
             complete_time = timestamp_millis(nested_value(lore, "data", "completeTime"))
@@ -601,9 +608,108 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
     return "failed", f"未知阅微任务类型：{task_type}"
 
 
+def _safe_long(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def merchant_profit_text(event_title: Any, settlement_amount: Any, principal: Any) -> str:
+    """行商完成通知正文：事件标题 + 收益/亏损（结算额 − 本金）。"""
+    delta = _safe_long(settlement_amount) - _safe_long(principal)
+    profit = f"收益 +{delta}" if delta >= 0 else f"亏损 {delta}"
+    title = str(event_title or "").strip() or "行商"
+    return f"{title} · {profit}"
+
+
+def execute_traveling_merchant_task(task: dict[str, Any]) -> tuple[str, str]:
+    """行商通知任务。
+
+    每 4 小时检查一次行商状态：
+    - 无活跃行商：静默，下次按调度间隔再查。
+    - 行商在途（now < endTime）：把下次检查排到 endTime，暂停常规轮询。
+    - 行商已抵达（now >= endTime 且未结算、未通知过）：通知收益/亏损；
+      若开启自动完成则 settle，并在配置齐全时 start 新行商。
+    """
+    request, secret = credential_for_task(task)
+    base_url = str(secret.get("baseUrl") or "https://api.reamicro.zhendong.ltd/").strip()
+    token = str(secret.get("token"))
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    poll_again = now_ms + 4 * 3_600_000
+    last_notified = bounded_config_int(task.get("merchantLastNotifiedTripId", 0), 0, 0)
+
+    status_code, body, raw = json_http_request(
+        base_url, token, request.get("body", {}) or {},
+        str(request.get("endpoint") or "rest/community/get-traveling-merchant"),
+    )
+    if status_code in (401, 403, 429):
+        return "paused", f"阅微认证/风控响应 HTTP {status_code}"
+    if status_code < 200 or status_code >= 300:
+        return "failed", f"获取行商状态失败 HTTP {status_code}: {redact_message(raw)}"
+    business_error = reamicro_business_error(body)
+    if business_error:
+        return "failed", f"获取行商状态失败：{business_error}"
+
+    trip = nested_value(body, "data", "activeTrip") or nested_value(body, "activeTrip")
+    if not isinstance(trip, dict):
+        task["nextRunAtOverride"] = poll_again
+        return "success", "当前没有进行中的行商"
+
+    trip_id = bounded_config_int(trip.get("id", 0), 0, 0)
+    status = str(trip.get("status") or "")
+    end_time_ms = timestamp_millis(trip.get("endTime"))
+    settlement_amount = _safe_long(trip.get("settlementAmount", 0))
+    principal = _safe_long(trip.get("principal", 0))
+    event_title = trip.get("eventTitle")
+
+    if status.upper() == "SETTLED":
+        task["nextRunAtOverride"] = poll_again
+        return "success", "行商已结算"
+    if end_time_ms > 0 and now_ms < end_time_ms:
+        task["nextRunAtOverride"] = end_time_ms + 60_000
+        return "success", "行商进行中，等待完成"
+    if trip_id and trip_id == last_notified:
+        task["nextRunAtOverride"] = poll_again
+        return "success", "行商已通知，等待结算"
+
+    message = merchant_profit_text(event_title, settlement_amount, principal)
+    if request.get("merchantAutoComplete") and trip_id:
+        settle_status, settle_body, settle_raw = json_http_request(
+            base_url, token, {"tripId": trip_id},
+            str(request.get("settleEndpoint") or "rest/community/settle-traveling-merchant"),
+        )
+        settle_error = reamicro_business_error(settle_body) if 200 <= settle_status < 300 else f"HTTP {settle_status}"
+        if settle_error:
+            message += f"（自动完成失败：{redact_message(str(settle_error))}）"
+        else:
+            message += "，已自动完成行商"
+            if _start_traveling_merchant(base_url, token, request):
+                message += "并开启新行商"
+    task["merchantLastNotifiedTripId"] = trip_id
+    task["nextRunAtOverride"] = poll_again
+    return "success", message
+
+
+def _start_traveling_merchant(base_url: str, token: str, request: dict[str, Any]) -> bool:
+    city_code = str(request.get("merchantCityCode") or "").strip()
+    principal = bounded_config_int(request.get("merchantPrincipal", 0), 0, 0)
+    transport_id = bounded_config_int(request.get("merchantTransportId", 0), 0, 0)
+    if not city_code or principal <= 0 or transport_id <= 0:
+        return False
+    status_code, body, _ = json_http_request(
+        base_url, token,
+        {"cityCode": city_code, "principal": principal, "transportId": transport_id},
+        str(request.get("startEndpoint") or "rest/community/start-traveling-merchant"),
+    )
+    return 200 <= status_code < 300 and not reamicro_business_error(body)
+
+
 def execute_task(task: dict[str, Any]) -> tuple[str, str]:
     if task.get("taskType") in {"http"}:
         return execute_http_task(task)
+    if task.get("taskType") == "traveling_merchant":
+        return execute_traveling_merchant_task(task)
     if task.get("taskType") in {"yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"}:
         return execute_reamicro_task(task)
     return "failed", f"未知任务类型：{task.get('taskType')}"

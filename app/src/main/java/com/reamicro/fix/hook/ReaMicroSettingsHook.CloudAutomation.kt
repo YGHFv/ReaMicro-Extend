@@ -17,17 +17,19 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private data class CloudAutomationTaskSpec(
+internal data class CloudAutomationTaskSpec(
     val taskType: String,
     val title: String,
     val description: String,
     val autoRead: Boolean = false,
     val rewardTriggered: Boolean = false,
+    val merchant: Boolean = false,
 )
 
 private const val CLOUD_AUTOMATION_LOG_PREFIX = "[ReaMicroFix/CloudAutomation]"
 
-private val CLOUD_AUTOMATION_TASKS = listOf(
+// 云端页与本地「自动任务」页共用同一份任务规格，保证两处任务列表一致。
+internal val CLOUD_AUTOMATION_TASKS = listOf(
     CloudAutomationTaskSpec(
         taskType = "yeshe_checkin",
         title = "野社零点签到",
@@ -44,6 +46,12 @@ private val CLOUD_AUTOMATION_TASKS = listOf(
         title = "云端自动阅读",
         description = "上报阅读时长，可使用最近阅读或指定图书",
         autoRead = true,
+    ),
+    CloudAutomationTaskSpec(
+        taskType = "traveling_merchant",
+        title = "行商通知",
+        description = "每 4 小时检查行商，完成后通知收益/亏损",
+        merchant = true,
     ),
 )
 
@@ -210,7 +218,11 @@ private fun ReaMicroSettingsHook.cloudAutomationTaskSubtitle(
     serverCredential == null || task == null -> "未配置 · ${spec.description}"
     else -> buildString {
         append(if (task.enabled) "已启用" else "已关闭")
-        if (spec.rewardTriggered) {
+        if (spec.merchant) {
+            append(" · 每 4 小时检查")
+            append(" · ")
+            append(if (task.merchantAutoComplete) "自动完成行商" else "仅通知不自动完成")
+        } else if (spec.rewardTriggered) {
             append(" · 签到奖励领取后触发")
             append(" · ")
             append(if (task.dailyDrawLimit == 0) "抽完全部彩筹" else "每日最多 ${task.dailyDrawLimit} 次")
@@ -308,6 +320,8 @@ private fun ReaMicroSettingsHook.setCloudAutomationTaskEnabled(
                 cloudAutomationTasks = cloudAutomationTasks.map { current ->
                     if (current.id == updated.id) updated else current
                 }
+                // 互斥：启用云端任务时关闭本地同类型任务。
+                if (updated.enabled) disableLocalAutomationTask(accountId, spec.taskType)
                 updateChecked(updated.enabled)
                 showToast(if (updated.enabled) "已启用${spec.title}" else "已停用${spec.title}")
             }.onFailure { error ->
@@ -373,8 +387,16 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
             minLines = 3
             setSingleLine(false)
         }
+        val merchantAutoComplete = settingsDialogSwitchRow(activity, "自动完成行商", task?.merchantAutoComplete == true, colors)
+        val merchantCity = apiServerEdit(activity, colors, "新行商城池 cityCode（自动开新行商用）", task?.merchantCityCode.orEmpty())
+        val merchantPrincipal = apiServerEdit(activity, colors, "新行商本金（铜）", (task?.merchantPrincipal?.takeIf { it > 0L })?.toString().orEmpty()).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        val merchantTransport = apiServerEdit(activity, colors, "新行商车马 transportId", (task?.merchantTransportId?.takeIf { it > 0L })?.toString().orEmpty()).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
         card.addView(account, apiServerRowParams(activity))
-        if (!spec.rewardTriggered) {
+        if (!spec.rewardTriggered && !spec.merchant) {
             card.addView(time, apiServerRowParams(activity))
         }
         if (spec.rewardTriggered) {
@@ -384,9 +406,16 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
             card.addView(duration, apiServerRowParams(activity))
             card.addView(books, apiServerRowParams(activity))
         }
+        if (spec.merchant) {
+            card.addView(merchantAutoComplete, apiServerRowParams(activity))
+            card.addView(merchantCity, apiServerRowParams(activity))
+            card.addView(merchantPrincipal, apiServerRowParams(activity))
+            card.addView(merchantTransport, apiServerRowParams(activity))
+        }
         val status = TextView(activity).apply {
             setTextColor(colors.body)
             text = when {
+                spec.merchant -> "每 4 小时检查行商，进行中时暂停到完成时刻再通知；默认只通知不自动完成。开启自动完成后可填城池/本金/车马以自动开启新行商"
                 spec.rewardTriggered -> "启用后将在签到奖励领取完成时自动抽卡；填写 0 会抽到彩筹用完，不按固定时间执行"
                 task == null -> "保存后即完成配置"
                 else -> "保存会更新当前任务配置"
@@ -397,7 +426,7 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
         val actions = settingsDialogActions(activity)
         val saveButton = settingsDialogButton(activity, "保存", colors, SettingsDialogButtonRole.Primary)
         saveButton.setOnClickListener {
-            val normalizedTime = if (spec.rewardTriggered) {
+            val normalizedTime = if (spec.rewardTriggered || spec.merchant) {
                 "00:05"
             } else {
                 runCatching { normalizeCloudAutomationTime(time.text.toString()) }
@@ -454,13 +483,24 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
                             request.put("bookLimit", selectedBooks.length())
                         }
                     }
-                    manager.saveAutomation(
+                    if (spec.merchant) {
+                        request.put("merchantAutoComplete", merchantAutoComplete.isChecked)
+                        merchantCity.text.toString().trim().takeIf(String::isNotBlank)?.let { request.put("merchantCityCode", it) }
+                        merchantPrincipal.text.toString().trim().toLongOrNull()?.takeIf { it > 0L }?.let { request.put("merchantPrincipal", it) }
+                        merchantTransport.text.toString().trim().toLongOrNull()?.takeIf { it > 0L }?.let { request.put("merchantTransportId", it) }
+                    }
+                    val savedTask = manager.saveAutomation(
                         taskType = spec.taskType,
                         enabled = enableAfterSave ?: task?.enabled ?: false,
                         credentialId = credentialId,
                         timeOfDay = normalizedTime,
                         request = request,
                     )
+                    // 互斥：启用云端任务时关闭本地同类型任务。
+                    if (savedTask.enabled) {
+                        disableLocalAutomationTask(currentCredential.accountId, spec.taskType)
+                    }
+                    savedTask
                 }
                 activity.runOnUiThread {
                     result.onSuccess {

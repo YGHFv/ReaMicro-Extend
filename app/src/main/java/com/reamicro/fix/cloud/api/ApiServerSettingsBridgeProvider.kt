@@ -5,17 +5,31 @@ import android.content.ContentValues
 import android.database.Cursor
 import android.net.Uri
 import android.os.Bundle
+import de.robv.android.xposed.XposedBridge
 
 /** 把宿主进程中的 API 配置镜像到模块进程，供系统闹钟静默唤醒时读取。 */
 class ApiServerSettingsBridgeProvider : ContentProvider() {
     override fun onCreate(): Boolean = true
 
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
-        if (method != METHOD_SAVE || callingPackage !in ALLOWED_CALLERS) return null
+        val caller = callingPackage
+        if (method != METHOD_SAVE || caller !in ALLOWED_CALLERS) {
+            XposedBridge.log("ReaMicro API settings mirror rejected caller=$caller method=$method")
+            return Bundle().apply { putBoolean("saved", false) }
+        }
         val settings = extras?.toSettings() ?: return null
-        ApiServerSettingsStore { context?.applicationContext }.save(settings)
-        CloudTaskWakeScheduler.schedule(context?.applicationContext ?: return null)
-        return Bundle().apply { putBoolean("saved", true) }
+        val appContext = context?.applicationContext ?: return null
+        ApiServerSettingsStore { appContext }.save(settings)
+        val persisted = ApiServerSettingsStore { appContext }.get()
+        val saved = persisted.enabled == settings.enabled &&
+            persisted.baseUrl == settings.baseUrl.trim().removeSuffix("/") &&
+            persisted.hostAccountId == settings.hostAccountId.trim()
+        if (saved) CloudTaskWakeScheduler.schedule(appContext)
+        XposedBridge.log(
+            "ReaMicro API settings mirror caller=$caller saved=$saved enabled=${persisted.enabled} " +
+                "baseUrl=${persisted.baseUrl.isNotBlank()}",
+        )
+        return Bundle().apply { putBoolean("saved", saved) }
     }
 
     override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? = null
@@ -32,7 +46,7 @@ class ApiServerSettingsBridgeProvider : ContentProvider() {
     }
 }
 
-fun ApiServerSettings.mirrorToModule(context: android.content.Context) {
+fun ApiServerSettings.mirrorToModule(context: android.content.Context): Boolean {
     val bundle = Bundle().apply {
         putBoolean("enabled", enabled)
         putString("baseUrl", baseUrl)
@@ -46,7 +60,12 @@ fun ApiServerSettings.mirrorToModule(context: android.content.Context) {
         putBoolean("autoCheckUpdates", autoCheckUpdates)
         putString("updateChannel", updateChannel.wireValue)
     }
-    runCatching { context.contentResolver.call(ApiServerSettingsBridgeProvider.URI, ApiServerSettingsBridgeProvider.METHOD_SAVE, null, bundle) }
+    return runCatching {
+        context.contentResolver.call(ApiServerSettingsBridgeProvider.URI, ApiServerSettingsBridgeProvider.METHOD_SAVE, null, bundle)
+            ?.getBoolean("saved", false) == true
+    }.onFailure {
+        XposedBridge.log("ReaMicro API settings mirror failed: ${it.message}")
+    }.getOrDefault(false)
 }
 
 private fun Bundle.toSettings(): ApiServerSettings = ApiServerSettings(

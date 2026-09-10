@@ -57,6 +57,40 @@ class CloudTaskManagerTest {
     }
 
     @Test
+    fun `traveling merchant schedule uses fixed interval`() {
+        val schedule = cloudAutomationSchedule("traveling_merchant", "00:05")
+        assertEquals(TRAVELING_MERCHANT_POLL_SECONDS, schedule.getLong("intervalSeconds"))
+        assertEquals(false, schedule.has("timeOfDay"))
+    }
+
+    @Test
+    fun `traveling merchant runs on device`() {
+        assertEquals("device", cloudTaskExecutionMode("traveling_merchant"))
+    }
+
+    @Test
+    fun `parses traveling merchant configuration`() {
+        val task = parseCloudTask(JSONObject("""
+            {
+              "data": {
+                "id": "task_m",
+                "taskType": "traveling_merchant",
+                "configuration": {
+                  "merchantAutoComplete": true,
+                  "merchantCityCode": "PENGLAI",
+                  "merchantPrincipal": 120,
+                  "merchantTransportId": 5
+                }
+              }
+            }
+        """.trimIndent()))
+        assertEquals(true, task.merchantAutoComplete)
+        assertEquals("PENGLAI", task.merchantCityCode)
+        assertEquals(120L, task.merchantPrincipal)
+        assertEquals(5L, task.merchantTransportId)
+    }
+
+    @Test
     fun `uses safe defaults when old server omits configuration`() {
         val task = parseCloudTask(JSONObject("""
             {

@@ -79,6 +79,12 @@ class ReaMicroSettingsHook(
     @Volatile internal var cloudAutomationTasks: List<com.reamicro.fix.cloud.api.CloudTask> = emptyList()
     @Volatile internal var cloudAutomationCredentials: List<com.reamicro.fix.cloud.api.ReaMicroCredential> = emptyList()
     @Volatile internal var cloudAutomationUpdatingTaskTypes: Set<String> = emptySet()
+    @Volatile internal var localAutomationVersionUiState: Any? = null
+    @Volatile internal var localAutomationLoaded: Boolean = false
+    @Volatile internal var localAutomationAccountId: String = ""
+    @Volatile internal var localAutomationError: String = ""
+    @Volatile internal var localAutomationTasks: List<com.reamicro.fix.cloud.local.LocalTask> = emptyList()
+    @Volatile internal var localAutomationUpdatingTaskTypes: Set<String> = emptySet()
     @Volatile internal var aiApiVersionUiState: Any? = null
     @Volatile internal var readerHighlightVersionUiState: Any? = null
     @Volatile internal var onlineEpubStyleVersionUiState: Any? = null
@@ -283,6 +289,7 @@ class ReaMicroSettingsHook(
         InjectedRoute.CloudCompletionSettings,
         InjectedRoute.ApiServerSettings,
         InjectedRoute.CloudAutomationSettings,
+        InjectedRoute.LocalAutomationSettings,
         InjectedRoute.RotationCompletionSettings,
         InjectedRoute.OnlineCompletionSettings,
         InjectedRoute.OnlineDownloadStyleSettings,

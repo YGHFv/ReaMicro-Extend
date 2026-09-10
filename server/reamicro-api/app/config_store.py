@@ -181,7 +181,7 @@ def public_server_capabilities(config: dict[str, Any]) -> dict[str, Any]:
         "allowPublic": "public" in modes,
         "authMethods": ["apiKey", "account", "hostAccount", "public"],
         "packageSchemaVersions": [1],
-        "taskTypes": ["http", "yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"],
+        "taskTypes": ["http", "yeshe_checkin", "yeshe_draw_card", "cloud_auto_read", "traveling_merchant"],
         "maxUploadSize": 50 * 1024 * 1024,
         "minModuleVersion": config["minModuleVersion"],
         "signingPublicKey": config["signingPublicKey"],

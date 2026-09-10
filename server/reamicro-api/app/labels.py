@@ -17,6 +17,7 @@ def _admin_task_label(task_type: Any) -> str:
         "yeshe_checkin": "野社零点签到",
         "yeshe_draw_card": "野社自动抽卡",
         "cloud_auto_read": "云端自动阅读",
+        "traveling_merchant": "行商通知",
         "http": "通用 HTTPS 请求",
     }.get(str(task_type), str(task_type) or "未命名任务")
 

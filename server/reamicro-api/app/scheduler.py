@@ -1,7 +1,7 @@
 """任务调度循环与执行记账。
 
-调度**不依赖模块在线**：签到、抽卡、云端阅读全在服务器跑完，模块被唤醒只为收消息
-和发通知。所以手机离线不影响任务执行，只影响结果通知的时效。
+调度**不依赖模块在线**：服务器继续执行 server 模式任务；device 模式任务由模块租约领取执行。
+模块离线时 device 模式会等待下一次唤醒，server 模式不受影响。
 """
 import asyncio
 import json
@@ -32,9 +32,17 @@ YESHE_DRAW_TRIGGER_EVENT = "yeshe_checkin_reward_claimed"
 
 
 def normalized_task_schedule(task_type: str, schedule: dict[str, Any]) -> dict[str, Any]:
-    """抽卡是签到奖励事件任务，其余任务保留原定时配置。"""
+    """抽卡是签到奖励事件任务；行商按固定间隔轮询；其余任务保留原定时配置。"""
     if task_type == "yeshe_draw_card":
         return {"event": YESHE_DRAW_TRIGGER_EVENT}
+    if task_type == "traveling_merchant":
+        interval = 4 * 3_600
+        if isinstance(schedule, dict):
+            try:
+                interval = max(int(schedule.get("intervalSeconds", interval)), 60)
+            except (TypeError, ValueError):
+                pass
+        return {"intervalSeconds": interval}
     value = dict(schedule)
     if value.get("timeOfDay"):
         value["timeOfDay"] = normalized_time_of_day(value.get("timeOfDay"))
@@ -202,6 +210,8 @@ async def task_scheduler_loop() -> None:
             for task_id, task in tasks.items():
                 if not task.get("enabled", True) or task.get("status") in {"paused", "cancelled", "running"}:
                     continue
+                if task.get("executionMode", "server") == "device":
+                    continue
                 if task.get("taskType") == "yeshe_draw_card" and not task.get("triggeredByCheckinReward"):
                     if task.get("status") != "scheduled" or bounded_config_int(task.get("nextRunAt", 0), 0, 0) != 0 or task.get("schedule") != {"event": YESHE_DRAW_TRIGGER_EVENT}:
                         task["status"] = "scheduled"
@@ -317,6 +327,13 @@ def public_task(task: dict[str, Any], include_request: bool = False) -> dict[str
                 for book in books
                 if isinstance(book, dict) and bounded_config_int(book.get("bookId", book.get("cloudBookId", 0)), 0, 0) > 0
             ],
+        }
+    elif task.get("taskType") == "traveling_merchant":
+        value["configuration"] = {
+            "merchantAutoComplete": bool(request_value.get("merchantAutoComplete", False)),
+            "merchantCityCode": str(request_value.get("merchantCityCode", ""))[:64],
+            "merchantPrincipal": bounded_config_int(request_value.get("merchantPrincipal", 0), 0, 0),
+            "merchantTransportId": bounded_config_int(request_value.get("merchantTransportId", 0), 0, 0),
         }
     return value
 

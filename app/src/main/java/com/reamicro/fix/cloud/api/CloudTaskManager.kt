@@ -15,6 +15,11 @@ data class CloudTask(
     val books: List<CloudTaskBook>,
     val nextRunAt: Long,
     val lastMessage: String,
+    val executionMode: String,
+    val merchantAutoComplete: Boolean = false,
+    val merchantCityCode: String = "",
+    val merchantPrincipal: Long = 0L,
+    val merchantTransportId: Long = 0L,
 )
 
 data class CloudTaskBook(
@@ -34,6 +39,7 @@ class CloudTaskManager(private val client: ApiServerClient) {
     fun create(taskType: String, scheduleSeconds: Long, request: JSONObject = JSONObject()): CloudTask {
         val body = JSONObject()
             .put("taskType", taskType)
+            .put("executionMode", cloudTaskExecutionMode(taskType))
             .put("schedule", JSONObject().put("intervalSeconds", scheduleSeconds.coerceAtLeast(60)))
             .put("request", request)
         return parseCloudTask(client.createTask(body))
@@ -47,6 +53,7 @@ class CloudTaskManager(private val client: ApiServerClient) {
     ): CloudTask {
         val body = JSONObject()
             .put("taskType", taskType)
+            .put("executionMode", cloudTaskExecutionMode(taskType))
             .put("schedule", cloudAutomationSchedule(taskType, timeOfDay))
             .put("request", request.put("credentialId", credentialId))
         return parseCloudTask(client.createTask(body))
@@ -65,6 +72,7 @@ class CloudTaskManager(private val client: ApiServerClient) {
         return if (existing == null) {
             val body = JSONObject()
                 .put("taskType", taskType)
+                .put("executionMode", cloudTaskExecutionMode(taskType))
                 .put("enabled", enabled)
                 .put("schedule", schedule)
                 .put("request", taskRequest)
@@ -72,6 +80,7 @@ class CloudTaskManager(private val client: ApiServerClient) {
         } else {
             parseCloudTask(client.configureTask(existing.id, JSONObject()
                 .put("enabled", enabled)
+                .put("executionMode", cloudTaskExecutionMode(taskType))
                 .put("schedule", schedule)
                 .put("request", taskRequest)))
         }
@@ -124,15 +133,30 @@ class CloudTaskManager(private val client: ApiServerClient) {
 
 }
 
+/** 会跑在设备（模块进程）或服务器上的阅微任务族。行商通知与签到等同属此族。 */
+internal val REAMICRO_AUTOMATION_TASK_TYPES = setOf(
+    "yeshe_checkin",
+    "yeshe_draw_card",
+    "cloud_auto_read",
+    "traveling_merchant",
+)
+
+internal fun cloudTaskExecutionMode(taskType: String): String =
+    if (taskType in REAMICRO_AUTOMATION_TASK_TYPES) "device" else "server"
+
 internal fun cloudAutomationSchedule(taskType: String, timeOfDay: String): JSONObject =
-    if (taskType == "yeshe_draw_card") {
-        JSONObject().put("event", "yeshe_checkin_reward_claimed")
-    } else {
-        JSONObject()
+    when (taskType) {
+        "yeshe_draw_card" -> JSONObject().put("event", "yeshe_checkin_reward_claimed")
+        // 行商通知按固定间隔轮询（默认 4 小时），不绑定每日时间点。
+        "traveling_merchant" -> JSONObject().put("intervalSeconds", TRAVELING_MERCHANT_POLL_SECONDS)
+        else -> JSONObject()
             .put("intervalSeconds", 86_400)
             .put("timeOfDay", timeOfDay)
             .put("timezoneOffsetMinutes", 480)
     }
+
+/** 行商轮询间隔：每 4 小时检查一次行商状态。 */
+internal const val TRAVELING_MERCHANT_POLL_SECONDS = 4L * 3_600L
 
 internal fun parseCloudTask(root: JSONObject): CloudTask {
     val data = root.optJSONObject("data") ?: root
@@ -159,5 +183,10 @@ internal fun parseCloudTask(root: JSONObject): CloudTask {
         books = books,
         nextRunAt = data.optLong("nextRunAt", 0L),
         lastMessage = data.optString("lastMessage"),
+        executionMode = data.optString("executionMode", "server"),
+        merchantAutoComplete = configuration.optBoolean("merchantAutoComplete", false),
+        merchantCityCode = configuration.optString("merchantCityCode"),
+        merchantPrincipal = configuration.optLong("merchantPrincipal", 0L).coerceAtLeast(0L),
+        merchantTransportId = configuration.optLong("merchantTransportId", 0L).coerceAtLeast(0L),
     )
 }
