@@ -1,5 +1,13 @@
 # 更新记录
 
+## 账号快照与账号配置页修复 - 2026-09-10
+
+- 云端任务修正回**服务器执行**：`cloudTaskExecutionMode` 一律回传 `server`，模块进程不再领取设备租约；服务器上遗留的 device 任务会在下次保存配置时自动迁移。模块进程只保留不依赖服务器的**本地任务**（`LocalTaskStore` + `LocalTaskRunner`）。
+- 修复阅微「高级功能」页开关在切换账号后被重置：智能识别（`SMART_RECOGNITION`）、插图优化（`ILLUSTRATION_OPTIMIZATION`）、封面匹配（`RELATE_DOWNLOAD_COVER`）、名帖取色（`CALLING_CARD_COLOR`）四个开关此前未纳入账号会话快照，切换账号再切回来会被还原成默认值；现补入 `SessionSnapshot` 的采集与还原链路。壁纸取色复用 `DYNAMIC_COLOR`，本就在快照内，故不受影响。
+- 修复阅微新版账号配置页 hook 错位：宿主把该页从 3 个条目扩展为 4 个（新增「登录方式」），删除项 lambda 的 mangling 名由 `$4$0$2` 漂移到 `$4$0$3`，导致模块把「登录方式」当成删除项替换——QQ/微信绑定消失、页面出现两个「删除账号」。现改为按形参签名 `(State, MutableState, LazyItemScope, Composer, int)` 定位，容忍后缀漂移；同时把「切换账号」入口从主设置页移到账号配置页「邮箱」下方单独一行。
+- 下载配置「经典红章」标题样式整体 CSS 的 `margin` 由 `2em 0 3em` 调整为 `3em 0 2em`。
+- 模块 versionCode 更新为 55（versionName 维持 2.3.2）。
+
 ## 本地自动任务与行商通知 - 2026-09-10
 
 - 「关于补全」页在「API 服务器设置」下新增「自动任务」入口（始终可见），配置在本机执行、不依赖 API 服务器的自动任务；任务列表与配置页与云端任务一致，凭据用当前阅微登录 token 并以 Android Keystore 加密保存在本机。

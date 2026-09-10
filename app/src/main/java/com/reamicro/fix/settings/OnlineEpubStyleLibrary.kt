@@ -264,7 +264,7 @@ internal object OnlineEpubStyleLibrary {
             builtIn = true,
             css = """.te-chapter-title {
   text-align: center;
-  margin: 2em 0 3em;
+  margin: 3em 0 2em;
   font-size: 1.2em;
   font-weight: 900;
   color: #c2181e;

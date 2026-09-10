@@ -551,6 +551,10 @@ class AccountCompletionController(
         updatePreference(session, key(PREF_KEYS_CLASS, "getSCREEN_ALWAYS_ON"), snapshot.screenAlwaysOn)
         updatePreference(session, key(PREF_KEYS_CLASS, "getSYSTEM_BARS"), snapshot.systemBars)
         updatePreference(session, key(PREF_KEYS_CLASS, "getAGREEMENT"), snapshot.agreement)
+        updatePreference(session, key(PREF_KEYS_CLASS, "getSMART_RECOGNITION"), snapshot.smartRecognition)
+        updatePreference(session, key(PREF_KEYS_CLASS, "getILLUSTRATION_OPTIMIZATION"), snapshot.illustrationOptimization)
+        updatePreference(session, key(PREF_KEYS_CLASS, "getRELATE_DOWNLOAD_COVER"), snapshot.relateDownloadCover)
+        updatePreference(session, key(PREF_KEYS_CLASS, "getCALLING_CARD_COLOR"), snapshot.callingCardColor)
     }
 
     private fun captureSessionSnapshot(session: Any): SessionSnapshot {
@@ -578,6 +582,10 @@ class AccountCompletionController(
             screenAlwaysOn = readPreference(prefs, key(PREF_KEYS_CLASS, "getSCREEN_ALWAYS_ON")) as? Boolean ?: false,
             systemBars = readPreference(prefs, key(PREF_KEYS_CLASS, "getSYSTEM_BARS")) as? Boolean ?: false,
             agreement = readPreference(prefs, key(PREF_KEYS_CLASS, "getAGREEMENT")) as? Boolean ?: false,
+            smartRecognition = readPreference(prefs, key(PREF_KEYS_CLASS, "getSMART_RECOGNITION")) as? Boolean ?: false,
+            illustrationOptimization = readPreference(prefs, key(PREF_KEYS_CLASS, "getILLUSTRATION_OPTIMIZATION")) as? Boolean ?: false,
+            relateDownloadCover = readPreference(prefs, key(PREF_KEYS_CLASS, "getRELATE_DOWNLOAD_COVER")) as? Boolean ?: false,
+            callingCardColor = readPreference(prefs, key(PREF_KEYS_CLASS, "getCALLING_CARD_COLOR")) as? Boolean ?: false,
             baiduAuth = readPreference(prefs, key(THIRD_PARTY_KEYS_CLASS, "getBAIDU_AUTH")) as? String ?: "",
             aliyunAuth = readPreference(prefs, key(THIRD_PARTY_KEYS_CLASS, "getALIYUN_AUTH")) as? String ?: "",
             yun115Auth = readPreference(prefs, key(THIRD_PARTY_KEYS_CLASS, "getYUN115_AUTH")) as? String ?: "",
@@ -2006,6 +2014,12 @@ class AccountCompletionController(
         val screenAlwaysOn: Boolean,
         val systemBars: Boolean,
         val agreement: Boolean,
+        // 「高级功能」页的开关。此前未纳入账号快照，切换账号再切回来时宿主设置会被
+        // 还原成默认值，表现为这些开关"自动重置"（壁纸取色因复用 dynamicColor 而不受影响）。
+        val smartRecognition: Boolean,
+        val illustrationOptimization: Boolean,
+        val relateDownloadCover: Boolean,
+        val callingCardColor: Boolean,
         val baiduAuth: String,
         val aliyunAuth: String,
         val yun115Auth: String,
@@ -2032,6 +2046,10 @@ class AccountCompletionController(
                 put("screenAlwaysOn", screenAlwaysOn)
                 put("systemBars", systemBars)
                 put("agreement", agreement)
+                put("smartRecognition", smartRecognition)
+                put("illustrationOptimization", illustrationOptimization)
+                put("relateDownloadCover", relateDownloadCover)
+                put("callingCardColor", callingCardColor)
                 put("baiduAuth", baiduAuth)
                 put("aliyunAuth", aliyunAuth)
                 put("yun115Auth", yun115Auth)
@@ -2068,6 +2086,10 @@ class AccountCompletionController(
                     screenAlwaysOn = false,
                     systemBars = false,
                     agreement = false,
+                    smartRecognition = false,
+                    illustrationOptimization = false,
+                    relateDownloadCover = false,
+                    callingCardColor = false,
                     baiduAuth = "",
                     aliyunAuth = "",
                     yun115Auth = "",
@@ -2108,6 +2130,10 @@ class AccountCompletionController(
                     screenAlwaysOn = source.optBoolean("screenAlwaysOn", false),
                     systemBars = source.optBoolean("systemBars", false),
                     agreement = source.optBoolean("agreement", false),
+                    smartRecognition = source.optBoolean("smartRecognition", false),
+                    illustrationOptimization = source.optBoolean("illustrationOptimization", false),
+                    relateDownloadCover = source.optBoolean("relateDownloadCover", false),
+                    callingCardColor = source.optBoolean("callingCardColor", false),
                     baiduAuth = source.optString("baiduAuth"),
                     aliyunAuth = source.optString("aliyunAuth"),
                     yun115Auth = source.optString("yun115Auth"),

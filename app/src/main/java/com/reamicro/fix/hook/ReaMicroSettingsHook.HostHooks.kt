@@ -150,13 +150,21 @@ internal fun ReaMicroSettingsHook.hookLazyListItem() {
             override fun afterHookedMethod(param: MethodHookParam) {
                 if (injectingModuleItem.get() == true) return
                 if ((highlightScreenBuildDepth.get() ?: 0) > 0) return
+                // 账号配置页：宿主渲染完「邮箱」条目后（第 2 个 item）注入「切换账号」入口。
+                if ((accountSecurityBuildDepth.get() ?: 0) > 0) {
+                    val count = (accountSecurityItemCount.get() ?: 0) + 1
+                    accountSecurityItemCount.set(count)
+                    if (count == INSERT_AFTER_ACCOUNT_EMAIL_ITEM_COUNT && accountSwitchEntryInjected.get() != true) {
+                        accountSwitchEntryInjected.set(true)
+                        insertAccountSwitchEntryItem(param.args[0] ?: return)
+                    }
+                    return
+                }
                 if ((settingsBuildDepth.get() ?: 0) <= 0) return
                 val count = (itemCount.get() ?: 0) + 1
                 itemCount.set(count)
                 if (count == INSERT_AFTER_SETTINGS_ITEM_COUNT) {
                     insertModuleSettingsItem(param.args[0] ?: return)
-                } else if (count == INSERT_BEFORE_SIGN_OUT_ITEM_COUNT) {
-                    insertAccountSettingsItem(param.args[0] ?: return)
                 }
             }
         })
@@ -188,11 +196,7 @@ internal fun ReaMicroSettingsHook.hookHostAccountSignOut() {
 
 internal fun ReaMicroSettingsHook.hookAccountSecurityScreen() {
     runCatching {
-        val method = method(
-            ACCOUNT_SECURITY_SCREEN_CLASS,
-            ACCOUNT_SECURITY_DELETE_CONTENT_METHOD,
-            5,
-        )
+        val method = resolveAccountSecurityDeleteContentMethod()
         XposedBridge.hookMethod(method, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 if (!settings.snapshot().canRunAccountDataExport) return
@@ -209,6 +213,75 @@ internal fun ReaMicroSettingsHook.hookAccountSecurityScreen() {
         })
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX failed to hook account security screen: ${it.stackTraceToString()}")
+    }
+}
+
+/**
+ * 定位账号配置页「删除账号」条目 lambda。
+ *
+ * 宿主把这一屏拆成 LazyColumn 的若干 item lambda（雅号 / 邮箱 / 登录方式 / 删除账号），
+ * 每个都是 `AccountSecurityScreen$lambda$0$0$4$0$N`，mangling 后缀 N 会随条目增删漂移
+ * （2.3.2 beta 新增「登录方式」项，删除项从 N=2 移到 N=3，导致旧的写死名把「登录方式」
+ * 当成删除项替换，QQ/微信绑定消失且出现两个删除账号）。
+ *
+ * 删除项 lambda 的形参签名独一无二：`(State, MutableState, LazyItemScope, Composer, int)`
+ * ——只有它以 `State` 开头、次参为 `MutableState`。按此签名匹配，容忍后缀漂移；
+ * 匹配不到再回退到写死常量名。
+ */
+internal fun ReaMicroSettingsHook.resolveAccountSecurityDeleteContentMethod(): java.lang.reflect.Method {
+    val screenClass = cls(ACCOUNT_SECURITY_SCREEN_CLASS)
+    val stateClass = cls(COMPOSE_STATE_CLASS)
+    val mutableStateClass = cls(MUTABLE_STATE_CLASS)
+    val lazyItemScopeClass = cls(LAZY_ITEM_SCOPE_CLASS)
+    val composerClass = cls(COMPOSER_CLASS)
+    val bySignature = screenClass.declaredMethods.firstOrNull { candidate ->
+        val types = candidate.parameterTypes
+        candidate.name.startsWith("AccountSecurityScreen\$lambda") &&
+            types.size == 5 &&
+            stateClass.isAssignableFrom(types[0]) &&
+            mutableStateClass.isAssignableFrom(types[1]) &&
+            lazyItemScopeClass.isAssignableFrom(types[2]) &&
+            composerClass.isAssignableFrom(types[3]) &&
+            types[4] == Int::class.javaPrimitiveType
+    }?.apply { isAccessible = true }
+    if (bySignature != null) return bySignature
+    XposedBridge.log("$LOG_PREFIX account security delete lambda not matched by signature; falling back to $ACCOUNT_SECURITY_DELETE_CONTENT_METHOD")
+    return method(ACCOUNT_SECURITY_SCREEN_CLASS, ACCOUNT_SECURITY_DELETE_CONTENT_METHOD, 5)
+}
+
+/**
+ * 跟踪账号配置页 LazyColumn 的构建，配合 [hookLazyListItem] 把「切换账号」注入到「邮箱」之后。
+ *
+ * 该 LazyColumn 内容 lambda（`AccountSecurityScreen$lambda$…$4$0`）形参以 `LazyListScope` 结尾、
+ * 返回 Unit，是这一屏唯一接受 LazyListScope 的方法；按此签名定位，容忍 mangling 漂移。
+ */
+internal fun ReaMicroSettingsHook.hookAccountSecurityColumn() {
+    runCatching {
+        val screenClass = cls(ACCOUNT_SECURITY_SCREEN_CLASS)
+        val lazyListScopeClass = cls(LAZY_LIST_SCOPE_CLASS)
+        val builder = screenClass.declaredMethods.firstOrNull { candidate ->
+            candidate.name.startsWith("AccountSecurityScreen\$lambda") &&
+                candidate.parameterTypes.isNotEmpty() &&
+                candidate.parameterTypes.last() == lazyListScopeClass
+        }?.apply { isAccessible = true }
+            ?: error("AccountSecurityScreen LazyColumn builder not found")
+        XposedBridge.hookMethod(builder, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if (!settings.snapshot().canRunAccountCompletion) return
+                accountSecurityBuildDepth.set((accountSecurityBuildDepth.get() ?: 0) + 1)
+                accountSecurityItemCount.set(0)
+                accountSwitchEntryInjected.set(false)
+            }
+
+            override fun afterHookedMethod(param: MethodHookParam) {
+                val depth = ((accountSecurityBuildDepth.get() ?: 0) - 1).coerceAtLeast(0)
+                accountSecurityBuildDepth.set(depth)
+                if (depth == 0) accountSecurityItemCount.set(0)
+            }
+        })
+        XposedBridge.log("$LOG_PREFIX account security column hook installed")
+    }.onFailure {
+        XposedBridge.log("$LOG_PREFIX failed to hook account security column: ${it.stackTraceToString()}")
     }
 }
 

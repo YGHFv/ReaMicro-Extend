@@ -17,8 +17,13 @@ internal const val LOG_PREFIX = "ReaMicro LSP"
 internal const val SETTINGS_SCREEN_CLASS = HostClasses.Host.SETTINGS_SCREEN
 internal const val SETTINGS_LIST_BUILDER_METHOD = "SettingsScreen\$lambda\$0\$1\$0\$0"
 internal const val ACCOUNT_SECURITY_SCREEN_CLASS = HostClasses.Host.ACCOUNT_SECURITY_SCREEN
-internal const val ACCOUNT_SECURITY_DELETE_CONTENT_METHOD = "AccountSecurityScreen\$lambda\$0\$0\$4\$0\$2"
+// 账号配置页删除项 lambda 的 mangling 名会随宿主增删条目而漂移（2.3.2 起新增登录方式项，
+// 该 lambda 从 $4$0$2 移到 $4$0$3）。运行期改用签名匹配定位，此常量仅作兜底/记录用途。
+internal const val ACCOUNT_SECURITY_DELETE_CONTENT_METHOD = "AccountSecurityScreen\$lambda\$0\$0\$4\$0\$3"
 internal const val ACCOUNT_SECURITY_DELETE_ITEM_METHOD = "DeleteAccountItem"
+internal const val COMPOSE_STATE_CLASS = HostClasses.Compose.COMPOSE_STATE
+internal const val MUTABLE_STATE_CLASS = HostClasses.Compose.MUTABLE_STATE
+internal const val LAZY_ITEM_SCOPE_CLASS = "androidx.compose.foundation.lazy.LazyItemScope"
 internal const val NAV_GRAPH_SCOPE_CLASS = HostClasses.Host.NAV_GRAPH_SCOPE
 internal const val NAV_CONTROLLER_CLASS = HostClasses.AndroidX.NAV_CONTROLLER
 internal const val ROUTE_ABOUT_CLASS = "app.zhendong.reamicro.Route\$About"
@@ -122,8 +127,9 @@ internal const val USER_REPOSITORY_CLASS = HostClasses.Host.USER_REPOSITORY
 internal const val USER_REPOSITORY_SIGN_OUT_METHOD = "signOut"
 
 internal const val INSERT_AFTER_SETTINGS_ITEM_COUNT = 2
-internal const val INSERT_BEFORE_SIGN_OUT_ITEM_COUNT = 3
-internal const val ACCOUNT_SETTINGS_ITEM_KEY = 0x524D4657
+// 账号配置页把「切换账号」注入到宿主第 2 个条目（邮箱）之后。
+internal const val INSERT_AFTER_ACCOUNT_EMAIL_ITEM_COUNT = 2
+internal const val ACCOUNT_SWITCH_ITEM_KEY = 0x524D4659
 internal const val MODULE_SETTINGS_ITEM_KEY = 0x524D4658
 internal const val MODULE_TOP_BAR_KEY = 0x524D4659
 internal const val MODULE_CONTENT_KEY = 0x524D465A

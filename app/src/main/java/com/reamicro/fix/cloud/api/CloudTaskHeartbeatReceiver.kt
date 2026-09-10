@@ -3,7 +3,6 @@ package com.reamicro.fix.cloud.api
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import com.reamicro.fix.cloud.local.CloudTaskLocalRunner
 import com.reamicro.fix.cloud.local.LocalTaskRunner
 
 /** 系统闹钟唤醒入口；只做一次短连接，不启动可见界面或常驻服务。 */
@@ -24,8 +23,7 @@ class CloudTaskHeartbeatReceiver : BroadcastReceiver() {
         Thread {
             try {
                 if (action == CloudTaskWakeScheduler.ACTION_WAKE || action == Intent.ACTION_BOOT_COMPLETED || action == Intent.ACTION_MY_PACKAGE_REPLACED) {
-                    CloudTaskLocalRunner.runDue(appContext)
-                    // 本地自动任务不依赖服务器，任何唤醒都尝试跑一次到期任务。
+                    // 云端任务由服务器执行，模块进程只跑不依赖服务器的本地任务。
                     runCatching { LocalTaskRunner.runDue(appContext) }
                 }
                 CloudTaskNotificationPoller.pollBlocking(appContext, source = action)

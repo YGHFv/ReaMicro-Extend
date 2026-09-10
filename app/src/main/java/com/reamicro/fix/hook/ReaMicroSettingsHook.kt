@@ -51,6 +51,11 @@ class ReaMicroSettingsHook(
     // 借用宿主自身调用 LazyListScope.item$default 的时机注入"补全计划"入口。
     internal val highlightScreenBuildDepth = ThreadLocal.withInitial { 0 }
     internal val highlightEntryInjected = ThreadLocal.withInitial { false }
+    // 账号配置页（AccountSecurityScreen）LazyColumn 渲染期间的深度、条目计数与去重标志。
+    // 借助宿主自身的 item$default 调用时机，把「切换账号」入口注入到「邮箱」条目之后。
+    internal val accountSecurityBuildDepth = ThreadLocal.withInitial { 0 }
+    internal val accountSecurityItemCount = ThreadLocal.withInitial { 0 }
+    internal val accountSwitchEntryInjected = ThreadLocal.withInitial { false }
     internal val settingsEntryTitleOverride = ThreadLocal.withInitial<String?> { null }
     internal val navigatingModuleRoute = ThreadLocal.withInitial { false }
     internal val poppingInjectedRoute = ThreadLocal.withInitial { false }
@@ -145,6 +150,7 @@ class ReaMicroSettingsHook(
                 "externalSourceImportIntent" to ::hookExternalSourceImportIntent,
                 "hostAccountSignOut" to ::hookHostAccountSignOut,
                 "accountSecurityScreen" to ::hookAccountSecurityScreen,
+                "accountSecurityColumn" to ::hookAccountSecurityColumn,
             ),
         )
     }

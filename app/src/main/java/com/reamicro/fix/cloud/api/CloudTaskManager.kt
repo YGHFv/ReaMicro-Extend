@@ -133,7 +133,7 @@ class CloudTaskManager(private val client: ApiServerClient) {
 
 }
 
-/** 会跑在设备（模块进程）或服务器上的阅微任务族。行商通知与签到等同属此族。 */
+/** 云端任务族。这些任务一律在**服务器**执行；模块只负责展示配置与投递结果通知。 */
 internal val REAMICRO_AUTOMATION_TASK_TYPES = setOf(
     "yeshe_checkin",
     "yeshe_draw_card",
@@ -141,8 +141,14 @@ internal val REAMICRO_AUTOMATION_TASK_TYPES = setOf(
     "traveling_merchant",
 )
 
-internal fun cloudTaskExecutionMode(taskType: String): String =
-    if (taskType in REAMICRO_AUTOMATION_TASK_TYPES) "device" else "server"
+/**
+ * 云端任务的执行位置：统一为 **server**。
+ *
+ * 此前阅微类任务被改成 device（模块领租约代跑），现修正回服务器执行——模块进程只保留
+ * 不依赖服务器的**本地任务**（LocalTaskStore + LocalTaskRunner）。显式回传 "server"
+ * 而非省略该字段，是为了让服务器上已存在的 device 任务在下次保存配置时被迁移回服务器。
+ */
+internal fun cloudTaskExecutionMode(@Suppress("UNUSED_PARAMETER") taskType: String): String = "server"
 
 internal fun cloudAutomationSchedule(taskType: String, timeOfDay: String): JSONObject =
     when (taskType) {

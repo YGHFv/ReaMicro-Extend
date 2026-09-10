@@ -36,11 +36,12 @@ internal fun ReaMicroSettingsHook.insertModuleSettingsItem(lazyListScope: Any) {
     injectingModuleItem.set(false)
 }
 
-internal fun ReaMicroSettingsHook.insertAccountSettingsItem(lazyListScope: Any) {
+// 「切换账号」入口注入到账号配置页「邮箱」条目之后，作为单独一行。
+internal fun ReaMicroSettingsHook.insertAccountSwitchEntryItem(lazyListScope: Any) {
     if (!settings.snapshot().moduleEnabled) return
     injectingModuleItem.set(true)
     runCatching {
-        addLazyItem(lazyListScope, ACCOUNT_SETTINGS_ITEM_KEY) { composer ->
+        addLazyItem(lazyListScope, ACCOUNT_SWITCH_ITEM_KEY) { composer ->
             renderSettingsEntry(
                 title = ACCOUNT_SWITCH_TITLE,
                 callbackName = "OpenAccountSwitch",
@@ -49,7 +50,7 @@ internal fun ReaMicroSettingsHook.insertAccountSettingsItem(lazyListScope: Any) 
             )
         }
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to insert account settings item: ${it.stackTraceToString()}")
+        XposedBridge.log("$LOG_PREFIX failed to insert account switch entry: ${it.stackTraceToString()}")
     }
     injectingModuleItem.set(false)
 }

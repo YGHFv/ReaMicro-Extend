@@ -64,8 +64,11 @@ class CloudTaskManagerTest {
     }
 
     @Test
-    fun `traveling merchant runs on device`() {
-        assertEquals("device", cloudTaskExecutionMode("traveling_merchant"))
+    fun `cloud automation tasks run on server`() {
+        // 云端任务一律由服务器执行；模块进程只跑不依赖服务器的本地任务。
+        assertEquals("server", cloudTaskExecutionMode("traveling_merchant"))
+        assertEquals("server", cloudTaskExecutionMode("yeshe_checkin"))
+        assertEquals("server", cloudTaskExecutionMode("cloud_auto_read"))
     }
 
     @Test
