@@ -85,6 +85,67 @@ internal fun ReaderHook.selectionMenuMaxItemsPerRow(actionCount: Int): Int? {
 }
 
 internal fun ReaderHook.renderWrappedSelectionMenu(actions: List<Any>, tint: Long, composer: Any, maxPerRow: Int) {
+    if (settingsProvider().canUseCompactReaderSelectionMenu) {
+        renderCompactWrappedSelectionMenu(actions, tint, composer, maxPerRow)
+        return
+    }
+    val rows = actions.chunked(maxPerRow.coerceAtLeast(1))
+    val cellWidth = selectionMenuCellWidthDp(actions)
+    val content = functionProxy("ReaderSelectionGridColumn", KOTLIN_FUNCTION3_CLASS) { args ->
+        val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
+        rows.forEach { rowActions ->
+            val rowContent = functionProxy("ReaderSelectionGridRow", KOTLIN_FUNCTION3_CLASS) { rowArgs ->
+                val rowComposer = rowArgs?.getOrNull(1) ?: return@functionProxy targetUnit()
+                rowActions.forEach { action ->
+                    val itemContent = functionProxy("ReaderSelectionGridItem", KOTLIN_FUNCTION3_CLASS) { itemArgs ->
+                        val itemComposer = itemArgs?.getOrNull(1) ?: return@functionProxy targetUnit()
+                        renderNativeSelectionMenuItem(action, tint, itemComposer)
+                        targetUnit()
+                    }
+                    composeMethod(BOX_KT_CLASS, BOX_METHOD, 7).invoke(
+                        null,
+                        selectionMenuCellModifier(cellWidth),
+                        selectionMenuAlignmentCenter(),
+                        false,
+                        itemContent,
+                        rowComposer,
+                        0,
+                        0,
+                    )
+                }
+                targetUnit()
+            }
+            composeMethod(ROW_KT_CLASS, ROW_METHOD, 7).invoke(
+                null,
+                modifierInstance(),
+                arrangementSpacedBy(2),
+                selectionMenuAlignmentCenterVertically(),
+                rowContent,
+                innerComposer,
+                0,
+                0,
+            )
+        }
+        targetUnit()
+    }
+    composeMethod(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
+        null,
+        selectionMenuPaddingModifier(),
+        arrangementSpacedBy(2),
+        selectionMenuAlignmentStart(),
+        content,
+        composer,
+        0,
+        0,
+    )
+}
+
+private fun ReaderHook.renderCompactWrappedSelectionMenu(
+    actions: List<Any>,
+    tint: Long,
+    composer: Any,
+    maxPerRow: Int,
+) {
     val content = functionProxy("ReaderSelectionFlowRow", KOTLIN_FUNCTION3_CLASS) { args ->
         val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
         actions.forEach { action ->
@@ -106,6 +167,36 @@ internal fun ReaderHook.renderWrappedSelectionMenu(actions: List<Any>, tint: Lon
         8,
     )
 }
+
+// FlowRow 按标题固有宽度排版时，各行的列起点会不同。固定单元格宽度后，
+// 仍然使用宿主 SelectionMenuItem，因此点击回调、图标和主题样式保持不变。
+private fun ReaderHook.selectionMenuCellWidthDp(actions: List<Any>): Int {
+    val maxTitleWidth = actions.maxOfOrNull { action ->
+        callString(action, "getTitle").sumOf { character ->
+            if (character.code <= 0x7f) 8 else 14
+        }
+    } ?: 0
+    return (maxTitleWidth + 42).coerceIn(72, 112)
+}
+
+private fun ReaderHook.selectionMenuCellModifier(widthDp: Int): Any =
+    composeMethod(SIZE_KT_CLASS, WIDTH_METHOD, 2).invoke(
+        null,
+        modifierInstance(),
+        udp(widthDp),
+    )
+
+private fun ReaderHook.selectionMenuAlignmentStart(): Any =
+    callNoArg(staticObject(ALIGNMENT_CLASS, "INSTANCE"), "getStart")
+        ?: error("Alignment.Start not found")
+
+private fun ReaderHook.selectionMenuAlignmentCenter(): Any =
+    callNoArg(staticObject(ALIGNMENT_CLASS, "INSTANCE"), "getCenter")
+        ?: error("Alignment.Center not found")
+
+private fun ReaderHook.selectionMenuAlignmentCenterVertically(): Any =
+    callNoArg(staticObject(ALIGNMENT_CLASS, "INSTANCE"), "getCenterVertically")
+        ?: error("Alignment.CenterVertically not found")
 
 internal fun ReaderHook.renderNativeSelectionMenuItem(action: Any, tint: Long, composer: Any) {
     nativeSelectionMenuItemMethod().invoke(

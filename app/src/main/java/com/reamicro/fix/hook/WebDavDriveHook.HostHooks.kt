@@ -1528,40 +1528,39 @@ internal fun WebDavDriveHook.hookHomeSearchTapCancellation() {
 
 internal fun WebDavDriveHook.hookWebDavCloudDownload() {
     runCatching {
-        val method = cls(WORKER_MANAGER_CLASS).declaredMethods.first {
-            it.name == WORKER_ENQUEUE_DOWNLOAD_METHOD &&
-                it.parameterTypes.size == 1 &&
-                it.parameterTypes[0].name == CLOUD_BOOK_CLASS
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val book = param.args?.getOrNull(0) ?: return
-                val type = book.javaClass.methods.firstOrNull {
-                    it.name == "getType" && it.parameterTypes.isEmpty()
-                }?.apply { isAccessible = true }?.invoke(book) as? Number ?: return
-                if (type.toInt() != BACKUP_TYPE_WEBDAV && type.toInt() != BACKUP_TYPE_LOCAL_LIBRARY) return
+        val methods = workerEnqueueDownloadMethods()
+        check(methods.isNotEmpty()) { "$WORKER_MANAGER_CLASS.$WORKER_ENQUEUE_DOWNLOAD_METHOD not found" }
+        methods.forEach { method ->
+            XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val book = param.args?.getOrNull(0) ?: return
+                    val type = book.javaClass.methods.firstOrNull {
+                        it.name == "getType" && it.parameterTypes.isEmpty()
+                    }?.apply { isAccessible = true }?.invoke(book) as? Number ?: return
+                    if (type.toInt() != BACKUP_TYPE_WEBDAV && type.toInt() != BACKUP_TYPE_LOCAL_LIBRARY) return
 
-                param.result = runCatching {
-                    if (type.toInt() == BACKUP_TYPE_LOCAL_LIBRARY) {
-                        enqueueLocalLibraryImport(param.thisObject, book)
-                    } else {
-                        enqueueWebDavDownload(param.thisObject, book)
+                    param.result = runCatching {
+                        if (type.toInt() == BACKUP_TYPE_LOCAL_LIBRARY) {
+                            enqueueLocalLibraryImport(param.thisObject, book)
+                        } else {
+                            enqueueWebDavDownload(param.thisObject, book)
+                        }
+                    }.getOrElse {
+                        XposedBridge.log("$LOG_PREFIX cloud download/import failed: ${it.stackTraceToString()}")
+                        val title = if (type.toInt() == BACKUP_TYPE_LOCAL_LIBRARY) LOCAL_LIBRARY_TITLE else WEBDAV_TITLE
+                        newWorkHandle(UUID.randomUUID().toString(), newWorkState("Error", 100, it.message ?: "import failed", null, title))
                     }
-                }.getOrElse {
-                    XposedBridge.log("$LOG_PREFIX cloud download/import failed: ${it.stackTraceToString()}")
-                    val title = if (type.toInt() == BACKUP_TYPE_LOCAL_LIBRARY) LOCAL_LIBRARY_TITLE else WEBDAV_TITLE
-                    newWorkHandle(UUID.randomUUID().toString(), newWorkState("Error", 100, it.message ?: "import failed", null, title))
                 }
-            }
 
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val book = param.args?.getOrNull(0) ?: return
-                val type = book.callInt("getType")
-                if (type !in NATIVE_CLOUD_DOWNLOAD_TYPES) return
-                val handle = param.result ?: return
-                registerNativeCloudDownload(param.thisObject, book, handle, type)
-            }
-        })
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val book = param.args?.getOrNull(0) ?: return
+                    val type = book.callInt("getType")
+                    if (type !in NATIVE_CLOUD_DOWNLOAD_TYPES) return
+                    val handle = param.result ?: return
+                    registerNativeCloudDownload(param.thisObject, book, handle, type)
+                }
+            })
+        }
         XposedBridge.log("$LOG_PREFIX WebDAV cloud download hook installed")
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX failed to hook WebDAV cloud download: ${it.stackTraceToString()}")
@@ -1990,12 +1989,8 @@ internal fun WebDavDriveHook.hookWebDavCloudTap() {
                         val workerManager = viewModel.javaClass.methods.first {
                             it.name == "getWorkerManager" && it.parameterTypes.isEmpty()
                         }.apply { isAccessible = true }.invoke(viewModel)
-                        val enqueueDownload = this@hookWebDavCloudTap.method(
-                            WORKER_MANAGER_CLASS,
-                            WORKER_ENQUEUE_DOWNLOAD_METHOD,
-                            1,
-                        )
-                        enqueueDownload.invoke(workerManager, book)
+                            ?: error("CloudStorageViewModel.workerManager is null")
+                        invokeWorkerEnqueueDownload(workerManager, book)
                         logWebDav("tap queued cloud import type=$typeInt path=${cloudPathOf(book)}")
                     }.onFailure {
                         XposedBridge.log("$LOG_PREFIX cloud tap download failed: ${it.stackTraceToString()}")
@@ -2008,6 +2003,31 @@ internal fun WebDavDriveHook.hookWebDavCloudTap() {
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX failed to hook WebDAV cloud tap: ${it.stackTraceToString()}")
     }
+}
+
+// 阅微 2.3.2 为 enqueueDownload 新增可选下载目录参数；旧版仍是单参数。
+private fun WebDavDriveHook.workerEnqueueDownloadMethods(): List<java.lang.reflect.Method> =
+    (cls(WORKER_MANAGER_CLASS).methods.asSequence() + cls(WORKER_MANAGER_CLASS).declaredMethods.asSequence())
+        .distinct()
+        .filter { method ->
+            method.name == WORKER_ENQUEUE_DOWNLOAD_METHOD &&
+                method.parameterTypes.firstOrNull()?.name == CLOUD_BOOK_CLASS &&
+                (method.parameterTypes.size == 1 ||
+                    (method.parameterTypes.size == 2 && method.parameterTypes[1] == String::class.java))
+        }
+        .onEach { it.isAccessible = true }
+        .sortedBy { it.parameterTypes.size }
+        .toList()
+
+private fun WebDavDriveHook.invokeWorkerEnqueueDownload(workerManager: Any, book: Any): Any? {
+    val method = workerEnqueueDownloadMethods().firstOrNull()
+        ?: error("$WORKER_MANAGER_CLASS.$WORKER_ENQUEUE_DOWNLOAD_METHOD not found")
+    val args = if (method.parameterTypes.size == 1) {
+        arrayOf(book)
+    } else {
+        arrayOf(book, null)
+    }
+    return method.invoke(workerManager, *args)
 }
 
 internal fun WebDavDriveHook.hookThirdAccountWebDavRoute() {
