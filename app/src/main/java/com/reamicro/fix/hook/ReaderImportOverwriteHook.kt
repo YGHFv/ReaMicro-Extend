@@ -112,6 +112,10 @@ class ReaderImportOverwriteHook(
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val snapshot = settingsProvider()
                     if (!snapshot.canRunReaderOverwriteCheck) return
+                    // 每次调用都先记下"被调用的到底是哪个 importBook、实参长什么样"。
+                    // 实机上真实现声明在 android.media.Curloust（宿主为绕隐藏 API 限制放在系统包下），
+                    // 一个类名下会挂到多个同名方法，参数全为 null 的那种此前完全无从识别。
+                    logImportBookCall(param)
                     repositoryRef = WeakReference(param.thisObject)
                     ReaMicroBookMetadataSync.rememberBookshelfRepository(param.thisObject)
                     val importSource = param.args?.getOrNull(0)
@@ -803,6 +807,35 @@ class ReaderImportOverwriteHook(
         "${uuid.trim()}|${title.normalizedBookTitle()}"
 
     /**
+     * 记下一次 importBook 调用的方法签名与实参运行时类型。
+     *
+     * 排查"取消导入没拦住"只能靠这行：宿主把真实实现放在 `android.media.Curloust` 这类系统包里，
+     * 同一个方法名在继承链上可能挂到多个签名，其中有的实参全是 null（没有文件名/uri/uuid 可用，
+     * 钩子根本无法识别是哪个文件）。不打出签名与实参类型，就看不出那几次调用是什么。
+     *
+     * 实参全为 null 的那种调用额外打一段栈：它没有任何可用身份，只能靠调用方定位。
+     */
+    private fun logImportBookCall(param: XC_MethodHook.MethodHookParam) {
+        runCatching {
+            val method = param.method
+            val declaring = method?.declaringClass?.name?.substringAfterLast('.')
+            val params = method?.parameterTypes?.joinToString(",") { it.simpleName }.orEmpty()
+            val args = param.args?.joinToString(",") { it?.javaClass?.simpleName ?: "null" }.orEmpty()
+            XposedBridge.log("$LOG_PREFIX importBook call: $declaring#$params args=[$args]")
+            if (isAllNullArgs(param)) {
+                val frames = Throwable().stackTrace.take(16).joinToString("\n") { "    at $it" }
+                XposedBridge.log("$LOG_PREFIX importBook all-null call stack:\n$frames")
+            }
+        }
+    }
+
+    /** 实参数组非空且每个元素都是 null——这种调用没有任何可用身份。 */
+    private fun isAllNullArgs(param: XC_MethodHook.MethodHookParam): Boolean {
+        val args = param.args ?: return false
+        return args.isNotEmpty() && args.all { it == null }
+    }
+
+    /**
      * 取源文件名。
      *
      * 两条 Hook 拿到的源对象不同（预检是 `okio.Path`，importBook 是 `PlatformFile`），
@@ -1045,10 +1078,18 @@ class ReaderImportOverwriteHook(
         false
     }
 
+    /**
+     * 取消这次导入。
+     *
+     * 两件事都要做：
+     * 1. **跳过原方法**（`setResult`）——`returnEarly` 一旦置位，拦截器就不会再调 `chain.proceed`，
+     *    宿主那段导入逻辑根本没机会执行。只设 `throwable` 也置位 `returnEarly`，但实机上观察到
+     *    框架会在钩子抛异常后以"恢复"路径再动一次原方法；显式给个结果把这层不确定性按死。
+     * 2. 抛出模块自己的取消异常，让宿主把这次 Work 标成失败（不要伪装成宿主的重复书籍异常，
+     *    阅微会对 DuplicateBookException 走"重复书籍"分支，在批量导入里可能被吞掉继续处理）。
+     */
     private fun cancelImport(param: XC_MethodHook.MethodHookParam) {
-        // 不要伪造宿主 DuplicateBookException：阅微会对该异常走“重复书籍”分支，
-        // 在 WorkerManager 的批量导入流程里可能被吞掉并继续处理。使用模块自己的
-        // 取消异常，让协程直接进入失败清理路径，既不写库也不移动书籍目录。
+        param.setResult(null)
         param.throwable = ImportCancelledException()
     }
 
