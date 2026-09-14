@@ -135,8 +135,17 @@ class ReaderImportOverwriteHook(
                         return
                     }
                     if (opf == null) {
-                        // 没有 opf 就解析不出 uuid/书名，冲突检测无从谈起，交给宿主的默认行为。
-                        // 取消已经在上一步处理过了，所以这里放行是安全的。
+                        // 没有 opf 就解析不出 uuid/书名，冲突检测无从谈起。但**取消仍要生效**：
+                        // 实机日志里，一次本地书库导入在取消之后，宿主还会以
+                        // `importBook(null,null,null,null,null,null,continuation)` 的形式再调几次
+                        // （实参连文件名都没有）。这种调用不可能是别的书的合法导入，只可能是同一次
+                        // 导入动作的后续调用——用户刚点过取消，就一并取消。
+                        if (ImportCancellations.hasFreshCancellation()) {
+                            rememberCancelledImport(uuid, title, uriOverride, importSource)
+                            cancelImport(param)
+                            XposedBridge.log("$LOG_PREFIX importBook without opf cancelled (fresh user cancellation)")
+                            return
+                        }
                         XposedBridge.log("$LOG_PREFIX importBook without opf passed through: uri=$uriOverride")
                         return
                     }
@@ -822,17 +831,13 @@ class ReaderImportOverwriteHook(
             val params = method?.parameterTypes?.joinToString(",") { it.simpleName }.orEmpty()
             val args = param.args?.joinToString(",") { it?.javaClass?.simpleName ?: "null" }.orEmpty()
             XposedBridge.log("$LOG_PREFIX importBook call: $declaring#$params args=[$args]")
-            if (isAllNullArgs(param)) {
+            // 「没有可用身份」的判定不能写成"全为 null"：实机日志里这类调用的第 7 个实参是
+            // 匿名 Continuation（非 null），全 null 判定会漏掉、连栈都打不出来。
+            if (param.args?.getOrNull(0) == null && param.args?.getOrNull(2) == null) {
                 val frames = Throwable().stackTrace.take(16).joinToString("\n") { "    at $it" }
-                XposedBridge.log("$LOG_PREFIX importBook all-null call stack:\n$frames")
+                XposedBridge.log("$LOG_PREFIX importBook identity-less call stack:\n$frames")
             }
         }
-    }
-
-    /** 实参数组非空且每个元素都是 null——这种调用没有任何可用身份。 */
-    private fun isAllNullArgs(param: XC_MethodHook.MethodHookParam): Boolean {
-        val args = param.args ?: return false
-        return args.isNotEmpty() && args.all { it == null }
     }
 
     /**

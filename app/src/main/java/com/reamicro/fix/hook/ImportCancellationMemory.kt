@@ -27,14 +27,33 @@ internal class ImportCancellationMemory(
 ) {
     private val cancelled = ConcurrentHashMap<String, Long>()
 
+    /** 最近一次记录取消的时刻（0 表示从未记录），用于"刚取消过"的时间窗判定。 */
+    @Volatile
+    var lastRememberedAtMs: Long = 0L
+        private set
+
     /** 记下这次取消。没有任何可用键时不记录（调用方应尽量给出文件名等兜底身份）。 */
     fun remember(keys: Collection<String>): Boolean {
         val valid = keys.filter(String::isNotBlank).distinct()
         if (valid.isEmpty()) return false
         val now = nowProvider()
         valid.forEach { cancelled[it] = now }
+        lastRememberedAtMs = now
         clearExpired()
         return true
+    }
+
+    /**
+     * 上一次取消是否发生在 [windowMs] 之内。
+     *
+     * 给"没有任何可用身份的 importBook 调用"兜底：这类调用连文件名都没有，不可能是别的书的
+     * 合法导入，只可能是同一次导入动作的后续调用（宿主在钩子返回后还会以桥接/重入的形式再调
+     * 几次）。用户刚点过取消，就把它们一并取消。
+     */
+    fun hasRecentCancellation(windowMs: Long): Boolean {
+        val last = lastRememberedAtMs
+        if (last == 0L) return false
+        return nowProvider() - last <= windowMs
     }
 
     /** 这批身份里是否有任一命中最近的取消。 */
@@ -126,6 +145,18 @@ internal object ImportCancellations {
 
     /** 供模块自己的导入入口使用：不写日志，避免高频调用刷屏。 */
     fun peek(keys: Collection<String>): Boolean = memory.isCancelled(keys)
+
+    /**
+     * 刚刚（[windowMs] 内）有没有取消过导入。
+     *
+     * 给「没有任何可用身份的 importBook 调用」兜底，见
+     * [ImportCancellationMemory.hasRecentCancellation]。
+     */
+    fun hasFreshCancellation(windowMs: Long = FRESH_CANCELLATION_WINDOW_MS): Boolean =
+        memory.hasRecentCancellation(windowMs)
+
+    /** 「刚取消过」的时间窗。取消后宿主的后续调用都在毫秒级，30 秒足够宽松又不会误伤。 */
+    const val FRESH_CANCELLATION_WINDOW_MS = 30_000L
 
     /** 一条导入记录的身份键（模块自己的导入入口用文件名 + 来源 url）。 */
     fun keysForSource(fileName: String, uri: String): List<String> =

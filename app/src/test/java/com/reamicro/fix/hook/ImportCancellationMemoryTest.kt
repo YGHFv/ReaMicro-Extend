@@ -172,4 +172,28 @@ class ImportCancellationMemoryTest {
         assertFalse(ImportCancellations.peek(ImportCancellations.keysForSource("另一本.epub", "local-library://y")))
         ImportCancellations.memory.clear()
     }
+
+    /**
+     * 「刚取消过」的时间窗。
+     *
+     * 实机日志：一次本地书库导入被取消后，宿主还会以
+     * `importBook(null,null,null,null,null,null,continuation)` 再调几次——实参连文件名都没有，
+     * 取消记忆按身份匹配必然落空。这类调用不可能是别的书的合法导入，所以只要刚落过一次取消，
+     * 就把它们一并取消。这里锁住时间窗语义：窗口内为真、窗口外为假、没取消过为假。
+     */
+    @Test
+    fun `刚取消过的时间窗内为真`() {
+        var now = 5_000L
+        val memory = ImportCancellationMemory(ttlMs = 600_000L, nowProvider = { now })
+        assertFalse("没取消过就应为假", memory.hasRecentCancellation(30_000L))
+
+        memory.remember(listOf("uuid:x"))
+        assertTrue(memory.hasRecentCancellation(30_000L))
+
+        now = 5_000L + 30_000L
+        assertTrue("刚好到窗口边界仍算刚取消过", memory.hasRecentCancellation(30_000L))
+
+        now = 5_000L + 30_001L
+        assertFalse("超出窗口就不该再拦无身份调用", memory.hasRecentCancellation(30_000L))
+    }
 }
