@@ -39,8 +39,8 @@ object CloudTaskLocalRunner {
         val token = credential.optString("token").ifBlank { return Outcome("paused", "阅微登录凭据无效") }
         // 行商可配置求安/求财：跑之前先确认有道观运签，没有就补一支（已有签不替换）。
         val blessingType = request.optString("blessingType")
-        val blessingError = ensureTaoistBlessing(baseUrl, token, request, blessingType)
-        val blessingSuffix = if (blessingError != null) "（运签：$blessingError）" else blessingNote(blessingType)
+        val blessing = ensureTaoistBlessing(baseUrl, token, request, blessingType)
+        val blessingSuffix = if (blessing.failure != null) "（运签：${blessing.failure}）" else blessingNote(blessingType)
         val now = System.currentTimeMillis()
         val lastNotified = task.optLong("merchantLastNotifiedTripId", 0L)
         val body = postReaMicro(baseUrl, token, request.optJSONObject("body") ?: JSONObject(), request.optString("endpoint").ifBlank { "rest/community/get-traveling-merchant" })
@@ -76,6 +76,10 @@ object CloudTaskLocalRunner {
                     return Outcome("success", "行商已结算", merchantState(pollAgain, lastNotified, remembered), notify = false)
                 }
                 var message = merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal) + blessingSuffix
+                val detail = merchantDetail(trip)
+                detail.put("结果", merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal))
+                if (blessing.detail.length() > 0) detail.put("运签", blessing.detail.optString("运签"))
+                if (blessing.detail.length() > 0) detail.put("运签效果", blessing.detail.optString("效果"))
                 val autoComplete = request.optBoolean("merchantAutoComplete", false)
                 if (autoComplete) {
                     val config = resolveStartConfig(request, remembered)
@@ -85,7 +89,7 @@ object CloudTaskLocalRunner {
                         message += "（未能开启新行商：${merchantStartHint(config)}）"
                     }
                 }
-                return Outcome("success", message, merchantState(pollAgain, trip.tripId, remembered), notify = true)
+                return Outcome("success", message, merchantState(pollAgain, trip.tripId, remembered), notify = true, detail = detail)
             }
             MerchantPhase.NOTIFIED -> {
                 return Outcome("success", "行商已结算", merchantState(pollAgain, lastNotified, remembered), notify = false)
@@ -100,6 +104,10 @@ object CloudTaskLocalRunner {
                     return Outcome("success", "行商已通知，等待结算", merchantState(pollAgain, lastNotified, remembered), notify = false)
                 }
                 var message = merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal) + blessingSuffix
+                val detail = merchantDetail(trip)
+                detail.put("结果", merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal))
+                if (blessing.detail.length() > 0) detail.put("运签", blessing.detail.optString("运签"))
+                if (blessing.detail.length() > 0) detail.put("运签效果", blessing.detail.optString("效果"))
                 val autoComplete = request.optBoolean("merchantAutoComplete", false)
                 if (autoComplete && trip.tripId > 0L) {
                     val settle = postReaMicro(baseUrl, token, JSONObject().put("tripId", trip.tripId), request.optString("settleEndpoint").ifBlank { "rest/community/settle-traveling-merchant" })
@@ -117,14 +125,24 @@ object CloudTaskLocalRunner {
                             )
                         }
                         message += "，已自动完成行商"
+                        detail.put("自动完成", "已结算" + if (settleError == null) "" else "（$settleError）")
                         val start = startResult(baseUrl, token, request, remembered)
                         if (start != null) message += "并开启新行商" else message += "（未能开启新行商：${merchantStartHint(resolveStartConfig(request, remembered))}）"
                     }
                 }
-                return Outcome("success", message, merchantState(pollAgain, trip.tripId, remembered), notify = true)
+                return Outcome("success", message, merchantState(pollAgain, trip.tripId, remembered), notify = true, detail = detail)
             }
         }
     }
+
+    /** 行商详情：谁、去哪、本金多少、结算多少、事件是什么。 */
+    private fun merchantDetail(trip: MerchantTrip): JSONObject = JSONObject()
+        .put("事件", trip.eventTitle.ifBlank { "行商" })
+        .put("行程", "${formatMerchantEpoch(trip.startTimeMs)} → ${formatMerchantEpoch(trip.endTimeMs)}")
+        .put("城池", trip.cityCode)
+        .put("本金", "${trip.principal} 铜")
+        .put("结算", "${trip.settlementAmount} 铜")
+        .put("状态", trip.status.ifBlank { "—" })
 
     /**
      * 解析本次要用于开新行商的参数：**用户填了就用用户的，留空则沿用上次行商配置**。
@@ -186,8 +204,8 @@ object CloudTaskLocalRunner {
         val baseUrl = credential.optString("baseUrl").ifBlank { return Outcome("failed", "阅微服务器地址为空") }
         val token = credential.optString("token").ifBlank { return Outcome("paused", "阅微登录凭据无效") }
         // 每日轶闻固定求运（LUCK）：先确认道观运签，没有就补一支。
-        val blessingError = ensureTaoistBlessing(baseUrl, token, request, BLESSING_LUCK)
-        val blessingSuffix = if (blessingError != null) "（运签：$blessingError）" else blessingNote(BLESSING_LUCK)
+        val blessing = ensureTaoistBlessing(baseUrl, token, request, BLESSING_LUCK)
+        val blessingSuffix = if (blessing.failure != null) "（运签：${blessing.failure}）" else blessingNote(BLESSING_LUCK)
         val body = postReaMicro(baseUrl, token, request.optJSONObject("body") ?: JSONObject(), request.optString("endpoint").ifBlank { "rest/community/get-daily-lore" })
         val error = businessError(body)
         if (error != null) return Outcome("failed", "获取每日轶闻失败：$error")
@@ -219,7 +237,14 @@ object CloudTaskLocalRunner {
             .put("claimCompletedDate", if (claimed) today else "")
             .put("claimJustCompleted", claimed)
         val checkinMessage = if (claimed) "签到完成，奖励已领取" else "签到完成，等待奖励解锁"
-        return Outcome("success", checkinMessage + blessingSuffix, state)
+        val detail = JSONObject()
+            .put("轶闻", request.optJSONObject("body")?.optString("title").orEmpty())
+            .put("奖励", if (claimed) "已领取" else "待解锁（${formatMerchantEpoch(claimDueAt)}）")
+        blessing.detail.takeIf { it.length() > 0 }?.let {
+            detail.put("运签", it.optString("运签"))
+            detail.put("运签效果", it.optString("效果"))
+        }
+        return Outcome("success", checkinMessage + blessingSuffix, state, detail = detail)
     }
 
     private fun runDrawCard(task: JSONObject, request: JSONObject, credential: JSONObject): Outcome {
@@ -258,7 +283,15 @@ object CloudTaskLocalRunner {
         }
         val summary = items.groupBy { "${it.optString("name")}\u0000${it.optString("quality")}" }
             .entries.joinToString("、") { (_, values) -> "${values.first().optString("name")} x${values.sumOf { it.optInt("count", 1) }}" }
-        return Outcome("success", if (summary.isBlank()) "抽卡完成" else summary, drawState(items, usedToday + consumed))
+        val detail = JSONObject()
+            .put("本次祈愿", "$consumed 次")
+            .put("获得", if (summary.isBlank()) "无" else summary)
+        return Outcome(
+            "success",
+            if (summary.isBlank()) "抽卡完成" else summary,
+            drawState(items, usedToday + consumed),
+            detail = detail,
+        )
     }
 
     private fun drawState(items: List<JSONObject>, consumed: Int): JSONObject = JSONObject()
@@ -316,7 +349,11 @@ object CloudTaskLocalRunner {
             .put("dailyReadDate", today)
             .put("dailyReadMinutes", usedToday + duration)
             .put("bookRotation", rotation + completedBooks)
-        return Outcome("success", "${names.joinToString("、")} · $duration 分钟", state)
+        val detail = JSONObject()
+            .put("图书", names.joinToString("、"))
+            .put("时长", "$duration 分钟")
+            .put("今日累计", "${usedToday + duration} 分钟")
+        return Outcome("success", "${names.joinToString("、")} · $duration 分钟", state, detail = detail)
     }
 
     /**
@@ -330,29 +367,41 @@ object CloudTaskLocalRunner {
         token: String,
         request: JSONObject,
         blessingType: String,
-    ): String? {
+    ): BlessingCheck {
         val type = blessingType.trim().uppercase()
-        if (type.isBlank()) return null
+        if (type.isBlank()) return BlessingCheck(null, JSONObject())
         val current = postReaMicro(
             baseUrl,
             token,
             JSONObject(),
             request.optString("blessingEndpoint").ifBlank { "rest/community/get-taoist-blessing" },
         )
-        businessError(current)?.let { return "查询运签失败：$it" }
+        businessError(current)?.let { return BlessingCheck("查询运签失败：$it", JSONObject()) }
         val data = current.optJSONObject("data") ?: current
-        // blessing 为 null 表示没有签；用 JSONObject.NULL 与缺失两种形态都要识别成"无签"。
+        // blessing 为 null 表示没有签；JSONObject.NULL 与缺失两种形态都要识别成"无签"。
         val blessing = data.opt("blessing")
-        if (blessing is JSONObject) return null
+        if (blessing is JSONObject) return BlessingCheck(null, blessingDetail(blessing, "沿用已有"))
         val pray = postReaMicro(
             baseUrl,
             token,
             JSONObject().put("blessingType", type),
             request.optString("prayEndpoint").ifBlank { "rest/community/pray-taoist-blessing" },
         )
-        businessError(pray)?.let { return "祈禳${blessingLabel(type)}失败：$it" }
-        return null
+        businessError(pray)?.let { return BlessingCheck("祈禳${blessingLabel(type)}失败：$it", JSONObject()) }
+        val prayed = (pray.optJSONObject("data") ?: pray).optJSONObject("blessing")
+        return BlessingCheck(null, if (prayed != null) blessingDetail(prayed, "本次祈禳") else JSONObject())
     }
+
+    /** 运签详情：签种、签文名、效果描述（游戏原文，例如"下一次每日轶闻：绿色及以上概率提升 2 个百分点"）。 */
+    private fun blessingDetail(blessing: JSONObject, source: String): JSONObject {
+        val type = blessing.optString("blessingType")
+        return JSONObject()
+            .put("运签", "$source · ${blessingLabel(type)} ${blessing.optString("name")}".trim())
+            .put("效果", blessing.optString("description"))
+    }
+
+    /** 运签检查结果：failure 非空表示这次没拿到签；detail 用于任务记录详情。 */
+    private data class BlessingCheck(val failure: String?, val detail: JSONObject)
 
     /** 祈禳成功时给任务消息加一句，方便回查这次任务用的什么签。 */
     private fun blessingNote(blessingType: String): String =
@@ -456,7 +505,12 @@ object CloudTaskLocalRunner {
             return Outcome("failed", "典当失败：${failure ?: "未知原因"}", state)
         }
         val tail = if (failure != null) "（第 ${successCount + 1} 次中断：$failure）" else ""
-        return Outcome("success", "典当「$propName」$successCount 件，获得铜钱 $coin 文$tail", state)
+        val detail = JSONObject()
+            .put("期物", propName)
+            .put("典当数量", "$successCount 件")
+            .put("获得铜钱", "$coin 文")
+            .put("今日次数", "${usedToday + successCount}/$maxPerDay")
+        return Outcome("success", "典当「$propName」$successCount 件，获得铜钱 $coin 文$tail", state, detail = detail)
     }
 
     private fun postReaMicro(baseUrl: String, token: String, body: JSONObject, endpoint: String): JSONObject {
@@ -483,10 +537,13 @@ object CloudTaskLocalRunner {
         val trip = data.optJSONObject("activeTrip") ?: return MerchantTrip(hasTrip = false)
         val endTimeRaw = trip.optLong("endTime", 0L)
         val endTimeMs = if (endTimeRaw in 1 until 100_000_000_000L) endTimeRaw * 1_000L else endTimeRaw
+        val startTimeRaw = trip.optLong("startTime", 0L)
+        val startTimeMs = if (startTimeRaw in 1 until 100_000_000_000L) startTimeRaw * 1_000L else startTimeRaw
         return MerchantTrip(
             hasTrip = true,
             tripId = trip.optLong("id", 0L),
             status = trip.optString("status"),
+            startTimeMs = startTimeMs,
             endTimeMs = endTimeMs,
             settlementAmount = trip.optLong("settlementAmount", 0L),
             principal = trip.optLong("principal", 0L),
@@ -522,6 +579,7 @@ object CloudTaskLocalRunner {
         val hasTrip: Boolean,
         val tripId: Long = 0L,
         val status: String = "",
+        val startTimeMs: Long = 0L,
         val endTimeMs: Long = 0L,
         val settlementAmount: Long = 0L,
         val principal: Long = 0L,
@@ -535,6 +593,8 @@ object CloudTaskLocalRunner {
         val message: String,
         val state: JSONObject = JSONObject(),
         val notify: Boolean = true,
+        /** 展示给用户的细节（运签/奖励/事件/期物…），落进任务记录供主界面详情页渲染。 */
+        val detail: JSONObject = JSONObject(),
     )
 
     internal const val REAMICRO_BASE_URL = "https://api.reamicro.zhendong.ltd/"

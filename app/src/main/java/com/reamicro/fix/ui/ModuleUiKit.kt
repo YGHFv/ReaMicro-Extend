@@ -206,6 +206,181 @@ internal class ModuleUiKit(private val context: Context) {
         android.widget.Toast.makeText(context.applicationContext, message, android.widget.Toast.LENGTH_SHORT).show()
     }
 
+    /**
+     * 页面骨架：可滚动内容 + 底部页签栏。
+     *
+     * 底栏固定在窗口底部，内容区自己滚动——页签切换就是换内容，不重建底栏，
+     * 所以切页不会闪。
+     */
+    fun scaffold(content: View, tabs: List<String>, selectedIndex: Int, onSelect: (Int) -> Unit): View {
+        val bar = bottomBar(tabs, selectedIndex, onSelect)
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(palette.pageBackground)
+            addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(bar)
+            // 内容区的顶部避让由 page() 自己处理；底栏要单独避让手势导航条，否则会被压在下面点不到。
+            setOnApplyWindowInsetsListener { _, insets ->
+                val bottom = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    insets.getInsets(WindowInsets.Type.systemBars()).bottom
+                } else {
+                    @Suppress("DEPRECATION")
+                    insets.systemWindowInsetBottom
+                }
+                (bar.layoutParams as? LinearLayout.LayoutParams)?.let { params ->
+                    params.bottomMargin = px(BOTTOM_BAR_MARGIN_DP) + bottom
+                    bar.layoutParams = params
+                }
+                insets
+            }
+        }
+    }
+
+    private fun bottomBar(tabs: List<String>, selectedIndex: Int, onSelect: (Int) -> Unit): View =
+        LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = rounded(palette.rowBackground, 14f)
+            setPadding(px(6), px(6), px(6), px(6))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                leftMargin = px(12)
+                rightMargin = px(12)
+                bottomMargin = px(BOTTOM_BAR_MARGIN_DP)
+            }
+            tabs.forEachIndexed { index, title ->
+                addView(
+                    textView(title, 14f, if (index == selectedIndex) palette.primaryText else palette.body, bold = index == selectedIndex).apply {
+                        gravity = Gravity.CENTER
+                        isClickable = true
+                        setOnClickListener { onSelect(index) }
+                        if (index == selectedIndex) {
+                            background = rounded(palette.pageBackground, 10f).apply {
+                                setStroke((1.2f * dp).toInt(), palette.border)
+                            }
+                        }
+                        layoutParams = LinearLayout.LayoutParams(0, px(42), 1f).apply {
+                            leftMargin = px(3)
+                            rightMargin = px(3)
+                        }
+                    },
+                )
+            }
+        }
+
+    /**
+     * 一条「通知样式」的列表项：标题 / 正文 / 时间，整块可点。
+     *
+     * 任务记录用它而不是普通行，是为了和系统通知的长相接近——用户已经在通知栏见过这些内容，
+     * 样式一致时更容易对上"哪条通知对应哪次执行"。
+     */
+    fun listItem(
+        title: String,
+        body: String,
+        meta: String,
+        accent: Boolean,
+        onClick: () -> Unit,
+    ): View = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        background = rounded(palette.rowBackground, 12f)
+        setPadding(px(14), px(12), px(14), px(12))
+        isClickable = true
+        setOnClickListener { onClick() }
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply {
+            leftMargin = px(16)
+            rightMargin = px(16)
+            bottomMargin = px(8)
+        }
+        addView(
+            LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(
+                    textView(title, 15f, if (accent) palette.title else palette.destructiveText, bold = true),
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                )
+                addView(textView(meta, 11f, palette.body))
+            },
+        )
+        if (body.isNotBlank()) {
+            addView(textView(body, 13f, palette.body).apply { setPadding(0, px(6), 0, 0) })
+        }
+    }
+
+    /**
+     * 编辑弹窗：一行一个输入框（标签 + 提示 + 初值）。
+     *
+     * [register] 把每个输入框按标签交回调用方读取——标签是唯一键，调用方按同一套标签取值，
+     * 不用维护两份下标。
+     */
+    fun editDialog(
+        title: String,
+        build: (add: (label: String, hint: String, value: String) -> Unit) -> Unit,
+        register: (label: String, edit: android.widget.EditText) -> Unit,
+        onSave: () -> Boolean,
+    ): Dialog {
+        val dialog = Dialog(context)
+        val metrics = context.resources.displayMetrics
+        val card = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(palette.rowBackground, 12f)
+            setPadding(px(18), px(18), px(18), px(14))
+        }
+        card.addView(textView(title, 18f, palette.title, bold = true).apply { setPadding(0, 0, 0, px(10)) })
+        val form = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        card.addView(form)
+        build { label, hint, value ->
+            form.addView(fieldRow(label, hint))
+            val edit = editText(value)
+            form.addView(edit)
+            register(label, edit)
+        }
+        val scroll = ScrollView(context).apply {
+            addView(form)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                (metrics.heightPixels * 0.5f).toInt(),
+            )
+        }
+        card.addView(scroll)
+        card.addView(
+            LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, px(12), 0, 0)
+                addView(button("保存", onClick = { if (onSave()) dialog.dismiss() }))
+                addView(button("取消", onClick = { dialog.dismiss() }))
+            },
+        )
+        dialog.setContentView(card)
+        dialog.setOnShowListener {
+            dialog.window?.setLayout((metrics.widthPixels * 0.9f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        dialog.show()
+        return dialog
+    }
+
+    private fun fieldRow(label: String, hint: String): View = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(px(2), px(6), px(2), px(2))
+        addView(textView(label, 13f, palette.title, bold = true))
+        if (hint.isNotBlank()) addView(textView(hint, 11f, palette.body).apply { setPadding(0, px(2), 0, 0) })
+    }
+
+    private fun editText(value: String): android.widget.EditText =
+        android.widget.EditText(context).apply {
+            setText(value)
+            textSize = 14f
+            setTextColor(palette.title)
+            background = rounded(palette.pageBackground, 8f).apply {
+                setStroke((1.2f * dp).toInt(), palette.border)
+            }
+            setPadding(px(10), px(8), px(10), px(8))
+            maxLines = 6
+        }
+
     /** 当前配色是不是深色底。用于把状态栏图标调成相反色，否则深底上的黑图标看不见。 */
     val isDarkPage: Boolean
         get() {
@@ -236,4 +411,8 @@ internal class ModuleUiKit(private val context: Context) {
     }
 
     private fun px(value: Int): Int = (value * dp).toInt()
+
+    private companion object {
+        const val BOTTOM_BAR_MARGIN_DP = 12
+    }
 }

@@ -13,34 +13,38 @@ import android.view.ViewGroup
 import android.view.WindowInsetsController
 import com.reamicro.fix.cloud.api.CloudTaskWakeDiagnostics
 import com.reamicro.fix.cloud.api.CloudTaskWakeScheduler
+import com.reamicro.fix.cloud.api.NextWakeHint
+import com.reamicro.fix.cloud.local.CloudTaskLocalRunner
+import com.reamicro.fix.cloud.local.LocalTask
+import com.reamicro.fix.cloud.local.LocalTaskBook
 import com.reamicro.fix.cloud.local.LocalTaskRecord
 import com.reamicro.fix.cloud.local.LocalTaskRunner
 import com.reamicro.fix.cloud.local.LocalTaskStore
+import com.reamicro.fix.hook.CLOUD_AUTOMATION_TASKS
+import com.reamicro.fix.hook.CloudAutomationTaskSpec
 import com.reamicro.fix.logging.ModuleAndroidLog
 import com.reamicro.fix.logging.ModuleLogBuffer
 import com.reamicro.fix.notification.CloudTaskNotifications
 import com.reamicro.fix.notification.NotificationRecord
 import com.reamicro.fix.notification.NotificationRecordStore
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /**
- * 模块自己的主界面。
+ * 模块主界面：底栏三个页签（记录 / 配置 / 关于）。
  *
- * 存在的两个理由：
- * 1. **能看见**：任务记录、通知记录、诊断日志此前只存在于两个进程各自的存储里，用户没有任何
- *    入口去回查"任务到底跑没跑、通知到底发没发"。这里把它们汇总到一屏。
- * 2. **能被唤醒**：模块 App 一直没有 launcher activity，装完可能长期处于 stopped 状态，而
- *    stopped 应用的广播收不到（系统闹钟唤醒正是靠广播）。有了主界面，用户装完自然会打开一次，
- *    应用脱离 stopped——这与带 FLAG_INCLUDE_STOPPED_PACKAGES 的广播互为双保险。
+ * 为什么要有它：模块此前没有任何界面，任务跑没跑、通知发没发、下次什么时候跑，用户全都没处看。
+ * 「记录」页把任务记录按通知的样式列出来、点进去看细节（运签、奖励、行商事件与收益…）；
+ * 「配置」页放本地任务配置、权限管理与日志；「关于」页放版本与后台唤醒状态。
  *
- * UI 全部用代码构建：模块只有极简资源，复用设置页那套视图辅助函数又必须绑定宿主的 Activity，
- * 所以这里用 [ModuleUiKit] 自建一套，配色仍取自 [com.reamicro.fix.hook.ModuleDialogTheme]。
+ * UI 全部代码构建：模块只有极简资源，复用设置页那套视图辅助函数又必须绑定宿主的 Activity。
  */
 class ModuleMainActivity : Activity() {
 
     private lateinit var ui: ModuleUiKit
+    private var tab = TAB_RECORDS
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -52,12 +56,7 @@ class ModuleMainActivity : Activity() {
         refresh()
     }
 
-    /**
-     * 状态栏图标与本页底色相反。
-     *
-     * edge-to-edge 之后状态栏直接压在页面底色上：浅色底要深色图标（LIGHT_STATUS_BARS），
-     * 深色底反之。不设的话深色模式下图标是黑的，等于看不见。
-     */
+    /** 状态栏图标与本页底色相反（edge-to-edge 之后状态栏直接压在页面底色上）。 */
     private fun applyStatusBarIcons() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         runCatching {
@@ -70,37 +69,277 @@ class ModuleMainActivity : Activity() {
 
     private fun refresh() {
         setContentView(
-            ui.page(
+            ui.scaffold(
+                content = when (tab) {
+                    TAB_CONFIG -> configPage()
+                    TAB_ABOUT -> aboutPage()
+                    else -> recordsPage()
+                },
+                tabs = TAB_TITLES,
+                selectedIndex = tab,
+                onSelect = { index ->
+                    if (index != tab) {
+                        tab = index
+                        refresh()
+                    }
+                },
+            ),
+        )
+    }
+
+    // ---- 记录页 ----
+
+    private fun recordsPage(): View {
+        val store = LocalTaskStore { applicationContext }
+        val records = store.accountIds()
+            .flatMap { accountId -> store.records(accountId).map { accountId to it } }
+            .sortedByDescending { (_, record) -> record.at }
+        val failed = records.count { (_, record) -> record.result != "success" }
+        val header = ui.row(
+            "任务记录",
+            if (records.isEmpty()) {
+                "还没有执行记录。任务跑过之后会在这里按时间列出，点进去能看到运签、奖励、行商事件这些细节。"
+            } else {
+                "本机已记录 ${records.size} 条（失败 $failed 条），最新在前。点任意一条看详情。"
+            },
+            actions = buildList<Pair<String, () -> Unit>> {
+                add("立即执行" to { runLocalTasksNow() })
+                if (records.isNotEmpty()) {
+                    add("清空" to {
+                        store.accountIds().forEach { store.clearRecords(it) }
+                        ui.toast("任务记录已清空")
+                        refresh()
+                    })
+                }
+            },
+        )
+        return ui.page(
+            listOf(
+                ui.pageTitle("阅微补全计划", "本地任务由模块进程执行，与阅微是否打开无关"),
+                ui.card(listOf(header)),
+            ) + records.map { (accountId, record) -> recordCard(accountId, record) },
+        )
+    }
+
+    /** 一条记录按通知的样式呈现：任务名 + 时间 / 正文，整块可点。 */
+    private fun recordCard(accountId: String, record: LocalTaskRecord): View = ui.listItem(
+        title = taskTitle(record.taskType) + if (record.result == "success") "" else "（${record.result}）",
+        body = record.message,
+        meta = formatDateTime(record.at),
+        accent = record.result == "success",
+        onClick = { showRecordDetail(accountId, record) },
+    )
+
+    private fun showRecordDetail(accountId: String, record: LocalTaskRecord) {
+        val detail = runCatching { JSONObject(record.detail) }.getOrNull()
+        val lines = buildList {
+            add("时间：${formatDateTime(record.at)}")
+            add("任务：${taskTitle(record.taskType)}")
+            add("账号：$accountId")
+            add("结果：${if (record.result == "success") "成功" else record.result}")
+            add("")
+            add(record.message)
+            if (detail != null && detail.length() > 0) {
+                add("")
+                detail.keys().forEach { key ->
+                    val value = detail.optString(key)
+                    if (value.isNotBlank()) add("$key：$value")
+                }
+            }
+        }
+        ui.contentDialog(
+            title = "${taskTitle(record.taskType)} 详情",
+            content = lines.joinToString("\n"),
+            actions = listOf(),
+        )
+    }
+
+    private fun runLocalTasksNow() {
+        ui.background(
+            work = {
+                val count = LocalTaskRunner.runDue(applicationContext)
+                if (count > 0) "已执行 $count 个到期任务" else "没有到期的本地任务"
+            },
+            then = { ui.toast(it); refresh() },
+        )
+    }
+
+    // ---- 配置页 ----
+
+    private fun configPage(): View {
+        val store = LocalTaskStore { applicationContext }
+        val accounts = store.accountIds()
+        val tasks = accounts.flatMap { accountId -> store.list(accountId).map { accountId to it } }
+        val enabled = tasks.count { (_, task) -> task.enabled }
+        val nextTaskAt = futureNextRunAt(store)
+        val children = mutableListOf<View>(
+            ui.pageTitle("配置", "本地任务与模块权限都集中在这里"),
+            ui.sectionTitle("本地任务"),
+            ui.card(
                 listOf(
-                    ui.pageTitle("阅微补全计划", versionLine()),
-                    ui.sectionTitle("后台唤醒自检"),
-                    wakeCard(),
-                    ui.sectionTitle("本地自动任务"),
-                    localTaskCard(),
-                    ui.sectionTitle("通知"),
-                    notificationCard(),
-                    ui.sectionTitle("Root 增强（实验性）"),
-                    rootCard(),
-                    ui.sectionTitle("诊断"),
-                    diagnosticsCard(),
+                    ui.row(
+                        "任务概览",
+                        buildString {
+                            append("${accounts.size} 个账号、$enabled 个任务已启用")
+                            append("\n下次唤醒：${formatTime(NextWakeHint.read(this@ModuleMainActivity))}")
+                            append("（系统闹钟/看门狗的实际触发时刻）")
+                            append("\n下次任务时刻：${nextTaskAt?.let(::formatTime) ?: "无"}")
+                            if (nextTaskAt != null) append("（任务自己排的时刻）")
+                        },
+                    ),
+                ),
+            ),
+        )
+        if (tasks.isEmpty()) {
+            children += ui.card(listOf(ui.row("还没有本地任务", "在阅微的设置页里启用任务后，这里就能改配置")))
+        } else {
+            tasks.forEach { (accountId, task) -> children += taskCard(accountId, task) }
+        }
+        children += ui.sectionTitle("权限与后台")
+        children += wakeCard()
+        children += ui.sectionTitle("通知与日志")
+        children += notificationCard()
+        children += logCard()
+        return ui.page(children)
+    }
+
+    private fun taskCard(accountId: String, task: LocalTask): View {
+        val spec = CLOUD_AUTOMATION_TASKS.firstOrNull { it.taskType == task.taskType }
+        val subtitle = buildString {
+            append(if (task.enabled) "已启用" else "已关闭")
+            if (task.blessingType.isNotBlank()) append(" · ${CloudTaskLocalRunner.blessingLabel(task.blessingType)}")
+            if (task.enabled && task.nextRunAt > 0L) append("\n下次：${formatDateTime(task.nextRunAt)}")
+            if (task.lastMessage.isNotBlank()) {
+                append("\n")
+                append(task.lastMessage)
+            }
+            append("\n（改这里只影响本地任务；阅微设置页里的改动会覆盖这里）")
+        }
+        return ui.card(
+            listOf(
+                ui.row(
+                    spec?.title ?: taskTitle(task.taskType),
+                    subtitle,
+                    actions = listOf(
+                        (if (task.enabled) "停用" else "启用") to { setTaskEnabled(accountId, task, !task.enabled) },
+                        "改配置" to { openTaskEditor(accountId, task, spec) },
+                    ),
                 ),
             ),
         )
     }
 
-    private fun versionLine(): String =
-        runCatching {
-            val info = packageManager.getPackageInfo(packageName, 0)
-            "模块 ${info.versionName}（${info.versionCode}）· 阅微补全计划"
-        }.getOrDefault("阅微补全计划")
+    private fun setTaskEnabled(accountId: String, task: LocalTask, enabled: Boolean) {
+        val store = LocalTaskStore { applicationContext }
+        store.setEnabled(accountId, task.taskType, enabled, store.token(accountId))
+        // 开关变了要重排闹钟，否则新启用的任务不会被唤醒执行。
+        runCatching { CloudTaskWakeScheduler.schedule(applicationContext) }
+        ui.toast("${taskTitle(task.taskType)}已${if (enabled) "启用" else "停用"}")
+        refresh()
+    }
 
-    // ---- 自检与授权 ----
+    /** 任务配置编辑：字段随任务类型变化（与阅微设置页同一套语义）。 */
+    private fun openTaskEditor(accountId: String, task: LocalTask, spec: CloudAutomationTaskSpec?) {
+        val fields = linkedMapOf<String, android.widget.EditText>()
+        ui.editDialog(
+            title = spec?.title ?: taskTitle(task.taskType),
+            build = { add ->
+                if (spec?.rewardTriggered != true && spec?.merchant != true) add("执行时间", "HH:mm", task.timeOfDay)
+                if (spec?.autoRead == true) {
+                    add("阅读时长", "分钟", task.durationMinutes.toString())
+                    add("图书", "每行 bookId|书名，留空=最近阅读", task.books.joinToString("\n") { "${it.bookId}|${it.name}" })
+                }
+                if (spec?.rewardTriggered == true) add("每日祈愿上限", "0 表示抽完彩筹", task.dailyDrawLimit.toString())
+                if (spec?.merchant == true) {
+                    add("城池 cityCode", "留空沿用上次", task.merchantCityCode)
+                    add("本金", "留空沿用上次", task.merchantPrincipal.takeIf { it > 0L }?.toString().orEmpty())
+                    add("车马 transportId", "留空沿用上次", task.merchantTransportId.takeIf { it > 0L }?.toString().orEmpty())
+                }
+                if (spec != null && spec.blessingOptions.isNotEmpty()) {
+                    add(
+                        "运签",
+                        spec.blessingOptions.joinToString("/") { CloudTaskLocalRunner.blessingLabel(it) },
+                        task.blessingType.ifBlank { spec.blessingOptions.first() },
+                    )
+                }
+            },
+            register = { label, edit -> fields[label] = edit },
+            onSave = {
+                val updated = applyTaskEdits(task, spec, fields)
+                if (updated == null) {
+                    ui.toast("填写有误，请检查时间与数字")
+                    false
+                } else {
+                    val store = LocalTaskStore { applicationContext }
+                    store.saveTask(accountId, updated, store.token(accountId))
+                    runCatching { CloudTaskWakeScheduler.schedule(applicationContext) }
+                    ui.toast("配置已保存")
+                    refresh()
+                    true
+                }
+            },
+        )
+    }
+
+    /** 把对话框里填的值并回任务；时间或数字非法时返回 null。 */
+    private fun applyTaskEdits(
+        task: LocalTask,
+        spec: CloudAutomationTaskSpec?,
+        fields: Map<String, android.widget.EditText>,
+    ): LocalTask? {
+        val text = { label: String -> fields[label]?.text?.toString()?.trim().orEmpty() }
+        val timeOfDay = if (spec?.rewardTriggered != true && spec?.merchant != true) {
+            val parts = text("执行时间").split(":")
+            val hour = parts.getOrNull(0)?.toIntOrNull()
+            val minute = parts.getOrNull(1)?.toIntOrNull()
+            if (parts.size != 2 || hour == null || minute == null || hour !in 0..23 || minute !in 0..59) return null
+            "%02d:%02d".format(hour, minute)
+        } else task.timeOfDay
+        val duration = if (spec?.autoRead == true) {
+            text("阅读时长").toIntOrNull()?.takeIf { it in 1..720 } ?: return null
+        } else task.durationMinutes
+        val drawLimit = if (spec?.rewardTriggered == true) {
+            text("每日祈愿上限").toIntOrNull()?.takeIf { it in 0..20 } ?: return null
+        } else task.dailyDrawLimit
+        val books = if (spec?.autoRead == true) {
+            val lines = text("图书").lineSequence().map(String::trim).filter(String::isNotBlank).toList()
+            val parsed = ArrayList<LocalTaskBook>(lines.size)
+            for (line in lines) {
+                val id = line.substringBefore('|').trim().toLongOrNull() ?: return null
+                if (id <= 0L) return null
+                parsed += LocalTaskBook(id, line.substringAfter('|', "").trim())
+            }
+            parsed
+        } else task.books
+        val blessing = if (spec != null && spec.blessingOptions.isNotEmpty()) {
+            val raw = text("运签").uppercase()
+            spec.blessingOptions.firstOrNull { it == raw }
+                ?: spec.blessingOptions.firstOrNull { CloudTaskLocalRunner.blessingLabel(it) == raw }
+                ?: spec.blessingOptions.first()
+        } else task.blessingType
+        return task.copy(
+            timeOfDay = timeOfDay,
+            durationMinutes = duration,
+            dailyDrawLimit = drawLimit,
+            books = books,
+            blessingType = blessing,
+            merchantCityCode = if (spec?.merchant == true) text("城池 cityCode") else task.merchantCityCode,
+            merchantPrincipal = if (spec?.merchant == true) text("本金").toLongOrNull()?.coerceAtLeast(0L) ?: 0L else task.merchantPrincipal,
+            merchantTransportId = if (spec?.merchant == true) text("车马 transportId").toLongOrNull()?.coerceAtLeast(0L) ?: 0L else task.merchantTransportId,
+        )
+    }
+
+    // ---- 权限 / 通知 / 日志 ----
 
     private fun wakeCard(): View {
         val status = CloudTaskWakeDiagnostics.inspect(this)
         return ui.card(
             listOf(
-                ui.row("后台唤醒", status.summary(), titleColor = if (status.healthy) ui.palette.title else ui.palette.destructiveText),
+                ui.row(
+                    "后台唤醒",
+                    status.summary(),
+                    titleColor = if (status.healthy) ui.palette.title else ui.palette.destructiveText,
+                ),
                 ui.info(status.details().joinToString("\n")),
                 ui.row(
                     "授权与跳转",
@@ -116,6 +355,141 @@ class ModuleMainActivity : Activity() {
             ),
         )
     }
+
+    private fun notificationCard(): View {
+        val store = NotificationRecordStore { applicationContext }
+        val records = store.list()
+        val delivered = records.count { it.delivered }
+        val subtitle = if (records.isEmpty()) {
+            "还没有通知记录。任务结果通知会在这里留下投递结果（含失败原因）。"
+        } else {
+            "共 ${records.size} 条：成功投出 $delivered 条，未投出 ${records.size - delivered} 条。\n" +
+                "未投出的说明模块进程当时没能发出通知（被系统冻结或未启动），服务器会保留该消息下次重发。"
+        }
+        return ui.card(
+            listOf(
+                ui.row(
+                    "通知记录",
+                    subtitle,
+                    actions = listOf(
+                        "查看" to { showNotificationRecords(store) },
+                        "清空" to { store.clear(); ui.toast("通知记录已清空"); refresh() },
+                    ),
+                ),
+            ),
+        )
+    }
+
+    private fun showNotificationRecords(store: NotificationRecordStore) {
+        val records = store.list()
+        ui.contentDialog(
+            title = "通知记录",
+            content = if (records.isEmpty()) "还没有通知记录。" else records.joinToString("\n\n") { it.describe() },
+            actions = listOf("清空" to { store.clear(); ui.toast("通知记录已清空"); refresh() }),
+        )
+    }
+
+    private fun NotificationRecord.describe(): String = buildString {
+        append(formatDateTime(at))
+        append(" · ")
+        append(if (delivered) "已发出" else "未发出")
+        append('\n')
+        append(title)
+        append('\n')
+        append(text)
+        append("\n来源：")
+        append(source)
+        if (detail.isNotBlank()) {
+            append(" · ")
+            append(detail)
+        }
+    }
+
+    private fun logCard(): View {
+        val logs = ModuleLogBuffer.snapshot()
+        val path = ModuleLogBuffer.filePath()
+        return ui.card(
+            listOf(
+                ui.row(
+                    "模块日志",
+                    "共 ${logs.size} 条（最新在前）。模块进程的日志默认不出现在 logcat 里，这里能直接看到。" +
+                        (path?.let { "\n落盘位置：$it" } ?: "\n尚未落盘（模块还没被唤醒过）"),
+                    actions = listOf(
+                        "查看" to { showLogs() },
+                        "清空" to { ModuleLogBuffer.clear(); ui.toast("日志已清空"); refresh() },
+                    ),
+                ),
+            ),
+        )
+    }
+
+    private fun showLogs() {
+        val logs = ModuleLogBuffer.snapshot()
+        ui.contentDialog(
+            title = "模块日志",
+            content = if (logs.isEmpty()) "暂无日志。" else logs.joinToString("\n") {
+                "${formatDateTime(it.at)} ${it.level}/${it.tag}: ${it.message}"
+            },
+            actions = listOf("清空" to { ModuleLogBuffer.clear(); ui.toast("日志已清空"); refresh() }),
+        )
+    }
+
+    // ---- 关于页 ----
+
+    private fun aboutPage(): View {
+        val placeholder = ui.row("Root 状态", "正在检测…")
+        ui.background(
+            work = { RootWakeController.inspect(applicationContext) },
+            then = { status -> replaceRow(placeholder, buildRootRow(status)) },
+        )
+        return ui.page(
+            listOf(
+                ui.pageTitle("关于", "阅微补全计划 · 模块 ${versionLine()}"),
+                ui.sectionTitle("Root 增强（实验性）"),
+                ui.card(
+                    listOf(
+                        placeholder,
+                        ui.row(
+                            "说明",
+                            "部分机型（如 HyperOS）会冻结后台应用，冻结期间系统闹钟与通知广播都不会执行。" +
+                                "启用后，由 root 侧的看门狗在任务时刻唤醒模块（模块每次排完闹钟会把下次时刻写给它），" +
+                                "不受冻结影响。\n开启会在 /data/adb/service.d 写入一个开机脚本；停用会删除它。",
+                            actions = listOf(
+                                "启用" to { rootAction { RootWakeController.enable(applicationContext) } },
+                                "停用" to { rootAction { RootWakeController.disable(applicationContext) } },
+                            ),
+                        ),
+                    ),
+                ),
+                ui.sectionTitle("状态"),
+                ui.card(
+                    listOf(
+                        ui.row("模块进程", "PID ${android.os.Process.myPid()}"),
+                        ui.row(
+                            "通知权限",
+                            if (CloudTaskNotifications.hasPermission(this)) "已授予" else "未授予，任务结果只能在打开阅微时以提示条显示",
+                        ),
+                        ui.row("下次唤醒", formatTime(NextWakeHint.read(this))),
+                    ),
+                ),
+            ),
+        )
+    }
+
+    private fun buildRootRow(status: RootWakeController.Status): View = ui.row(
+        status.displayTitle(),
+        status.message,
+        titleColor = if (status.rootAvailable) ui.palette.title else ui.palette.body,
+    )
+
+    private fun rootAction(block: () -> String) {
+        ui.background(
+            work = block,
+            then = { message -> ui.toast(message); refresh() },
+        )
+    }
+
+    // ---- 通用 ----
 
     private fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -141,12 +515,6 @@ class ModuleMainActivity : Activity() {
         openFirstAvailable(intent)
     }
 
-    /**
-     * 厂商自启动白名单页。
-     *
-     * 各家 ROM 的组件名各不相同，且都可能在升级后改名，所以按"最可能 → 兜底"依次尝试，
-     * 全都拉不起来时退回应用详情页，让用户自己在设置里找。
-     */
     private fun openAutoStartSettings() {
         val candidates = listOf(
             Intent("miui.intent.action.OP_AUTO_START").addCategory(Intent.CATEGORY_DEFAULT),
@@ -174,219 +542,12 @@ class ModuleMainActivity : Activity() {
         ui.background(
             work = {
                 CloudTaskWakeScheduler.schedule(applicationContext)
-                val next = LocalTaskStore { applicationContext }.earliestNextRunAt()
-                if (next > 0L) "已重排闹钟，下一次本地任务：${formatTime(next)}" else "已重排闹钟（当前没有已启用的本地任务）"
-            },
-            then = { ui.toast(it) },
-        )
-    }
-
-    // ---- 本地任务 ----
-
-    private fun localTaskCard(): View {
-        val store = LocalTaskStore { applicationContext }
-        val accounts = store.accountIds()
-        val enabled = accounts.sumOf { accountId -> store.list(accountId).count { it.enabled } }
-        val nextRunAt = store.earliestNextRunAt()
-        val subtitle = buildString {
-            append("本机存有 ${accounts.size} 个账号的配置，已启用 $enabled 个任务")
-            if (nextRunAt > 0L) append("；下次执行 ${formatTime(nextRunAt)}")
-            append("。\n任务由模块进程在后台执行，与阅微是否打开无关。")
-        }
-        return ui.card(
-            listOf(
-                ui.row("本地任务状态", subtitle),
-                ui.row(
-                    "手动执行",
-                    "立即跑一次所有已到期的本地任务，执行结果会记到下面的任务记录里。",
-                    actions = listOf("立即执行" to { runLocalTasksNow() }),
-                ),
-                ui.row(
-                    "任务记录",
-                    recordSummary(store.accountIds().flatMap { store.records(it) }),
-                    actions = listOf(
-                        "查看" to { showLocalRecords(store) },
-                        "清空" to { clearLocalRecords(store) },
-                    ),
-                ),
-            ),
-        )
-    }
-
-    private fun runLocalTasksNow() {
-        ui.background(
-            work = {
-                val count = LocalTaskRunner.runDue(applicationContext)
-                if (count > 0) "已执行 $count 个到期任务" else "没有到期的本地任务（或本机尚未配置本地任务）"
+                "已重排闹钟：下次唤醒 ${formatTime(NextWakeHint.read(applicationContext))}"
             },
             then = { ui.toast(it); refresh() },
         )
     }
 
-    private fun showLocalRecords(store: LocalTaskStore) {
-        val accountIds = store.accountIds()
-        val merged = accountIds.flatMap { accountId ->
-            store.records(accountId).map { accountId to it }
-        }.sortedByDescending { (_, record) -> record.at }
-        ui.contentDialog(
-            title = "任务记录",
-            content = if (merged.isEmpty()) {
-                "本机还没有任务执行记录。\n\n如果刚配好任务，可以点「立即执行」跑一次；后台执行的结果也会记在这里。"
-            } else {
-                merged.joinToString("\n\n") { (accountId, record) ->
-                    "${formatDateTime(record.at)} · ${taskTitle(record.taskType)} · " +
-                        "${if (record.result == "success") "成功" else record.result}\n" +
-                        "账号 $accountId\n${record.message}"
-                }
-            },
-            actions = listOf("清空" to {
-                clearLocalRecords(store)
-            }),
-        )
-    }
-
-    private fun clearLocalRecords(store: LocalTaskStore) {
-        store.accountIds().forEach { store.clearRecords(it) }
-        ui.toast("本机任务记录已清空")
-        refresh()
-    }
-
-    private fun recordSummary(records: List<LocalTaskRecord>): String =
-        if (records.isEmpty()) "暂无执行记录 · 点击查看" else "本机已记录 ${records.size} 条执行结果，最新在前"
-
-    // ---- 通知 ----
-
-    private fun notificationCard(): View {
-        val store = NotificationRecordStore { applicationContext }
-        val records = store.list()
-        val delivered = records.count { it.delivered }
-        val failed = records.size - delivered
-        val subtitle = if (records.isEmpty()) {
-            "还没有通知记录。任务结果通知会在这里留下投递结果（含失败原因）。"
-        } else {
-            "共 ${records.size} 条：成功投出 $delivered 条，未投出 $failed 条。\n" +
-                "未投出的说明模块进程当时没能发出通知（被系统冻结或未启动），服务器会保留该消息下次重发。"
-        }
-        return ui.card(
-            listOf(
-                ui.row("通知记录", subtitle),
-                ui.row(
-                    "通知权限",
-                    if (CloudTaskNotifications.hasPermission(this)) "已授予，任务结果会以系统通知的形式送达" else "未授予，任务结果只能在打开阅微时以提示条显示",
-                    actions = listOf(
-                        "查看记录" to { showNotificationRecords(store) },
-                        "清空" to { store.clear(); ui.toast("通知记录已清空"); refresh() },
-                    ),
-                ),
-            ),
-        )
-    }
-
-    private fun showNotificationRecords(store: NotificationRecordStore) {
-        val records = store.list()
-        ui.contentDialog(
-            title = "通知记录",
-            content = if (records.isEmpty()) {
-                "还没有通知记录。"
-            } else {
-                records.joinToString("\n\n") { it.describe() }
-            },
-            actions = listOf("清空" to { store.clear(); ui.toast("通知记录已清空"); refresh() }),
-        )
-    }
-
-    private fun NotificationRecord.describe(): String = buildString {
-        append(formatDateTime(at))
-        append(" · ")
-        append(if (delivered) "已发出" else "未发出")
-        append('\n')
-        append(title)
-        append('\n')
-        append(text)
-        append("\n来源：")
-        append(source)
-        if (detail.isNotBlank()) {
-            append(" · ")
-            append(detail)
-        }
-    }
-
-    // ---- Root ----
-
-    private fun rootCard(): View {
-        val placeholder = ui.row("Root 状态", "正在检测…")
-        ui.background(
-            work = { RootWakeController.inspect(applicationContext) },
-            then = { status -> replaceRow(placeholder, buildRootRow(status)) },
-        )
-        return ui.card(
-            listOf(
-                placeholder,
-                ui.row(
-                    "说明",
-                    "部分机型（如 HyperOS）会冻结后台应用，冻结期间系统闹钟与通知广播都不会执行。" +
-                        "启用后，由 root 侧的看门狗在任务时刻唤醒模块（模块每次排完闹钟会把下次时刻写给它；" +
-                        "读不到时刻时每 15 分钟兜底一次），不受冻结影响。\n" +
-                        "开启会在 /data/adb/service.d/ 写入一个开机脚本；停用会删除它。",
-                    actions = listOf(
-                        "启用" to { rootAction { RootWakeController.enable(applicationContext) } },
-                        "停用" to { rootAction { RootWakeController.disable(applicationContext) } },
-                    ),
-                ),
-            ),
-        )
-    }
-
-    private fun buildRootRow(status: RootWakeController.Status): View = ui.row(
-        status.displayTitle(),
-        status.message,
-        titleColor = if (status.rootAvailable) ui.palette.title else ui.palette.body,
-    )
-
-    private fun rootAction(block: () -> String) {
-        ui.background(
-            work = block,
-            then = { message -> ui.toast(message); refresh() },
-        )
-    }
-
-    // ---- 诊断 ----
-
-    private fun diagnosticsCard(): View {
-        val logs = ModuleLogBuffer.snapshot()
-        val path = ModuleLogBuffer.filePath()
-        return ui.card(
-            listOf(
-                ui.row(
-                    "模块日志",
-                    "共 ${logs.size} 条（最新在前）。模块进程的日志默认不会出现在 logcat 里，这里能直接看到。" +
-                        (path?.let { "\n落盘位置：$it" } ?: "\n尚未落盘（模块还没被唤醒过）"),
-                    actions = listOf(
-                        "查看" to { showLogs() },
-                        "清空" to { ModuleLogBuffer.clear(); ui.toast("日志已清空"); refresh() },
-                    ),
-                ),
-                ui.row(
-                    "模块进程状态",
-                    "进程 PID：${android.os.Process.myPid()} · 通知权限：" +
-                        (if (CloudTaskNotifications.hasPermission(this)) "已授予" else "未授予"),
-                ),
-            ),
-        )
-    }
-
-    private fun showLogs() {
-        val logs = ModuleLogBuffer.snapshot()
-        ui.contentDialog(
-            title = "模块日志",
-            content = if (logs.isEmpty()) "暂无日志。" else logs.joinToString("\n") {
-                "${formatDateTime(it.at)} ${it.level}/${it.tag}: ${it.message}"
-            },
-            actions = listOf("清空" to { ModuleLogBuffer.clear(); ui.toast("日志已清空"); refresh() }),
-        )
-    }
-
-    /** 行内容会变（root 检测要在后台跑），所以就地替换整行而不是重建整页。 */
     private fun replaceRow(old: View, new: View) {
         val parent = old.parent as? ViewGroup ?: return
         val index = parent.indexOfChild(old)
@@ -395,17 +556,35 @@ class ModuleMainActivity : Activity() {
         parent.addView(new, index)
     }
 
-    private fun taskTitle(taskType: String): String = when (taskType) {
-        "yeshe_checkin" -> "每日轶闻"
-        "yeshe_draw_card" -> "自动祈愿"
-        "cloud_auto_read" -> "自动阅读"
-        "traveling_merchant" -> "自动行商"
-        "pawn" -> "期物典当"
-        else -> taskType
+    /**
+     * 下一个**未来**的任务时刻。
+     *
+     * 过期的 nextRunAt 不能当成"下次执行"显示——它其实已经到期、会在下一次唤醒时立刻跑；
+     * 直接显示会得到"下次执行 09-14 20:02"这种早于当前时间的荒谬结果（用户报的就是这个）。
+     */
+    private fun futureNextRunAt(store: LocalTaskStore): Long? {
+        val now = System.currentTimeMillis()
+        return store.accountIds()
+            .flatMap { accountId -> store.list(accountId) }
+            .filter { it.enabled && it.nextRunAt > now }
+            .minOfOrNull { it.nextRunAt }
     }
 
+    private fun taskTitle(taskType: String): String =
+        CLOUD_AUTOMATION_TASKS.firstOrNull { it.taskType == taskType }?.title ?: when (taskType) {
+            "yeshe_checkin" -> "每日轶闻"
+            "yeshe_draw_card" -> "自动祈愿"
+            "cloud_auto_read" -> "自动阅读"
+            "traveling_merchant" -> "自动行商"
+            "pawn" -> "期物典当"
+            else -> taskType
+        }
+
+    private fun versionLine(): String =
+        runCatching { packageManager.getPackageInfo(packageName, 0).versionName.orEmpty() }.getOrDefault("2.3.2")
+
     private fun formatTime(at: Long): String =
-        SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(at))
+        if (at <= 0L) "未排程" else SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(at))
 
     private fun formatDateTime(at: Long): String =
         SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault()).format(Date(at))
@@ -413,5 +592,9 @@ class ModuleMainActivity : Activity() {
     private companion object {
         const val LOG_TAG = "ReaMicroMain"
         const val REQUEST_POST_NOTIFICATIONS = 4501
+        const val TAB_RECORDS = 0
+        const val TAB_CONFIG = 1
+        const val TAB_ABOUT = 2
+        val TAB_TITLES = listOf("记录", "配置", "关于")
     }
 }

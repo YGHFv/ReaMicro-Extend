@@ -45,6 +45,13 @@ data class LocalTaskRecord(
     val taskType: String,
     val result: String,
     val message: String,
+    /**
+     * 这条记录的细节，形如 `{"运签":"求运签 · 初晴签","效果":"下一次每日轶闻：绿色及以上概率提升 2 个百分点"}`。
+     *
+     * 存 JSON 而不是固定字段：不同任务要展示的东西完全不同（轶闻看奖励、行商看事件与收益、
+     * 典当看期物与铜钱），固定字段会逼着每个任务都填一堆空值。
+     */
+    val detail: String = "",
 )
 
 /**
@@ -186,6 +193,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
         result: String,
         message: String,
         at: Long = System.currentTimeMillis(),
+        detail: String = "",
     ) {
         if (accountId.isBlank()) return
         editAccount(accountId) { root, _ ->
@@ -195,7 +203,8 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
                     .put("at", at)
                     .put("taskType", taskType)
                     .put("result", result)
-                    .put("message", message),
+                    .put("message", message)
+                    .put("detail", detail),
             )
             val trimmed = JSONArray()
             for (index in (records.length() - MAX_RECORDS).coerceAtLeast(0) until records.length()) {
@@ -215,6 +224,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
                 taskType = item.optString("taskType"),
                 result = item.optString("result"),
                 message = item.optString("message"),
+                detail = item.optString("detail"),
             )
         }.sortedByDescending { it.at }
     }

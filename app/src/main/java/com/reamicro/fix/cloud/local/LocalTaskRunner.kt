@@ -41,7 +41,14 @@ object LocalTaskRunner {
                     }.getOrElse { CloudTaskLocalRunner.Outcome("failed", it.message ?: "本地任务执行失败") }
                     persistOutcome(store, accountId, task.taskType, outcome, now)
                     // 不论成败都记一条，方便用户回查「为什么没跑 / 为什么失败」。
-                    store.appendRecord(accountId, task.taskType, outcome.result, outcome.message, now)
+                    store.appendRecord(
+                        accountId,
+                        task.taskType,
+                        outcome.result,
+                        outcome.message,
+                        now,
+                        outcome.detail.toString(),
+                    )
                     if (outcome.notify) {
                         postNotification(appContext, accountId, task.taskType, outcome)
                     }
