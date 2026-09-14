@@ -414,6 +414,8 @@ object CloudTaskLocalRunner {
         blessingType.trim().takeIf { it.isNotBlank() }?.let { " · 已祈禳${blessingLabel(it)}" }.orEmpty()
 
     internal fun blessingLabel(type: String): String = when (type.trim().uppercase()) {
+        // 空串是合法选择（用户明确要求"不祈禳"），不是"未知签种"。
+        "" -> "不祈禳"
         BLESSING_LUCK -> "求运签"
         BLESSING_SAFETY -> "求安签"
         BLESSING_WEALTH -> "求财签"

@@ -18,6 +18,14 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * 「不祈禳」选项的 wire 值：空串。
+ *
+ * 与游戏侧一致——不发祈禳请求就是不做这件事，不存在一个叫 NONE 的签种。
+ * 放在选项列表**末尾**，未配置的任务默认仍取列表第一项（求运/求安），不祈禳是显式选择。
+ */
+internal const val BLESSING_NONE = ""
+
 internal data class CloudAutomationTaskSpec(
     val taskType: String,
     val title: String,
@@ -42,7 +50,7 @@ internal val CLOUD_AUTOMATION_TASKS = listOf(
         taskType = "yeshe_checkin",
         title = "每日轶闻",
         description = "自动完成野社签到并领取奖励；执行前检查道观运签，没有就补一支求运签",
-        blessingOptions = listOf(CloudTaskLocalRunner.BLESSING_LUCK),
+        blessingOptions = listOf(CloudTaskLocalRunner.BLESSING_LUCK, BLESSING_NONE),
     ),
     CloudAutomationTaskSpec(
         taskType = "yeshe_draw_card",
@@ -61,7 +69,11 @@ internal val CLOUD_AUTOMATION_TASKS = listOf(
         title = "自动行商",
         description = "有行商时按它的结束时间检查，完成/结算后通知事件与收益；可配求安/求财运签",
         merchant = true,
-        blessingOptions = listOf(CloudTaskLocalRunner.BLESSING_SAFETY, CloudTaskLocalRunner.BLESSING_WEALTH),
+        blessingOptions = listOf(
+            CloudTaskLocalRunner.BLESSING_SAFETY,
+            CloudTaskLocalRunner.BLESSING_WEALTH,
+            BLESSING_NONE,
+        ),
     ),
     CloudAutomationTaskSpec(
         taskType = "pawn",

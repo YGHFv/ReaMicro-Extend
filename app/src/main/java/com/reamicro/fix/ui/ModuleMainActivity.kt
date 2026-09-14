@@ -110,7 +110,7 @@ class ModuleMainActivity : Activity() {
 
     /** 一条记录按通知的样式呈现：任务名 + 时间 / 正文，整块可点。 */
     private fun recordCard(accountId: String, record: LocalTaskRecord): View = ui.listItem(
-        title = taskTitle(record.taskType) + if (record.result == "success") "" else "（${record.result}）",
+        title = taskTitle(record.taskType) + if (record.result == "success") "" else "（${resultLabel(record.result)}）",
         body = record.message,
         meta = formatDateTime(record.at),
         accent = record.result == "success",
@@ -123,7 +123,7 @@ class ModuleMainActivity : Activity() {
             add("时间：${formatDateTime(record.at)}")
             add("任务：${taskTitle(record.taskType)}")
             add("账号：$accountId")
-            add("结果：${if (record.result == "success") "成功" else record.result}")
+            add("结果：${resultLabel(record.result)}")
             add("")
             add(record.message)
             if (detail != null && detail.length() > 0) {
@@ -212,7 +212,9 @@ class ModuleMainActivity : Activity() {
         val spec = CLOUD_AUTOMATION_TASKS.firstOrNull { it.taskType == task.taskType }
         val subtitle = buildString {
             append(if (task.enabled) "已启用" else "已关闭")
-            if (task.blessingType.isNotBlank()) append(" · ${CloudTaskLocalRunner.blessingLabel(task.blessingType)}")
+            if (spec != null && spec.blessingOptions.isNotEmpty()) {
+                append(" · ${CloudTaskLocalRunner.blessingLabel(task.blessingType)}")
+            }
             append('\n')
             append(nextRunLine(accountId, task, spec))
             if (task.lastMessage.isNotBlank()) {
@@ -281,10 +283,10 @@ class ModuleMainActivity : Activity() {
 
     /** 任务配置编辑：字段随任务类型变化（与阅微设置页同一套语义）。 */
     private fun openTaskEditor(accountId: String, task: LocalTask, spec: CloudAutomationTaskSpec?) {
-        val fields = linkedMapOf<String, android.widget.EditText>()
+        val fields = linkedMapOf<String, () -> String>()
         ui.editDialog(
             title = spec?.title ?: taskTitle(task.taskType),
-            build = { add ->
+            build = { add, choose ->
                 if (spec?.rewardTriggered != true && spec?.merchant != true) add("执行时间", "HH:mm", task.timeOfDay)
                 if (spec?.autoRead == true) {
                     add("阅读时长", "分钟", task.durationMinutes.toString())
@@ -297,14 +299,16 @@ class ModuleMainActivity : Activity() {
                     add("车马 transportId", "留空沿用上次", task.merchantTransportId.takeIf { it > 0L }?.toString().orEmpty())
                 }
                 if (spec != null && spec.blessingOptions.isNotEmpty()) {
-                    add(
+                    // 运签用选择器而不是输入框：用户面对的应该只有「求安签/求财签」，
+                    // 不该让他知道也不该让他手打 SAFETY 这种 wire 值。
+                    choose(
                         "运签",
-                        spec.blessingOptions.joinToString("/") { CloudTaskLocalRunner.blessingLabel(it) },
+                        spec.blessingOptions.map { it to CloudTaskLocalRunner.blessingLabel(it) },
                         task.blessingType.ifBlank { spec.blessingOptions.first() },
                     )
                 }
             },
-            register = { label, edit -> fields[label] = edit },
+            register = { label, provider -> fields[label] = provider },
             onSave = {
                 val updated = applyTaskEdits(task, spec, fields)
                 if (updated == null) {
@@ -326,9 +330,9 @@ class ModuleMainActivity : Activity() {
     private fun applyTaskEdits(
         task: LocalTask,
         spec: CloudAutomationTaskSpec?,
-        fields: Map<String, android.widget.EditText>,
+        fields: Map<String, () -> String>,
     ): LocalTask? {
-        val text = { label: String -> fields[label]?.text?.toString()?.trim().orEmpty() }
+        val text = { label: String -> fields[label]?.invoke()?.trim().orEmpty() }
         val timeOfDay = if (spec?.rewardTriggered != true && spec?.merchant != true) {
             val parts = text("执行时间").split(":")
             val hour = parts.getOrNull(0)?.toIntOrNull()
@@ -609,6 +613,16 @@ class ModuleMainActivity : Activity() {
             .flatMap { accountId -> store.list(accountId) }
             .filter { it.enabled && it.nextRunAt > now }
             .minOfOrNull { it.nextRunAt }
+    }
+
+    /** 任务结果的展示文案。内部值（success/failed/paused…）不该直接出现在界面上。 */
+    private fun resultLabel(result: String): String = when (result) {
+        "success" -> "成功"
+        "failed" -> "失败"
+        "paused" -> "已暂停"
+        "skipped" -> "已跳过"
+        "" -> "未知"
+        else -> result
     }
 
     private fun taskTitle(taskType: String): String =

@@ -174,7 +174,8 @@ internal class ModuleUiKit(private val context: Context) {
             if (bold) typeface = android.graphics.Typeface.DEFAULT_BOLD
         }
 
-    fun rounded(color: Int, radiusDp: Float): GradientDrawable = GradientDrawable().apply {
+    /** 卡片与弹窗统一用这个圆角半径，避免"详情弹窗看着比卡片方"这种不一致。 */
+    fun rounded(color: Int, radiusDp: Float = CARD_CORNER_DP): GradientDrawable = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
         cornerRadius = radiusDp * dp
         setColor(color)
@@ -224,6 +225,9 @@ internal class ModuleUiKit(private val context: Context) {
         }
         dialog.setContentView(card)
         dialog.setOnShowListener {
+            // 窗口自身也要透明：默认背景是有颜色的直角矩形，会把卡片的圆角盖住，
+            // 看起来就是"弹窗比卡片方"。
+            dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
             dialog.window?.setLayout(
                 (metrics.widthPixels * 0.9f).toInt(),
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -347,8 +351,11 @@ internal class ModuleUiKit(private val context: Context) {
      */
     fun editDialog(
         title: String,
-        build: (add: (label: String, hint: String, value: String) -> Unit) -> Unit,
-        register: (label: String, edit: android.widget.EditText) -> Unit,
+        build: (
+            add: (label: String, hint: String, value: String) -> Unit,
+            choose: (label: String, options: List<Pair<String, String>>, value: String) -> Unit,
+        ) -> Unit,
+        register: (label: String, value: () -> String) -> Unit,
         onSave: () -> Boolean,
     ): Dialog {
         val dialog = Dialog(context)
@@ -363,12 +370,29 @@ internal class ModuleUiKit(private val context: Context) {
         // 先 card.addView(form) 再 scroll.addView(form) 会直接抛
         // "The specified child already has a parent" 崩掉。
         val form = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        build { label, hint, value ->
-            form.addView(fieldRow(label, hint))
-            val edit = editText(value)
-            form.addView(edit)
-            register(label, edit)
-        }
+        build(
+            { label, hint, value ->
+                form.addView(fieldRow(label, hint))
+                val edit = editText(value)
+                form.addView(edit)
+                register(label) { edit.text.toString().trim() }
+            },
+            { label, options, value ->
+                form.addView(fieldRow(label, options.joinToString("/") { it.second }))
+                var selected = options.firstOrNull { it.first == value } ?: options.firstOrNull()
+                val picker = button(selected?.second ?: "未选择", role = Role.Neutral) {}
+                picker.setOnClickListener {
+                    if (options.size > 1) {
+                        val next = (options.indexOfFirst { it.first == selected?.first } + 1) % options.size
+                        selected = options[next]
+                        // 文案随选中项变，用户看到的一直是中文名，wire 值只在内部分发。
+                        picker.text = selected?.second ?: "未选择"
+                    }
+                }
+                form.addView(picker)
+                register(label) { selected?.first.orEmpty() }
+            },
+        )
         val scroll = ScrollView(context).apply {
             addView(form)
             layoutParams = LinearLayout.LayoutParams(
@@ -387,6 +411,7 @@ internal class ModuleUiKit(private val context: Context) {
         )
         dialog.setContentView(card)
         dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
             dialog.window?.setLayout((metrics.widthPixels * 0.9f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         dialog.show()
@@ -445,5 +470,6 @@ internal class ModuleUiKit(private val context: Context) {
 
     private companion object {
         const val BOTTOM_BAR_MARGIN_DP = 12
+        const val CARD_CORNER_DP = 12f
     }
 }
