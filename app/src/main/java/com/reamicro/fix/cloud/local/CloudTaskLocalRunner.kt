@@ -40,6 +40,9 @@ object CloudTaskLocalRunner {
         // 行商可配置求安/求财：跑之前先确认有道观运签，没有就补一支（已有签不替换）。
         val blessingType = request.optString("blessingType")
         val blessing = ensureTaoistBlessing(baseUrl, token, request, blessingType)
+        // 任务可能设成"不祈禳"或没配签种，但游戏里账户上本来就有一支签在生效（比如「增益签」），
+        // 用户要看到的是"这趟行商吃了什么加成"，所以无论祈不祈禳都把当前签读出来（只读）。
+        val activeBlessing = currentBlessingDetail(baseUrl, token, request, blessing)
         val blessingSuffix = if (blessing.failure != null) "（运签：${blessing.failure}）" else blessingNote(blessingType)
         val now = System.currentTimeMillis()
         val lastNotified = task.optLong("merchantLastNotifiedTripId", 0L)
@@ -78,8 +81,8 @@ object CloudTaskLocalRunner {
                 var message = merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal) + blessingSuffix
                 val detail = merchantDetail(trip)
                 detail.put("结果", merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal))
-                if (blessing.detail.length() > 0) detail.put("运签", blessing.detail.optString("运签"))
-                if (blessing.detail.length() > 0) detail.put("运签效果", blessing.detail.optString("效果"))
+                if (activeBlessing.length() > 0) detail.put("运签", activeBlessing.optString("运签"))
+                if (activeBlessing.length() > 0) detail.put("运签效果", activeBlessing.optString("效果"))
                 val autoComplete = request.optBoolean("merchantAutoComplete", false)
                 if (autoComplete) {
                     val config = resolveStartConfig(request, remembered)
@@ -112,8 +115,8 @@ object CloudTaskLocalRunner {
                 var message = merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal) + blessingSuffix
                 val detail = merchantDetail(trip)
                 detail.put("结果", merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal))
-                if (blessing.detail.length() > 0) detail.put("运签", blessing.detail.optString("运签"))
-                if (blessing.detail.length() > 0) detail.put("运签效果", blessing.detail.optString("效果"))
+                if (activeBlessing.length() > 0) detail.put("运签", activeBlessing.optString("运签"))
+                if (activeBlessing.length() > 0) detail.put("运签效果", activeBlessing.optString("效果"))
                 val autoComplete = request.optBoolean("merchantAutoComplete", false)
                 if (autoComplete && trip.tripId > 0L) {
                     val settle = postReaMicro(baseUrl, token, JSONObject().put("tripId", trip.tripId), request.optString("settleEndpoint").ifBlank { "rest/community/settle-traveling-merchant" })
@@ -144,8 +147,10 @@ object CloudTaskLocalRunner {
     /** 行商详情：谁、去哪、本金多少、结算多少、事件是什么。 */
     private fun merchantDetail(trip: MerchantTrip): JSONObject = JSONObject()
         .put("事件", trip.eventTitle.ifBlank { "行商" })
+        .apply { if (trip.eventContent.isNotBlank()) put("事件详情", trip.eventContent) }
         .put("行程", "${formatMerchantEpoch(trip.startTimeMs)} → ${formatMerchantEpoch(trip.endTimeMs)}")
         .put("城池", trip.cityCode)
+        .apply { if (trip.transportLabel.isNotBlank()) put("车马", trip.transportLabel) }
         .put("本金", "${trip.principal} 铜")
         .put("结算", "${trip.settlementAmount} 铜")
         .put("状态", trip.status.ifBlank { "—" })
@@ -398,6 +403,33 @@ object CloudTaskLocalRunner {
         return BlessingCheck(null, if (prayed != null) blessingDetail(prayed, "本次祈禳") else JSONObject())
     }
 
+    /**
+     * 当前账户上生效的运签详情。
+     *
+     * 与"这次有没有祈禳"无关：祈禳只是补签，签本身是账户状态。任务设成不祈禳时也不会去发祈禳请求，
+     * 但这里仍要把它读出来——否则详情里看不到行商吃到的加成（用户报的就是这个）。
+     */
+    private fun currentBlessingDetail(
+        baseUrl: String,
+        token: String,
+        request: JSONObject,
+        prayed: BlessingCheck,
+    ): JSONObject {
+        if (prayed.detail.length() > 0) return prayed.detail
+        val current = runCatching {
+            postReaMicro(
+                baseUrl,
+                token,
+                JSONObject(),
+                request.optString("blessingEndpoint").ifBlank { "rest/community/get-taoist-blessing" },
+            )
+        }.getOrNull() ?: return JSONObject()
+        if (businessError(current) != null) return JSONObject()
+        val data = current.optJSONObject("data") ?: current
+        val blessing = data.opt("blessing") as? JSONObject ?: return JSONObject()
+        return blessingDetail(blessing, "当前生效")
+    }
+
     /** 运签详情：签种、签文名、效果描述（游戏原文，例如"下一次每日轶闻：绿色及以上概率提升 2 个百分点"）。 */
     private fun blessingDetail(blessing: JSONObject, source: String): JSONObject {
         val type = blessing.optString("blessingType")
@@ -556,9 +588,18 @@ object CloudTaskLocalRunner {
             settlementAmount = trip.optLong("settlementAmount", 0L),
             principal = trip.optLong("principal", 0L),
             eventTitle = trip.optString("eventTitle"),
+            eventContent = trip.optString("eventContent").ifBlank { trip.optString("content") },
             // 这趟行商实际使用的参数，作为「上次行商配置」的来源。
             cityCode = trip.optString("cityCode"),
             transportId = trip.optLong("transportId", 0L),
+            // 游戏里显示的是"河曲马 · 速度 +5%"这种名称+效果，字段名各版本不一，逐个兜底。
+            transportLabel = sequenceOf(
+                trip.optString("transportName"),
+                trip.optString("transportEffect"),
+                nestedObjectString(trip, "transport", "name"),
+                nestedObjectString(trip, "transport", "effect"),
+                nestedObjectString(trip, "transportInfo", "name"),
+            ).filter { it.isNotBlank() }.distinct().joinToString(" · "),
         )
     }
 
@@ -583,6 +624,10 @@ object CloudTaskLocalRunner {
 
     internal enum class MerchantPhase { IN_TRANSIT, ARRIVED, SETTLED, NOTIFIED }
 
+    /** 从嵌套对象里取一个字符串字段（取不到返回空串）。 */
+    private fun nestedObjectString(parent: JSONObject, objectKey: String, fieldKey: String): String =
+        parent.optJSONObject(objectKey)?.optString(fieldKey).orEmpty()
+
     internal data class MerchantTrip(
         val hasTrip: Boolean,
         val tripId: Long = 0L,
@@ -592,8 +637,11 @@ object CloudTaskLocalRunner {
         val settlementAmount: Long = 0L,
         val principal: Long = 0L,
         val eventTitle: String = "",
+        val eventContent: String = "",
         val cityCode: String = "",
         val transportId: Long = 0L,
+        /** 车马名称/效果，形如"河曲马 · 速度 +5%"；取不到时为空串。 */
+        val transportLabel: String = "",
     )
 
     internal data class Outcome(
