@@ -4,9 +4,11 @@ import android.app.Activity
 import android.app.Dialog
 import android.content.Context
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -34,6 +36,24 @@ internal class ModuleUiKit(private val context: Context) {
         return ScrollView(context).apply {
             setBackgroundColor(palette.pageBackground)
             addView(column)
+            // targetSdk 35 起系统强制 edge-to-edge，内容会画到状态栏/导航栏底下。
+            // 之前没避让，标题被状态栏压掉一截。这里把系统栏高度加成内边距。
+            setOnApplyWindowInsetsListener { _, insets ->
+                val top: Int
+                val bottom: Int
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                    top = bars.top
+                    bottom = bars.bottom
+                } else {
+                    @Suppress("DEPRECATION")
+                    top = insets.systemWindowInsetTop
+                    @Suppress("DEPRECATION")
+                    bottom = insets.systemWindowInsetBottom
+                }
+                column.setPadding(px(16), px(16) + top, px(16), px(28) + bottom)
+                insets
+            }
         }
     }
 
@@ -87,16 +107,28 @@ internal class ModuleUiKit(private val context: Context) {
         }
     }
 
+    /**
+     * 操作按钮。
+     *
+     * 填充用**页面底色**而不是卡片底色：`primarySoft` 在深色配色里就等于卡片底色，按钮会和卡片
+     * 糊在一起，完全看不出是个可点的控件（实机见过）。页面底色与卡片底色在两种配色下都不同，
+     * 再加一圈描边，按钮在任何配色下都能看出来。
+     */
     fun button(label: String, textColor: Int = palette.primaryText, onClick: () -> Unit): TextView =
         textView(label, 14f, textColor).apply {
             gravity = Gravity.CENTER
-            background = rounded(withAlpha(palette.primarySoft, 255), 8f)
+            background = rounded(palette.pageBackground, 8f).apply {
+                setStroke((1.2f * dp).toInt(), palette.border)
+            }
             isClickable = true
             setOnClickListener { onClick() }
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 px(38),
-            ).apply { rightMargin = px(8) }
+            ).apply {
+                rightMargin = px(8)
+                left = px(2)
+            }
         }
 
     fun info(text: String, color: Int = palette.body): TextView =
@@ -174,21 +206,34 @@ internal class ModuleUiKit(private val context: Context) {
         android.widget.Toast.makeText(context.applicationContext, message, android.widget.Toast.LENGTH_SHORT).show()
     }
 
-    /** 在后台线程跑一段事，回到主线程更新。root 探测与任务执行都不能卡 UI。 */
-    fun background(then: (String) -> Unit, work: () -> String) {
+    /** 当前配色是不是深色底。用于把状态栏图标调成相反色，否则深底上的黑图标看不见。 */
+    val isDarkPage: Boolean
+        get() {
+            val red = android.graphics.Color.red(palette.pageBackground) / 255.0
+            val green = android.graphics.Color.green(palette.pageBackground) / 255.0
+            val blue = android.graphics.Color.blue(palette.pageBackground) / 255.0
+            return 0.2126 * red + 0.7152 * green + 0.0722 * blue < 0.45
+        }
+
+    /**
+     * 在后台线程跑一段事，回到主线程更新。
+     *
+     * root 探测（要起 su 进程）与任务执行（要走网络）都不能卡 UI，所以统一走这里。
+     * 结果是任意类型，调用方直接拿到对象——不要为了传值把多个字段拼成字符串再拆开，
+     * 那样两端的字段顺序/数量一旦不一致就会渲染出互相矛盾的内容。
+     */
+    fun <T> background(work: () -> T, then: (T) -> Unit) {
         Thread {
-            val result = runCatching(work).getOrElse { it.message ?: it.javaClass.simpleName }
-            (context as? Activity)?.runOnUiThread { then(result) } ?: then(result)
+            runCatching(work)
+                .onSuccess { value -> onMain { then(value) } }
+                .onFailure { error -> onMain { toast(error.message ?: error.javaClass.simpleName) } }
         }.apply { isDaemon = true }.start()
+    }
+
+    private fun onMain(block: () -> Unit) {
+        val activity = context as? Activity
+        if (activity != null) activity.runOnUiThread(block) else block()
     }
 
     private fun px(value: Int): Int = (value * dp).toInt()
 }
-
-internal fun withAlpha(color: Int, alpha: Int): Int =
-    android.graphics.Color.argb(
-        alpha.coerceIn(0, 255),
-        android.graphics.Color.red(color),
-        android.graphics.Color.green(color),
-        android.graphics.Color.blue(color),
-    )

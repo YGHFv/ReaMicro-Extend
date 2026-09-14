@@ -3,6 +3,7 @@ package de.robv.android.xposed
 import android.util.Log
 import com.reamicro.fix.logging.ModuleLogBuffer
 import com.reamicro.fix.logging.ModuleLogLevel
+import com.reamicro.fix.logging.ModuleLogSink
 import com.reamicro.fix.logging.ModuleLogState
 import com.reamicro.fix.logging.legacyModuleLogLevel
 import com.reamicro.fix.logging.shouldEmitModuleLog
@@ -14,8 +15,20 @@ object XposedBridge {
     private const val LOG_TAG = "ReaMicro"
     private val frameworkRef = AtomicReference<XposedInterface?>()
 
+    /**
+     * 日志出口。
+     *
+     * **不能直接用 `frameworkRef` 打日志**：`libxposed` 是 `compileOnly` 依赖，只存在于被
+     * 注入的宿主进程里。模块**自己的进程**（接收器、闹钟唤醒、主界面）里没有这个类，一旦
+     * 执行到引用 `XposedInterface` 的字节码就会 `NoClassDefFoundError` —— 实测就是打开阅微
+     * 时模块进程崩溃（`ApiServerSettingsMirrorReceiver` 里那句 log 触发的）。
+     * 所以日志走这个只用自有类型的出口：模块进程里它是 null，永远不会碰到 libxposed。
+     */
+    private val logSinkRef = AtomicReference<ModuleLogSink?>()
+
     fun attachFramework(framework: XposedInterface) {
         frameworkRef.set(framework)
+        logSinkRef.set(FrameworkLogSink(framework))
         log(
             Log.INFO,
             "LibXposed framework attached: api=${framework.apiVersion}, " +
@@ -41,9 +54,9 @@ object XposedBridge {
      * true，走普通 log 会被整条吞掉——而这行的用途恰恰是宿主升级后第一眼要看的东西。
      */
     fun logAlways(text: String) {
-        val framework = frameworkRef.get()
-        if (framework != null) {
-            framework.log(Log.INFO, LOG_TAG, text)
+        val sink = logSinkRef.get()
+        if (sink != null) {
+            sink.log(Log.INFO, LOG_TAG, text, null)
         } else {
             Log.println(Log.INFO, LOG_TAG, text)
             ModuleLogBuffer.record(ModuleLogLevel.INFO.name, LOG_TAG, text)
@@ -147,20 +160,16 @@ object XposedBridge {
             priority >= Log.WARN -> ModuleLogLevel.WARN
             else -> ModuleLogLevel.INFO
         }
-        val framework = frameworkRef.get()
-        // frameworkRef 为空说明这是模块**自己的进程**（没有 libxposed 注入）。这里的日志只进
+        val sink = logSinkRef.get()
+        // sink 为空说明这是模块**自己的进程**（没有 libxposed 注入）。这里的日志只进
         // logcat，而模块进程的 INFO 日志受「简洁日志」抑制、logcat 里根本看不到——所以同时收进
-        // 诊断缓冲，模块主界面能直接翻到。宿主进程里 framework 非空，不会走这条。
-        if (framework == null) {
+        // 诊断缓冲，模块主界面能直接翻到。宿主进程里 sink 非空，不会走这条。
+        if (sink == null) {
             ModuleLogBuffer.record(level.name, LOG_TAG, text)
         }
         if (!shouldEmitModuleLog(ModuleLogState.conciseLogEnabled, level)) return
-        if (framework != null) {
-            if (throwable != null) {
-                framework.log(priority, LOG_TAG, text, throwable)
-            } else {
-                framework.log(priority, LOG_TAG, text)
-            }
+        if (sink != null) {
+            sink.log(priority, LOG_TAG, text, throwable)
         } else {
             Log.println(priority, LOG_TAG, text)
         }
@@ -173,5 +182,22 @@ object XposedBridge {
         private val proceed: (Array<Any?>) -> Any?,
     ) {
         fun proceed(args: Array<Any?>): Any? = proceed.invoke(args)
+    }
+}
+
+/**
+ * 把日志转给 libxposed 框架。
+ *
+ * 单独一个类，**只有被注入的进程**才会加载它（仅 [XposedBridge.attachFramework] 里实例化）：
+ * 模块自身进程没有 libxposed，凡是引用到 [XposedInterface] 的字节码一执行就
+ * `NoClassDefFoundError`，所以这些引用必须隔离在"非注入进程绝不触碰"的类里。
+ */
+private class FrameworkLogSink(private val framework: XposedInterface) : ModuleLogSink {
+    override fun log(priority: Int, tag: String, text: String, throwable: Throwable?) {
+        if (throwable != null) {
+            framework.log(priority, tag, text, throwable)
+        } else {
+            framework.log(priority, tag, text)
+        }
     }
 }

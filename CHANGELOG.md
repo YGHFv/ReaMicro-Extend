@@ -1,5 +1,48 @@
 # 更新记录
 
+## 修复模块进程崩溃 + Root 看门狗改按任务时刻唤醒 + 主界面深色适配 - 2026-09-14（同日第二批）
+
+用户反馈：打开阅微时模块进程崩溃（AppErrorsTracking 抓到 `NoClassDefFoundError`）；root 唤醒不要每 15 分钟一次，应按任务定时/结束时间；主界面要跟随系统深浅色、顶部要避让状态栏；root 要显示「已授权未启用」。
+
+### 修复模块进程崩溃：日志出口引用了宿主进程才有的 libxposed 类
+
+`libxposed` 是 `compileOnly` 依赖，只存在于被注入的阅微进程。`XposedBridge.log()` 的方法体里读的是
+`AtomicReference<XposedInterface?>`，模块**自己的进程**（接收器、闹钟唤醒、主界面）一执行到就
+`NoClassDefFoundError` —— 崩在 `ApiServerSettingsMirrorReceiver`（本批新增的 API 配置下发通道，打开阅微时就会跑），
+栈顶是 `XposedBridge.log(XposedBridge.kt:150)`。
+
+修法：日志走一层**自有类型**的出口 `ModuleLogSink`，`XposedBridge` 只持有它；真正引用 `XposedInterface`
+的 `FrameworkLogSink` 只在 `attachFramework` 里实例化——那个方法只在被注入的进程里跑，于是模块进程
+永远加载不到 libxposed 的类。同类隐患（`LocalTaskMirror` / `LocalLibrarySupport` / `WebDavLog` 里的日志）
+一并消除。
+
+### Root 看门狗改为按任务时刻唤醒
+
+原实现是每 15 分钟无条件 `am broadcast` 一次，绝大多数唤醒无事可做。现在模块每次排完闹钟都会把触发时刻
+写进 `filesDir/next-wake-at`（`NextWakeHint`，只在模块进程写），看门狗睡到那个时刻才广播：
+- 睡醒粒度上限 15 分钟（只读文件、不广播），以便及时感知"用户刚改了配置"；
+- 读不到时刻（全新安装/刚启用）时仍定期兜底唤醒，不会失联；
+- 广播后冷却 5 分钟，等模块写回新的时刻，避免同一个到期时刻被反复广播。
+脚本内容有单测锁定（断言它读时刻文件、按时差 sleep、带 `--include-stopped-packages` 与 `--user 0`）。
+
+### Root 状态显示与探测修正
+
+- 新增「已授权，未启用」状态；无 root 时显示「未授权」。状态标签与说明同源（`Status.stateLabel()`），
+  不再出现「看门狗运行中」配「未启用看门狗」这种自相矛盾的展示（实机见过）。
+- 探测改为严格判定：`su -c id` 必须退出码 0 且回显 `uid=0`；看门狗探测必须回显 `yes`。
+- 修掉 `pgrep -f reamicro-watchdog` **匹配到自己命令行**造成的假阳性（探测命令本身含该字符串，
+  没有看门狗也会匹配到）——改用 `[r]eamicro-watchdog` 写法。
+- 每条探测的原始输出与退出码都写进模块日志，root 问题可直接在主界面回查。
+
+### 主界面深色适配与状态栏避让
+
+- 新增 `ModuleTheme`（浅色在 `values/styles.xml`、深色在 `values-night/styles.xml`），窗口底色跟随系统；
+  页面内部配色由 `ModuleDialogTheme.palette()` 依 `uiMode` 推导，状态栏图标按底色深浅设成相反色。
+- 内容按 `systemBars` insets 加内边距——targetSdk 35 强制 edge-to-edge，此前标题被状态栏压掉一截。
+- 按钮填充改用页面底色 + 描边：深色配色下 `primarySoft` 等于卡片底色，按钮会和卡片糊在一起看不出可点。
+
+模块 versionCode 更新为 60（versionName 维持 2.3.2）。
+
 ## 本地任务真正执行 + 通知只在真送达后回执 + 模块主界面（含 Root 增强）- 2026-09-14
 
 用户反馈四件事：覆盖检查的「取消导入」仍会导入；本地任务全部不执行（前台不跑、后台不自启）；很多设备收不到任务通知而服务器显示「已发送」；并建议给模块加主界面、必要时上 root 方案。

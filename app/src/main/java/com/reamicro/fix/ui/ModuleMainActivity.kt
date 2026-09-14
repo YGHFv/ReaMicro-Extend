@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsetsController
 import com.reamicro.fix.cloud.api.CloudTaskWakeDiagnostics
 import com.reamicro.fix.cloud.api.CloudTaskWakeScheduler
 import com.reamicro.fix.cloud.local.LocalTaskRecord
@@ -46,8 +47,25 @@ class ModuleMainActivity : Activity() {
         ModuleLogBuffer.attach(this)
         ui = ModuleUiKit(this)
         window?.setBackgroundDrawable(ColorDrawable(ui.palette.pageBackground))
+        applyStatusBarIcons()
         ModuleAndroidLog.legacy(LOG_TAG, "module main ui opened")
         refresh()
+    }
+
+    /**
+     * 状态栏图标与本页底色相反。
+     *
+     * edge-to-edge 之后状态栏直接压在页面底色上：浅色底要深色图标（LIGHT_STATUS_BARS），
+     * 深色底反之。不设的话深色模式下图标是黑的，等于看不见。
+     */
+    private fun applyStatusBarIcons() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        runCatching {
+            window.insetsController?.setSystemBarsAppearance(
+                if (ui.isDarkPage) 0 else WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS,
+                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS,
+            )
+        }
     }
 
     private fun refresh() {
@@ -154,12 +172,12 @@ class ModuleMainActivity : Activity() {
 
     private fun rescheduleAlarm() {
         ui.background(
-            then = { ui.toast(it) },
             work = {
                 CloudTaskWakeScheduler.schedule(applicationContext)
                 val next = LocalTaskStore { applicationContext }.earliestNextRunAt()
                 if (next > 0L) "已重排闹钟，下一次本地任务：${formatTime(next)}" else "已重排闹钟（当前没有已启用的本地任务）"
             },
+            then = { ui.toast(it) },
         )
     }
 
@@ -197,11 +215,11 @@ class ModuleMainActivity : Activity() {
 
     private fun runLocalTasksNow() {
         ui.background(
-            then = { ui.toast(it); refresh() },
             work = {
                 val count = LocalTaskRunner.runDue(applicationContext)
                 if (count > 0) "已执行 $count 个到期任务" else "没有到期的本地任务（或本机尚未配置本地任务）"
             },
+            then = { ui.toast(it); refresh() },
         )
     }
 
@@ -296,13 +314,10 @@ class ModuleMainActivity : Activity() {
     // ---- Root ----
 
     private fun rootCard(): View {
-        val placeholder = ui.row(
-            "Root 状态",
-            "正在检测…",
-        )
+        val placeholder = ui.row("Root 状态", "正在检测…")
         ui.background(
-            then = { message -> replaceRow(placeholder, buildRootRow(message)) },
-            work = { RootWakeController.inspect(applicationContext).let { "${it.rootAvailable}|${it.watchdogInstalled}|${it.watchdogRunning}|${it.message}" } },
+            work = { RootWakeController.inspect(applicationContext) },
+            then = { status -> replaceRow(placeholder, buildRootRow(status)) },
         )
         return ui.card(
             listOf(
@@ -310,7 +325,8 @@ class ModuleMainActivity : Activity() {
                 ui.row(
                     "说明",
                     "部分机型（如 HyperOS）会冻结后台应用，冻结期间系统闹钟与通知广播都不会执行。" +
-                        "启用后，由 root 侧的看门狗每 15 分钟唤醒一次模块，不受冻结影响。\n" +
+                        "启用后，由 root 侧的看门狗在任务时刻唤醒模块（模块每次排完闹钟会把下次时刻写给它；" +
+                        "读不到时刻时每 15 分钟兜底一次），不受冻结影响。\n" +
                         "开启会在 /data/adb/service.d/ 写入一个开机脚本；停用会删除它。",
                     actions = listOf(
                         "启用" to { rootAction { RootWakeController.enable(applicationContext) } },
@@ -321,29 +337,16 @@ class ModuleMainActivity : Activity() {
         )
     }
 
-    private fun buildRootRow(encoded: String): View {
-        val parts = encoded.split("|", limit = 4)
-        val available = parts.getOrNull(0) == "true"
-        val installed = parts.getOrNull(1) == "true"
-        val running = parts.getOrNull(2) == "true"
-        val message = parts.getOrNull(3).orEmpty()
-        val state = when {
-            !available -> "不可用"
-            running -> "看门狗运行中"
-            installed -> "看门狗已安装"
-            else -> "未启用"
-        }
-        return ui.row(
-            "Root 状态：$state",
-            if (message.isBlank()) "—" else message,
-            titleColor = if (available) ui.palette.title else ui.palette.body,
-        )
-    }
+    private fun buildRootRow(status: RootWakeController.Status): View = ui.row(
+        status.displayTitle(),
+        status.message,
+        titleColor = if (status.rootAvailable) ui.palette.title else ui.palette.body,
+    )
 
     private fun rootAction(block: () -> String) {
         ui.background(
-            then = { ui.toast(it); refresh() },
             work = block,
+            then = { message -> ui.toast(message); refresh() },
         )
     }
 

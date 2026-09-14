@@ -255,6 +255,8 @@ object CloudTaskWakeScheduler {
         // 服务器没有任务时间、网络失败或系统错过闹钟时，固定短周期保证模块仍能自行恢复。
         val fallbackWake = now + FALLBACK_POLL_INTERVAL_MS
         val triggerAt = minOf(calendar.timeInMillis, taskWake, localWake, fallbackWake)
+        // 把这次排出来的时刻告诉 root 看门狗，让它按任务时刻唤醒而不是固定周期空转。
+        NextWakeHint.write(context, triggerAt)
         val exact = canScheduleExact(alarm)
         runCatching {
             if (exact) {

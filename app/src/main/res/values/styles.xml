@@ -8,4 +8,13 @@
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowNoDisplay">false</item>
     </style>
+
+    <!--
+      模块主界面的主题。浅色版本在这里，深色版本在 values-night/styles.xml——两个资源目录按系统的
+      深浅色自动切换，于是窗口底色跟着系统走；页面内部的配色由 ModuleDialogTheme.palette() 依据
+      uiMode 推导，同样跟随系统。窗口底色写死颜色是为了避免启动瞬间闪一下系统默认白/黑。
+    -->
+    <style name="ModuleTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#FFF4F5F7</item>
+    </style>
 </resources>

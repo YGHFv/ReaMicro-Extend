@@ -1,0 +1,9 @@
+<resources>
+    <!--
+      深色模式下的模块主题（系统开启深色时自动生效）。
+      配色与 ModuleDialogTheme 的深色回退值保持一致，避免窗口底色与页面内部配色不同色。
+    -->
+    <style name="ModuleTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF111318</item>
+    </style>
+</resources>
