@@ -110,6 +110,21 @@ internal fun importCancellationKeys(
 internal fun String.normalizedCancellationTitle(): String = trim().replace(Regex("\\s+"), " ")
 
 /**
+ * 模块为导入而复制的临时文件所在目录名（见 `importCacheFile(cacheDir, "reamicro-local-library", name)`）。
+ *
+ * 取消导入时要删的是**这份副本**——用户的原文件绝不能碰，所以删除前必须先用这个标记确认路径。
+ */
+internal const val MODULE_IMPORT_CACHE_MARKER = "reamicro-local-library"
+
+/**
+ * 这个路径是不是模块自己复制出来的待导入临时文件。
+ *
+ * 单独抽成可测的判定：它决定"取消导入时删哪个文件"，判错就会删到用户的原始文件。
+ */
+internal fun isModuleImportCachePath(path: String): Boolean =
+    path.isNotBlank() && path.contains(MODULE_IMPORT_CACHE_MARKER)
+
+/**
  * 全模块共享的「取消导入」记忆。
  *
  * 必须是共享的、而不是各 Hook 各持一份：一次导入会经过**多个入口**——预检

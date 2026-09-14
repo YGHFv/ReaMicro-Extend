@@ -196,4 +196,27 @@ class ImportCancellationMemoryTest {
         now = 5_000L + 30_001L
         assertFalse("超出窗口就不该再拦无身份调用", memory.hasRecentCancellation(30_000L))
     }
+
+    /**
+     * 取消时删的只能是模块自己复制的临时文件。
+     *
+     * 这条判定决定"删哪个文件"，判错就会删到用户的原始文件——所以正例反例都要锁死。
+     */
+    @Test
+    fun `只认模块缓存的待导入文件`() {
+        assertTrue(
+            isModuleImportCachePath(
+                "/data/user/0/app.zhendong.reamicro/cache/reamicro-local-library/1789_uuid/三体.epub",
+            ),
+        )
+        // 用户的原文件、SAF 文档 URI、本地书库来源路径都不该被认成可删对象。
+        assertFalse(isModuleImportCachePath("/storage/emulated/0/Download/MiShare/三体.epub"))
+        assertFalse(
+            isModuleImportCachePath(
+                "content://com.android.externalstorage.documents/tree/primary%3ADownload/document/primary%3ADownload%2FMiShare%2F三体.epub",
+            ),
+        )
+        assertFalse(isModuleImportCachePath("local-library://reamicro/local:abc"))
+        assertFalse(isModuleImportCachePath(""))
+    }
 }

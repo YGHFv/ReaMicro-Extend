@@ -1086,16 +1086,36 @@ class ReaderImportOverwriteHook(
     /**
      * 取消这次导入。
      *
-     * 两件事都要做：
+     * 三件事都要做：
      * 1. **跳过原方法**（`setResult`）——`returnEarly` 一旦置位，拦截器就不会再调 `chain.proceed`，
      *    宿主那段导入逻辑根本没机会执行。只设 `throwable` 也置位 `returnEarly`，但实机上观察到
      *    框架会在钩子抛异常后以"恢复"路径再动一次原方法；显式给个结果把这层不确定性按死。
      * 2. 抛出模块自己的取消异常，让宿主把这次 Work 标成失败（不要伪装成宿主的重复书籍异常，
      *    阅微会对 DuplicateBookException 走"重复书籍"分支，在批量导入里可能被吞掉继续处理）。
+     * 3. 删掉模块自己复制的那份待导入临时文件——宿主还有别的重发路径，删了源就没有东西可导。
      */
     private fun cancelImport(param: XC_MethodHook.MethodHookParam) {
         param.setResult(null)
         param.throwable = ImportCancelledException()
+        deleteModuleImportCache(param.args?.getOrNull(0))
+    }
+
+    /**
+     * 删除模块复制到缓存目录的待导入文件。
+     *
+     * 只删带 [MODULE_IMPORT_CACHE_MARKER] 标记的路径——那是模块自己在
+     * `cacheDir/reamicro-local-library/...` 下复制的副本，删了没有副作用（下次导入会重新复制）；
+     * 用户的原文件必须原样保留。判定抽成 [isModuleImportCachePath] 并有单测。
+     */
+    private fun deleteModuleImportCache(source: Any?) {
+        runCatching {
+            val path = source?.toString().orEmpty()
+            if (!isModuleImportCachePath(path)) return
+            val file = File(path)
+            if (file.isFile && file.delete()) {
+                XposedBridge.log("$LOG_PREFIX deleted cancelled import cache file: $path")
+            }
+        }
     }
 
     private class ImportCancelledException : RuntimeException("导入已取消")
