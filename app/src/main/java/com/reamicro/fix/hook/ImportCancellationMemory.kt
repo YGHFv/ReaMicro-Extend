@@ -106,6 +106,30 @@ internal fun importCancellationKeys(
     fileName.trim().takeIf { it.isNotBlank() }?.let { add("file:$it") }
 }
 
+/**
+ * 模块自己驱动的导入（本地书库 / WebDAV 下载完成后）在**发起导入之前**先判一次冲突的入口。
+ *
+ * 为什么必须前移：宿主的导入是「可重发 Work」，从 Hook 里取消只能中止当前那一次；实机日志显示
+ * 即便把链路上每一个 `importBook` 调用都取消掉（连临时文件都删了），宿主仍会在我们 hook 不到的
+ * 那一层把书写掉——它被加固过，真实现藏在 `android.os.Turlng` / `android.media.Curloust` 这类
+ * 系统包名下。与其继续追宿主内部，不如在模块自己的入口就停下：用户选「取消」时**根本不发起导入**，
+ * 没有 Work、没有重发，也就不存在"取消之后又被写一次"。
+ *
+ * Hook 实例由 [de.robv.android.xposed.XposedBridge] 加载模块时挂上来；没挂上（或解析不出身份）
+ * 时一律放行，交回原有流程处理。
+ */
+internal object ModuleImportPrecheck {
+    @Volatile private var hook: ReaderImportOverwriteHook? = null
+
+    fun attach(hook: ReaderImportOverwriteHook) {
+        this.hook = hook
+    }
+
+    /** 返回 true 继续导入；false 表示用户取消，调用方必须中止。 */
+    fun precheck(epubFile: java.io.File, sourceUri: String): Boolean =
+        hook?.precheckModuleImport(epubFile, sourceUri) ?: true
+}
+
 /** 书名做空白归一化，避免" 三体 "与"三体"被当成两本书。 */
 internal fun String.normalizedCancellationTitle(): String = trim().replace(Regex("\\s+"), " ")
 

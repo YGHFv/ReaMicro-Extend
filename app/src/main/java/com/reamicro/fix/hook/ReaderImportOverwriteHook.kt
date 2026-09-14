@@ -92,6 +92,8 @@ class ReaderImportOverwriteHook(
 
     fun install(): Boolean {
         return runCatching {
+            // 让模块自己驱动的导入（本地书库 / WebDAV）能在发起导入前先问一次冲突。
+            ModuleImportPrecheck.attach(this)
             val bookshelfClass = XposedHelpers.findClass(BOOKSHELF_REPOSITORY_CLASS, classLoader)
             XposedBridge.hookAllConstructors(bookshelfClass, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
@@ -296,15 +298,19 @@ class ReaderImportOverwriteHook(
                     XposedBridge.log(
                         "$LOG_PREFIX pre-import conflict intercepted: title=$title, uuid=$uuid, conflict=$conflict",
                     )
-                    val decision = if (signaledOnlineImport || isOnlineCompletionImport(uuid, "", conflict)) {
-                        XposedBridge.log(
-                            "$LOG_PREFIX online completion pre-import overwrite forced silently: " +
-                                "title=$title, uuid=$uuid signaled=$signaledOnlineImport oldBook=${conflict.oldUuid}",
-                        )
-                        OverwriteDecision.OVERWRITE
-                    } else {
-                        showOverwriteConfirm(conflict.oldTitle, title)
-                    }
+                    // 模块自己的导入入口（本地书库 / WebDAV）可能已经问过用户，那就沿用它的决定，
+                    // 不再弹第二次。CONSUME 之后下面的 rememberPreImportDecision 会把它按新 uuid
+                    // 重新存好，供 importBook 那一层继续消费。
+                    val decision = consumePreImportDecision(uuid, title)?.decision
+                        ?: if (signaledOnlineImport || isOnlineCompletionImport(uuid, "", conflict)) {
+                            XposedBridge.log(
+                                "$LOG_PREFIX online completion pre-import overwrite forced silently: " +
+                                    "title=$title, uuid=$uuid signaled=$signaledOnlineImport oldBook=${conflict.oldUuid}",
+                            )
+                            OverwriteDecision.OVERWRITE
+                        } else {
+                            showOverwriteConfirm(conflict.oldTitle, title)
+                        }
                     val preDecision = PreImportDecision(
                         decision = decision,
                         oldTitle = conflict.oldTitle,
@@ -839,6 +845,73 @@ class ReaderImportOverwriteHook(
             }
         }
     }
+
+    /**
+     * 模块自己驱动的导入在**发起之前**判一次冲突，并把用户的决定留给后面的 Hook 消费。
+     *
+     * 返回 true 表示继续导入；false 表示用户选了「取消导入」，调用方必须**在当前线程直接中止**，
+     * 不要再去调宿主的导入——那样才有"取消之后没有任何东西可重发"。
+     *
+     * 拿不到书架仓库、解析不出 epub 身份（uuid/书名）时一律返回 true：预检只是提前拦取消，
+     * 失败不能反过来挡住正常导入。
+     */
+    internal fun precheckModuleImport(epubFile: File, sourceUri: String): Boolean {
+        if (!settingsProvider().canRunReaderOverwriteCheck) return true
+        if (!epubFile.isFile) return true
+        val repository = repositoryRef?.get() ?: return true
+        val opf = obtainOpf(okioPathOf(epubFile) ?: return true) ?: return true
+        val uuid = resolveImportUuid(opf).orEmpty()
+        val title = resolveImportTitle(opf, null) ?: return true
+        val conflict = findImportConflict(repository, uuid, sourceUri, title) ?: return true
+        XposedBridge.log(
+            "$LOG_PREFIX module import precheck conflict: title=$title, uuid=$uuid, " +
+                "uri=${sourceUri.take(80)}, oldUuid=${conflict.oldUuid}",
+        )
+        return when (val decision = showOverwriteConfirm(conflict.oldTitle, title)) {
+            OverwriteDecision.CANCEL -> {
+                rememberCancelledImport(uuid, title, sourceUri, epubFile)
+                XposedBridge.log("$LOG_PREFIX module import precheck cancelled before starting: title=$title")
+                false
+            }
+            OverwriteDecision.PASSTHROUGH -> true
+            OverwriteDecision.OVERWRITE, OverwriteDecision.INDEPENDENT -> {
+                // 决定存下来，宿主真正导入时由预检 Hook 消费掉——用户不会再被弹第二次。
+                rememberPreImportDecision(
+                    uuid,
+                    title,
+                    PreImportDecision(
+                        decision = decision,
+                        oldTitle = conflict.oldTitle,
+                        oldUuid = conflict.oldUuid,
+                        oldUri = null,
+                        oldBook = conflict.oldBook,
+                        metadataPatch = ReaMicroBookMetadataSync.metadataFromOpf(opf),
+                        createdAtMs = System.currentTimeMillis(),
+                    ),
+                )
+                XposedBridge.log("$LOG_PREFIX module import precheck decision=$decision title=$title")
+                true
+            }
+        }
+    }
+
+    /**
+     * 把本地文件转成宿主 `Opf.obtain` 认的 `okio.Path`。
+     *
+     * 模块不编译依赖 okio（只按类名字符串反射），所以这里走 `okio.Path.Companion.toPath(String)`。
+     * 转不出来时返回 null，预检按"解析不出身份"放行。
+     */
+    private fun okioPathOf(file: File): Any? = runCatching {
+        val pathClass = XposedHelpers.findClass(OKIO_PATH_CLASS, classLoader)
+        val companion = pathClass.getField("Companion").get(null) ?: return null
+        companion.javaClass.methods
+            .firstOrNull {
+                it.name == "toPath" && it.parameterTypes.size == 1 &&
+                    it.parameterTypes[0] == String::class.java
+            }
+            ?.apply { isAccessible = true }
+            ?.invoke(companion, file.absolutePath)
+    }.getOrNull()
 
     /**
      * 取源文件名。

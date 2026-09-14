@@ -234,6 +234,10 @@ internal fun WebDavDriveHook.enqueueWebDavDownload(workerManager: Any, book: Any
             if (ImportCancellations.peek(ImportCancellations.keysForSource(localFile.name, sourceUrl))) {
                 error("用户已取消导入：$name")
             }
+            // 冲突判定前移到这里：选「取消」就直接中止，不创建 Work，也就没有可重发的导入。
+            if (!ModuleImportPrecheck.precheck(localFile, sourceUrl)) {
+                error("已取消导入：$name")
+            }
             rememberPendingWebDavImport(platformFile, localFile, sourceUrl, sourceSize?.toLong())
             setTrackedWorkState(tracker, id, "Running", 90, null, null, name)
             enqueueNativeImport(workerManager, platformFile)

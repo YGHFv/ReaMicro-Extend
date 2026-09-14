@@ -190,6 +190,11 @@ internal fun WebDavDriveHook.enqueueLocalLibraryImport(workerManager: Any, book:
             if (ImportCancellations.peek(ImportCancellations.keysForSource(localFile.name, sourceUrl))) {
                 error("用户已取消导入：$name")
             }
+            // 真正把冲突判定前移到这里：先解析这本 epub 的身份、查一次冲突，需要时当场问用户。
+            // 选「取消」就直接中止（连 Work 都不创建），也就不存在"取消之后又被写一次"。
+            if (!ModuleImportPrecheck.precheck(localFile, sourceUrl)) {
+                error("已取消导入：$name")
+            }
             rememberPendingWebDavImport(platformFile, localFile, sourceUrl, sourceSize?.toLong() ?: entry.size)
             enqueueNativeImport(workerManager, platformFile)
             setTrackedWorkState(tracker, id, "Success", 100, null, sourceUrl, name)
