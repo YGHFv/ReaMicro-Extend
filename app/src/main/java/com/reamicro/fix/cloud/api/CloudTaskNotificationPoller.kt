@@ -254,9 +254,12 @@ object CloudTaskWakeScheduler {
         }.getOrDefault(0L).takeIf { it > now } ?: Long.MAX_VALUE
         // 服务器没有任务时间、网络失败或系统错过闹钟时，固定短周期保证模块仍能自行恢复。
         val fallbackWake = now + FALLBACK_POLL_INTERVAL_MS
-        val triggerAt = minOf(calendar.timeInMillis, taskWake, localWake, fallbackWake)
-        // 把这次排出来的时刻告诉 root 看门狗，让它按任务时刻唤醒而不是固定周期空转。
-        NextWakeHint.write(context, triggerAt)
+        // **只由任务自身决定的**唤醒时刻（不含 15 分钟兜底）。
+        val taskDrivenWake = taskDrivenWakeAt(now, calendar.timeInMillis, taskWake, localWake)
+        val triggerAt = minOf(taskDrivenWake, fallbackWake)
+        // 写给 root 看门狗的是上面的"任务时刻"。这里曾经写的是 triggerAt —— 而它因为含 15 分钟兜底
+        // 永远 ≤15 分钟，于是开了 root 增强也一样每 15 分钟醒一次，与"按任务时刻唤醒"完全相反。
+        NextWakeHint.write(context, taskDrivenWake)
         val exact = canScheduleExact(alarm)
         runCatching {
             if (exact) {
@@ -296,6 +299,19 @@ object CloudTaskWakeScheduler {
 
     fun canScheduleExact(context: Context): Boolean =
         context.getSystemService(AlarmManager::class.java)?.let(::canScheduleExact) ?: false
+
+    /**
+     * 只由任务自身决定的唤醒时刻：零点 / 云任务完成点 / 本地任务时刻，**不含 15 分钟兜底**。
+     *
+     * 单独抽出来是因为它有两个不同用途、曾经被混成一个：系统闹钟要拿去和兜底取 min（保证错过也能
+     * 自愈），而 root 看门狗要的是纯任务时刻（否则它也跟着每 15 分钟空转一次）。
+     */
+    internal fun taskDrivenWakeAt(now: Long, midnight: Long, nextTaskAt: Long, localNextRunAt: Long): Long =
+        minOf(
+            midnight,
+            nextTaskAt.takeIf { it > now } ?: Long.MAX_VALUE,
+            localNextRunAt.takeIf { it > now } ?: Long.MAX_VALUE,
+        )
 
     const val ACTION_WAKE = "com.reamicro.fix.CLOUD_TASK_HEARTBEAT"
     private const val HEARTBEAT_RECEIVER_CLASS = "com.reamicro.fix.cloud.api.CloudTaskHeartbeatReceiver"

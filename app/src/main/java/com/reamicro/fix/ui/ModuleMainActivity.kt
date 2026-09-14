@@ -181,8 +181,8 @@ class ModuleMainActivity : Activity() {
                         "任务概览",
                         buildString {
                             append("${accounts.size} 个账号、$enabled 个任务已启用")
-                            append("\n下次唤醒：${formatTime(NextWakeHint.read(this@ModuleMainActivity))}")
-                            append("（系统闹钟/看门狗的实际触发时刻）")
+                            append("\n唤醒时刻：${formatTime(NextWakeHint.read(this@ModuleMainActivity))}")
+                            append("（看门狗按这个任务时刻唤醒；系统闹钟另有 15 分钟兜底）")
                             append("\n下次任务时刻：${nextTaskAt?.let(::formatTime) ?: "无"}")
                             if (nextTaskAt != null) append("（任务自己排的时刻）")
                         },
@@ -510,7 +510,7 @@ class ModuleMainActivity : Activity() {
                             "通知权限",
                             if (CloudTaskNotifications.hasPermission(this)) "已授予" else "未授予，任务结果只能在打开阅微时以提示条显示",
                         ),
-                        ui.row("下次唤醒", formatTime(NextWakeHint.read(this))),
+                        ui.row("唤醒时刻", formatTime(NextWakeHint.read(this))),
                     ),
                 ),
             ),
