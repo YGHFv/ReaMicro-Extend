@@ -114,109 +114,30 @@ class ImportCancellationMemoryTest {
     }
 
     @Test
-    fun `空白的身份片段会被丢掉`() {
-        assertEquals(emptyList<String>(), keys(title = "   ", uri = "  "))
-    }
-
-    /**
-     * 跨入口的键必须重叠。
-     *
-     * 实机踩过的坑：用户在覆盖检查里点了「取消导入」，但这次导入是**模块自己**从本地书库发起的
-     * （`enqueueLocalLibraryImport` → 缓存文件 → `enqueueNativeImport`），而那条链路上
-     * `importBook` 拿到的 opf 是 null —— Hook 侧既判不出冲突、也（当时）读不到取消记忆，
-     * 于是书照样被导进去。现在模块的导入入口会用文件名+大小+来源 url 去查同一份取消记忆，
-     * 所以两侧的键**至少要有一个相同**，这条断言把那个契约固定下来。
-     */
-    @Test
-    fun `模块导入入口与 Hook 的文件名键重叠`() {
-        // Hook 侧：从导入源对象解析出的身份（预检是 okio.Path，importBook 是 PlatformFile）
-        val hookKeys = importCancellationKeys(
-            uuid = "",
-            title = "三体",
-            uri = "",
-            fileName = "三体.epub",
-        )
-        // 模块自己的导入入口：只有缓存文件名 / 来源 url
-        val entryKeys = ImportCancellations.keysForSource("三体.epub", "local-library://x")
-        assertTrue(
-            "两侧没有任何共同键，用户在 Hook 里的取消就传不到模块导入入口：$hookKeys vs $entryKeys",
-            hookKeys.any { it in entryKeys },
-        )
-    }
-
-    @Test
-    fun `共享实例的取消能被模块导入入口查到`() {
-        val file = "你说这是恋爱游戏？_v2.epub"
+    fun `共享实例的取消能被重入的导入识别`() {
+        // 取消记忆现在的作用：让重入的导入也走"独立副本 + 导完删除"，而不是覆盖原书。
         ImportCancellations.memory.clear()
         ImportCancellations.remember(
             uuid = "1accf8f9-fe66-d57a-e295-de97edba7183",
             title = "你说这是恋爱游戏？",
             uri = "",
-            fileName = file,
+            fileName = "你说这是恋爱游戏？_v2.epub",
             fileSize = 11_692_886L,
         )
-        assertTrue(ImportCancellations.peek(ImportCancellations.keysForSource(file, "local-library://x")))
-        ImportCancellations.memory.clear()
-    }
-
-    @Test
-    fun `模块导入入口不会误伤别的文件`() {
-        ImportCancellations.memory.clear()
-        ImportCancellations.remember(
-            uuid = "u",
-            title = "三体",
-            uri = "",
-            fileName = "三体.epub",
-            fileSize = 100L,
-        )
-        assertFalse(ImportCancellations.peek(ImportCancellations.keysForSource("另一本.epub", "local-library://y")))
-        ImportCancellations.memory.clear()
-    }
-
-    /**
-     * 「刚取消过」的时间窗。
-     *
-     * 实机日志：一次本地书库导入被取消后，宿主还会以
-     * `importBook(null,null,null,null,null,null,continuation)` 再调几次——实参连文件名都没有，
-     * 取消记忆按身份匹配必然落空。这类调用不可能是别的书的合法导入，所以只要刚落过一次取消，
-     * 就把它们一并取消。这里锁住时间窗语义：窗口内为真、窗口外为假、没取消过为假。
-     */
-    @Test
-    fun `刚取消过的时间窗内为真`() {
-        var now = 5_000L
-        val memory = ImportCancellationMemory(ttlMs = 600_000L, nowProvider = { now })
-        assertFalse("没取消过就应为假", memory.hasRecentCancellation(30_000L))
-
-        memory.remember(listOf("uuid:x"))
-        assertTrue(memory.hasRecentCancellation(30_000L))
-
-        now = 5_000L + 30_000L
-        assertTrue("刚好到窗口边界仍算刚取消过", memory.hasRecentCancellation(30_000L))
-
-        now = 5_000L + 30_001L
-        assertFalse("超出窗口就不该再拦无身份调用", memory.hasRecentCancellation(30_000L))
-    }
-
-    /**
-     * 取消时删的只能是模块自己复制的临时文件。
-     *
-     * 这条判定决定"删哪个文件"，判错就会删到用户的原始文件——所以正例反例都要锁死。
-     */
-    @Test
-    fun `只认模块缓存的待导入文件`() {
         assertTrue(
-            isModuleImportCachePath(
-                "/data/user/0/app.zhendong.reamicro/cache/reamicro-local-library/1789_uuid/三体.epub",
+            ImportCancellations.isCancelled(
+                uuid = "1accf8f9-fe66-d57a-e295-de97edba7183",
+                title = "你说这是恋爱游戏？",
+                uri = "",
+                fileName = "",
+                fileSize = 0L,
             ),
         )
-        // 用户的原文件、SAF 文档 URI、本地书库来源路径都不该被认成可删对象。
-        assertFalse(isModuleImportCachePath("/storage/emulated/0/Download/MiShare/三体.epub"))
-        assertFalse(
-            isModuleImportCachePath(
-                "content://com.android.externalstorage.documents/tree/primary%3ADownload/document/primary%3ADownload%2FMiShare%2F三体.epub",
-            ),
-        )
-        assertFalse(isModuleImportCachePath("local-library://reamicro/local:abc"))
-        assertFalse(isModuleImportCachePath(""))
+        ImportCancellations.memory.clear()
+    }
+
+    @Test
+    fun `空白的身份片段会被丢掉`() {
+        assertEquals(emptyList<String>(), keys(title = "   ", uri = "  "))
     }
 }
