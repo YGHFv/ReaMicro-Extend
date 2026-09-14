@@ -184,17 +184,10 @@ internal fun WebDavDriveHook.enqueueLocalLibraryImport(workerManager: Any, book:
             } ?: error("无法读取本地书库文件")
             setTrackedWorkState(tracker, id, "Running", 80, null, null, name)
             val platformFile = platformFile(localFile)
-            // 用户刚在覆盖检查里点了「取消导入」：模块自己就别再发起导入了。
-            // 光靠 Hook 里抛异常挡不住这条链路——宿主会重发 Work，而 importBook 在这条链路上
-            // 拿到的 opf 是 null（见 importBookArgs 的调用），Hook 侧无从判定冲突。入口处直接拦最可靠。
-            if (ImportCancellations.peek(ImportCancellations.keysForSource(localFile.name, sourceUrl))) {
-                error("用户已取消导入：$name")
-            }
-            // 真正把冲突判定前移到这里：先解析这本 epub 的身份、查一次冲突，需要时当场问用户。
-            // 选「取消」就直接中止（连 Work 都不创建），也就不存在"取消之后又被写一次"。
-            if (!ModuleImportPrecheck.precheck(localFile, sourceUrl)) {
-                error("已取消导入：$name")
-            }
+            // 冲突判定前移到这里：先解析这本 epub 的身份、查一次冲突，需要时当场问用户。
+            // 用户选「取消导入」时**照常导入**，但会按独立副本落地、由 Hook 在导入完成后删掉
+            // （见 applyCancelAsIndependentCopy：抛异常中止不住宿主的写入，只能这样绕）。
+            ModuleImportPrecheck.precheck(localFile, sourceUrl)
             rememberPendingWebDavImport(platformFile, localFile, sourceUrl, sourceSize?.toLong() ?: entry.size)
             enqueueNativeImport(workerManager, platformFile)
             setTrackedWorkState(tracker, id, "Success", 100, null, sourceUrl, name)

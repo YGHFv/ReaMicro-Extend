@@ -84,11 +84,14 @@ class ReaderImportOverwriteHook(
     /**
      * 刚刚被用户取消过的导入。
      *
-     * 取消是靠抛异常中止**当前这次导入 Work** 的，但宿主的导入可重发（Home 自动导入目录扫描
-     * 每次都会为同一个文件新建 Work）、且分好几条车道，所以必须按**文件身份**记忆、并在每个
-     * 入口优先命中——记忆存在共享的 [ImportCancellations] 里，模块自己的本地书库/WebDAV 导入
-     * 入口也要读同一份，详见 [ImportCancellationMemory] 的说明。
+     * 取消靠抛异常中止**当前这次导入 Work**，但宿主的导入可重发（Home 自动导入目录扫描
+     * 每次都会为同一个文件新建 Work）、且分好几条车道。记忆存在共享的 [ImportCancellations] 里，
+     * 模块自己的本地书库/WebDAV 导入入口也读同一份，见 [ImportCancellationMemory]。
+     *
+     * 注意：这份记忆现在**不再用来中止导入**（中止在中止不了，见下），而是用来把重入的导入
+     * 也识别成"曾经被取消过的那一次"，从而走同样的「独立导入 + 导完删除」处理。
      */
+    private val cancelledImportCopies = ConcurrentHashMap<String, Long>()
 
     fun install(): Boolean {
         return runCatching {
@@ -128,30 +131,24 @@ class ReaderImportOverwriteHook(
                     val title = resolveImportTitle(opf, importSource) ?: "未命名"
                     val uuid = resolveImportUuid(opf).orEmpty()
 
-                    // 取消检查必须放在最前面，且**不依赖 opf**：此前它排在 opf 判空之后，
-                    // 于是 opf 为空的那条导入链直接跳过取消检查、把用户刚取消的书又导了进去。
-                    if (isRecentlyCancelled(uuid, title, uriOverride, importSource)) {
-                        rememberCancelledImport(uuid, title, uriOverride, importSource)
-                        cancelImport(param)
-                        XposedBridge.log("$LOG_PREFIX overwrite import re-cancelled (recent user cancellation): title=$title, uuid=$uuid")
-                        return
-                    }
+                    // 「曾经被取消过」的导入重入时，沿用同样的处理（独立导入一本副本、导完删除），
+                    // 不要再弹窗、更不要按覆盖导入落地。注意这里**不再抛异常中止**——中止不了
+                    // （见 applyCancelAsIndependentCopy 的说明）。
+                    val cancelledBefore = isRecentlyCancelled(uuid, title, uriOverride, importSource)
                     if (opf == null) {
-                        // 没有 opf 就解析不出 uuid/书名，冲突检测无从谈起。但**取消仍要生效**：
-                        // 实机日志里，一次本地书库导入在取消之后，宿主还会以
-                        // `importBook(null,null,null,null,null,null,continuation)` 的形式再调几次
-                        // （实参连文件名都没有）。这种调用不可能是别的书的合法导入，只可能是同一次
-                        // 导入动作的后续调用——用户刚点过取消，就一并取消。
-                        if (ImportCancellations.hasFreshCancellation()) {
-                            rememberCancelledImport(uuid, title, uriOverride, importSource)
-                            cancelImport(param)
-                            XposedBridge.log("$LOG_PREFIX importBook without opf cancelled (fresh user cancellation)")
-                            return
-                        }
+                        // 没有 opf 就解析不出 uuid/书名，也没法改写出副本身份，交给宿主的默认行为。
                         XposedBridge.log("$LOG_PREFIX importBook without opf passed through: uri=$uriOverride")
                         return
                     }
                     if (uuid.isBlank() && uriOverride.isBlank() && title.isBlank()) return
+                    if (cancelledBefore) {
+                        applyCancelAsIndependentCopy(opf, title) { newUuid, newOpf ->
+                            param.args[2] = newOpf
+                            copyBookDirForIndependentUuid(param.args?.getOrNull(1), newUuid, newOpf)
+                                ?.let { newBookDir -> param.args[1] = newBookDir }
+                        }
+                        return
+                    }
                     val signaledOnlineImport = OnlineCompletionImportSignal.matches(uuid, title, uriOverride)
 
                     consumePreImportDecision(uuid, title)?.let { preDecision ->
@@ -221,10 +218,14 @@ class ReaderImportOverwriteHook(
                             }
                         }
                         OverwriteDecision.CANCEL -> {
+                            // 「取消导入」按独立导入落地一本副本，导入完成后自动删掉（见
+                            // applyCancelAsIndependentCopy 的说明）。
                             rememberCancelledImport(uuid, title, uriOverride, importSource)
-                            cancelImport(param)
-                            XposedBridge.log("$LOG_PREFIX overwrite import cancelled: title=$title, uuid=$uuid")
-                            return
+                            applyCancelAsIndependentCopy(opf, title) { newUuid, newOpf ->
+                                param.args[2] = newOpf
+                                copyBookDirForIndependentUuid(param.args?.getOrNull(1), newUuid, newOpf)
+                                    ?.let { newBookDir -> param.args[1] = newBookDir }
+                            }
                         }
                         OverwriteDecision.PASSTHROUGH -> {
                             XposedBridge.log("$LOG_PREFIX overwrite import passed through to host default: title=$title, uuid=$uuid")
@@ -232,6 +233,13 @@ class ReaderImportOverwriteHook(
                         }
                     }
                     XposedBridge.log("$LOG_PREFIX overwrite import decision applied: title=$title, uuid=$uuid")
+                }
+
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    // 「取消导入」走的独立副本：导入落地后把它删掉，净效果等于没导入。
+                    runCatching { scheduleCancelledCopyCleanup(param) }.onFailure {
+                        XposedBridge.log("$LOG_PREFIX cancelled copy cleanup failed: ${it.message}")
+                    }
                 }
             })
             if (!hookEpubFileManagerImport()) error("EpubFileManager.import hook target not found")
@@ -286,11 +294,25 @@ class ReaderImportOverwriteHook(
                     val title = resolveImportTitle(opf, null) ?: return
                     val uuid = resolveImportUuid(opf).orEmpty()
                     val signaledOnlineImport = OnlineCompletionImportSignal.matches(uuid, title, "")
-                    // 用户刚刚取消过这次导入：宿主重发时直接再取消，不要再弹一次冲突窗。
+                    // 曾经被取消过的导入重入时，沿用同样的处理：独立导入一本副本、导完删除。
+                    // 这里不再抛异常中止（中止不了），见 applyCancelAsIndependentCopy。
                     if (isRecentlyCancelled(uuid, title, "", unzipDir)) {
-                        rememberCancelledImport(uuid, title, "", unzipDir)
-                        cancelImport(param)
-                        XposedBridge.log("$LOG_PREFIX pre-import re-cancelled (recent user cancellation): title=$title, uuid=$uuid")
+                        applyCancelAsIndependentCopy(opf, title) { newUuid, newOpf ->
+                            newOpf.overwriteToRoot(unzipDir)
+                            rememberPreImportDecision(
+                                newUuid,
+                                title,
+                                PreImportDecision(
+                                    decision = OverwriteDecision.CANCEL,
+                                    oldTitle = title,
+                                    oldUuid = uuid,
+                                    oldUri = null,
+                                    oldBook = findExistingBookByUuid(repository, uuid),
+                                    metadataPatch = ReaMicroBookMetadataSync.metadataFromOpf(opf),
+                                    createdAtMs = System.currentTimeMillis(),
+                                ),
+                            )
+                        }
                         return
                     }
                     val conflict = findImportConflict(repository, uuid, "", title) ?: return
@@ -341,8 +363,11 @@ class ReaderImportOverwriteHook(
                         }
                         OverwriteDecision.CANCEL -> {
                             rememberCancelledImport(uuid, title, "", unzipDir)
-                            cancelImport(param)
-                            XposedBridge.log("$LOG_PREFIX pre-import conflict cancelled: title=$title, uuid=$uuid")
+                            // 同 importBook：取消按"独立导入一本副本 + 导完删除"落地。
+                            applyCancelAsIndependentCopy(opf, title) { newUuid, newOpf ->
+                                newOpf.overwriteToRoot(unzipDir)
+                                rememberPreImportDecision(newUuid, title, preDecision)
+                            }
                         }
                         OverwriteDecision.PASSTHROUGH -> {
                             XposedBridge.log("$LOG_PREFIX pre-import conflict passed through to host default: title=$title, uuid=$uuid")
@@ -413,7 +438,12 @@ class ReaderImportOverwriteHook(
             }
             OverwriteDecision.CANCEL -> {
                 rememberCancelledImport(uuid, preDecision.oldTitle, "", param.args?.getOrNull(0))
-                cancelImport(param)
+                // 取消 = 独立导入一本副本，导完由 afterHookedMethod 删掉（见 applyCancelAsIndependentCopy）。
+                applyCancelAsIndependentCopy(opf, preDecision.oldTitle) { newUuid, newOpf ->
+                    param.args[2] = newOpf
+                    copyBookDirForIndependentUuid(param.args?.getOrNull(1), newUuid, newOpf)
+                        ?.let { newBookDir -> param.args[1] = newBookDir }
+                }
             }
             OverwriteDecision.PASSTHROUGH -> {
                 // 预检阶段没问成用户时存的决策。此时什么都不改，让宿主按自己的规则导入。
@@ -869,31 +899,37 @@ class ReaderImportOverwriteHook(
         )
         return when (val decision = showOverwriteConfirm(conflict.oldTitle, title)) {
             OverwriteDecision.CANCEL -> {
+                // 取消不再中断导入（中断不住，见 applyCancelAsIndependentCopy），而是把决定存下来，
+                // 让这次导入按「独立副本 + 导完删除」落地——用户看到的净效果就是没导入。
                 rememberCancelledImport(uuid, title, sourceUri, epubFile)
-                XposedBridge.log("$LOG_PREFIX module import precheck cancelled before starting: title=$title")
-                false
+                rememberPreImportDecision(uuid, title, preDecisionOf(decision, conflict.oldUuid, conflict.oldBook, opf))
+                XposedBridge.log("$LOG_PREFIX module import precheck cancel -> import copy then delete: title=$title")
+                true
             }
             OverwriteDecision.PASSTHROUGH -> true
             OverwriteDecision.OVERWRITE, OverwriteDecision.INDEPENDENT -> {
                 // 决定存下来，宿主真正导入时由预检 Hook 消费掉——用户不会再被弹第二次。
-                rememberPreImportDecision(
-                    uuid,
-                    title,
-                    PreImportDecision(
-                        decision = decision,
-                        oldTitle = conflict.oldTitle,
-                        oldUuid = conflict.oldUuid,
-                        oldUri = null,
-                        oldBook = conflict.oldBook,
-                        metadataPatch = ReaMicroBookMetadataSync.metadataFromOpf(opf),
-                        createdAtMs = System.currentTimeMillis(),
-                    ),
-                )
+                rememberPreImportDecision(uuid, title, preDecisionOf(decision, conflict.oldUuid, conflict.oldBook, opf))
                 XposedBridge.log("$LOG_PREFIX module import precheck decision=$decision title=$title")
                 true
             }
         }
     }
+
+    private fun preDecisionOf(
+        decision: OverwriteDecision,
+        oldUuid: String?,
+        oldBook: Any?,
+        opf: Any,
+    ): PreImportDecision = PreImportDecision(
+        decision = decision,
+        oldTitle = "",
+        oldUuid = oldUuid,
+        oldUri = null,
+        oldBook = oldBook,
+        metadataPatch = ReaMicroBookMetadataSync.metadataFromOpf(opf),
+        createdAtMs = System.currentTimeMillis(),
+    )
 
     /**
      * 把本地文件转成宿主 `Opf.obtain` 认的 `okio.Path`。
@@ -1167,31 +1203,96 @@ class ReaderImportOverwriteHook(
      *    阅微会对 DuplicateBookException 走"重复书籍"分支，在批量导入里可能被吞掉继续处理）。
      * 3. 删掉模块自己复制的那份待导入临时文件——宿主还有别的重发路径，删了源就没有东西可导。
      */
-    private fun cancelImport(param: XC_MethodHook.MethodHookParam) {
-        param.setResult(null)
-        param.throwable = ImportCancelledException()
-        deleteModuleImportCache(param.args?.getOrNull(0))
+    /**
+     * 把「取消导入」实现成：**按独立导入落地一本副本，导入完成后自动删掉它**。
+     *
+     * 为什么不再用抛异常中止：宿主的导入是可重发 Work，异常只能中止当前那一次；实机日志进一步显示，
+     * 即便把链路上每一个 `importBook` 调用都取消掉、连待导入临时文件都删了，宿主仍会在我们 hook
+     * 不到的那一层把书写掉（它被加固过，真实现藏在 `android.os.Turlng` / `android.media.Curloust`
+     * 这类系统包名下）。所以改成走**已经验证可用**的独立导入路径：副本建成新书后由
+     * [scheduleCancelledCopyCleanup] 删除，净效果等于没导入，原书完全不受影响。
+     *
+     * 返回新建副本的 uuid（失败时返回 null，此时不登记删除）。
+     */
+    private fun applyCancelAsIndependentCopy(
+        opf: Any,
+        title: String,
+        applyNewUuid: (newUuid: String, newOpf: Any) -> Unit,
+    ): String? {
+        val newUuid = UUID.randomUUID().toString()
+        val newOpf = opf.withUuid(newUuid)
+        // withUuid 失败时会静默返回原对象，必须回读校验：改写没生效就还是旧 uuid，
+        // 那样宿主会按旧 uuid 命中原书、变成覆盖导入，而副本根本不存在、也就无从删除。
+        if (resolveImportUuid(newOpf).orEmpty() != newUuid) {
+            XposedBridge.log("$LOG_PREFIX cancel-as-independent could NOT rewrite uuid; aborting copy path: title=$title")
+            return null
+        }
+        applyNewUuid(newUuid, newOpf)
+        markCancelledCopyForDeletion(newUuid)
+        XposedBridge.log("$LOG_PREFIX cancel-as-independent copy created: title=$title newUuid=$newUuid")
+        return newUuid
+    }
+
+    /** 登记一本"取消导入产生的副本"，导入完成后要删掉。 */
+    private fun markCancelledCopyForDeletion(uuid: String) {
+        if (uuid.isBlank()) return
+        cancelledImportCopies[uuid] = System.currentTimeMillis()
+        clearExpiredCancelledCopies()
+    }
+
+    private fun clearExpiredCancelledCopies() {
+        val now = System.currentTimeMillis()
+        cancelledImportCopies.entries.removeAll { (_, at) -> now - at > CANCELLED_COPY_TTL_MS }
     }
 
     /**
-     * 删除模块复制到缓存目录的待导入文件。
+     * 这次 importBook 导入的是不是"取消导入产生的副本"；是就删掉。
      *
-     * 只删带 [MODULE_IMPORT_CACHE_MARKER] 标记的路径——那是模块自己在
-     * `cacheDir/reamicro-local-library/...` 下复制的副本，删了没有副作用（下次导入会重新复制）；
-     * 用户的原文件必须原样保留。判定抽成 [isModuleImportCachePath] 并有单测。
+     * 延时 + 重试：importBook 刚返回时那本书的行未必已经写库（宿主的收尾可能在协程恢复之后），
+     * 一次查不到就等一会儿再查，避免漏删留下副本。
      */
-    private fun deleteModuleImportCache(source: Any?) {
-        runCatching {
-            val path = source?.toString().orEmpty()
-            if (!isModuleImportCachePath(path)) return
-            val file = File(path)
-            if (file.isFile && file.delete()) {
-                XposedBridge.log("$LOG_PREFIX deleted cancelled import cache file: $path")
+    private fun scheduleCancelledCopyCleanup(param: XC_MethodHook.MethodHookParam) {
+        val uuid = resolveImportUuid(param.args?.getOrNull(2)).orEmpty()
+        if (uuid.isBlank() || cancelledImportCopies.remove(uuid) == null) return
+        val repository = repositoryRef?.get()
+        val bookDir = param.args?.getOrNull(1)
+        Thread {
+            var deleted = false
+            repeat(CANCELLED_COPY_DELETE_ATTEMPTS) {
+                val book = repository?.let { findExistingBookByUuid(it, uuid) }
+                if (book != null && repository != null) {
+                    val result = runCatching { deleteBookEntity(repository, book) }
+                    XposedBridge.log(
+                        "$LOG_PREFIX cancelled copy deleted: uuid=$uuid ok=${result.isSuccess} " +
+                            "error=${result.exceptionOrNull()?.message.orEmpty().take(80)}",
+                    )
+                    deleted = result.isSuccess
+                    return@Thread
+                }
+                runCatching { Thread.sleep(CANCELLED_COPY_DELETE_RETRY_MS) }
             }
-        }
+            if (!deleted) {
+                XposedBridge.log("$LOG_PREFIX cancelled copy not found for deletion (kept the row): uuid=$uuid")
+            }
+        }.apply {
+            isDaemon = true
+            name = "ReaMicroCancelCleanup"
+        }.start()
+        // 书库文件一并清掉（行删掉后目录就成孤儿了）。best-effort，失败只记日志。
+        clearExistingBookDirContentsBeforeImport(bookDir, uuid)
     }
 
-    private class ImportCancelledException : RuntimeException("导入已取消")
+    /** 调宿主 `BookshelfRepository.deleteBook(Book, Continuation)` 删掉这本书。 */
+    private fun deleteBookEntity(repository: Any, book: Any) {
+        val method = (repository.javaClass.methods.asSequence() + repository.javaClass.declaredMethods.asSequence())
+            .firstOrNull {
+                it.name == "deleteBook" &&
+                    it.parameterTypes.lastOrNull()?.name == KOTLIN_CONTINUATION_CLASS
+            }
+            ?.apply { isAccessible = true }
+            ?: error("BookshelfRepository.deleteBook not found")
+        invokeSuspendBlocking(method, repository, book)
+    }
 
     private fun method(targetClass: Class<*>, name: String, parameterCount: Int): Method =
         (targetClass.methods.asSequence() + targetClass.declaredMethods.asSequence())
@@ -1368,6 +1469,11 @@ class ReaderImportOverwriteHook(
         const val ONLINE_COMPLETION_BOOK_PREFIX = "reamicro-online-book://"
         const val ONLINE_COMPLETION_UUID_PREFIX = "reamicro-online-"
         const val PRE_IMPORT_DECISION_TTL_MS = 120_000L
+        /** 「取消导入产生的副本」的登记存活时长；超时未删的条目不再尝试（避免长期占内存）。 */
+        const val CANCELLED_COPY_TTL_MS = 10 * 60_000L
+        /** 副本可能晚于 importBook 返回才写库，所以延时重试几次。 */
+        const val CANCELLED_COPY_DELETE_ATTEMPTS = 6
+        const val CANCELLED_COPY_DELETE_RETRY_MS = 500L
         const val POST_IMPORT_METADATA_SYNC_DELAY_MS = 2_500L
         val REAMICRO_MD5_REGEX = Regex("^[0-9a-fA-F]{32}$")
     }

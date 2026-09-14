@@ -230,14 +230,8 @@ internal fun WebDavDriveHook.enqueueWebDavDownload(workerManager: Any, book: Any
             throwIfWebDavDownloadCancelled(token)
             setTrackedWorkState(tracker, id, "Running", 78, null, null, name)
             val platformFile = platformFile(localFile)
-            // 同本地书库：用户在覆盖检查里取消过的文件，模块自己就不再发起导入了。
-            if (ImportCancellations.peek(ImportCancellations.keysForSource(localFile.name, sourceUrl))) {
-                error("用户已取消导入：$name")
-            }
-            // 冲突判定前移到这里：选「取消」就直接中止，不创建 Work，也就没有可重发的导入。
-            if (!ModuleImportPrecheck.precheck(localFile, sourceUrl)) {
-                error("已取消导入：$name")
-            }
+            // 同本地书库：冲突判定前移，用户选「取消导入」时按独立副本落地、导完自动删除。
+            ModuleImportPrecheck.precheck(localFile, sourceUrl)
             rememberPendingWebDavImport(platformFile, localFile, sourceUrl, sourceSize?.toLong())
             setTrackedWorkState(tracker, id, "Running", 90, null, null, name)
             enqueueNativeImport(workerManager, platformFile)
