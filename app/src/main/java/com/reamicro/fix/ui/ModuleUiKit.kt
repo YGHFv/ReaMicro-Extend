@@ -330,8 +330,10 @@ internal class ModuleUiKit(private val context: Context) {
             setPadding(px(18), px(18), px(18), px(14))
         }
         card.addView(textView(title, 18f, palette.title, bold = true).apply { setPadding(0, 0, 0, px(10)) })
+        // 注意：form 只能挂到一个父容器上（下面挂进 ScrollView），
+        // 先 card.addView(form) 再 scroll.addView(form) 会直接抛
+        // "The specified child already has a parent" 崩掉。
         val form = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        card.addView(form)
         build { label, hint, value ->
             form.addView(fieldRow(label, hint))
             val edit = editText(value)

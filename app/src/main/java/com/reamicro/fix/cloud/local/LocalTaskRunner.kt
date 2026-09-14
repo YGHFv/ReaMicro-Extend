@@ -39,7 +39,7 @@ object LocalTaskRunner {
                     val outcome = runCatching {
                         CloudTaskLocalRunner.runTask(task.taskType, stateInput, request, credential)
                     }.getOrElse { CloudTaskLocalRunner.Outcome("failed", it.message ?: "本地任务执行失败") }
-                    persistOutcome(store, accountId, task.taskType, outcome, now)
+                    persistOutcome(store, accountId, task, outcome, now)
                     // 不论成败都记一条，方便用户回查「为什么没跑 / 为什么失败」。
                     store.appendRecord(
                         accountId,
@@ -91,23 +91,26 @@ object LocalTaskRunner {
     private fun persistOutcome(
         store: LocalTaskStore,
         accountId: String,
-        taskType: String,
+        task: LocalTask,
         outcome: CloudTaskLocalRunner.Outcome,
         now: Long,
     ) {
         val state = JSONObject(outcome.state.toString())
-        // 统一把 nextRunAtOverride 落成本地存储的 nextRunAt；无 override 时按类型默认间隔。
+        // 统一把 nextRunAtOverride 落成本地存储的 nextRunAt；无 override 时按任务自己配置的时间点算。
         val override = state.optLong("nextRunAtOverride", 0L)
         val nextRunAt = when {
             override > 0L -> override
-            taskType == "traveling_merchant" -> now + 4L * 3_600_000L
-            else -> now + 24L * 3_600_000L
+            task.taskType == "traveling_merchant" -> now + 4L * 3_600_000L
+            // 此前这里是 now + 24h：用户配的是「每天 00:00」，模块却排到"此刻之后 24 小时"，
+            // 于是主界面显示的时间和设置页里配的时间永远对不上（用户报的就是这个）。
+            else -> nextDailyRunAt(task.timeOfDay, now)
         }
         state.remove("nextRunAtOverride")
+        // 记录下一次的任务时刻，主界面与设置页看到的是同一个来源。
         state.put(LocalTaskStore.KEY_NEXT_RUN_AT, nextRunAt)
         state.put(LocalTaskStore.KEY_LAST_MESSAGE, outcome.message)
         state.put(LocalTaskStore.KEY_LAST_RUN_AT, now)
-        store.recordState(accountId, taskType, state)
+        store.recordState(accountId, task.taskType, state)
     }
 
     private fun postNotification(
@@ -132,4 +135,21 @@ object LocalTaskRunner {
         "pawn" -> "期物典当"
         else -> "自动任务"
     }
+}
+
+/**
+ * 按任务配置的每天时间点算出下一次执行时刻（东八区）。
+ *
+ * 配置的是"每天 HH:mm"，所以下一次必须是**那一天的 HH:mm**：今天还没到就用今天，否则明天。
+ * 用 now + 24h 会让执行时刻每天往后漂，也和设置页里显示的时间对不上。
+ */
+internal fun nextDailyRunAt(timeOfDay: String, now: Long): Long {
+    val zone = java.time.ZoneId.of("Asia/Shanghai")
+    val parts = timeOfDay.trim().split(":")
+    val hour = (parts.getOrNull(0)?.toIntOrNull() ?: 0).coerceIn(0, 23)
+    val minute = (parts.getOrNull(1)?.toIntOrNull() ?: 5).coerceIn(0, 59)
+    val localNow = java.time.Instant.ofEpochMilli(now).atZone(zone)
+    var candidate = localNow.toLocalDate().atTime(hour, minute).atZone(zone)
+    if (candidate.toInstant().toEpochMilli() <= now) candidate = candidate.plusDays(1)
+    return candidate.toInstant().toEpochMilli()
 }

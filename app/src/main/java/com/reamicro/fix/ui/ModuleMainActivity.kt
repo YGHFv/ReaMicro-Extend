@@ -193,8 +193,10 @@ class ModuleMainActivity : Activity() {
         if (tasks.isEmpty()) {
             children += ui.card(listOf(ui.row("还没有本地任务", "在阅微的设置页里启用任务后，这里就能改配置")))
         } else {
+            children += ui.sectionTitle("任务")
             tasks.forEach { (accountId, task) -> children += taskCard(accountId, task) }
         }
+        children += ui.info("这里改的是模块进程执行用的那份本地任务配置；阅微设置页里的改动会在下次下发时覆盖它。")
         children += ui.sectionTitle("权限与后台")
         children += wakeCard()
         children += ui.sectionTitle("通知与日志")
@@ -213,7 +215,6 @@ class ModuleMainActivity : Activity() {
                 append("\n")
                 append(task.lastMessage)
             }
-            append("\n（改这里只影响本地任务；阅微设置页里的改动会覆盖这里）")
         }
         return ui.card(
             listOf(
