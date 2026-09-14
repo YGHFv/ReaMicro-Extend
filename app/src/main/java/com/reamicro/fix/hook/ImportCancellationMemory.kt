@@ -1,5 +1,6 @@
 package com.reamicro.fix.hook
 
+import de.robv.android.xposed.XposedBridge
 import java.util.concurrent.ConcurrentHashMap
 
 /** 取消记忆的存活时长。 */
@@ -66,23 +67,67 @@ internal class ImportCancellationMemory(
 /**
  * 由导入的各路身份拼出取消键。
  *
- * 传入值凡是取不到的（空串、0、负数）都会被跳过；只要还剩一个键就能记住/命中。
- * 文件名与大小合成一个键（`file:<名>|<大小>`），因为同名不同大小的文件不是同一个文件。
+ * 传入值凡是取不到的（空串）都会被跳过；只要还剩一个键就能记住/命中。
+ *
+ * **文件名不带大小**：同一次导入在三个入口拿到的是不同对象（预检是 `okio.Path`、
+ * `importBook` 是 `PlatformFile`、模块自己的导入入口是缓存 `File`），大小只有部分能读到。
+ * 把大小写进键里，只要有一侧读不到就会两侧对不上、取消静默失效——而"取消失效"正是要修的
+ * 那个 bug。代价是同名不同内容的文件在存续期内会互相命中，但那只表现为"多拦一次"，
+ * 比"取消被忽略、书被覆盖"轻得多。大小仍然会写进日志便于排查。
  */
 internal fun importCancellationKeys(
     uuid: String,
     title: String,
     uri: String,
     fileName: String,
-    fileSize: Long,
 ): List<String> = buildList {
     uuid.trim().takeIf { it.isNotBlank() }?.let { add("uuid:$it") }
     title.normalizedCancellationTitle().takeIf { it.isNotBlank() }?.let { add("title:$it") }
     uri.trim().takeIf { it.isNotBlank() }?.let { add("uri:$it") }
-    fileName.trim().takeIf { it.isNotBlank() }?.let { name ->
-        add(if (fileSize > 0L) "file:$name|$fileSize" else "file:$name")
-    }
+    fileName.trim().takeIf { it.isNotBlank() }?.let { add("file:$it") }
 }
 
 /** 书名做空白归一化，避免" 三体 "与"三体"被当成两本书。 */
 internal fun String.normalizedCancellationTitle(): String = trim().replace(Regex("\\s+"), " ")
+
+/**
+ * 全模块共享的「取消导入」记忆。
+ *
+ * 必须是共享的、而不是各 Hook 各持一份：一次导入会经过**多个入口**——预检
+ * （`EpubFileManager.import`）、`BookshelfRepository.importBook`，以及模块自己驱动的
+ * WebDAV / 本地书库导入（`enqueueNativeImport` 之前）。用户在预检弹窗里点了取消，
+ * 取消消息必须能被后面这些入口读到，否则「取消」只在第一个入口生效。
+ */
+internal object ImportCancellations {
+    val memory = ImportCancellationMemory()
+
+    /** 记下这次取消，并把用到的身份键写进日志（排查"为什么取消没生效"只能靠这几行）。 */
+    fun remember(uuid: String, title: String, uri: String, fileName: String, fileSize: Long): Boolean {
+        val keys = importCancellationKeys(uuid, title, uri, fileName)
+        val ok = memory.remember(keys)
+        XposedBridge.log(
+            "ReaMicro LSP import cancellation remembered ok=$ok size=$fileSize keys=${keys.joinToString(" ").take(240)}",
+        )
+        return ok
+    }
+
+    /**
+     * 这批身份是否命中过取消。未命中时也把键打出来：键不匹配是"取消没生效"最常见的原因，
+     * 而两侧键对不上的话光看命中结果根本无从判断。
+     */
+    fun isCancelled(uuid: String, title: String, uri: String, fileName: String, fileSize: Long): Boolean {
+        val keys = importCancellationKeys(uuid, title, uri, fileName)
+        val hit = memory.isCancelled(keys)
+        XposedBridge.log(
+            "ReaMicro LSP import cancellation lookup hit=$hit size=$fileSize keys=${keys.joinToString(" ").take(240)}",
+        )
+        return hit
+    }
+
+    /** 供模块自己的导入入口使用：不写日志，避免高频调用刷屏。 */
+    fun peek(keys: Collection<String>): Boolean = memory.isCancelled(keys)
+
+    /** 一条导入记录的身份键（模块自己的导入入口用文件名 + 来源 url）。 */
+    fun keysForSource(fileName: String, uri: String): List<String> =
+        importCancellationKeys(uuid = "", title = "", uri = uri, fileName = fileName)
+}

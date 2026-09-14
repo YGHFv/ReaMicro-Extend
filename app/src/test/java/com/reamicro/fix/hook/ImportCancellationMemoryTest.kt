@@ -26,8 +26,7 @@ class ImportCancellationMemoryTest {
         title: String = "",
         uri: String = "",
         fileName: String = "",
-        fileSize: Long = 0L,
-    ) = importCancellationKeys(uuid, title, uri, fileName, fileSize)
+    ) = importCancellationKeys(uuid, title, uri, fileName)
 
     @Test
     fun `同一个文件的另一条链路也能命中`() {
@@ -39,21 +38,18 @@ class ImportCancellationMemoryTest {
     }
 
     @Test
-    fun `按文件名与大小也能命中`() {
+    fun `按文件名也能命中`() {
         val memory = ImportCancellationMemory()
-        memory.remember(keys(fileName = "三体.epub", fileSize = 1234L))
-        assertTrue(memory.isCancelled(keys(fileName = "三体.epub", fileSize = 1234L)))
+        memory.remember(keys(fileName = "三体.epub"))
+        assertTrue(memory.isCancelled(keys(fileName = "三体.epub")))
     }
 
     @Test
-    fun `同名不同大小不算同一个文件`() {
-        val memory = ImportCancellationMemory()
-        memory.remember(keys(fileName = "三体.epub", fileSize = 1234L))
-        assertFalse(memory.isCancelled(keys(fileName = "三体.epub", fileSize = 9999L)))
-    }
-
-    @Test
-    fun `取不到大小时退化成只按文件名`() {
+    fun `文件名相同即视为同一次导入（不看大小）`() {
+        // 刻意不把大小写进键：同一次导入在三个入口拿到的是不同对象（okio.Path / PlatformFile /
+        // 缓存 File），大小只有部分能读到。键里带大小的话，只要有一侧读不到就两侧对不上、
+        // 取消静默失效——而那正是要修的 bug。代价是同名文件在存续期内互相命中，
+        // 表现为"多拦一次"，比"取消被忽略、书被覆盖"轻。
         val memory = ImportCancellationMemory()
         memory.remember(keys(fileName = "三体.epub"))
         assertTrue(memory.isCancelled(keys(fileName = "三体.epub")))
@@ -71,7 +67,7 @@ class ImportCancellationMemoryTest {
         val memory = ImportCancellationMemory()
         memory.remember(keys(uuid = uuid, title = title))
         assertFalse(memory.isCancelled(keys(uuid = "another-uuid", title = "另一本书")))
-        assertFalse(memory.isCancelled(keys(fileName = "另一本.epub", fileSize = 1L)))
+        assertFalse(memory.isCancelled(keys(fileName = "另一本.epub")))
     }
 
     @Test
@@ -120,5 +116,60 @@ class ImportCancellationMemoryTest {
     @Test
     fun `空白的身份片段会被丢掉`() {
         assertEquals(emptyList<String>(), keys(title = "   ", uri = "  "))
+    }
+
+    /**
+     * 跨入口的键必须重叠。
+     *
+     * 实机踩过的坑：用户在覆盖检查里点了「取消导入」，但这次导入是**模块自己**从本地书库发起的
+     * （`enqueueLocalLibraryImport` → 缓存文件 → `enqueueNativeImport`），而那条链路上
+     * `importBook` 拿到的 opf 是 null —— Hook 侧既判不出冲突、也（当时）读不到取消记忆，
+     * 于是书照样被导进去。现在模块的导入入口会用文件名+大小+来源 url 去查同一份取消记忆，
+     * 所以两侧的键**至少要有一个相同**，这条断言把那个契约固定下来。
+     */
+    @Test
+    fun `模块导入入口与 Hook 的文件名键重叠`() {
+        // Hook 侧：从导入源对象解析出的身份（预检是 okio.Path，importBook 是 PlatformFile）
+        val hookKeys = importCancellationKeys(
+            uuid = "",
+            title = "三体",
+            uri = "",
+            fileName = "三体.epub",
+        )
+        // 模块自己的导入入口：只有缓存文件名 / 来源 url
+        val entryKeys = ImportCancellations.keysForSource("三体.epub", "local-library://x")
+        assertTrue(
+            "两侧没有任何共同键，用户在 Hook 里的取消就传不到模块导入入口：$hookKeys vs $entryKeys",
+            hookKeys.any { it in entryKeys },
+        )
+    }
+
+    @Test
+    fun `共享实例的取消能被模块导入入口查到`() {
+        val file = "你说这是恋爱游戏？_v2.epub"
+        ImportCancellations.memory.clear()
+        ImportCancellations.remember(
+            uuid = "1accf8f9-fe66-d57a-e295-de97edba7183",
+            title = "你说这是恋爱游戏？",
+            uri = "",
+            fileName = file,
+            fileSize = 11_692_886L,
+        )
+        assertTrue(ImportCancellations.peek(ImportCancellations.keysForSource(file, "local-library://x")))
+        ImportCancellations.memory.clear()
+    }
+
+    @Test
+    fun `模块导入入口不会误伤别的文件`() {
+        ImportCancellations.memory.clear()
+        ImportCancellations.remember(
+            uuid = "u",
+            title = "三体",
+            uri = "",
+            fileName = "三体.epub",
+            fileSize = 100L,
+        )
+        assertFalse(ImportCancellations.peek(ImportCancellations.keysForSource("另一本.epub", "local-library://y")))
+        ImportCancellations.memory.clear()
     }
 }

@@ -86,9 +86,9 @@ class ReaderImportOverwriteHook(
      *
      * 取消是靠抛异常中止**当前这次导入 Work** 的，但宿主的导入可重发（Home 自动导入目录扫描
      * 每次都会为同一个文件新建 Work）、且分好几条车道，所以必须按**文件身份**记忆、并在每个
-     * 入口优先命中——详见 [ImportCancellationMemory] 的说明。
+     * 入口优先命中——记忆存在共享的 [ImportCancellations] 里，模块自己的本地书库/WebDAV 导入
+     * 入口也要读同一份，详见 [ImportCancellationMemory] 的说明。
      */
-    private val cancelledImports = ImportCancellationMemory()
 
     fun install(): Boolean {
         return runCatching {
@@ -114,25 +114,33 @@ class ReaderImportOverwriteHook(
                     if (!snapshot.canRunReaderOverwriteCheck) return
                     repositoryRef = WeakReference(param.thisObject)
                     ReaMicroBookMetadataSync.rememberBookshelfRepository(param.thisObject)
-                    val opf = param.args?.getOrNull(2) ?: return
+                    val importSource = param.args?.getOrNull(0)
+                    // opf 允许为空：模块自己驱动的 WebDAV / 本地书库导入
+                    // （importBookArgs(method, file, null, null, url, size)）就是给宿主传 null opf。
+                    val opf = param.args?.getOrNull(2)
                     val uriOverride = param.args?.getOrNull(3)?.toString().orEmpty().trim()
-                    val title = resolveImportTitle(opf, param.args?.getOrNull(0)) ?: "未命名"
+                    val title = resolveImportTitle(opf, importSource) ?: "未命名"
                     val uuid = resolveImportUuid(opf).orEmpty()
+
+                    // 取消检查必须放在最前面，且**不依赖 opf**：此前它排在 opf 判空之后，
+                    // 于是 opf 为空的那条导入链直接跳过取消检查、把用户刚取消的书又导了进去。
+                    if (isRecentlyCancelled(uuid, title, uriOverride, importSource)) {
+                        rememberCancelledImport(uuid, title, uriOverride, importSource)
+                        cancelImport(param)
+                        XposedBridge.log("$LOG_PREFIX overwrite import re-cancelled (recent user cancellation): title=$title, uuid=$uuid")
+                        return
+                    }
+                    if (opf == null) {
+                        // 没有 opf 就解析不出 uuid/书名，冲突检测无从谈起，交给宿主的默认行为。
+                        // 取消已经在上一步处理过了，所以这里放行是安全的。
+                        XposedBridge.log("$LOG_PREFIX importBook without opf passed through: uri=$uriOverride")
+                        return
+                    }
                     if (uuid.isBlank() && uriOverride.isBlank() && title.isBlank()) return
                     val signaledOnlineImport = OnlineCompletionImportSignal.matches(uuid, title, uriOverride)
 
                     consumePreImportDecision(uuid, title)?.let { preDecision ->
                         applyPreImportDecision(param, opf, uuid, preDecision)
-                        return
-                    }
-
-                    // 用户刚刚取消过这次导入：宿主重发时不要再弹一次冲突窗（弹了多半会被随手点掉，
-                    // 结果就是"取消导入"最终变成覆盖导入），直接继续取消。
-                    val importSource = param.args?.getOrNull(0)
-                    if (isRecentlyCancelled(uuid, title, uriOverride, importSource)) {
-                        rememberCancelledImport(uuid, title, uriOverride, importSource)
-                        cancelImport(param)
-                        XposedBridge.log("$LOG_PREFIX overwrite import re-cancelled (recent user cancellation): title=$title, uuid=$uuid")
                         return
                     }
 
@@ -794,16 +802,6 @@ class ReaderImportOverwriteHook(
     private fun decisionKey(uuid: String, title: String): String =
         "${uuid.trim()}|${title.normalizedBookTitle()}"
 
-    /** 这次导入的全部可用身份，用于取消记忆的写入与命中。 */
-    private fun cancellationKeysOf(uuid: String, title: String, uri: String, source: Any?): List<String> =
-        importCancellationKeys(
-            uuid = uuid,
-            title = title,
-            uri = uri,
-            fileName = sourceFileName(source),
-            fileSize = platformFileSize(source) ?: 0L,
-        )
-
     /**
      * 取源文件名。
      *
@@ -824,15 +822,27 @@ class ReaderImportOverwriteHook(
     }
 
     private fun rememberCancelledImport(uuid: String, title: String, uri: String = "", source: Any? = null) {
-        val keys = cancellationKeysOf(uuid, title, uri, source)
-        if (!cancelledImports.remember(keys)) {
+        val remembered = ImportCancellations.remember(
+            uuid = uuid,
+            title = title,
+            uri = uri,
+            fileName = sourceFileName(source),
+            fileSize = platformFileSize(source) ?: 0L,
+        )
+        if (!remembered) {
             // 一个身份都取不到时不能静默：否则用户点了取消、重发时照样导入。
             XposedBridge.log("$LOG_PREFIX cancelled import could not be remembered (no usable identity): title=$title")
         }
     }
 
     private fun isRecentlyCancelled(uuid: String, title: String, uri: String = "", source: Any? = null): Boolean =
-        cancelledImports.isCancelled(cancellationKeysOf(uuid, title, uri, source))
+        ImportCancellations.isCancelled(
+            uuid = uuid,
+            title = title,
+            uri = uri,
+            fileName = sourceFileName(source),
+            fileSize = platformFileSize(source) ?: 0L,
+        )
 
     private fun rememberPreImportDecision(uuid: String, title: String, decision: PreImportDecision) {
         pendingPreImportDecisions[decisionKey(uuid, title)] = decision
