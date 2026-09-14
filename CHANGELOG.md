@@ -1,5 +1,50 @@
 # 更新记录
 
+## 本地任务真正执行 + 通知只在真送达后回执 + 模块主界面（含 Root 增强）- 2026-09-14
+
+用户反馈四件事：覆盖检查的「取消导入」仍会导入；本地任务全部不执行（前台不跑、后台不自启）；很多设备收不到任务通知而服务器显示「已发送」；并建议给模块加主界面、必要时上 root 方案。
+
+### 本地任务从不执行：账号键被加了两次前缀（前台后台全灭）
+
+`LocalTaskStore` 里账号键存为 `account_<accountId>`，但 `earliestNextRunAt()` / `hasEnabledTasks()` / `accountsWithEnabledTasks()` 三个聚合方法直接拿 **prefs 的原始 key**（`account_42`）当 accountId 传给 `list()`，而 `list()` 内部会**再加一次前缀**去找 `account_account_42` —— 永远查不到。后果：
+
+- `accountsWithEnabledTasks()` 恒为空集 ⇒ `LocalTaskRunner.runDue()` 一个任务都不遍历。前台心跳（`ReaMicroHookEntry`）、闹钟唤醒（`CloudTaskHeartbeatReceiver`）、配置下发后立即执行（`LocalTaskMirrorReceiver`）**三条路径全部空转**，这一条就解释了「前台也不执行、后台也不执行」。
+- `earliestNextRunAt()` 恒为 0 ⇒ 本地任务的执行时刻从不参与闹钟排程，闹钟只剩 15 分钟兜底轮询。
+
+现在抽出 `accountIdFromStorageKey()` / `accountIdsFromStorageKeys()` 供四处统一使用，并新增 `LocalTaskStoreAccountKeysTest` 锁住往返关系（旧实现会得到空列表）。主界面实测已能读出「本机存有 1 个账号的配置，已启用 1 个任务；下次执行 09-10 20:02」，修复前这里是空的。
+
+### 后台自启不到：闹钟 Intent 缺 FLAG_INCLUDE_STOPPED_PACKAGES
+
+模块 App 一直没有 launcher activity，装完可能长期处于 stopped 状态，而 **stopped 应用的 manifest receiver 收不到不带该标志的广播**。同仓 `LocalTaskMirror.push` 与 `CloudTaskNotifications.intent` 都显式加了这个标志并在注释里写明原因，只有 `CloudTaskWakeScheduler` 这条漏了。现已补上（intent 构造抽成 `wakeIntent()`）。
+
+### 通知「服务器说发了、设备没有」：广播发出即回执
+
+实测（Android 17 / HyperOS）：模块进程被系统 `freezeUid` 冻结期间，宿主投来的通知广播**接收器不执行**（无日志、无通知记录）；先用 `am start` 拉起模块让进程预热，同一条广播立刻成功。而 `CloudTaskNotificationPoller.dispatchToModule()` 只要 `sendBroadcast` 没抛异常就 `return true`，调用方随即回执给服务器 → 服务器 `deliveredAt` 置位、管理端显示「已发送」，设备上什么都没有。
+
+- 改为 **有序广播 + 回执确认**：只有 `CloudTaskNotificationReceiver` 真正把通知发出去（`setResultCode(RESULT_OK)`），宿主才回执；没确认的消息留在服务器上，下次轮询重发（通知 ID 由消息 ID 派生，重复投递只覆盖不堆叠）。
+- 降级顺序调整：模块确认 → 无确认则拉起模块的无界面 Activity 再试一次 + 提示条，且**不算已投递**。
+- **API 设置镜像改走广播**：原 provider 通道实测在宿主侧报 `Can't resolve content provider com.reamicro.fix.api-settings`（stopped 应用的 provider 无法被解析），模块进程的配置长期是空的、模块侧轮询与回执从来没跑起来过。新增 `ApiServerSettingsMirror` + 接收器（带 `FLAG_INCLUDE_STOPPED_PACKAGES`），provider 保留为兼容路径。
+
+### 覆盖检查「取消导入」：定位到宿主的可重发模型，取消改为按文件身份记忆
+
+用 MT MCP 反编译宿主编译态定位到实际放行路径：`WorkerManager$enqueueImport$2.invokeSuspend` 的 epub 车道把 `EpubFileManager.import` 与 `importBook` 包在**同一个 try** 里，`:catchall` 把异常转成 `WorkStatus.Error` 后**正常返回（不重抛）**——即抛异常只中止**这一次导入 Work**；而 `HomeViewModel.scanAutoImportDirectory` 每次扫描都会为同一个文件**重新发起一个新 Work**，zip/txt 等还走别的车道。所以「一次抛异常 + 120 秒按 uuid 的单个键」必然漏：
+
+- **取消记忆改为多键并集**：`uuid` / 规范化书名 / 来源 uri / 文件名+大小 一起存，查询时**任一命中**即算取消；键带命名空间前缀避免跨类型撞键。此前只存"uuid 优先、否则书名"这**一个**键，预检与 `importBook` 两条链路解析出的身份不一致（一条有 uuid、一条没有）就直接失配。新增 `ImportCancellationMemoryTest` 覆盖（含 TTL 边界，时钟可注入）。
+- **问不到用户时不再静默覆盖**：`showOverwriteConfirm` 在没有 Activity 或当前在主线程（无法弹窗）时，此前直接按 `OVERWRITE` 处理，而 OVERWRITE 分支会主动改写 uuid/复用旧书目录——用户看到的就是"我没点覆盖，书却被覆盖了"。现在返回新的 `PASSTHROUGH`：**不干预**，交由宿主的默认导入逻辑。
+- `hookAllMethods` 只扫 `declaredMethods`，而调用方的前置校验常用 `methods + declaredMethods`——方法若是继承来的会出现"校验通过、实际一个都没挂"。新增 `hookAllMethodsIncludingInherited` 并在导入 Hook 处使用（未改全局，避免影响其余 26 处调用点）。
+
+### 新增模块主界面（`ModuleMainActivity`，带 LAUNCHER 入口）
+
+模块此前没有任何 launcher activity，既无处查看任务/通知结果，也导致装完可能长期停留在 stopped 状态（收不到广播）。主界面把两件事一起解决：
+
+- **后台唤醒自检与授权**：复用 `CloudTaskWakeDiagnostics`；通知权限可直接申请，精确闹钟/电池优化/厂商自启动页可一键跳转（MIUI / ColorOS / EMUI 组件名逐级尝试，失败退回应用详情页，并补了对应的 `<queries>` 以通过 Android 11+ 的包可见性）。
+- **本地任务**：状态、下次执行时刻、**手动立即执行**、任务记录查看/清空。
+- **通知记录**：新增 `NotificationRecordStore`（明文 prefs 环形缓冲，最近 100 条），`CloudTaskNotifications.post()` 成功与失败各记一条（含失败原因）——模块进程没有界面，这是事后唯一能回答"通知到底发出去没有、为什么没发出去"的地方。
+- **诊断日志**：新增 `ModuleLogBuffer`（内存环形 500 条 + 落盘 `files/module-log.txt`，超 256KB 自动裁剪）。记录发生在**过滤之前**，因此被「简洁日志」开关吞掉的 INFO 日志也能在主界面看到；`XposedBridge` 在模块自身进程（无 libxposed 注入）里同样入缓冲。实测跨进程重启后仍可读。
+- **Root 增强（实验性）**：检测 `su`（`su -c id` 必须回 uid=0）；开启后写 `/data/adb/service.d/reamicro-watchdog.sh` 开机脚本并立即启动一份，由 root 侧循环每 15 分钟 `am broadcast --include-stopped-packages` 唤醒模块——root 身份不受应用冻结影响，可绕开 HyperOS 的 `freezeUid`；停用会删脚本并结束循环。无 root 时置灰并给出说明，不报错。
+
+模块 versionCode 更新为 59（versionName 维持 2.3.2）。
+
 ## 修复覆盖检查的独立导入与取消导入 - 2026-09-10
 
 用户反馈：覆盖检查弹窗里选「独立导入」或「取消导入」，结果依旧是正常覆盖导入。

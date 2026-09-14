@@ -53,16 +53,21 @@ object CloudTaskNotifications {
 
     /**
      * 在当前进程发出通知。只应由模块进程里的组件调用。
-     * 返回是否成功发出，调用方据此决定要不要继续兜底。
+     * 返回是否成功发出，调用方据此决定要不要继续兜底、以及能不能回执给服务器。
+     *
+     * 成功与失败都会往 [NotificationRecordStore] 记一条：模块进程没有界面，这是事后唯一
+     * 能回答「这条通知到底发出去没有、为什么没发出去」的地方。
      */
     fun post(context: Context, intent: Intent, source: String): Boolean {
         if (intent.action != ACTION_POST) return false
         val messageId = intent.getStringExtra(EXTRA_ID).orEmpty().ifBlank { return false }
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { "云端任务消息" }
         val text = intent.getStringExtra(EXTRA_TEXT).orEmpty().ifBlank { "任务状态已更新" }
+        val result = intent.getStringExtra(EXTRA_RESULT).orEmpty()
         val displayText = cloudTaskNotificationText(text, intent.getStringExtra(EXTRA_ITEMS).orEmpty())
         if (!hasPermission(context)) {
             ModuleAndroidLog.legacy(LOG_TAG, "cloud task notification permission denied source=$source")
+            record(context, title, displayText, result, source, delivered = false, detail = "未授予通知权限")
             return false
         }
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return false
@@ -88,10 +93,36 @@ object CloudTaskNotifications {
             // 用消息 ID 派生通知 ID，同一条消息重复投递只会覆盖而不是堆叠。
             manager.notify(notificationId(messageId), builder.build())
             ModuleAndroidLog.legacy(LOG_TAG, "cloud task notification posted source=$source id=$messageId")
+            record(context, title, displayText, result, source, delivered = true)
             true
         }.getOrElse {
             ModuleAndroidLog.legacy(LOG_TAG, "cloud task notification failed source=$source id=$messageId", it)
+            record(context, title, displayText, result, source, delivered = false, detail = it.message.orEmpty())
             false
+        }
+    }
+
+    private fun record(
+        context: Context,
+        title: String,
+        text: CharSequence,
+        result: String,
+        source: String,
+        delivered: Boolean,
+        detail: String = "",
+    ) {
+        runCatching {
+            NotificationRecordStore { context.applicationContext }.append(
+                NotificationRecord(
+                    at = System.currentTimeMillis(),
+                    title = title,
+                    text = text.toString(),
+                    result = result,
+                    source = source,
+                    delivered = delivered,
+                    detail = detail,
+                ),
+            )
         }
     }
 

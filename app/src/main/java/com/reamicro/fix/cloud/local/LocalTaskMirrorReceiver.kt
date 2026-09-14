@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import com.reamicro.fix.cloud.api.CloudTaskWakeScheduler
+import com.reamicro.fix.logging.ModuleLogBuffer
 import de.robv.android.xposed.XposedBridge
 import org.json.JSONObject
 
@@ -17,6 +18,8 @@ class LocalTaskMirrorReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         if (intent?.action != LocalTaskMirror.ACTION) return
         val appContext = context.applicationContext
+        // 绑定日志落盘位置：模块进程没有界面，这些接收器是最早、也往往是唯一拿到 Context 的地方。
+        ModuleLogBuffer.attach(appContext)
         val payload = runCatching {
             JSONObject(intent.getStringExtra(LocalTaskMirror.EXTRA_PAYLOAD) ?: "")
         }.getOrElse {

@@ -20,6 +20,12 @@
     <queries>
         <package android:name="app.zhendong.reamicro" />
         <package android:name="com.reamicro.fix" />
+        <!-- 厂商自启动设置页：主界面要能跳到它们。Android 11+ 起隐式 Intent 需要包可见性，
+             否则解析不到会静默失败（各 ROM 的组件名见 RootWakeController 附近的候选列表与
+             ModuleMainActivity.openAutoStartSettings）。 -->
+        <package android:name="com.miui.securitycenter" />
+        <package android:name="com.coloros.safecenter" />
+        <package android:name="com.huawei.systemmanager" />
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>
@@ -109,6 +115,17 @@
             </intent-filter>
         </receiver>
 
+        <!-- 同上，但下发的是 API 服务器配置：模块进程要用它去服务器拉消息并回执。
+             原来的 provider 通道在模块处于 stopped 时无法被解析，故改走广播。 -->
+        <receiver
+            android:name=".cloud.api.ApiServerSettingsMirrorReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.reamicro.fix.API_SETTINGS_MIRROR" />
+            </intent-filter>
+        </receiver>
+
         <receiver
             android:name=".tts.ReadAloudCommandReceiver"
             android:enabled="true"
@@ -125,6 +142,21 @@
                 <action android:name="com.reamicro.fix.READ_ALOUD_SYNC_PROGRESS" />
             </intent-filter>
         </receiver>
+
+        <!-- 模块自己的主界面。此前模块没有任何 launcher activity，装完可能长期处于 stopped 状态，
+             而 stopped 应用的广播收不到——系统闹钟唤醒正是靠广播。有了它，用户装完会打开一次，
+             应用即脱离 stopped；界面本身也是查看任务记录/通知记录/诊断日志的入口。 -->
+        <activity
+            android:name=".ui.ModuleMainActivity"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/module_name"
+            android:theme="@style/AppTheme">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
 
         <activity
             android:name=".notification.OnlineCompletionNotificationActivity"

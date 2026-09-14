@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import com.reamicro.fix.cloud.local.LocalTaskRunner
+import com.reamicro.fix.logging.ModuleLogBuffer
 
 /** 系统闹钟唤醒入口；只做一次短连接，不启动可见界面或常驻服务。 */
 class CloudTaskHeartbeatReceiver : BroadcastReceiver() {
@@ -17,6 +18,8 @@ class CloudTaskHeartbeatReceiver : BroadcastReceiver() {
                 Intent.ACTION_TIMEZONE_CHANGED,
             )) return
         val appContext = context.applicationContext
+        // 闹钟唤醒是后台路径上最早拿到 Context 的地方之一，日志落盘位置在这里绑定。
+        ModuleLogBuffer.attach(appContext)
         // 开机、改时间和换时区都先重排，避免旧的 RTC 闹钟落在过去；随后立即拉取一次。
         CloudTaskWakeScheduler.schedule(appContext)
         val pending = goAsync()

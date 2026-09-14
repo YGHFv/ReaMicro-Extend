@@ -139,9 +139,8 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
 
     /** 所有账号中「已启用任务」的最近一次待执行时间，供闹钟排程取 min。0 表示无。 */
     fun earliestNextRunAt(): Long {
-        val prefs = prefs() ?: return 0L
         var earliest = Long.MAX_VALUE
-        for (accountId in prefs.all.keys) {
+        for (accountId in storedAccountIds()) {
             for (task in list(accountId)) {
                 if (!task.enabled) continue
                 val next = task.nextRunAt
@@ -152,16 +151,31 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
     }
 
     /** 是否存在任意账号的任意已启用本地任务。 */
-    fun hasEnabledTasks(): Boolean {
-        val prefs = prefs() ?: return false
-        return prefs.all.keys.any { accountId -> list(accountId).any { it.enabled } }
-    }
+    fun hasEnabledTasks(): Boolean =
+        storedAccountIds().any { accountId -> list(accountId).any { it.enabled } }
+
+    /**
+     * 本机存过数据的所有账号 ID（不区分任务是否启用）。
+     *
+     * 给模块主界面用：那里要展示"本机存了哪些账号的任务记录"，只取已启用账号会在用户
+     * 临时关掉任务后让记录凭空消失。
+     */
+    fun accountIds(): List<String> = storedAccountIds()
 
     /** 所有已启用任务的账号集合（去重）。 */
-    fun accountsWithEnabledTasks(): Set<String> {
-        val prefs = prefs() ?: return emptySet()
-        return prefs.all.keys.filterTo(linkedSetOf()) { accountId -> list(accountId).any { it.enabled } }
-    }
+    fun accountsWithEnabledTasks(): Set<String> =
+        storedAccountIds().filterTo(linkedSetOf()) { accountId -> list(accountId).any { it.enabled } }
+
+    /**
+     * prefs 里实际存了数据的账号 ID。
+     *
+     * 必须先把 [KEY_ACCOUNT_PREFIX] 剥掉再交给 [list]：prefs 的 key 形如 `account_<accountId>`，
+     * 直接把它当 accountId 传进去，[accountKey] 会再加一次前缀，永远查不到账号。踩过这个坑的
+     * 表现是「本地任务配置得好好的，前台后台却从不执行」——[accountsWithEnabledTasks] 恒空集，
+     * 于是 [LocalTaskRunner.runDue] 一个任务都不遍历。
+     */
+    private fun storedAccountIds(): List<String> =
+        accountIdsFromStorageKeys(prefs()?.all?.keys.orEmpty())
 
     /** 追加一条执行记录；只保留最近 [MAX_RECORDS] 条，避免无限增长。 */
     fun appendRecord(
@@ -218,9 +232,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
         val prefs = prefs() ?: return JSONObject()
         val accounts = JSONObject()
         for (storageKey in prefs.all.keys) {
-            if (!storageKey.startsWith(KEY_ACCOUNT_PREFIX)) continue
-            val accountId = storageKey.removePrefix(KEY_ACCOUNT_PREFIX)
-            if (accountId.isBlank()) continue
+            val accountId = accountIdFromStorageKey(storageKey) ?: continue
             val root = runCatching { JSONObject(prefs.getString(storageKey, null) ?: "") }.getOrNull() ?: continue
             accounts.put(
                 accountId,
@@ -420,3 +432,19 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
         private const val KEY_ALIAS = "reamicro-local-task-credentials"
     }
 }
+
+/**
+ * `account_<accountId>` → `<accountId>`；不是账号键或 ID 为空时返回 null。
+ *
+ * 与 [LocalTaskStore] 内部的账号键拼法（`KEY_ACCOUNT_PREFIX + accountId`）严格互逆，
+ * 这个往返关系是那组聚合方法正确性的基础，所以单独抽出来并配了单测
+ * （`LocalTaskStoreAccountKeysTest`）。
+ */
+internal fun accountIdFromStorageKey(storageKey: String): String? =
+    storageKey.takeIf { it.startsWith(LocalTaskStore.KEY_ACCOUNT_PREFIX) }
+        ?.removePrefix(LocalTaskStore.KEY_ACCOUNT_PREFIX)
+        ?.takeIf { it.isNotBlank() }
+
+/** 从 SharedPreferences 的 key 集合里取出账号 ID；非账号键一律忽略。 */
+internal fun accountIdsFromStorageKeys(keys: Collection<String>): List<String> =
+    keys.mapNotNull(::accountIdFromStorageKey)

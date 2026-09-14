@@ -82,16 +82,13 @@ class ReaderImportOverwriteHook(
     private val pendingPreImportDecisions = ConcurrentHashMap<String, PreImportDecision>()
 
     /**
-     * 刚刚被用户取消过的导入（key -> 时间戳）。
+     * 刚刚被用户取消过的导入。
      *
-     * 取消是靠抛异常中止导入的，异常会一路逃出 importBook 到宿主的 WorkerManager。宿主若对
-     * 这次导入做了重试，重试时预决策已消费、又会重新弹一次冲突窗——用户随手点掉就变成覆盖导入，
-     * 表现就是"点了取消导入，结果还是覆盖导入"。这里把取消按 uuid 记一小段时间，重试直接再取消。
-     *
-     * 只按 uuid（读不到 uuid 时才退化为按书名）作键：同一个文件重试必然 uuid 相同，而书名相同的
-     * 另一个文件不会被误伤。
+     * 取消是靠抛异常中止**当前这次导入 Work** 的，但宿主的导入可重发（Home 自动导入目录扫描
+     * 每次都会为同一个文件新建 Work）、且分好几条车道，所以必须按**文件身份**记忆、并在每个
+     * 入口优先命中——详见 [ImportCancellationMemory] 的说明。
      */
-    private val recentlyCancelledImports = ConcurrentHashMap<String, Long>()
+    private val cancelledImports = ImportCancellationMemory()
 
     fun install(): Boolean {
         return runCatching {
@@ -109,7 +106,9 @@ class ReaderImportOverwriteHook(
                 .toList()
             if (importMethods.isEmpty()) error("BookshelfRepository.importBook hook target not found")
             hookWorkerManagerRepositoryCapture()
-            XposedBridge.hookAllMethods(bookshelfClass, BOOKSHELF_IMPORT_BOOK_METHOD, object : XC_MethodHook(XCallback.PRIORITY_LOWEST) {
+            // 用 IncludingInherited 与上面的前置校验（methods + declaredMethods）保持同一口径：
+            // 只看 declaredMethods 的话，方法若是继承来的就会出现"校验通过、实际一个都没挂"。
+            XposedBridge.hookAllMethodsIncludingInherited(bookshelfClass, BOOKSHELF_IMPORT_BOOK_METHOD, object : XC_MethodHook(XCallback.PRIORITY_LOWEST) {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val snapshot = settingsProvider()
                     if (!snapshot.canRunReaderOverwriteCheck) return
@@ -127,10 +126,11 @@ class ReaderImportOverwriteHook(
                         return
                     }
 
-                    // 用户刚刚取消过这次导入：宿主重试时不要再弹一次冲突窗（弹了多半会被随手点掉，
+                    // 用户刚刚取消过这次导入：宿主重发时不要再弹一次冲突窗（弹了多半会被随手点掉，
                     // 结果就是"取消导入"最终变成覆盖导入），直接继续取消。
-                    if (isRecentlyCancelled(uuid, title)) {
-                        rememberCancelledImport(uuid, title)
+                    val importSource = param.args?.getOrNull(0)
+                    if (isRecentlyCancelled(uuid, title, uriOverride, importSource)) {
+                        rememberCancelledImport(uuid, title, uriOverride, importSource)
                         cancelImport(param)
                         XposedBridge.log("$LOG_PREFIX overwrite import re-cancelled (recent user cancellation): title=$title, uuid=$uuid")
                         return
@@ -198,9 +198,13 @@ class ReaderImportOverwriteHook(
                             }
                         }
                         OverwriteDecision.CANCEL -> {
-                            rememberCancelledImport(uuid, title)
+                            rememberCancelledImport(uuid, title, uriOverride, importSource)
                             cancelImport(param)
                             XposedBridge.log("$LOG_PREFIX overwrite import cancelled: title=$title, uuid=$uuid")
+                            return
+                        }
+                        OverwriteDecision.PASSTHROUGH -> {
+                            XposedBridge.log("$LOG_PREFIX overwrite import passed through to host default: title=$title, uuid=$uuid")
                             return
                         }
                     }
@@ -259,9 +263,9 @@ class ReaderImportOverwriteHook(
                     val title = resolveImportTitle(opf, null) ?: return
                     val uuid = resolveImportUuid(opf).orEmpty()
                     val signaledOnlineImport = OnlineCompletionImportSignal.matches(uuid, title, "")
-                    // 用户刚刚取消过这次导入：宿主重试时直接再取消，不要再弹一次冲突窗。
-                    if (isRecentlyCancelled(uuid, title)) {
-                        rememberCancelledImport(uuid, title)
+                    // 用户刚刚取消过这次导入：宿主重发时直接再取消，不要再弹一次冲突窗。
+                    if (isRecentlyCancelled(uuid, title, "", unzipDir)) {
+                        rememberCancelledImport(uuid, title, "", unzipDir)
                         cancelImport(param)
                         XposedBridge.log("$LOG_PREFIX pre-import re-cancelled (recent user cancellation): title=$title, uuid=$uuid")
                         return
@@ -309,9 +313,12 @@ class ReaderImportOverwriteHook(
                             XposedBridge.log("$LOG_PREFIX pre-import independent uuid generated: $uuid -> $newUuid, title=$title")
                         }
                         OverwriteDecision.CANCEL -> {
-                            rememberCancelledImport(uuid, title)
+                            rememberCancelledImport(uuid, title, "", unzipDir)
                             cancelImport(param)
                             XposedBridge.log("$LOG_PREFIX pre-import conflict cancelled: title=$title, uuid=$uuid")
+                        }
+                        OverwriteDecision.PASSTHROUGH -> {
+                            XposedBridge.log("$LOG_PREFIX pre-import conflict passed through to host default: title=$title, uuid=$uuid")
                         }
                     }
                 }
@@ -378,8 +385,12 @@ class ReaderImportOverwriteHook(
                 }
             }
             OverwriteDecision.CANCEL -> {
-                rememberCancelledImport(uuid, preDecision.oldTitle)
+                rememberCancelledImport(uuid, preDecision.oldTitle, "", param.args?.getOrNull(0))
                 cancelImport(param)
+            }
+            OverwriteDecision.PASSTHROUGH -> {
+                // 预检阶段没问成用户时存的决策。此时什么都不改，让宿主按自己的规则导入。
+                XposedBridge.log("$LOG_PREFIX importBook reused pre-import passthrough decision: uuid=$uuid")
             }
         }
     }
@@ -460,14 +471,22 @@ class ReaderImportOverwriteHook(
             }
     }
 
+    /**
+     * 弹窗问用户怎么处理冲突。
+     *
+     * 问不到用户时（没有 Activity、或当前就在主线程上——在主线程 await 会直接死锁）返回
+     * [OverwriteDecision.PASSTHROUGH]：**不替用户做决定**，让宿主的默认导入逻辑照常走。
+     * 早期版本这里返回 OVERWRITE，于是后台/主线程上的重发会被静默当成"覆盖导入"，
+     * 用户看到的正是"我点了取消，书还是被覆盖了"。
+     */
     private fun showOverwriteConfirm(oldTitle: String, newTitle: String): OverwriteDecision {
         val activity = activityProvider() ?: run {
-            XposedBridge.log("$LOG_PREFIX no activity for overwrite confirmation; allowing import")
-            return OverwriteDecision.OVERWRITE
+            XposedBridge.log("$LOG_PREFIX no activity for overwrite confirmation; passing through to host default")
+            return OverwriteDecision.PASSTHROUGH
         }
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            XposedBridge.log("$LOG_PREFIX overwrite confirmation requested on main thread; allowing import")
-            return OverwriteDecision.OVERWRITE
+            XposedBridge.log("$LOG_PREFIX overwrite confirmation requested on main thread; passing through to host default")
+            return OverwriteDecision.PASSTHROUGH
         }
         val latch = CountDownLatch(1)
         var decision = OverwriteDecision.CANCEL
@@ -775,27 +794,45 @@ class ReaderImportOverwriteHook(
     private fun decisionKey(uuid: String, title: String): String =
         "${uuid.trim()}|${title.normalizedBookTitle()}"
 
-    /** 取消记忆的键：优先 uuid，读不到才退化为书名，避免误伤同名但不同的文件。 */
-    private fun cancellationKey(uuid: String, title: String): String =
-        uuid.trim().ifBlank { title.normalizedBookTitle() }
+    /** 这次导入的全部可用身份，用于取消记忆的写入与命中。 */
+    private fun cancellationKeysOf(uuid: String, title: String, uri: String, source: Any?): List<String> =
+        importCancellationKeys(
+            uuid = uuid,
+            title = title,
+            uri = uri,
+            fileName = sourceFileName(source),
+            fileSize = platformFileSize(source) ?: 0L,
+        )
 
-    private fun rememberCancelledImport(uuid: String, title: String) {
-        val key = cancellationKey(uuid, title)
-        if (key.isBlank()) return
-        recentlyCancelledImports[key] = System.currentTimeMillis()
-        clearExpiredCancellations()
+    /**
+     * 取源文件名。
+     *
+     * 两条 Hook 拿到的源对象不同（预检是 `okio.Path`，importBook 是 `PlatformFile`），
+     * 所以先试无参 `getName()`，再退回把 `toString()` 当路径取末段——两者都能给出 epub 文件名，
+     * 于是同一个文件即使 uuid/书名解析不出来也能在重发时对上。
+     */
+    private fun sourceFileName(source: Any?): String {
+        if (source == null) return ""
+        val reflective = runCatching {
+            source.javaClass.methods
+                .firstOrNull { it.parameterTypes.isEmpty() && it.name == "getName" }
+                ?.invoke(source)
+                ?.toString()
+        }.getOrNull()
+        val raw = reflective?.takeIf { it.isNotBlank() } ?: source.toString()
+        return runCatching { File(raw).name }.getOrDefault(raw).trim()
     }
 
-    private fun isRecentlyCancelled(uuid: String, title: String): Boolean {
-        clearExpiredCancellations()
-        val key = cancellationKey(uuid, title)
-        return key.isNotBlank() && recentlyCancelledImports.containsKey(key)
+    private fun rememberCancelledImport(uuid: String, title: String, uri: String = "", source: Any? = null) {
+        val keys = cancellationKeysOf(uuid, title, uri, source)
+        if (!cancelledImports.remember(keys)) {
+            // 一个身份都取不到时不能静默：否则用户点了取消、重发时照样导入。
+            XposedBridge.log("$LOG_PREFIX cancelled import could not be remembered (no usable identity): title=$title")
+        }
     }
 
-    private fun clearExpiredCancellations() {
-        val now = System.currentTimeMillis()
-        recentlyCancelledImports.entries.removeAll { (_, at) -> now - at > CANCELLATION_TTL_MS }
-    }
+    private fun isRecentlyCancelled(uuid: String, title: String, uri: String = "", source: Any? = null): Boolean =
+        cancelledImports.isCancelled(cancellationKeysOf(uuid, title, uri, source))
 
     private fun rememberPreImportDecision(uuid: String, title: String, decision: PreImportDecision) {
         pendingPreImportDecisions[decisionKey(uuid, title)] = decision
@@ -1118,6 +1155,14 @@ class ReaderImportOverwriteHook(
         OVERWRITE,
         INDEPENDENT,
         CANCEL,
+
+        /**
+         * 问不到用户时**不干预**，交给宿主的默认导入逻辑。
+         *
+         * 此前这两种情况下直接按 OVERWRITE 处理，等于模块替用户做了"覆盖"的决定；而 OVERWRITE
+         * 分支会主动改写 opf 的 uuid / 复用旧书目录 —— 用户看到的就是"我没点覆盖，书却被覆盖了"。
+         */
+        PASSTHROUGH,
     }
 
     private data class ImportConflict(
@@ -1174,7 +1219,6 @@ class ReaderImportOverwriteHook(
         const val ONLINE_COMPLETION_BOOK_PREFIX = "reamicro-online-book://"
         const val ONLINE_COMPLETION_UUID_PREFIX = "reamicro-online-"
         const val PRE_IMPORT_DECISION_TTL_MS = 120_000L
-        const val CANCELLATION_TTL_MS = 120_000L
         const val POST_IMPORT_METADATA_SYNC_DELAY_MS = 2_500L
         val REAMICRO_MD5_REGEX = Regex("^[0-9a-fA-F]{32}$")
     }

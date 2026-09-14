@@ -1,6 +1,7 @@
 package de.robv.android.xposed
 
 import android.util.Log
+import com.reamicro.fix.logging.ModuleLogBuffer
 import com.reamicro.fix.logging.ModuleLogLevel
 import com.reamicro.fix.logging.ModuleLogState
 import com.reamicro.fix.logging.legacyModuleLogLevel
@@ -45,6 +46,7 @@ object XposedBridge {
             framework.log(Log.INFO, LOG_TAG, text)
         } else {
             Log.println(Log.INFO, LOG_TAG, text)
+            ModuleLogBuffer.record(ModuleLogLevel.INFO.name, LOG_TAG, text)
         }
     }
 
@@ -74,6 +76,26 @@ object XposedBridge {
     fun hookAllMethods(clazz: Class<*>, methodName: String, callback: XC_MethodHook): List<XposedInterface.HookHandle> {
         return clazz.declaredMethods
             .asSequence()
+            .filter { it.name == methodName }
+            .mapNotNull { hookMethod(it, callback) }
+            .toList()
+    }
+
+    /**
+     * 同 [hookAllMethods]，但连**继承来的**同名方法一起挂。
+     *
+     * 只在明确需要的地方用：多数调用点的目标类自己声明了该方法，换成这个只会顺带把父类的同名
+     * 方法也挂上，可能影响别处。之所以需要它，是因为调用方的前置校验常常写成
+     * `methods + declaredMethods`（能查到继承方法），而 [hookAllMethods] 只扫 `declaredMethods`
+     * ——方法若是继承来的，校验通过、却**一个都没挂上**，日志里还打印"安装成功"。
+     */
+    fun hookAllMethodsIncludingInherited(
+        clazz: Class<*>,
+        methodName: String,
+        callback: XC_MethodHook,
+    ): List<XposedInterface.HookHandle> {
+        return (clazz.methods.asSequence() + clazz.declaredMethods.asSequence())
+            .distinct()
             .filter { it.name == methodName }
             .mapNotNull { hookMethod(it, callback) }
             .toList()
@@ -125,8 +147,14 @@ object XposedBridge {
             priority >= Log.WARN -> ModuleLogLevel.WARN
             else -> ModuleLogLevel.INFO
         }
-        if (!shouldEmitModuleLog(ModuleLogState.conciseLogEnabled, level)) return
         val framework = frameworkRef.get()
+        // frameworkRef 为空说明这是模块**自己的进程**（没有 libxposed 注入）。这里的日志只进
+        // logcat，而模块进程的 INFO 日志受「简洁日志」抑制、logcat 里根本看不到——所以同时收进
+        // 诊断缓冲，模块主界面能直接翻到。宿主进程里 framework 非空，不会走这条。
+        if (framework == null) {
+            ModuleLogBuffer.record(level.name, LOG_TAG, text)
+        }
+        if (!shouldEmitModuleLog(ModuleLogState.conciseLogEnabled, level)) return
         if (framework != null) {
             if (throwable != null) {
                 framework.log(priority, LOG_TAG, text, throwable)

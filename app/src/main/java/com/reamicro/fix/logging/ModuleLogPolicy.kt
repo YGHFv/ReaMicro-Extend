@@ -76,6 +76,9 @@ internal object ModuleAndroidLog {
         message: String,
         throwable: Throwable?,
     ) {
+        // 先收进诊断缓冲再判过滤：被「简洁日志」吞掉的那些恰恰是排查时最想看的，
+        // 模块主界面要能翻到它们（logcat 里看不到）。
+        ModuleLogBuffer.record(level.name, tag, message)
         if (!shouldEmitModuleLog(ModuleLogState.conciseLogEnabled, level)) return
         when (level) {
             ModuleLogLevel.ERROR -> if (throwable != null) Log.e(tag, message, throwable) else Log.e(tag, message)

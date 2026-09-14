@@ -110,7 +110,17 @@ fun readModuleLocalTaskRecords(context: android.content.Context, accountId: Stri
     }
 }
 
+/**
+ * 把宿主进程里的 API 配置同步给模块进程。
+ *
+ * 主路径是**广播**（[ApiServerSettingsMirror.push]）：模块 App 没有 launcher activity，装完可能
+ * 一直处于 stopped，而 stopped 应用的 provider 无法被解析，这条 provider 通道在实机上长期报
+ * `Can't resolve content provider`，等于没生效。广播带 FLAG_INCLUDE_STOPPED_PACKAGES，能投递给
+ * stopped 应用；provider 保留为旧版模块的兼容路径。任一成功即认为同步成功。
+ */
 fun ApiServerSettings.mirrorToModule(context: android.content.Context): Boolean {
+    val pushed = ApiServerSettingsMirror.push(context, this)
+    if (pushed) return true
     val bundle = Bundle().apply {
         putBoolean("enabled", enabled)
         putString("baseUrl", baseUrl)
@@ -128,10 +138,8 @@ fun ApiServerSettings.mirrorToModule(context: android.content.Context): Boolean 
         context.contentResolver.call(ApiServerSettingsBridgeProvider.URI, ApiServerSettingsBridgeProvider.METHOD_SAVE, null, bundle)
             ?.getBoolean("saved", false) == true
     }.onFailure {
-        // 模块 App 没有 LAUNCHER，未启动过时处于 stopped 状态，其 provider 无法被解析，
-        // 这里就会拿到 "Unknown authority"。属于预期内的降级（本地任务已改走广播镜像，
-        // 不再依赖这条通道），所以只记一条提示，不当作故障。
-        XposedBridge.log("ReaMicro API settings mirror unavailable (module not started yet): ${it.message}")
+        // 广播已经投出去了，provider 这条旧通道失败属预期内降级，只记一条提示。
+        XposedBridge.log("ReaMicro API settings provider mirror unavailable: ${it.message}")
     }.getOrDefault(false)
 }
 
