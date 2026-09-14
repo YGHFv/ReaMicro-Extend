@@ -396,10 +396,11 @@ class ModuleMainActivity : Activity() {
     }
 
     private fun taskTitle(taskType: String): String = when (taskType) {
-        "yeshe_checkin" -> "野社签到"
-        "yeshe_draw_card" -> "野社抽卡"
+        "yeshe_checkin" -> "每日轶闻"
+        "yeshe_draw_card" -> "自动祈愿"
         "cloud_auto_read" -> "自动阅读"
-        "traveling_merchant" -> "行商通知"
+        "traveling_merchant" -> "自动行商"
+        "pawn" -> "期物典当"
         else -> taskType
     }
 

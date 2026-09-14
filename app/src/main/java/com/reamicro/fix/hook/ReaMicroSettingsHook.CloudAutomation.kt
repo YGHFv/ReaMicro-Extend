@@ -9,6 +9,7 @@ import com.reamicro.fix.cloud.api.CloudTask
 import com.reamicro.fix.cloud.api.CloudTaskManager
 import com.reamicro.fix.cloud.api.ReaMicroCredential
 import com.reamicro.fix.cloud.api.mirrorToModule
+import com.reamicro.fix.cloud.local.CloudTaskLocalRunner
 import com.reamicro.fix.hook.settings.*
 import de.robv.android.xposed.XposedBridge
 import org.json.JSONArray
@@ -24,6 +25,13 @@ internal data class CloudAutomationTaskSpec(
     val autoRead: Boolean = false,
     val rewardTriggered: Boolean = false,
     val merchant: Boolean = false,
+    /**
+     * 这个任务跑之前要不要先检查道观运签、没有就祈禳一支；列表为空表示不需要。
+     *
+     * 只有「每日轶闻」与「自动行商」需要（用户指定）：前者固定求运，后者可在求安/求财之间选。
+     * 值是 `CloudTaskLocalRunner.BLESSING_*` 的 wire 值——服务端按它判合法性，不能自造。
+     */
+    val blessingOptions: List<String> = emptyList(),
 )
 
 private const val CLOUD_AUTOMATION_LOG_PREFIX = "[ReaMicroFix/CloudAutomation]"
@@ -32,26 +40,33 @@ private const val CLOUD_AUTOMATION_LOG_PREFIX = "[ReaMicroFix/CloudAutomation]"
 internal val CLOUD_AUTOMATION_TASKS = listOf(
     CloudAutomationTaskSpec(
         taskType = "yeshe_checkin",
-        title = "野社零点签到",
-        description = "自动完成野社签到并领取奖励",
+        title = "每日轶闻",
+        description = "自动完成野社签到并领取奖励；执行前检查道观运签，没有就补一支求运签",
+        blessingOptions = listOf(CloudTaskLocalRunner.BLESSING_LUCK),
     ),
     CloudAutomationTaskSpec(
         taskType = "yeshe_draw_card",
-        title = "野社自动抽卡",
+        title = "自动祈愿",
         description = "签到奖励领取完成后按配置自动抽卡",
         rewardTriggered = true,
     ),
     CloudAutomationTaskSpec(
         taskType = "cloud_auto_read",
-        title = "云端自动阅读",
+        title = "自动阅读",
         description = "上报阅读时长，可使用最近阅读或指定图书",
         autoRead = true,
     ),
     CloudAutomationTaskSpec(
         taskType = "traveling_merchant",
-        title = "行商通知",
-        description = "每 4 小时检查行商，完成后通知收益/亏损",
+        title = "自动行商",
+        description = "有行商时按它的结束时间检查，完成/结算后通知事件与收益；可配求安/求财运签",
         merchant = true,
+        blessingOptions = listOf(CloudTaskLocalRunner.BLESSING_SAFETY, CloudTaskLocalRunner.BLESSING_WEALTH),
+    ),
+    CloudAutomationTaskSpec(
+        taskType = "pawn",
+        title = "期物典当",
+        description = "把当日可典当的期物换成铜钱；祈禳/传承/夺宝要用的消耗品会跳过",
     ),
 )
 
@@ -388,6 +403,28 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
             setSingleLine(false)
         }
         val merchantAutoComplete = settingsDialogSwitchRow(activity, "自动完成行商", task?.merchantAutoComplete == true, colors)
+        // 运签：与本地页同一套语义（每日轶闻固定求运，自动行商在求安/求财之间切换）。
+        var blessingChoice = task?.blessingType?.trim()?.uppercase()
+            ?.takeIf { spec.blessingOptions.contains(it) }
+            ?: spec.blessingOptions.firstOrNull().orEmpty()
+        val blessingButton = spec.blessingOptions.takeIf { it.isNotEmpty() }?.let {
+            settingsDialogButton(
+                activity,
+                "运签：${CloudTaskLocalRunner.blessingLabel(blessingChoice)}",
+                colors,
+                SettingsDialogButtonRole.Neutral,
+            ).apply {
+                setOnClickListener {
+                    if (spec.blessingOptions.size <= 1) {
+                        showToast("${spec.title}固定使用求运签")
+                        return@setOnClickListener
+                    }
+                    val next = (spec.blessingOptions.indexOf(blessingChoice) + 1) % spec.blessingOptions.size
+                    blessingChoice = spec.blessingOptions[next]
+                    text = "运签：${CloudTaskLocalRunner.blessingLabel(blessingChoice)}"
+                }
+            }
+        }
         val merchantCity = apiServerEdit(activity, colors, "新行商城池 cityCode（自动开新行商用）", task?.merchantCityCode.orEmpty())
         val merchantPrincipal = apiServerEdit(activity, colors, "新行商本金（铜）", (task?.merchantPrincipal?.takeIf { it > 0L })?.toString().orEmpty()).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
@@ -406,6 +443,7 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
             card.addView(duration, apiServerRowParams(activity))
             card.addView(books, apiServerRowParams(activity))
         }
+        blessingButton?.let { card.addView(it, apiServerRowParams(activity)) }
         if (spec.merchant) {
             card.addView(merchantAutoComplete, apiServerRowParams(activity))
             card.addView(merchantCity, apiServerRowParams(activity))
@@ -483,6 +521,7 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
                             request.put("bookLimit", selectedBooks.length())
                         }
                     }
+                    if (blessingChoice.isNotBlank()) request.put("blessingType", blessingChoice)
                     if (spec.merchant) {
                         request.put("merchantAutoComplete", merchantAutoComplete.isChecked)
                         merchantCity.text.toString().trim().takeIf(String::isNotBlank)?.let { request.put("merchantCityCode", it) }

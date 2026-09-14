@@ -23,6 +23,7 @@ object CloudTaskLocalRunner {
             "yeshe_draw_card" -> runDrawCard(task, request, credential)
             "cloud_auto_read" -> runAutoRead(task, request, credential)
             "traveling_merchant" -> runMerchantNotify(task, request, credential)
+            "pawn" -> runPawn(task, request, credential)
             else -> Outcome("failed", "模块暂不支持此任务类型")
         }
 
@@ -36,6 +37,10 @@ object CloudTaskLocalRunner {
     internal fun runMerchantNotify(task: JSONObject, request: JSONObject, credential: JSONObject): Outcome {
         val baseUrl = credential.optString("baseUrl").ifBlank { REAMICRO_BASE_URL }
         val token = credential.optString("token").ifBlank { return Outcome("paused", "阅微登录凭据无效") }
+        // 行商可配置求安/求财：跑之前先确认有道观运签，没有就补一支（已有签不替换）。
+        val blessingType = request.optString("blessingType")
+        val blessingError = ensureTaoistBlessing(baseUrl, token, request, blessingType)
+        val blessingSuffix = if (blessingError != null) "（运签：$blessingError）" else blessingNote(blessingType)
         val now = System.currentTimeMillis()
         val lastNotified = task.optLong("merchantLastNotifiedTripId", 0L)
         val body = postReaMicro(baseUrl, token, request.optJSONObject("body") ?: JSONObject(), request.optString("endpoint").ifBlank { "rest/community/get-traveling-merchant" })
@@ -46,10 +51,43 @@ object CloudTaskLocalRunner {
         // 重启即丢，所以由我们记下来，供自动开新行商时留空沿用。
         val remembered = rememberedMerchantConfig(task, trip)
         if (!trip.hasTrip) {
+            // 没有在途行商：开着"自动完成"且参数齐全时补开一趟，否则这条链会在
+            // （比如手动结算过一次之后）彻底断掉，表现就是"自动行商不工作"。
+            val autoComplete = request.optBoolean("merchantAutoComplete", false)
+            if (autoComplete) {
+                val config = resolveStartConfig(request, remembered)
+                if (config.isComplete && maybeStartMerchant(baseUrl, token, request, config)) {
+                    return Outcome(
+                        "success",
+                        "当前没有进行中的行商，已按配置开启新行商$blessingSuffix",
+                        merchantState(pollAgain, lastNotified, config),
+                        notify = true,
+                    )
+                }
+            }
             return Outcome("success", "当前没有进行中的行商", merchantState(pollAgain, lastNotified, remembered), notify = false)
         }
         when (merchantPhase(trip, now)) {
-            MerchantPhase.SETTLED, MerchantPhase.NOTIFIED -> {
+            MerchantPhase.SETTLED -> {
+                // 游戏在 endTime 到达时就会把状态置成 SETTLED —— 也就是说**这里才是常见路径**。
+                // 此前这个分支只说一句"行商已结算"就按 4 小时重排，于是通知里既没有事件也没有
+                // 收益/亏损、节奏还退化成固定 4 小时轮询。现在按趟去重后如实播报结算结果。
+                if (trip.tripId <= 0L || trip.tripId == lastNotified) {
+                    return Outcome("success", "行商已结算", merchantState(pollAgain, lastNotified, remembered), notify = false)
+                }
+                var message = merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal) + blessingSuffix
+                val autoComplete = request.optBoolean("merchantAutoComplete", false)
+                if (autoComplete) {
+                    val config = resolveStartConfig(request, remembered)
+                    if (config.isComplete) {
+                        message += if (maybeStartMerchant(baseUrl, token, request, config)) "，已开启新行商" else "（未能开启新行商）"
+                    } else {
+                        message += "（未能开启新行商：${merchantStartHint(config)}）"
+                    }
+                }
+                return Outcome("success", message, merchantState(pollAgain, trip.tripId, remembered), notify = true)
+            }
+            MerchantPhase.NOTIFIED -> {
                 return Outcome("success", "行商已结算", merchantState(pollAgain, lastNotified, remembered), notify = false)
             }
             MerchantPhase.IN_TRANSIT -> {
@@ -61,7 +99,7 @@ object CloudTaskLocalRunner {
                 if (trip.tripId == lastNotified) {
                     return Outcome("success", "行商已通知，等待结算", merchantState(pollAgain, lastNotified, remembered), notify = false)
                 }
-                var message = merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal)
+                var message = merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal) + blessingSuffix
                 val autoComplete = request.optBoolean("merchantAutoComplete", false)
                 if (autoComplete && trip.tripId > 0L) {
                     val settle = postReaMicro(baseUrl, token, JSONObject().put("tripId", trip.tripId), request.optString("settleEndpoint").ifBlank { "rest/community/settle-traveling-merchant" })
@@ -69,9 +107,18 @@ object CloudTaskLocalRunner {
                     if (settleError != null) {
                         message += "（自动完成失败：$settleError）"
                     } else {
+                        // 结算响应里带着最终结算额：用它重算收益/亏损，比抵达瞬间的预估值准。
+                        val settledTrip = parseMerchantTrip(settle)
+                        if (settledTrip.hasTrip && settledTrip.settlementAmount > 0L) {
+                            message = merchantProfitText(
+                                settledTrip.eventTitle.ifBlank { trip.eventTitle },
+                                settledTrip.settlementAmount,
+                                settledTrip.principal.takeIf { it > 0L } ?: trip.principal,
+                            )
+                        }
                         message += "，已自动完成行商"
                         val start = startResult(baseUrl, token, request, remembered)
-                        if (start != null) message += "并开启新行商" else message += "（未能开启新行商：${merchantStartHint(remembered)}）"
+                        if (start != null) message += "并开启新行商" else message += "（未能开启新行商：${merchantStartHint(resolveStartConfig(request, remembered))}）"
                     }
                 }
                 return Outcome("success", message, merchantState(pollAgain, trip.tripId, remembered), notify = true)
@@ -138,6 +185,9 @@ object CloudTaskLocalRunner {
     private fun runCheckin(task: JSONObject, request: JSONObject, credential: JSONObject): Outcome {
         val baseUrl = credential.optString("baseUrl").ifBlank { return Outcome("failed", "阅微服务器地址为空") }
         val token = credential.optString("token").ifBlank { return Outcome("paused", "阅微登录凭据无效") }
+        // 每日轶闻固定求运（LUCK）：先确认道观运签，没有就补一支。
+        val blessingError = ensureTaoistBlessing(baseUrl, token, request, BLESSING_LUCK)
+        val blessingSuffix = if (blessingError != null) "（运签：$blessingError）" else blessingNote(BLESSING_LUCK)
         val body = postReaMicro(baseUrl, token, request.optJSONObject("body") ?: JSONObject(), request.optString("endpoint").ifBlank { "rest/community/get-daily-lore" })
         val error = businessError(body)
         if (error != null) return Outcome("failed", "获取每日轶闻失败：$error")
@@ -168,7 +218,8 @@ object CloudTaskLocalRunner {
             .put("nextRunAtOverride", if (claimed) 0L else claimDueAt)
             .put("claimCompletedDate", if (claimed) today else "")
             .put("claimJustCompleted", claimed)
-        return Outcome("success", if (claimed) "签到完成，奖励已领取" else "签到完成，等待奖励解锁", state)
+        val checkinMessage = if (claimed) "签到完成，奖励已领取" else "签到完成，等待奖励解锁"
+        return Outcome("success", checkinMessage + blessingSuffix, state)
     }
 
     private fun runDrawCard(task: JSONObject, request: JSONObject, credential: JSONObject): Outcome {
@@ -268,6 +319,146 @@ object CloudTaskLocalRunner {
         return Outcome("success", "${names.joinToString("、")} · $duration 分钟", state)
     }
 
+    /**
+     * 任务执行前检查道观运签：**没有签才祈禳一支**，已有签不替换（替换会白白消耗祈禳道具）。
+     *
+     * 返回失败原因（调用方把它附到任务消息里，用户才知道"这次为什么没签加成"）；
+     * 成功、未配置签种、或已有签时返回 null。
+     */
+    private fun ensureTaoistBlessing(
+        baseUrl: String,
+        token: String,
+        request: JSONObject,
+        blessingType: String,
+    ): String? {
+        val type = blessingType.trim().uppercase()
+        if (type.isBlank()) return null
+        val current = postReaMicro(
+            baseUrl,
+            token,
+            JSONObject(),
+            request.optString("blessingEndpoint").ifBlank { "rest/community/get-taoist-blessing" },
+        )
+        businessError(current)?.let { return "查询运签失败：$it" }
+        val data = current.optJSONObject("data") ?: current
+        // blessing 为 null 表示没有签；用 JSONObject.NULL 与缺失两种形态都要识别成"无签"。
+        val blessing = data.opt("blessing")
+        if (blessing is JSONObject) return null
+        val pray = postReaMicro(
+            baseUrl,
+            token,
+            JSONObject().put("blessingType", type),
+            request.optString("prayEndpoint").ifBlank { "rest/community/pray-taoist-blessing" },
+        )
+        businessError(pray)?.let { return "祈禳${blessingLabel(type)}失败：$it" }
+        return null
+    }
+
+    /** 祈禳成功时给任务消息加一句，方便回查这次任务用的什么签。 */
+    private fun blessingNote(blessingType: String): String =
+        blessingType.trim().takeIf { it.isNotBlank() }?.let { " · 已祈禳${blessingLabel(it)}" }.orEmpty()
+
+    internal fun blessingLabel(type: String): String = when (type.trim().uppercase()) {
+        BLESSING_LUCK -> "求运签"
+        BLESSING_SAFETY -> "求安签"
+        BLESSING_WEALTH -> "求财签"
+        else -> "运签"
+    }
+
+    /**
+     * 期物典当：按游戏给定的当日期物典当换铜钱。
+     *
+     * 接口与判定完全对齐参考脚本：`get-pawn-count` 取当日期物与剩余次数；期物命中禁当清单
+     * （[PROHIBITED_PAWN_PROP_HINTS]，都是祈禳/传承/夺宝这类要留着的消耗品）就跳过；
+     * 再从背包 `get-user-materials` 里找到该期物的 `userPropId`，循环 `pawn` 直到次数或持有量用尽。
+     */
+    private fun runPawn(task: JSONObject, request: JSONObject, credential: JSONObject): Outcome {
+        val baseUrl = credential.optString("baseUrl").ifBlank { return Outcome("failed", "阅微服务器地址为空") }
+        val token = credential.optString("token").ifBlank { return Outcome("paused", "阅微登录凭据无效") }
+        val info = postReaMicro(
+            baseUrl,
+            token,
+            JSONObject(),
+            request.optString("pawnCountEndpoint").ifBlank { "rest/community/get-pawn-count" },
+        )
+        businessError(info)?.let { return Outcome("failed", "获取期物典当信息失败：$it") }
+        val data = info.optJSONObject("data") ?: info
+        val remaining = data.optInt("remaining", 0).coerceAtLeast(0)
+        val maxPerDay = data.optInt("maxPerDay", 0).coerceAtLeast(0)
+        val usedToday = data.optInt("usedToday", 0).coerceAtLeast(0)
+        val propId = data.opt("specialPropId")?.toString().orEmpty().trim()
+        val propName = data.optString("specialPropName").ifBlank { "期物" }
+        if (remaining <= 0) {
+            return Outcome("success", "今日可典当次数已用完（$usedToday/$maxPerDay）", JSONObject(), notify = false)
+        }
+        PROHIBITED_PAWN_PROP_HINTS[propId]?.let { hint ->
+            // 跳过不是故障：今天的期物恰好是要留着的消耗品，明天再看。
+            return Outcome("success", "今日期物「$propName」是$hint，跳过典当", JSONObject(), notify = false)
+        }
+        val materials = postReaMicro(
+            baseUrl,
+            token,
+            JSONObject(),
+            request.optString("materialsEndpoint").ifBlank { "rest/community/get-user-materials" },
+        )
+        businessError(materials)?.let { return Outcome("failed", "读取背包失败：$it") }
+        val list = materials.optJSONObject("data")?.optJSONArray("materials")
+            ?: materials.optJSONArray("materials")
+            ?: JSONArray()
+        var target: JSONObject? = null
+        for (index in 0 until list.length()) {
+            val item = list.optJSONObject(index) ?: continue
+            if (item.opt("propId")?.toString()?.trim() == propId) {
+                target = item
+                break
+            }
+        }
+        if (target == null) {
+            return Outcome("success", "背包里没有期物「$propName」，跳过典当", JSONObject(), notify = false)
+        }
+        val quantity = target.optInt("quantity", 0).coerceAtLeast(0)
+        if (quantity <= 0) {
+            return Outcome("success", "期物「$propName」持有数量为 0，跳过典当", JSONObject(), notify = false)
+        }
+        val userPropId = target.opt("userPropId")?.toString()?.trim().orEmpty()
+            .takeIf { it.isNotBlank() }
+            ?: return Outcome("failed", "期物「$propName」缺少 userPropId，无法典当")
+        var successCount = 0
+        var coin = 0L
+        var failure: String? = null
+        repeat(minOf(remaining, quantity)) {
+            if (failure != null) return@repeat
+            val pawn = runCatching {
+                postReaMicro(
+                    baseUrl,
+                    token,
+                    JSONObject().put("userPropId", userPropId.toLongOrNull() ?: userPropId),
+                    request.optString("pawnEndpoint").ifBlank { "rest/community/pawn" },
+                )
+            }.getOrElse {
+                failure = it.message ?: "典当请求失败"
+                return@repeat
+            }
+            val error = businessError(pawn)
+            if (error != null) {
+                failure = error
+                return@repeat
+            }
+            coin += (pawn.optJSONObject("data") ?: pawn).optLong("coin", 0L)
+            successCount++
+        }
+        val today = LocalDate.now(ZoneId.of("Asia/Shanghai")).toString()
+        val state = JSONObject()
+            .put("lastPawnDate", today)
+            .put("pawnUsedToday", usedToday + successCount)
+            .put("pawnLastCoin", coin)
+        if (successCount == 0) {
+            return Outcome("failed", "典当失败：${failure ?: "未知原因"}", state)
+        }
+        val tail = if (failure != null) "（第 ${successCount + 1} 次中断：$failure）" else ""
+        return Outcome("success", "典当「$propName」$successCount 件，获得铜钱 $coin 文$tail", state)
+    }
+
     private fun postReaMicro(baseUrl: String, token: String, body: JSONObject, endpoint: String): JSONObject {
         val raw = HttpClient.postBytes(
             baseUrl.trimEnd('/') + "/" + endpoint.trimStart('/'),
@@ -347,6 +538,30 @@ object CloudTaskLocalRunner {
     )
 
     internal const val REAMICRO_BASE_URL = "https://api.reamicro.zhendong.ltd/"
+
+    /**
+     * 道观运签的签种。wire 值取自宿主 `ui/shrine/components/TempleWay`（LUCK/SAFETY/WEALTH），
+     * 不是我们自造的枚举，改名会让祈禳请求被服务端判为非法。
+     */
+    internal const val BLESSING_LUCK = "LUCK"
+    internal const val BLESSING_SAFETY = "SAFETY"
+    internal const val BLESSING_WEALTH = "WEALTH"
+
+    /**
+     * 禁当期物：这些消耗品另有用途（祈禳/传承/夺宝需要），典当掉会让对应玩法缺料。
+     * 与参考脚本的 PAWN_PROHIBITED 一致。
+     */
+    internal val PROHIBITED_PAWN_PROP_HINTS = mapOf(
+        "11" to "传承消耗物品（清酒）",
+        "12" to "祈禳消耗物品（剡藤）",
+        "13" to "传承消耗物品（檀香）",
+        "14" to "祈禳消耗物品（青瓷）",
+        "15" to "祈禳消耗物品（徽墨）",
+        "16" to "备选消耗物品（端砚）",
+        "17" to "夺宝消耗物品（琬琰）",
+        "18" to "传承消耗物品（欹器）",
+    )
+
     private const val TRAVELING_MERCHANT_POLL_MS = 4L * 3_600_000L
     private const val TRAVELING_MERCHANT_ARRIVE_GRACE_MS = 60_000L
     private val MERCHANT_TIME_FORMAT = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())

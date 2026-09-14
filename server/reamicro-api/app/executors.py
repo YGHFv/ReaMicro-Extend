@@ -356,6 +356,66 @@ def execute_http_task(task: dict[str, Any]) -> tuple[str, str]:
 
 
 def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
+    """任务执行入口：先做道观运签前置检查，再走各任务自己的实现。
+
+    运签只对两个任务生效（用户指定）：每日轶闻固定求运（LUCK），自动行商按配置求安/求财。
+    「没有签才祈禳」——已有签不替换，替换会白白消耗祈禳道具。
+    """
+    task_type = str(task.get("taskType"))
+    if task_type == "pawn":
+        return execute_pawn_task(task)
+    blessing_note = ""
+    if task_type in ("yeshe_checkin", "traveling_merchant"):
+        request, secret = credential_for_task(task)
+        base_url = str(secret.get("baseUrl") or "https://api.reamicro.zhendong.ltd/").strip()
+        token = str(secret.get("token"))
+        requested = "LUCK" if task_type == "yeshe_checkin" else str(request.get("blessingType") or "")
+        failure = ensure_taoist_blessing(base_url, token, request, requested)
+        if failure:
+            blessing_note = f"（运签：{failure}）"
+        else:
+            label = blessing_label(requested)
+            blessing_note = f" · 已祈禳{label}" if label else ""
+    result, message = _execute_reamicro_task_body(task)
+    return result, f"{message}{blessing_note}"
+
+
+def blessing_label(blessing_type: Any) -> str:
+    return {"LUCK": "求运签", "SAFETY": "求安签", "WEALTH": "求财签"}.get(str(blessing_type or "").strip().upper(), "")
+
+
+def ensure_taoist_blessing(base_url: str, token: str, request: dict[str, Any], blessing_type: Any) -> str | None:
+    """检查道观运签，没有就祈禳一支。返回失败原因（成功或无需祈禳时为 None）。"""
+    requested = str(blessing_type or "").strip().upper()
+    if not requested:
+        return None
+    status, body, raw = json_http_request(
+        base_url, token, {}, str(request.get("blessingEndpoint") or "rest/community/get-taoist-blessing"),
+    )
+    if status in (401, 403, 429):
+        return f"查询运签触发认证/风控 HTTP {status}"
+    if status < 200 or status >= 300:
+        return f"查询运签失败 HTTP {status}"
+    error = reamicro_business_error(body)
+    if error:
+        return f"查询运签失败：{error}"
+    data = nested_value(body, "data")
+    if isinstance(data, dict) and isinstance(data.get("blessing"), dict):
+        # 已有签就不动它：替换会浪费祈禳道具。
+        return None
+    status, body, raw = json_http_request(
+        base_url, token, {"blessingType": requested},
+        str(request.get("prayEndpoint") or "rest/community/pray-taoist-blessing"),
+    )
+    if status in (401, 403, 429):
+        return f"祈禳触发认证/风控 HTTP {status}"
+    if status < 200 or status >= 300:
+        return f"祈禳失败 HTTP {status}: {redact_message(raw)}"
+    error = reamicro_business_error(body)
+    return f"祈禳失败：{error}" if error else None
+
+
+def _execute_reamicro_task_body(task: dict[str, Any]) -> tuple[str, str]:
     request, secret = credential_for_task(task)
     base_url = str(secret.get("baseUrl") or "https://api.reamicro.zhendong.ltd/").strip()
     token = str(secret.get("token"))
@@ -608,6 +668,99 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
     return "failed", f"未知阅微任务类型：{task_type}"
 
 
+
+PROHIBITED_PAWN_PROP_HINTS = {
+    "11": "传承消耗物品（清酒）",
+    "12": "祈禳消耗物品（剡藤）",
+    "13": "传承消耗物品（檀香）",
+    "14": "祈禳消耗物品（青瓷）",
+    "15": "祈禳消耗物品（徽墨）",
+    "16": "备选消耗物品（端砚）",
+    "17": "夺宝消耗物品（琬琰）",
+    "18": "传承消耗物品（欹器）",
+}
+
+
+def execute_pawn_task(task: dict[str, Any]) -> tuple[str, str]:
+    """期物典当：把当日期物换成铜钱。
+
+    判定与参考脚本一致：`get-pawn-count` 取当日可典当期物与剩余次数；期物命中禁当清单就跳过
+    （那些消耗品另有用途，典当掉会让祈禳/传承/夺宝缺料）；再从背包里找到该期物的 userPropId，
+    循环 `pawn` 直到次数或持有量用尽。
+    """
+    request, secret = credential_for_task(task)
+    base_url = str(secret.get("baseUrl") or "https://api.reamicro.zhendong.ltd/").strip()
+    token = str(secret.get("token"))
+    status, body, raw = json_http_request(
+        base_url, token, {}, str(request.get("pawnCountEndpoint") or "rest/community/get-pawn-count"),
+    )
+    if status in (401, 403, 429):
+        return "paused", f"获取期物典当信息触发认证/风控 HTTP {status}"
+    if status < 200 or status >= 300:
+        return "failed", f"获取期物典当信息失败 HTTP {status}: {redact_message(raw)}"
+    error = reamicro_business_error(body)
+    if error:
+        return "failed", f"获取期物典当信息失败：{error}"
+    data = nested_value(body, "data") or {}
+    remaining = max(bounded_config_int(data.get("remaining", 0), 0, 0), 0)
+    max_per_day = max(bounded_config_int(data.get("maxPerDay", 0), 0, 0), 0)
+    used_today = max(bounded_config_int(data.get("usedToday", 0), 0, 0), 0)
+    prop_id = str(data.get("specialPropId") or "").strip()
+    prop_name = str(data.get("specialPropName") or "期物")
+    if remaining <= 0:
+        return "success", f"今日可典当次数已用完（{used_today}/{max_per_day}）"
+    if prop_id in PROHIBITED_PAWN_PROP_HINTS:
+        return "success", f"今日期物「{prop_name}」是{PROHIBITED_PAWN_PROP_HINTS[prop_id]}，跳过典当"
+    status, body, raw = json_http_request(
+        base_url, token, {}, str(request.get("materialsEndpoint") or "rest/community/get-user-materials"),
+    )
+    if status in (401, 403, 429):
+        return "paused", f"读取背包触发认证/风控 HTTP {status}"
+    if status < 200 or status >= 300:
+        return "failed", f"读取背包失败 HTTP {status}: {redact_message(raw)}"
+    materials = nested_value(body, "data", "materials")
+    if not isinstance(materials, list):
+        materials = []
+    target = next(
+        (item for item in materials if isinstance(item, dict) and str(item.get("propId") or "").strip() == prop_id),
+        None,
+    )
+    if target is None:
+        return "success", f"背包里没有期物「{prop_name}」，跳过典当"
+    quantity = max(bounded_config_int(target.get("quantity", 0), 0, 0), 0)
+    if quantity <= 0:
+        return "success", f"期物「{prop_name}」持有数量为 0，跳过典当"
+    user_prop_id = target.get("userPropId")
+    if user_prop_id in (None, ""):
+        return "failed", f"期物「{prop_name}」缺少 userPropId，无法典当"
+    success_count = 0
+    coin = 0
+    failure = ""
+    for _ in range(min(remaining, quantity)):
+        status, body, raw = json_http_request(
+            base_url, token, {"userPropId": int(user_prop_id)},
+            str(request.get("pawnEndpoint") or "rest/community/pawn"),
+        )
+        if status in (401, 403, 429):
+            failure = f"触发认证/风控 HTTP {status}"
+            break
+        if status < 200 or status >= 300:
+            failure = f"HTTP {status}: {redact_message(raw)}"
+            break
+        error = reamicro_business_error(body)
+        if error:
+            failure = str(error)
+            break
+        coin += _safe_long(nested_value(body, "data", "coin") if nested_value(body, "data", "coin") is not None else body.get("coin"))
+        success_count += 1
+    task["lastPawnDate"] = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+    task["pawnUsedToday"] = used_today + success_count
+    task["pawnLastCoin"] = coin
+    if success_count == 0:
+        return "failed", f"典当失败：{failure or '未知原因'}"
+    tail = f"（第 {success_count + 1} 次中断：{failure}）" if failure else ""
+    return "success", f"典当「{prop_name}」{success_count} 件，获得铜钱 {coin} 文{tail}"
+
 def _safe_long(value: Any) -> int:
     try:
         return int(value)
@@ -653,6 +806,15 @@ def execute_traveling_merchant_task(task: dict[str, Any]) -> tuple[str, str]:
 
     trip = nested_value(body, "data", "activeTrip") or nested_value(body, "activeTrip")
     if not isinstance(trip, dict):
+        # 没有在途行商：开着"自动完成"且参数齐全时补开一趟，否则这条链会在
+        # （比如手动结算过一次之后）彻底断掉，表现就是"自动行商不工作"。
+        if request.get("merchantAutoComplete"):
+            config = _merchant_start_config(request, _merchant_remembered_config(task, None))
+            if config["cityCode"] and config["principal"] > 0 and config["transportId"] > 0:
+                if _start_traveling_merchant(base_url, token, request, config):
+                    _remember_merchant_config(task, config)
+                    task["nextRunAtOverride"] = poll_again
+                    return "success", "当前没有进行中的行商，已按配置开启新行商"
         task["nextRunAtOverride"] = poll_again
         return "success", "当前没有进行中的行商"
 
@@ -664,8 +826,24 @@ def execute_traveling_merchant_task(task: dict[str, Any]) -> tuple[str, str]:
     event_title = trip.get("eventTitle")
 
     if status.upper() == "SETTLED":
+        # 游戏在 endTime 到达时就把它置成 SETTLED —— 这里才是常见路径。此前只说一句
+        # "行商已结算"，通知里既没有事件也没有收益/亏损；现在按趟去重后如实播报结算结果。
+        if not trip_id or trip_id == last_notified:
+            task["nextRunAtOverride"] = poll_again
+            return "success", "行商已结算"
+        message = merchant_profit_text(event_title, settlement_amount, principal)
+        remembered = _merchant_remembered_config(task, trip)
+        if request.get("merchantAutoComplete"):
+            config = _merchant_start_config(request, remembered)
+            if config["cityCode"] and config["principal"] > 0 and config["transportId"] > 0:
+                started = _start_traveling_merchant(base_url, token, request, config)
+                message += "，已开启新行商" if started else "（未能开启新行商）"
+                _remember_merchant_config(task, config)
+            else:
+                message += f"（未能开启新行商：{_merchant_start_hint(config)}）"
+        task["merchantLastNotifiedTripId"] = trip_id
         task["nextRunAtOverride"] = poll_again
-        return "success", "行商已结算"
+        return "success", message
     if end_time_ms > 0 and now_ms < end_time_ms:
         task["nextRunAtOverride"] = end_time_ms + 60_000
         return "success", "行商进行中，等待完成"
@@ -691,10 +869,52 @@ def execute_traveling_merchant_task(task: dict[str, Any]) -> tuple[str, str]:
     return "success", message
 
 
-def _start_traveling_merchant(base_url: str, token: str, request: dict[str, Any]) -> bool:
-    city_code = str(request.get("merchantCityCode") or "").strip()
-    principal = bounded_config_int(request.get("merchantPrincipal", 0), 0, 0)
-    transport_id = bounded_config_int(request.get("merchantTransportId", 0), 0, 0)
+def _merchant_remembered_config(task: dict[str, Any], trip: Any) -> dict[str, Any]:
+    """上次行商实际使用的城池/本金/车马。用户留空时沿用——阅微只在内存里保存这些选择。"""
+    trip = trip if isinstance(trip, dict) else {}
+    return {
+        "cityCode": str(trip.get("cityCode") or task.get("merchantLastCityCode") or "").strip(),
+        "transportId": bounded_config_int(trip.get("transportId") or task.get("merchantLastTransportId", 0), 0, 0),
+        "principal": bounded_config_int(trip.get("principal") or task.get("merchantLastPrincipal", 0), 0, 0),
+    }
+
+
+def _merchant_start_config(request: dict[str, Any], remembered: dict[str, Any]) -> dict[str, Any]:
+    """用户填了的优先，留空的沿用上次行商配置。"""
+    return {
+        "cityCode": str(request.get("merchantCityCode") or "").strip() or remembered.get("cityCode", ""),
+        "transportId": bounded_config_int(request.get("merchantTransportId", 0), 0, 0) or remembered.get("transportId", 0),
+        "principal": bounded_config_int(request.get("merchantPrincipal", 0), 0, 0) or remembered.get("principal", 0),
+    }
+
+
+def _merchant_start_hint(config: dict[str, Any]) -> str:
+    if not config.get("cityCode"):
+        return "缺少城池"
+    if int(config.get("transportId") or 0) <= 0:
+        return "缺少车马"
+    if int(config.get("principal") or 0) <= 0:
+        return "缺少本金"
+    return "参数不完整"
+
+
+def _remember_merchant_config(task: dict[str, Any], config: dict[str, Any]) -> None:
+    task["merchantLastCityCode"] = config.get("cityCode", "")
+    task["merchantLastTransportId"] = config.get("transportId", 0)
+    task["merchantLastPrincipal"] = config.get("principal", 0)
+
+
+def _start_traveling_merchant(
+    base_url: str, token: str, request: dict[str, Any], config: dict[str, Any] | None = None,
+) -> bool:
+    config = config or {
+        "cityCode": str(request.get("merchantCityCode") or "").strip(),
+        "transportId": bounded_config_int(request.get("merchantTransportId", 0), 0, 0),
+        "principal": bounded_config_int(request.get("merchantPrincipal", 0), 0, 0),
+    }
+    city_code = str(config.get("cityCode") or "").strip()
+    principal = bounded_config_int(config.get("principal", 0), 0, 0)
+    transport_id = bounded_config_int(config.get("transportId", 0), 0, 0)
     if not city_code or principal <= 0 or transport_id <= 0:
         return False
     status_code, body, _ = json_http_request(

@@ -58,6 +58,8 @@ object LocalTaskRunner {
 
     private fun buildRequest(task: LocalTask): JSONObject {
         val request = JSONObject()
+        // 运签签种对两个任务都有意义：每日轶闻固定求运，自动行商按用户选择求安/求财。
+        if (task.blessingType.isNotBlank()) request.put("blessingType", task.blessingType)
         when (task.taskType) {
             "cloud_auto_read" -> {
                 request.put("durationMinutes", task.durationMinutes)
@@ -116,10 +118,11 @@ object LocalTaskRunner {
     }
 
     private fun localTaskTitle(taskType: String): String = when (taskType) {
-        "yeshe_checkin" -> "野社签到"
-        "yeshe_draw_card" -> "野社抽卡"
+        "yeshe_checkin" -> "每日轶闻"
+        "yeshe_draw_card" -> "自动祈愿"
         "cloud_auto_read" -> "自动阅读"
-        "traveling_merchant" -> "行商通知"
+        "traveling_merchant" -> "自动行商"
+        "pawn" -> "期物典当"
         else -> "自动任务"
     }
 }

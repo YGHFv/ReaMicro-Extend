@@ -149,7 +149,7 @@ class AdminPageRenderTest(unittest.TestCase):
                 "taskId": "task_1",
                 "taskType": "yeshe_checkin",
                 "result": "success",
-                "title": "野社零点签到",
+                "title": "每日轶闻",
                 "message": "端砚 x1",
                 "items": [{"name": "端砚", "quality": "RED", "count": 1}],
                 "createdAt": int(RAW_TIMESTAMP),
@@ -214,7 +214,7 @@ class AdminPageRenderTest(unittest.TestCase):
         self.assertIn("任务消息队列", page)
         self.assertIn("2.4.0", page)
         self.assertIn("在线", page)
-        self.assertIn("野社零点签到", page)
+        self.assertIn("每日轶闻", page)
         self.assertIn("class='result-item quality-red'", page)
         self.assertIn("端砚 x1", page)
         self.assertNotIn("端砚（RED）", page)
@@ -279,7 +279,7 @@ class AdminPageRenderTest(unittest.TestCase):
         self.assertIn("value='delete'", page)
         self.assertIn("value='verify'", page)
         self.assertIn("value='toggle'", page)
-        self.assertIn("野社零点签到", page)
+        self.assertIn("每日轶闻", page)
         self.assert_no_raw_values(page, "tasks")
 
     def test_time_and_enum_labels_are_readable(self):

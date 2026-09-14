@@ -17,6 +17,8 @@ data class CloudTask(
     val lastMessage: String,
     val executionMode: String,
     val merchantAutoComplete: Boolean = false,
+    /** 执行前祈禳的道观运签签种（空 = 不祈禳）。 */
+    val blessingType: String = "",
     val merchantCityCode: String = "",
     val merchantPrincipal: Long = 0L,
     val merchantTransportId: Long = 0L,
@@ -139,6 +141,7 @@ internal val REAMICRO_AUTOMATION_TASK_TYPES = setOf(
     "yeshe_draw_card",
     "cloud_auto_read",
     "traveling_merchant",
+    "pawn",
 )
 
 /**
@@ -191,6 +194,7 @@ internal fun parseCloudTask(root: JSONObject): CloudTask {
         lastMessage = data.optString("lastMessage"),
         executionMode = data.optString("executionMode", "server"),
         merchantAutoComplete = configuration.optBoolean("merchantAutoComplete", false),
+        blessingType = configuration.optString("blessingType").trim().uppercase(),
         merchantCityCode = configuration.optString("merchantCityCode"),
         merchantPrincipal = configuration.optLong("merchantPrincipal", 0L).coerceAtLeast(0L),
         merchantTransportId = configuration.optLong("merchantTransportId", 0L).coerceAtLeast(0L),

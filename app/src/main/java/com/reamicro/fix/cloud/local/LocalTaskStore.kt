@@ -26,6 +26,8 @@ data class LocalTask(
     val merchantCityCode: String = "",
     val merchantPrincipal: Long = 0L,
     val merchantTransportId: Long = 0L,
+    /** 执行前要祈禳的道观运签签种（空 = 不祈禳）。wire 值取自游戏：LUCK/SAFETY/WEALTH。 */
+    val blessingType: String = "",
     // 运行时状态
     val nextRunAt: Long = 0L,
     val lastMessage: String = "",
@@ -303,6 +305,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
             merchantCityCode = obj.optString(KEY_MERCHANT_CITY_CODE),
             merchantPrincipal = obj.optLong(KEY_MERCHANT_PRINCIPAL, 0L).coerceAtLeast(0L),
             merchantTransportId = obj.optLong(KEY_MERCHANT_TRANSPORT_ID, 0L).coerceAtLeast(0L),
+            blessingType = obj.optString(KEY_BLESSING_TYPE).trim().uppercase(),
             nextRunAt = obj.optLong(KEY_NEXT_RUN_AT, 0L),
             lastMessage = obj.optString(KEY_LAST_MESSAGE),
             lastRunAt = obj.optLong(KEY_LAST_RUN_AT, 0L),
@@ -320,6 +323,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
         .put(KEY_MERCHANT_CITY_CODE, task.merchantCityCode)
         .put(KEY_MERCHANT_PRINCIPAL, task.merchantPrincipal)
         .put(KEY_MERCHANT_TRANSPORT_ID, task.merchantTransportId)
+        .put(KEY_BLESSING_TYPE, task.blessingType.trim().uppercase())
 
     private fun readAccount(accountId: String): JSONObject? {
         val raw = prefs()?.getString(accountKey(accountId), null) ?: return null
@@ -401,6 +405,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
         private const val KEY_MERCHANT_CITY_CODE = "merchantCityCode"
         private const val KEY_MERCHANT_PRINCIPAL = "merchantPrincipal"
         private const val KEY_MERCHANT_TRANSPORT_ID = "merchantTransportId"
+        internal const val KEY_BLESSING_TYPE = "blessingType"
         const val KEY_NEXT_RUN_AT = "nextRunAt"
         const val KEY_LAST_MESSAGE = "lastMessage"
         const val KEY_LAST_RUN_AT = "lastRunAt"
@@ -423,6 +428,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
         private val CONFIG_KEYS = setOf(
             KEY_ENABLED, KEY_TIME_OF_DAY, KEY_DURATION_MINUTES, KEY_DAILY_DRAW_LIMIT, KEY_BOOKS,
             KEY_MERCHANT_AUTO_COMPLETE, KEY_MERCHANT_CITY_CODE, KEY_MERCHANT_PRINCIPAL, KEY_MERCHANT_TRANSPORT_ID,
+            KEY_BLESSING_TYPE,
         )
         // 执行记录只保留最近若干条，避免 SharedPreferences 无限增长。
         private const val KEY_RECORDS = "records"

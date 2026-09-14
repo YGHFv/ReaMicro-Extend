@@ -238,10 +238,10 @@ private fun ReaMicroSettingsHook.openLocalAutomationRecordsDialog() {
 }
 
 private fun localTaskTitleOf(taskType: String): String = when (taskType) {
-    "yeshe_checkin" -> "野社签到"
-    "yeshe_draw_card" -> "野社抽卡"
+    "yeshe_checkin" -> "每日轶闻"
+    "yeshe_draw_card" -> "自动祈愿"
     "cloud_auto_read" -> "自动阅读"
-    "traveling_merchant" -> "行商通知"
+    "traveling_merchant" -> "自动行商"
     else -> taskType
 }
 
@@ -417,6 +417,28 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
         val merchantTransport = apiServerEdit(activity, colors, "新行商车马 transportId（留空沿用上次）", (task?.merchantTransportId?.takeIf { it > 0L })?.toString().orEmpty()).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
         }
+        // 运签：每日轶闻固定求运；自动行商在求安/求财之间切换（游戏只认这三个 wire 值）。
+        var blessingChoice = task?.blessingType?.trim()?.uppercase()
+            ?.takeIf { spec.blessingOptions.contains(it) }
+            ?: spec.blessingOptions.firstOrNull().orEmpty()
+        val blessingButton = spec.blessingOptions.takeIf { it.isNotEmpty() }?.let {
+            settingsDialogButton(
+                activity,
+                "运签：${com.reamicro.fix.cloud.local.CloudTaskLocalRunner.blessingLabel(blessingChoice)}",
+                colors,
+                SettingsDialogButtonRole.Neutral,
+            ).apply {
+                setOnClickListener {
+                    if (spec.blessingOptions.size <= 1) {
+                        showToast("${spec.title}固定使用求运签")
+                        return@setOnClickListener
+                    }
+                    val next = (spec.blessingOptions.indexOf(blessingChoice) + 1) % spec.blessingOptions.size
+                    blessingChoice = spec.blessingOptions[next]
+                    text = "运签：${com.reamicro.fix.cloud.local.CloudTaskLocalRunner.blessingLabel(blessingChoice)}"
+                }
+            }
+        }
         card.addView(account, apiServerRowParams(activity))
         if (!spec.rewardTriggered && !spec.merchant) card.addView(time, apiServerRowParams(activity))
         if (spec.rewardTriggered) card.addView(drawLimit, apiServerRowParams(activity))
@@ -424,6 +446,7 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
             card.addView(duration, apiServerRowParams(activity))
             card.addView(books, apiServerRowParams(activity))
         }
+        blessingButton?.let { card.addView(it, apiServerRowParams(activity)) }
         if (spec.merchant) {
             card.addView(merchantAutoComplete, apiServerRowParams(activity))
             card.addView(merchantCity, apiServerRowParams(activity))
@@ -433,7 +456,7 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
         val status = TextView(activity).apply {
             setTextColor(colors.body)
             text = when {
-                spec.merchant -> "每 4 小时检查行商，进行中时暂停到完成时刻再通知；默认只通知不自动完成。开启自动完成行商后，城池/本金/车马留空会沿用上次行商的配置"
+                spec.merchant -> "有行商时按它的结束时间检查；完成/结算后通知事件与收益。默认只通知不自动完成；开启自动完成后，城池/本金/车马留空会沿用上次行商的配置，没有在途行商时会自动开一趟"
                 spec.rewardTriggered -> "启用后按每日上限抽卡；填写 0 会抽到彩筹用完"
                 task == null -> "保存后即完成配置"
                 else -> "保存会更新当前任务配置"
@@ -480,6 +503,7 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
                 merchantCityCode = if (spec.merchant) merchantCity.text.toString().trim() else "",
                 merchantPrincipal = if (spec.merchant) merchantPrincipal.text.toString().trim().toLongOrNull()?.coerceAtLeast(0L) ?: 0L else 0L,
                 merchantTransportId = if (spec.merchant) merchantTransport.text.toString().trim().toLongOrNull()?.coerceAtLeast(0L) ?: 0L else 0L,
+                blessingType = blessingChoice,
             )
             val store = LocalTaskStore { activity.applicationContext }
             store.saveTask(accountId, localTask, currentCredential.token)

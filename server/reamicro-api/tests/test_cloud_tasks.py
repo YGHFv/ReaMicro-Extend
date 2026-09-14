@@ -151,7 +151,7 @@ class CloudTaskSecurityTest(unittest.TestCase):
         item = state.load_notifications()[notification_id]
         self.assertEqual(item["owner"], "host:3")
         self.assertEqual(item["deliveredAt"], 0)
-        self.assertEqual("野社零点签到", item["title"])
+        self.assertEqual("每日轶闻", item["title"])
         self.assertEqual(task["notificationItems"], item["items"])
 
     def test_task_notification_compacts_whitespace_and_long_text(self):
@@ -637,7 +637,7 @@ class AdminSecurityTest(unittest.TestCase):
         self.assertIn("value='cancel'", page)
 
     def test_admin_task_and_owner_labels_are_readable(self):
-        self.assertEqual(labels._admin_task_label("cloud_auto_read"), "云端自动阅读")
+        self.assertEqual(labels._admin_task_label("cloud_auto_read"), "自动阅读")
         self.assertEqual(labels._admin_task_status_label("scheduled"), "等待执行")
         self.assertEqual(labels._admin_owner_label("host:3"), "阅微账号 3")
         self.assertEqual(admin_format._admin_time_label(1_787_775_994_125), "2026-08-27 04:26")
