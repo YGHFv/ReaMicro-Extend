@@ -146,11 +146,24 @@ object CloudTaskLocalRunner {
 
     /** 行商详情：谁、去哪、本金多少、结算多少、事件是什么。 */
     private fun merchantDetail(trip: MerchantTrip): JSONObject = JSONObject()
-        .put("事件", trip.eventTitle.ifBlank { "行商" })
+        .put(
+            "事件",
+            trip.eventTitle.ifBlank {
+                // 行商途中的事件在结算时才生成，这里别用"行商"这种兜底词冒充事件内容。
+                if (trip.status.equals("TRAVELING", ignoreCase = true)) "待结算（事件在抵达后才生成）" else "无"
+            },
+        )
         .apply { if (trip.eventContent.isNotBlank()) put("事件详情", trip.eventContent) }
         .put("行程", "${formatMerchantEpoch(trip.startTimeMs)} → ${formatMerchantEpoch(trip.endTimeMs)}")
-        .put("城池", trip.cityCode)
+        .put("城池", trip.cityName.ifBlank { trip.cityCode })
         .apply { if (trip.transportLabel.isNotBlank()) put("车马", trip.transportLabel) }
+        .apply {
+            // 行商这趟自带运签信息（blessingName / effect），比单独查一次更准。
+            if (trip.blessingName.isNotBlank()) {
+                val effect = blessingEffectText(trip.blessingEffectType, trip.blessingEffectValue)
+                put("运签", listOf(trip.blessingName, effect).filter { it.isNotBlank() }.joinToString(" · "))
+            }
+        }
         .put("本金", "${trip.principal} 铜")
         .put("结算", "${trip.settlementAmount} 铜")
         .put("状态", trip.status.ifBlank { "—" })
@@ -592,14 +605,13 @@ object CloudTaskLocalRunner {
             // 这趟行商实际使用的参数，作为「上次行商配置」的来源。
             cityCode = trip.optString("cityCode"),
             transportId = trip.optLong("transportId", 0L),
-            // 游戏里显示的是"河曲马 · 速度 +5%"这种名称+效果，字段名各版本不一，逐个兜底。
-            transportLabel = sequenceOf(
-                trip.optString("transportName"),
-                trip.optString("transportEffect"),
-                nestedObjectString(trip, "transport", "name"),
-                nestedObjectString(trip, "transport", "effect"),
-                nestedObjectString(trip, "transportInfo", "name"),
-            ).filter { it.isNotBlank() }.distinct().joinToString(" · "),
+            // 城池与车马的中文名：响应里带着 cities[] / transports[] 对照表，
+            // 直接把 code/id 翻出来，别把 LANGYA、transportId=5 这种内部值摆给用户看。
+            cityName = lookupName(data.optJSONArray("cities"), "code", trip.optString("cityCode"), "name"),
+            transportLabel = transportLabel(trip.optLong("transportId", 0L), data.optJSONArray("transports")),
+            blessingName = trip.optString("blessingName"),
+            blessingEffectType = trip.optString("blessingEffectType"),
+            blessingEffectValue = trip.optString("blessingEffectValue"),
         )
     }
 
@@ -624,9 +636,45 @@ object CloudTaskLocalRunner {
 
     internal enum class MerchantPhase { IN_TRANSIT, ARRIVED, SETTLED, NOTIFIED }
 
-    /** 从嵌套对象里取一个字符串字段（取不到返回空串）。 */
-    private fun nestedObjectString(parent: JSONObject, objectKey: String, fieldKey: String): String =
-        parent.optJSONObject(objectKey)?.optString(fieldKey).orEmpty()
+    /** 在数组里按 [matchKey] 找到 [value] 对应的那一条，返回它的 [nameKey] 字段（找不到就退回原值）。 */
+    private fun lookupName(array: JSONArray?, matchKey: String, value: String, nameKey: String): String {
+        if (array == null || value.isBlank()) return value
+        for (index in 0 until array.length()) {
+            val item = array.optJSONObject(index) ?: continue
+            if (item.optString(matchKey) == value) return item.optString(nameKey).ifBlank { value }
+        }
+        return value
+    }
+
+    /** 车马的中文名与效果，形如"河曲马 · 速度 +5%"；查不到时退回 id。 */
+    private fun transportLabel(transportId: Long, transports: JSONArray?): String {
+        if (transports == null || transportId <= 0L) return ""
+        for (index in 0 until transports.length()) {
+            val item = transports.optJSONObject(index) ?: continue
+            if (item.optLong("id", 0L) != transportId) continue
+            val name = item.optString("name").ifBlank { "车马 $transportId" }
+            val speed = item.optLong("speedPercent", 0L)
+            val trait = item.optString("traitName")
+            return listOfNotNull(
+                name,
+                speed.takeIf { it != 0L }?.let { "速度 ${if (it > 0) "+" else ""}$it%" },
+                trait.takeIf { it.isNotBlank() },
+            ).joinToString(" · ")
+        }
+        return "车马 $transportId"
+    }
+
+    /**
+     * 运签效果文案。
+     *
+     * 效果类型是游戏侧的枚举，直接显示 MERCHANT_PROFIT_BONUS 这种值用户看不懂，按已知类型翻译。
+     */
+    internal fun blessingEffectText(effectType: String, effectValue: String): String = when (effectType.trim().uppercase()) {
+        "MERCHANT_PROFIT_BONUS" -> "商事盈利收益率提升 $effectValue%"
+        "LORE_THRESHOLD_BONUS" -> "下一次每日轶闻：绿色及以上概率提升 $effectValue 个百分点"
+        "" -> ""
+        else -> "$effectType +$effectValue"
+    }
 
     internal data class MerchantTrip(
         val hasTrip: Boolean,
@@ -639,9 +687,13 @@ object CloudTaskLocalRunner {
         val eventTitle: String = "",
         val eventContent: String = "",
         val cityCode: String = "",
+        val cityName: String = "",
         val transportId: Long = 0L,
         /** 车马名称/效果，形如"河曲马 · 速度 +5%"；取不到时为空串。 */
         val transportLabel: String = "",
+        val blessingName: String = "",
+        val blessingEffectType: String = "",
+        val blessingEffectValue: String = "",
     )
 
     internal data class Outcome(

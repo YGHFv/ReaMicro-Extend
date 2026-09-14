@@ -28,10 +28,16 @@ class CloudTaskBlessingAndPawnTest {
     }
 
     @Test
+    fun `空签种是「不祈禳」而不是未知`() {
+        // 用户明确要求能选择不祈禳：空串代表"不发祈禳请求"，界面上要显示成人话。
+        assertEquals("不祈禳", CloudTaskLocalRunner.blessingLabel(""))
+        assertEquals("不祈禳", CloudTaskLocalRunner.blessingLabel("  "))
+    }
+
+    @Test
     fun `未知签种退回通用称呼而不是显示原文`() {
         // 服务端将来加了新签种也不能把裸 wire 值塞进通知里给用户看。
         assertEquals("运签", CloudTaskLocalRunner.blessingLabel("SOMETHING_NEW"))
-        assertEquals("运签", CloudTaskLocalRunner.blessingLabel(""))
     }
 
     @Test
