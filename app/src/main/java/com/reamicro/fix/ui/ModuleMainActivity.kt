@@ -103,21 +103,6 @@ class ModuleMainActivity : Activity() {
         } else {
             listOf(
                 ui.pageTitle("记录", "共 ${records.size} 条（失败 $failed 条），最新在前；点任意一条看详情"),
-                ui.card(
-                    listOf(
-                        ui.row(
-                            "记录管理",
-                            "「立即执行」和「重算下次时刻」在配置页；这里只负责清空本机记录。",
-                            actions = listOf(
-                                "清空" to {
-                                    store.accountIds().forEach { store.clearRecords(it) }
-                                    ui.toast("任务记录已清空")
-                                    refresh()
-                                },
-                            ),
-                        ),
-                    ),
-                ),
             )
         }
         return ui.page(head + records.map { (accountId, record) -> recordCard(accountId, record) })
