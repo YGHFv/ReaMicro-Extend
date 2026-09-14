@@ -103,6 +103,21 @@ class ModuleMainActivity : Activity() {
         } else {
             listOf(
                 ui.pageTitle("记录", "共 ${records.size} 条（失败 $failed 条），最新在前；点任意一条看详情"),
+                ui.card(
+                    listOf(
+                        ui.row(
+                            "记录管理",
+                            "「立即执行」和「重算下次时刻」在配置页；这里只负责清空本机记录。",
+                            actions = listOf(
+                                "清空" to {
+                                    store.accountIds().forEach { store.clearRecords(it) }
+                                    ui.toast("任务记录已清空")
+                                    refresh()
+                                },
+                            ),
+                        ),
+                    ),
+                ),
             )
         }
         return ui.page(head + records.map { (accountId, record) -> recordCard(accountId, record) })
@@ -172,30 +187,9 @@ class ModuleMainActivity : Activity() {
         val tasks = accounts.flatMap { accountId -> store.list(accountId).map { accountId to it } }
         val enabled = tasks.count { (_, task) -> task.enabled }
         val nextTaskAt = futureNextRunAt(store)
-        val recordStore = LocalTaskStore { applicationContext }
-        val recordCount = recordStore.accountIds().sumOf { recordStore.records(it).size }
         val children = mutableListOf<View>(
             ui.pageTitle("配置", "本地任务与模块权限都集中在这里"),
             ui.sectionTitle("任务"),
-            ui.card(
-                listOf(
-                    ui.row(
-                        "任务记录",
-                        if (recordCount == 0) "还没有记录" else "本机已记录 $recordCount 条",
-                        actions = buildList<Pair<String, () -> Unit>> {
-                            add("立即执行" to { runLocalTasksNow() })
-                            add("重算下次时刻" to { recomputeSchedule() })
-                            if (recordCount > 0) {
-                                add("清空" to {
-                                    recordStore.accountIds().forEach { recordStore.clearRecords(it) }
-                                    ui.toast("任务记录已清空")
-                                    refresh()
-                                })
-                            }
-                        },
-                    ),
-                ),
-            ),
             ui.card(
                 listOf(
                     ui.row(
@@ -207,6 +201,10 @@ class ModuleMainActivity : Activity() {
                             append("\n下次任务时刻：${nextTaskAt?.let(::formatTime) ?: "无"}")
                             if (nextTaskAt != null) append("（任务自己排的时刻）")
                         },
+                        actions = listOf(
+                            "立即执行" to { runLocalTasksNow() },
+                            "重算下次时刻" to { recomputeSchedule() },
+                        ),
                     ),
                 ),
             ),
@@ -230,9 +228,10 @@ class ModuleMainActivity : Activity() {
         val subtitle = buildString {
             append(if (task.enabled) "已启用" else "已关闭")
             if (task.blessingType.isNotBlank()) append(" · ${CloudTaskLocalRunner.blessingLabel(task.blessingType)}")
-            if (task.enabled && task.nextRunAt > 0L) append("\n下次：${formatDateTime(task.nextRunAt)}")
+            append('\n')
+            append(nextRunLine(accountId, task, spec))
             if (task.lastMessage.isNotBlank()) {
-                append("\n")
+                append('\n')
                 append(task.lastMessage)
             }
         }
@@ -242,11 +241,47 @@ class ModuleMainActivity : Activity() {
                     spec?.title ?: taskTitle(task.taskType),
                     subtitle,
                     actions = listOf(
+                        "立即执行" to { runSingleTask(accountId, task) },
                         (if (task.enabled) "停用" else "启用") to { setTaskEnabled(accountId, task, !task.enabled) },
                         "改配置" to { openTaskEditor(accountId, task, spec) },
                     ),
                 ),
             ),
+        )
+    }
+
+    /**
+     * 这一行「下次…」怎么写，三种任务语义完全不同：
+     * - 抽卡（自动祈愿）不是定时任务，它是签到奖励到账后触发的，写时间只会误导；
+     * - 行商的下次执行是"轮询检查"，而且真正的节点是**当前这趟行商的结束时间**——那个时间只有
+     *   调接口才知道，所以从最近一次执行记录里读出来一起显示，避免和游戏里看到的时间对不上；
+     * - 其余任务是每天固定时间，直接显示下次时刻。
+     */
+    private fun nextRunLine(accountId: String, task: LocalTask, spec: CloudAutomationTaskSpec?): String {
+        if (!task.enabled) return "未启用"
+        if (spec?.rewardTriggered == true) return "每日轶闻完成后自动祈愿"
+        if (spec?.merchant == true) {
+            val poll = if (task.nextRunAt > 0L) "下次检查 ${formatDateTime(task.nextRunAt)}" else "下次检查 待排程"
+            val tripEnd = lastMerchantTripEnd(accountId, task.taskType)
+            return if (tripEnd != null) "$poll\n行商预计 $tripEnd 完成" else poll
+        }
+        return if (task.nextRunAt > 0L) "下次 ${formatDateTime(task.nextRunAt)}" else "下次 待排程"
+    }
+
+    /** 从最近一次行商执行记录的详情里取"行程"的结束时间。 */
+    private fun lastMerchantTripEnd(accountId: String, taskType: String): String? =
+        LocalTaskStore { applicationContext }.records(accountId)
+            .firstOrNull { it.taskType == taskType }
+            ?.detail
+            ?.let { runCatching { JSONObject(it) }.getOrNull() }
+            ?.optString("行程")
+            ?.substringAfter(" → ", "")
+            ?.takeIf { it.isNotBlank() }
+
+    private fun runSingleTask(accountId: String, task: LocalTask) {
+        ui.background(
+            work = { LocalTaskRunner.runTaskNow(applicationContext, accountId, task.taskType) },
+            then = { ui.toast(it); refresh() },
         )
     }
 

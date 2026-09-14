@@ -68,6 +68,37 @@ object LocalTaskRunner {
         return completed
     }
 
+    /**
+     * 立即执行指定的一条本地任务（忽略 nextRunAt）。返回结果消息。
+     *
+     * 与「全部立即执行」分开：用户往往只想补跑某一条（比如刚改了行商参数），
+     * 把其它任务一起跑掉既慢又可能重复消耗。
+     */
+    fun runTaskNow(context: Context, accountId: String, taskType: String): String {
+        val appContext = context.applicationContext
+        val store = LocalTaskStore { appContext }
+        val task = store.get(accountId, taskType) ?: return "任务不存在"
+        val token = store.token(accountId)
+        if (token.isBlank()) return "阅微登录凭据缺失，请重新登录"
+        val credential = JSONObject()
+            .put("baseUrl", CloudTaskLocalRunner.REAMICRO_BASE_URL)
+            .put("token", token)
+        val now = System.currentTimeMillis()
+        val outcome = runCatching {
+            CloudTaskLocalRunner.runTask(
+                taskType,
+                store.runtimeState(accountId, taskType),
+                buildRequest(task),
+                credential,
+            )
+        }.getOrElse { CloudTaskLocalRunner.Outcome("failed", it.message ?: "执行失败") }
+        persistOutcome(store, accountId, task, outcome, now)
+        store.appendRecord(accountId, taskType, outcome.result, outcome.message, now, outcome.detail.toString())
+        if (outcome.notify) postNotification(appContext, accountId, taskType, outcome)
+        runCatching { CloudTaskWakeScheduler.schedule(appContext) }
+        return outcome.message
+    }
+
     private fun buildRequest(task: LocalTask): JSONObject {
         val request = JSONObject()
         // 运签签种对两个任务都有意义：每日轶闻固定求运，自动行商按用户选择求安/求财。

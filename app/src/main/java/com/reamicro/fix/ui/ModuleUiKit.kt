@@ -318,14 +318,12 @@ internal class ModuleUiKit(private val context: Context) {
         setPadding(px(14), px(12), px(14), px(12))
         isClickable = true
         setOnClickListener { onClick() }
+        // 左右不留外边距：页面已经有 16dp 内边距，这里再加 16dp 会让记录卡片比其它卡片窄一圈
+        // （实机上就是"通知卡片的边距和其他页面不一样"）。
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply {
-            leftMargin = px(16)
-            rightMargin = px(16)
-            bottomMargin = px(8)
-        }
+        ).apply { bottomMargin = px(10) }
         addView(
             LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL

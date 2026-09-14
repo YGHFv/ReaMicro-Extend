@@ -97,7 +97,13 @@ object CloudTaskLocalRunner {
             MerchantPhase.IN_TRANSIT -> {
                 val resumeAt = trip.endTimeMs + TRAVELING_MERCHANT_ARRIVE_GRACE_MS
                 val message = "行商进行中，预计 ${formatMerchantEpoch(trip.endTimeMs)} 完成"
-                return Outcome("success", message, merchantState(resumeAt, lastNotified, remembered), notify = false)
+                return Outcome(
+                    "success",
+                    message,
+                    merchantState(resumeAt, lastNotified, remembered),
+                    notify = false,
+                    detail = merchantDetail(trip),
+                )
             }
             MerchantPhase.ARRIVED -> {
                 if (trip.tripId == lastNotified) {
