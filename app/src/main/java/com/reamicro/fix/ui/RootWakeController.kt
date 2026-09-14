@@ -4,6 +4,7 @@ import android.content.Context
 import com.reamicro.fix.cloud.api.CloudTaskWakeScheduler
 import com.reamicro.fix.cloud.api.NextWakeHint
 import com.reamicro.fix.logging.ModuleAndroidLog
+import com.reamicro.fix.notification.CloudTaskNotifications
 import java.util.concurrent.TimeUnit
 
 /**
@@ -124,7 +125,16 @@ object RootWakeController {
                 "mkdir -p ${ADB_DIR}/service.d && cat > $WATCHDOG_PATH <<'EOF'\n$script\nEOF\nchmod 755 $WATCHDOG_PATH",
                 timeoutSeconds = 20,
             )
-            // 2) 先把当前的下次唤醒时刻写出去，看门狗一起步就能按它睡，不必先空转一轮。
+            // 2) 顺手把模块加进 Doze 白名单与活跃待机桶：降低被系统冻结/延迟的概率。
+            //    这只是"降低概率"，真正保证能被叫醒的是看门狗，两者互不替代。
+            val whitelist = runCatching {
+                runRoot("cmd deviceidle whitelist +${CloudTaskNotifications.MODULE_PACKAGE_NAME}", 15).output
+            }.getOrDefault("")
+            runCatching {
+                runRoot("am set-standby-bucket ${CloudTaskNotifications.MODULE_PACKAGE_NAME} active", 15)
+            }
+            ModuleAndroidLog.legacy(LOG_TAG, "root doze whitelist applied: ${whitelist.take(120)}")
+            // 3) 先把当前的下次唤醒时刻写出去，看门狗一起步就能按它睡，不必先空转一轮。
             CloudTaskWakeScheduler.schedule(appContext)
             // 3) 立刻起一份，不必等重启。
             runRoot("$WATCHDOG_PATH >/dev/null 2>&1 &", timeoutSeconds = 10)
