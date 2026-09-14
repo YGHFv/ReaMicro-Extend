@@ -70,15 +70,21 @@ internal class ModuleUiKit(private val context: Context) {
         setPadding(px(8), px(18), px(8), px(6))
     }
 
-    /** 卡片容器；卡片内部再放若干行。 */
+    /**
+     * 卡片容器；卡片内部再放若干行。
+     *
+     * 卡片自己带下外边距与左右边距：此前没有外边距，多张卡在页面上直接贴在一起（实机上看起来
+     * 就是"卡片互相堆叠重合"）。间距统一收在这里，调用方不用每处都写 layoutParams。
+     */
     fun card(rows: List<View>): View = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
         background = rounded(palette.rowBackground, 12f)
-        addView(LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(px(4), px(4), px(4), px(4))
-            rows.forEach { addView(it) }
-        })
+        setPadding(px(4), px(4), px(4), px(4))
+        rows.forEach { addView(it) }
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { bottomMargin = px(10) }
     }
 
     /**
@@ -102,7 +108,9 @@ internal class ModuleUiKit(private val context: Context) {
             addView(LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(0, px(10), 0, 0)
-                actions.forEach { (label, onClick) -> addView(button(label, onClick = onClick)) }
+                actions.forEach { (label, onClick) ->
+                    addView(button(label, role = buttonRoleOf(label), onClick = onClick))
+                }
             })
         }
     }
@@ -114,9 +122,23 @@ internal class ModuleUiKit(private val context: Context) {
      * 糊在一起，完全看不出是个可点的控件（实机见过）。页面底色与卡片底色在两种配色下都不同，
      * 再加一圈描边，按钮在任何配色下都能看出来。
      */
-    fun button(label: String, textColor: Int = palette.primaryText, onClick: () -> Unit): TextView =
-        textView(label, 14f, textColor).apply {
+    /** 按钮配色角色。尺寸与间距对所有角色一致，只有文字颜色不同。 */
+    enum class Role { Primary, Neutral, Danger }
+
+    fun button(label: String, role: Role = Role.Primary, onClick: () -> Unit): TextView =
+        textView(
+            label,
+            14f,
+            when (role) {
+                Role.Primary -> palette.primaryText
+                Role.Neutral -> palette.neutralText
+                Role.Danger -> palette.destructiveText
+            },
+        ).apply {
             gravity = Gravity.CENTER
+            // 文字左右必须留内边距：只给固定宽高的话，"立即执行"这种四字标签会顶到边框上，
+            // 一排按钮的宽度还各不相同，看起来就"丑且不统一"。
+            setPadding(px(16), 0, px(16), 0)
             background = rounded(palette.pageBackground, 8f).apply {
                 setStroke((1.2f * dp).toInt(), palette.border)
             }
@@ -124,12 +146,21 @@ internal class ModuleUiKit(private val context: Context) {
             setOnClickListener { onClick() }
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                px(38),
-            ).apply {
-                rightMargin = px(8)
-                left = px(2)
-            }
+                px(36),
+            ).apply { rightMargin = px(8) }
         }
+
+    /**
+     * 按按钮文案推断配色角色。
+     *
+     * 调用方只给「文案 to 回调」，不必每处都标角色；危险操作（清空/停用/取消）统一走红色，
+     * 这样同一个动作在哪个页面都是同一个颜色。
+     */
+    private fun buttonRoleOf(label: String): Role = when (label) {
+        "清空", "停用", "取消" -> Role.Danger
+        "关闭", "刷新", "重排闹钟", "重算下次时刻" -> Role.Neutral
+        else -> Role.Primary
+    }
 
     fun info(text: String, color: Int = palette.body): TextView =
         textView(text, 12f, color).apply { setPadding(px(14), px(4), px(14), px(10)) }

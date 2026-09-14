@@ -95,30 +95,17 @@ class ModuleMainActivity : Activity() {
             .flatMap { accountId -> store.records(accountId).map { accountId to it } }
             .sortedByDescending { (_, record) -> record.at }
         val failed = records.count { (_, record) -> record.result != "success" }
-        val header = ui.row(
-            "任务记录",
-            if (records.isEmpty()) {
-                "还没有执行记录。任务跑过之后会在这里按时间列出，点进去能看到运签、奖励、行商事件这些细节。"
-            } else {
-                "本机已记录 ${records.size} 条（失败 $failed 条），最新在前。点任意一条看详情。"
-            },
-            actions = buildList<Pair<String, () -> Unit>> {
-                add("立即执行" to { runLocalTasksNow() })
-                if (records.isNotEmpty()) {
-                    add("清空" to {
-                        store.accountIds().forEach { store.clearRecords(it) }
-                        ui.toast("任务记录已清空")
-                        refresh()
-                    })
-                }
-            },
-        )
-        return ui.page(
+        val head = if (records.isEmpty()) {
             listOf(
-                ui.pageTitle("阅微补全计划", "本地任务由模块进程执行，与阅微是否打开无关"),
-                ui.card(listOf(header)),
-            ) + records.map { (accountId, record) -> recordCard(accountId, record) },
-        )
+                ui.pageTitle("记录", "任务跑过之后会在这里按时间列出"),
+                ui.card(listOf(ui.row("还没有执行记录", "到「配置」页点「立即执行」可以先跑一轮；点任意一条记录能看详情（运签、奖励、行商事件）"))),
+            )
+        } else {
+            listOf(
+                ui.pageTitle("记录", "共 ${records.size} 条（失败 $failed 条），最新在前；点任意一条看详情"),
+            )
+        }
+        return ui.page(head + records.map { (accountId, record) -> recordCard(accountId, record) })
     }
 
     /** 一条记录按通知的样式呈现：任务名 + 时间 / 正文，整块可点。 */
@@ -154,11 +141,24 @@ class ModuleMainActivity : Activity() {
         )
     }
 
+    /** 「立即执行」强制跑一轮（忽略 nextRunAt），顺便把旧代码写下的过时时刻重算掉。 */
     private fun runLocalTasksNow() {
         ui.background(
             work = {
-                val count = LocalTaskRunner.runDue(applicationContext)
-                if (count > 0) "已执行 $count 个到期任务" else "没有到期的本地任务"
+                val count = LocalTaskRunner.runDue(applicationContext, force = true)
+                if (count > 0) "已执行 $count 个任务" else "没有已启用的本地任务"
+            },
+            then = { ui.toast(it); refresh() },
+        )
+    }
+
+    /** 只按配置的时间点重算下次执行时刻，不执行任务——专治历史遗留的"上次跑完 + 24 小时"。 */
+    private fun recomputeSchedule() {
+        ui.background(
+            work = {
+                val updated = LocalTaskStore { applicationContext }.rescheduleEnabledTasks()
+                runCatching { CloudTaskWakeScheduler.schedule(applicationContext) }
+                if (updated > 0) "已按配置时间重算 $updated 个任务" else "任务时刻已经和配置一致"
             },
             then = { ui.toast(it); refresh() },
         )
@@ -172,9 +172,30 @@ class ModuleMainActivity : Activity() {
         val tasks = accounts.flatMap { accountId -> store.list(accountId).map { accountId to it } }
         val enabled = tasks.count { (_, task) -> task.enabled }
         val nextTaskAt = futureNextRunAt(store)
+        val recordStore = LocalTaskStore { applicationContext }
+        val recordCount = recordStore.accountIds().sumOf { recordStore.records(it).size }
         val children = mutableListOf<View>(
             ui.pageTitle("配置", "本地任务与模块权限都集中在这里"),
-            ui.sectionTitle("本地任务"),
+            ui.sectionTitle("任务"),
+            ui.card(
+                listOf(
+                    ui.row(
+                        "任务记录",
+                        if (recordCount == 0) "还没有记录" else "本机已记录 $recordCount 条",
+                        actions = buildList<Pair<String, () -> Unit>> {
+                            add("立即执行" to { runLocalTasksNow() })
+                            add("重算下次时刻" to { recomputeSchedule() })
+                            if (recordCount > 0) {
+                                add("清空" to {
+                                    recordStore.accountIds().forEach { recordStore.clearRecords(it) }
+                                    ui.toast("任务记录已清空")
+                                    refresh()
+                                })
+                            }
+                        },
+                    ),
+                ),
+            ),
             ui.card(
                 listOf(
                     ui.row(
@@ -193,7 +214,6 @@ class ModuleMainActivity : Activity() {
         if (tasks.isEmpty()) {
             children += ui.card(listOf(ui.row("还没有本地任务", "在阅微的设置页里启用任务后，这里就能改配置")))
         } else {
-            children += ui.sectionTitle("任务")
             tasks.forEach { (accountId, task) -> children += taskCard(accountId, task) }
         }
         children += ui.info("这里改的是模块进程执行用的那份本地任务配置；阅微设置页里的改动会在下次下发时覆盖它。")

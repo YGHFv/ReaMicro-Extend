@@ -16,8 +16,13 @@ import org.json.JSONObject
  */
 object LocalTaskRunner {
 
-    /** 执行所有已到期的本地任务，写回状态、记执行记录并发通知。返回执行条数。 */
-    fun runDue(context: Context, maxTasks: Int = 8): Int {
+    /**
+     * 执行本地任务，写回状态、记执行记录并发通知。返回执行条数。
+     *
+     * [force] 为真时忽略 nextRunAt 一律执行——「立即执行」按钮要的就是这个：不强制的话
+     * 时刻还没到的任务会被跳过，用户看到的"下次执行时间"永远停在上一次的旧值上。
+     */
+    fun runDue(context: Context, maxTasks: Int = 8, force: Boolean = false): Int {
         val appContext = context.applicationContext
         val store = LocalTaskStore { appContext }
         val now = System.currentTimeMillis()
@@ -32,7 +37,7 @@ object LocalTaskRunner {
                 for (task in store.list(accountId)) {
                     if (completed >= maxTasks) return completed
                     if (!task.enabled) continue
-                    if (task.nextRunAt > now) continue
+                    if (!force && task.nextRunAt > now) continue
                     val request = buildRequest(task)
                     // 把上次落盘的运行时状态喂回执行器，签到/抽卡/阅读的每日计数与行商已通知 tripId 才能续跑。
                     val stateInput = store.runtimeState(accountId, task.taskType)

@@ -171,6 +171,30 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
      */
     fun accountIds(): List<String> = storedAccountIds()
 
+    /**
+     * 按任务配置的时间点重算已启用任务的下次执行时刻（**不执行任务**）。
+     *
+     * 用来修正历史遗留的旧值：早前排程用 `now + 24h`，与用户配的「每天 HH:mm」无关，
+     * 那些任务因为时刻在将来又不会被 runDue 选中，光靠执行永远修不回来。
+     */
+    fun rescheduleEnabledTasks(now: Long = System.currentTimeMillis()): Int {
+        var updated = 0
+        for (accountId in storedAccountIds()) {
+            for (task in list(accountId)) {
+                if (!task.enabled) continue
+                val next = if (task.taskType == "traveling_merchant") {
+                    task.nextRunAt.takeIf { it > now } ?: (now + 60_000L)
+                } else {
+                    nextDailyRunAt(task.timeOfDay, now)
+                }
+                if (next == task.nextRunAt) continue
+                recordState(accountId, task.taskType, JSONObject().put(KEY_NEXT_RUN_AT, next))
+                updated++
+            }
+        }
+        return updated
+    }
+
     /** 所有已启用任务的账号集合（去重）。 */
     fun accountsWithEnabledTasks(): Set<String> =
         storedAccountIds().filterTo(linkedSetOf()) { accountId -> list(accountId).any { it.enabled } }
