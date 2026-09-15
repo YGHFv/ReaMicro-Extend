@@ -188,7 +188,7 @@ internal class ModuleUiKit(private val context: Context) {
      * 正文高度按屏幕比例给定值：用 weight 填充的话，外层 card 是 wrap_content，
      * 高度为 0 的子项会被压成不可见。
      */
-    fun contentDialog(title: String, content: String, actions: List<Pair<String, () -> Unit>>): Dialog {
+    fun contentDialog(title: String, content: CharSequence, actions: List<Pair<String, () -> Unit>>, bodySizeSp: Float = 12f): Dialog {
         val dialog = Dialog(context)
         val metrics = context.resources.displayMetrics
         val card = LinearLayout(context).apply {
@@ -204,7 +204,7 @@ internal class ModuleUiKit(private val context: Context) {
                 addView(
                     TextView(context).apply {
                         text = content
-                        textSize = 12f
+                        textSize = bodySizeSp
                         setTextColor(palette.body)
                         includeFontPadding = false
                         setTextIsSelectable(true)

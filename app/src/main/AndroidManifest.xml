@@ -90,7 +90,7 @@
             </intent-filter>
         </receiver>
 
-        <!-- exported=true：闹钟由阅微进程重排时会显式投递到这里，非导出会被系统拒收。 -->
+        <!-- exported=true：闹钟与宿主的重排请求都由阅微进程显式投递到这里，非导出会被系统拒收。 -->
         <receiver
             android:name=".cloud.api.CloudTaskHeartbeatReceiver"
             android:enabled="true"
@@ -101,6 +101,17 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
                 <action android:name="android.intent.action.TIME_SET" />
                 <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 宿主进程自己排不了闹钟：它排出来的是阅微名下的模糊闹钟，且写不进模块的唤醒时刻文件。
+             这里只重排、不执行任务。 -->
+        <receiver
+            android:name=".cloud.api.CloudTaskRescheduleReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.reamicro.fix.RESCHEDULE_WAKE" />
             </intent-filter>
         </receiver>
 

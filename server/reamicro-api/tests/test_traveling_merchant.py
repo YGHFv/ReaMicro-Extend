@@ -90,7 +90,7 @@ class TravelingMerchantTest(unittest.TestCase):
         def fake(url, token, payload, endpoint="", timeout=45):
             self.calls.append((endpoint, payload))
             return 200, {"code": 0, "data": {"activeTrip": {
-                "id": 42, "status": "ARRIVED", "endTime": end_time_ms // 1000,
+                "id": 42, "status": "SETTLED", "endTime": end_time_ms // 1000,
                 "settlementAmount": 379, "principal": 120, "eventTitle": "购朝鲜马",
             }}}, "{}"
 
@@ -109,7 +109,7 @@ class TravelingMerchantTest(unittest.TestCase):
         def fake(url, token, payload, endpoint="", timeout=45):
             self.calls.append((endpoint, payload))
             return 200, {"code": 0, "data": {"activeTrip": {
-                "id": 42, "status": "ARRIVED", "endTime": end_time_ms // 1000,
+                "id": 42, "status": "SETTLED", "endTime": end_time_ms // 1000,
                 "settlementAmount": 379, "principal": 120, "eventTitle": "购朝鲜马",
             }}}, "{}"
 
@@ -118,7 +118,8 @@ class TravelingMerchantTest(unittest.TestCase):
         task["merchantLastNotifiedTripId"] = 42
         result, message = executors.execute_traveling_merchant_task(task)
         self.assertEqual("success", result)
-        self.assertIn("已通知", message)
+        self.assertIn("待领取", message)
+        self.assertNotIn("购朝鲜马", message)
 
     def test_auto_complete_settles_and_starts_new_trip(self):
         end_time_ms = _now_ms() - 60_000
@@ -126,10 +127,14 @@ class TravelingMerchantTest(unittest.TestCase):
             self.calls.append((endpoint, payload))
             if endpoint == "rest/community/get-traveling-merchant":
                 return 200, {"code": 0, "data": {"activeTrip": {
-                    "id": 42, "status": "ARRIVED", "endTime": end_time_ms // 1000,
+                    "id": 42, "status": "SETTLED", "endTime": end_time_ms // 1000,
                     "settlementAmount": 379, "principal": 120, "eventTitle": "购朝鲜马",
                 }}}, "{}"
-            return 200, {"code": 0, "data": {}}, "{}"
+            if endpoint == "rest/community/start-traveling-merchant":
+                return 200, {"code": 0, "data": {"success": True, "trip": {
+                    "id": 43, "status": "TRAVELING", "endTime": _now_ms() + 3_600_000, **payload,
+                }}}, "{}"
+            return 200, {"code": 0, "data": {"success": True}}, "{}"
 
         executors.json_http_request = fake
         task = self.task({
@@ -140,7 +145,7 @@ class TravelingMerchantTest(unittest.TestCase):
         })
         result, message = executors.execute_traveling_merchant_task(task)
         self.assertEqual("success", result)
-        self.assertIn("已自动完成行商", message)
+        self.assertIn("已领取行商奖励", message)
         self.assertIn("开启新行商", message)
         endpoints = [e for e, _ in self.calls]
         self.assertEqual([

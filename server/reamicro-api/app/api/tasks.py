@@ -91,6 +91,7 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
         "createdAt": now,
         "nextRunAt": 0 if task_type == "yeshe_draw_card" else int(payload.get("nextRunAt", now)),
         "runCount": 0,
+        "automationStateVersion": 1,
         "maxRetries": max(0, min(int(payload.get("maxRetries", 3) or 3), 10)),
         "consecutiveFailures": 0,
         "executionMode": execution_mode,
@@ -105,8 +106,9 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
         previous = duplicate[1]
         task["id"] = task_id
         task["createdAt"] = previous.get("createdAt", now)
+        task["automationStateVersion"] = previous.get("automationStateVersion", 0)
         task["updatedAt"] = now
-        for field in ("executionHistory", "lastExecution", "runCount", "consecutiveFailures", "dailyCounterDate", "dailyCounter", "dailyReadDate", "dailyReadMinutes", "bookRotation", "lastCheckinDate", "lastCheckinAt", "claimDueAt", "claimRetryCount", "claimFinalAttemptDate", "claimCompletedDate", "claimFinalFailedDate", "lastClaimAt", "merchantLastNotifiedTripId"):
+        for field in ("automationStateVersion", "executionHistory", "lastExecution", "runCount", "consecutiveFailures", "dailyCounterDate", "dailyCounter", "dailyReadDate", "dailyReadMinutes", "bookRotation", "lastCheckinDate", "lastCheckinAt", "claimDueAt", "claimLoreId", "claimRetryCount", "claimFinalAttemptDate", "claimCompletedDate", "claimFinalFailedDate", "lastClaimAt", "merchantLastNotifiedTripId", "merchantSettledTripId", "merchantRestartedAfterTripId", "merchantEndTime", "merchantLastCityCode", "merchantLastTransportId", "merchantLastPrincipal"):
             if field in previous:
                 task[field] = previous[field]
     tasks[task_id] = task

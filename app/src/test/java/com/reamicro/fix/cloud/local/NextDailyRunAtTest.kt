@@ -61,4 +61,62 @@ class NextDailyRunAtTest {
         assertTrue(nextDailyRunAt("99:99", now) > now)
         assertTrue(nextDailyRunAt("abc", now) > now)
     }
+
+    @Test
+    fun `重算不会推后一个仍在等待中的更早节点`() {
+        // 每日轶闻 00:00 签到、奖励 08:00 解锁：下次执行排在 08:00，重算不能把它抹成次日 00:00，
+        // 否则奖励就没人去领了（用户报的"任务时刻刷新了、奖励没下文"）。
+        val now = at("2026-09-15T00:00:30Z") // 东八区 09-15 08:00:30
+        val pendingClaim = at("2026-09-15T00:00:00Z")
+        assertEquals(now + 60_000L, rescheduledNextRunAt("yeshe_checkin", "00:00", pendingClaim, now))
+    }
+
+    @Test
+    fun `重算会纠正遗留的 now 加 24 小时`() {
+        val now = at("2026-09-14T14:30:00Z")
+        val legacy = now + 24 * 3_600_000L
+        // 遗留值比"明天的 00:00"还晚，按配置纠正回来。
+        assertEquals(
+            local(nextDailyRunAt("00:00", now)),
+            local(rescheduledNextRunAt("yeshe_checkin", "00:00", legacy, now)),
+        )
+    }
+
+    @Test
+    fun `重算时已经过期的旧值按配置时间点重排`() {
+        val now = at("2026-09-14T14:30:00Z")
+        assertEquals(
+            local(nextDailyRunAt("23:00", now)),
+            local(rescheduledNextRunAt("cloud_auto_read", "23:00", null, now)),
+        )
+    }
+
+    @Test
+    fun `行商重算排的是轮询节点而不是每日时间点`() {
+        val now = at("2026-09-14T14:30:00Z")
+        val arriving = at("2026-09-14T16:00:00Z")
+        assertEquals(arriving, rescheduledNextRunAt("traveling_merchant", "00:05", arriving, now))
+        // 没有未来节点时立刻查一次，而不是等到次日 00:05。
+        val soon = rescheduledNextRunAt("traveling_merchant", "00:05", null, now)
+        assertTrue("应尽快轮询", soon - now <= 60_000L)
+    }
+
+    @Test
+    fun `重算保留跨过零点的明确领取节点`() {
+        val now = at("2026-09-14T14:30:00Z")
+        val pending = at("2026-09-15T01:00:00Z")
+        assertEquals(pending, rescheduledNextRunAt("yeshe_checkin", "00:00", pending, now, pending))
+    }
+
+    @Test
+    fun `失败的每日任务五分钟后重试而不是等明天`() {
+        val now = at("2026-09-14T14:30:00Z")
+        assertEquals(now + 300_000L, nextLocalRunAt("yeshe_checkin", "00:00", "failed", 0L, now))
+    }
+
+    @Test
+    fun `执行完成时已经到期的后续节点不丢失`() {
+        val now = at("2026-09-14T14:30:00Z")
+        assertEquals(now + 60_000L, nextLocalRunAt("yeshe_checkin", "00:00", "success", now - 1000L, now))
+    }
 }

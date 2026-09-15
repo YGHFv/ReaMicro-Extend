@@ -27,121 +27,126 @@ object CloudTaskLocalRunner {
             else -> Outcome("failed", "模块暂不支持此任务类型")
         }
 
-    /**
-     * 行商通知：每次执行拉取行商状态。
-     * - 无活跃行商：静默等待，下次 4 小时后再查。
-     * - 行商在途（now < endTime）：把下次检查排到 endTime，暂停 4 小时轮询。
-     * - 行商已抵达（now >= endTime 且未结算、未通知过）：发出「收益/亏损」通知；
-     *   若开启自动完成，则结算并（在配置齐全时）开启新行商。
-     */
+    /** 行商的 SETTLED 表示奖励待领取，领取成功后才能开启下一趟。 */
     internal fun runMerchantNotify(task: JSONObject, request: JSONObject, credential: JSONObject): Outcome {
         val baseUrl = credential.optString("baseUrl").ifBlank { REAMICRO_BASE_URL }
         val token = credential.optString("token").ifBlank { return Outcome("paused", "阅微登录凭据无效") }
-        // 行商可配置求安/求财：跑之前先确认有道观运签，没有就补一支（已有签不替换）。
-        val blessingType = request.optString("blessingType")
-        val blessing = ensureTaoistBlessing(baseUrl, token, request, blessingType)
-        // 任务可能设成"不祈禳"或没配签种，但游戏里账户上本来就有一支签在生效（比如「增益签」），
-        // 用户要看到的是"这趟行商吃了什么加成"，所以无论祈不祈禳都把当前签读出来（只读）。
-        val activeBlessing = currentBlessingDetail(baseUrl, token, request, blessing)
-        val blessingSuffix = if (blessing.failure != null) "（运签：${blessing.failure}）" else blessingNote(blessingType)
         val now = System.currentTimeMillis()
-        val lastNotified = task.optLong("merchantLastNotifiedTripId", 0L)
-        val body = postReaMicro(baseUrl, token, request.optJSONObject("body") ?: JSONObject(), request.optString("endpoint").ifBlank { "rest/community/get-traveling-merchant" })
-        businessError(body)?.let { return Outcome("failed", "获取行商状态失败：$it") }
-        val trip = parseMerchantTrip(body)
-        val pollAgain = now + TRAVELING_MERCHANT_POLL_MS
-        // 这趟行商用的城池/本金/车马就是「上次行商配置」的来源：阅微只在内存里保存用户选择，
-        // 重启即丢，所以由我们记下来，供自动开新行商时留空沿用。
+        val state = JSONObject(task.toString()).put("nextRunAtOverride", now + TASK_RETRY_INTERVAL_MS)
+        val body = postReaMicro(
+            baseUrl, token, request.optJSONObject("body") ?: JSONObject(),
+            request.optString("endpoint").ifBlank { "rest/community/get-traveling-merchant" },
+        )
+        operationError(body)?.let { return Outcome("failed", "获取行商状态失败：$it", state) }
+        var trip = parseMerchantTrip(body)
         val remembered = rememberedMerchantConfig(task, trip)
-        if (!trip.hasTrip) {
-            // 没有在途行商：开着"自动完成"且参数齐全时补开一趟，否则这条链会在
-            // （比如手动结算过一次之后）彻底断掉，表现就是"自动行商不工作"。
-            val autoComplete = request.optBoolean("merchantAutoComplete", false)
-            if (autoComplete) {
-                val config = resolveStartConfig(request, remembered)
-                if (config.isComplete && maybeStartMerchant(baseUrl, token, request, config)) {
-                    return Outcome(
-                        "success",
-                        "当前没有进行中的行商，已按配置开启新行商$blessingSuffix",
-                        merchantState(pollAgain, lastNotified, config),
-                        notify = true,
-                    )
-                }
-            }
-            return Outcome("success", "当前没有进行中的行商", merchantState(pollAgain, lastNotified, remembered), notify = false)
+        rememberMerchantConfig(state, remembered)
+        state.put(LocalTaskStore.KEY_MERCHANT_END_TIME, trip.endTimeMs)
+        val config = resolveStartConfig(request, remembered)
+        val autoComplete = request.optBoolean("merchantAutoComplete", false)
+        val phase = merchantPhase(trip, now)
+        if (trip.hasTrip && trip.tripId <= 0L) return Outcome("failed", "行商响应缺少 tripId", state)
+        if (trip.hasTrip && phase == MerchantPhase.IN_TRANSIT) {
+            state.put("nextRunAtOverride", merchantNextRunAt(trip, now))
+            return Outcome(
+                "success", "行商进行中，预计 ${formatMerchantEpoch(trip.endTimeMs)} 完成", state,
+                notify = false, detail = merchantDetail(trip),
+            )
         }
-        when (merchantPhase(trip, now)) {
-            MerchantPhase.SETTLED -> {
-                // 游戏在 endTime 到达时就会把状态置成 SETTLED —— 也就是说**这里才是常见路径**。
-                // 此前这个分支只说一句"行商已结算"就按 4 小时重排，于是通知里既没有事件也没有
-                // 收益/亏损、节奏还退化成固定 4 小时轮询。现在按趟去重后如实播报结算结果。
-                if (trip.tripId <= 0L || trip.tripId == lastNotified) {
-                    return Outcome("success", "行商已结算", merchantState(pollAgain, lastNotified, remembered), notify = false)
-                }
-                var message = merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal) + blessingSuffix
-                val detail = merchantDetail(trip)
-                detail.put("结果", merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal))
-                if (activeBlessing.length() > 0) detail.put("运签", activeBlessing.optString("运签"))
-                if (activeBlessing.length() > 0) detail.put("运签效果", activeBlessing.optString("效果"))
-                val autoComplete = request.optBoolean("merchantAutoComplete", false)
-                if (autoComplete) {
-                    val config = resolveStartConfig(request, remembered)
-                    if (config.isComplete) {
-                        message += if (maybeStartMerchant(baseUrl, token, request, config)) "，已开启新行商" else "（未能开启新行商）"
-                    } else {
-                        message += "（未能开启新行商：${merchantStartHint(config)}）"
-                    }
-                }
-                return Outcome("success", message, merchantState(pollAgain, trip.tripId, remembered), notify = true, detail = detail)
-            }
-            MerchantPhase.NOTIFIED -> {
-                return Outcome("success", "行商已结算", merchantState(pollAgain, lastNotified, remembered), notify = false)
-            }
-            MerchantPhase.IN_TRANSIT -> {
-                val resumeAt = trip.endTimeMs + TRAVELING_MERCHANT_ARRIVE_GRACE_MS
-                val message = "行商进行中，预计 ${formatMerchantEpoch(trip.endTimeMs)} 完成"
-                return Outcome(
-                    "success",
-                    message,
-                    merchantState(resumeAt, lastNotified, remembered),
-                    notify = false,
-                    detail = merchantDetail(trip),
+        if (trip.hasTrip && phase == MerchantPhase.ARRIVED) {
+            state.put("nextRunAtOverride", now + TRAVELING_MERCHANT_ARRIVE_GRACE_MS)
+            return Outcome("success", "行商已到预计结束时间，等待服务端生成结算结果", state, notify = false)
+        }
+        val action = merchantAction(
+            trip.hasTrip, phase, trip.tripId,
+            state.optLong(KEY_MERCHANT_NOTIFIED_TRIP), state.optLong(LocalTaskStore.KEY_MERCHANT_SETTLED_TRIP),
+            state.optLong(LocalTaskStore.KEY_MERCHANT_RESTART_AFTER), autoComplete, config.isComplete,
+        )
+        var message = if (trip.hasTrip) {
+            merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal) + "，奖励待领取"
+        } else "当前没有进行中的行商"
+        var detail = if (trip.hasTrip) merchantDetail(trip) else JSONObject()
+        var notify = action.notify
+        if (action.notify) state.put(KEY_MERCHANT_NOTIFIED_TRIP, trip.tripId)
+        if (action.settle) {
+            val settled = runCatching {
+                postReaMicro(
+                    baseUrl, token, JSONObject().put("tripId", trip.tripId),
+                    request.optString("settleEndpoint").ifBlank { "rest/community/settle-traveling-merchant" },
                 )
+            }.getOrElse { return Outcome("failed", "$message（领取行商奖励失败：${it.message}）", state, detail = detail) }
+            operationError(settled)?.let {
+                return Outcome("failed", "$message（领取行商奖励失败：$it）", state, detail = detail)
             }
-            MerchantPhase.ARRIVED -> {
-                if (trip.tripId == lastNotified) {
-                    return Outcome("success", "行商已通知，等待结算", merchantState(pollAgain, lastNotified, remembered), notify = false)
-                }
-                var message = merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal) + blessingSuffix
-                val detail = merchantDetail(trip)
-                detail.put("结果", merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal))
-                if (activeBlessing.length() > 0) detail.put("运签", activeBlessing.optString("运签"))
-                if (activeBlessing.length() > 0) detail.put("运签效果", activeBlessing.optString("效果"))
-                val autoComplete = request.optBoolean("merchantAutoComplete", false)
-                if (autoComplete && trip.tripId > 0L) {
-                    val settle = postReaMicro(baseUrl, token, JSONObject().put("tripId", trip.tripId), request.optString("settleEndpoint").ifBlank { "rest/community/settle-traveling-merchant" })
-                    val settleError = businessError(settle)
-                    if (settleError != null) {
-                        message += "（自动完成失败：$settleError）"
-                    } else {
-                        // 结算响应里带着最终结算额：用它重算收益/亏损，比抵达瞬间的预估值准。
-                        val settledTrip = parseMerchantTrip(settle)
-                        if (settledTrip.hasTrip && settledTrip.settlementAmount > 0L) {
-                            message = merchantProfitText(
-                                settledTrip.eventTitle.ifBlank { trip.eventTitle },
-                                settledTrip.settlementAmount,
-                                settledTrip.principal.takeIf { it > 0L } ?: trip.principal,
-                            )
-                        }
-                        message += "，已自动完成行商"
-                        detail.put("自动完成", "已结算" + if (settleError == null) "" else "（$settleError）")
-                        val start = startResult(baseUrl, token, request, remembered)
-                        if (start != null) message += "并开启新行商" else message += "（未能开启新行商：${merchantStartHint(resolveStartConfig(request, remembered))}）"
-                    }
-                }
-                return Outcome("success", message, merchantState(pollAgain, trip.tripId, remembered), notify = true, detail = detail)
+            state.put(LocalTaskStore.KEY_MERCHANT_SETTLED_TRIP, trip.tripId)
+            state.put(LocalTaskStore.KEY_MERCHANT_END_TIME, 0L)
+            val settledTrip = parseMerchantTrip(settled)
+            if (settledTrip.hasTrip) {
+                trip = settledTrip.copy(
+                    cityName = trip.cityName.ifBlank { settledTrip.cityName },
+                    transportLabel = trip.transportLabel.ifBlank { settledTrip.transportLabel },
+                )
+                detail = merchantDetail(trip)
             }
+            detail.put("领取奖励", "已领取")
+            message = merchantProfitText(trip.eventTitle, trip.settlementAmount, trip.principal) + "，已领取行商奖励"
+            notify = true
+        } else if (trip.hasTrip && state.optLong(LocalTaskStore.KEY_MERCHANT_SETTLED_TRIP) == trip.tripId) {
+            message = "行商奖励已领取"
+            state.put(LocalTaskStore.KEY_MERCHANT_END_TIME, 0L)
         }
+        val canStart = autoComplete && (!trip.hasTrip ||
+            (state.optLong(LocalTaskStore.KEY_MERCHANT_SETTLED_TRIP) == trip.tripId &&
+                state.optLong(LocalTaskStore.KEY_MERCHANT_RESTART_AFTER) != trip.tripId))
+        if (canStart) {
+            if (!config.isComplete) {
+                return Outcome("failed", "$message（未能开启新行商：${merchantStartHint(config)}）", state, detail = detail)
+            }
+            val blessingType = request.optString("blessingType").trim().uppercase()
+            val blessing = ensureTaoistBlessing(baseUrl, token, request, blessingType)
+            if (blessing.failure != null) {
+                return Outcome("failed", "$message${blessingNote(blessing, blessingType)}", state, detail = detail)
+            }
+            val started = runCatching {
+                postReaMicro(
+                    baseUrl, token,
+                    JSONObject().put("cityCode", config.cityCode).put("principal", config.principal).put("transportId", config.transportId),
+                    request.optString("startEndpoint").ifBlank { "rest/community/start-traveling-merchant" },
+                )
+            }.getOrElse { return Outcome("failed", "$message（未能开启新行商：${it.message}）", state, detail = detail) }
+            operationError(started)?.let {
+                return Outcome("failed", "$message（未能开启新行商：$it）", state, detail = detail)
+            }
+            var nextTrip = parseMerchantTrip(started)
+            if (!nextTrip.hasTrip) {
+                val refreshed = runCatching {
+                    postReaMicro(baseUrl, token, JSONObject(), request.optString("endpoint").ifBlank { "rest/community/get-traveling-merchant" })
+                }.getOrNull()
+                if (refreshed != null && businessError(refreshed) == null) nextTrip = parseMerchantTrip(refreshed)
+            }
+            if ((!nextTrip.hasTrip || nextTrip.tripId == trip.tripId) &&
+                !(started.optJSONObject("data") ?: started).optBoolean("success", false)
+            ) {
+                return Outcome("failed", "$message（未能确认新行商已开启）", state, detail = detail)
+            }
+            if (trip.hasTrip) state.put(LocalTaskStore.KEY_MERCHANT_RESTART_AFTER, trip.tripId)
+            rememberMerchantConfig(state, config)
+            state.put(LocalTaskStore.KEY_MERCHANT_END_TIME, nextTrip.endTimeMs)
+            state.put("nextRunAtOverride", merchantNextRunAt(nextTrip, now))
+            message += "，已开启新行商${blessingNote(blessing, blessingType)}"
+            detail.put("新行商", "预计 ${formatMerchantEpoch(nextTrip.endTimeMs)} 完成")
+            if (blessing.detail.length() > 0) detail.put("新行商运签", blessing.detail.optString("运签"))
+            return Outcome("success", message, state, detail = detail)
+        }
+        state.put("nextRunAtOverride", now + TRAVELING_MERCHANT_POLL_MS)
+        return Outcome("success", message, state, notify = notify, detail = detail)
+    }
+
+    /** 把当前生效的运签写进详情（读不到就什么都不写，不编造）。 */
+    private fun addActiveBlessing(detail: JSONObject, active: JSONObject) {
+        if (active.length() <= 0) return
+        detail.put("运签", active.optString("运签"))
+        detail.put("运签效果", active.optString("效果"))
     }
 
     /** 行商详情：谁、去哪、本金多少、结算多少、事件是什么。 */
@@ -174,7 +179,7 @@ object CloudTaskLocalRunner {
      */
     private fun rememberedMerchantConfig(task: JSONObject, trip: MerchantTrip): MerchantConfig = MerchantConfig(
         cityCode = trip.cityCode.ifBlank { task.optString(LocalTaskStore.KEY_MERCHANT_LAST_CITY) },
-        transportId = trip.transportId.takeIf { it > 0L } ?: task.optLong(LocalTaskStore.KEY_MERCHANT_LAST_TRANSPORT, 0L),
+        transportId = if (trip.hasTrip) trip.transportId else task.optLong(LocalTaskStore.KEY_MERCHANT_LAST_TRANSPORT, 0L),
         principal = trip.principal.takeIf { it > 0L } ?: task.optLong(LocalTaskStore.KEY_MERCHANT_LAST_PRINCIPAL, 0L),
     )
 
@@ -187,89 +192,108 @@ object CloudTaskLocalRunner {
 
     private fun merchantStartHint(config: MerchantConfig): String = when {
         config.cityCode.isBlank() -> "缺少城池，请先跑一趟行商或手动填写 cityCode"
-        config.transportId <= 0L -> "缺少车马，请先跑一趟行商或手动填写 transportId"
+        config.transportId < 0L -> "车马配置无效"
         config.principal <= 0L -> "缺少本金，请先跑一趟行商或手动填写本金"
         else -> "参数不完整"
     }
 
-    /** 配置齐全时开启新行商，返回是否成功发起；不齐全返回 null。 */
-    private fun startResult(baseUrl: String, token: String, request: JSONObject, remembered: MerchantConfig): Boolean? {
-        val config = resolveStartConfig(request, remembered)
-        if (!config.isComplete) return null
-        return maybeStartMerchant(baseUrl, token, request, config)
+    private fun merchantNextRunAt(trip: MerchantTrip, now: Long): Long =
+        trip.endTimeMs.takeIf { it > now }?.plus(TRAVELING_MERCHANT_ARRIVE_GRACE_MS) ?: (now + TASK_RETRY_INTERVAL_MS)
+
+    private fun rememberMerchantConfig(state: JSONObject, config: MerchantConfig) {
+        state.put(LocalTaskStore.KEY_MERCHANT_LAST_CITY, config.cityCode)
+        state.put(LocalTaskStore.KEY_MERCHANT_LAST_TRANSPORT, config.transportId)
+        state.put(LocalTaskStore.KEY_MERCHANT_LAST_PRINCIPAL, config.principal)
     }
 
-    /** 用给定参数开启新行商。 */
-    private fun maybeStartMerchant(baseUrl: String, token: String, request: JSONObject, config: MerchantConfig): Boolean {
-        val payload = JSONObject()
-            .put("cityCode", config.cityCode)
-            .put("principal", config.principal)
-            .put("transportId", config.transportId)
-        val started = runCatching {
-            postReaMicro(baseUrl, token, payload, request.optString("startEndpoint").ifBlank { "rest/community/start-traveling-merchant" })
-        }.getOrNull() ?: return false
-        return businessError(started) == null
-    }
-
-    /** 行商启动参数；[isComplete] 表示三项都可用。 */
     internal data class MerchantConfig(val cityCode: String, val transportId: Long, val principal: Long) {
-        val isComplete: Boolean get() = cityCode.isNotBlank() && transportId > 0L && principal > 0L
+        val isComplete: Boolean get() = cityCode.isNotBlank() && transportId >= 0L && principal > 0L
     }
 
-    private fun merchantState(nextRunAt: Long, lastNotifiedTripId: Long, config: MerchantConfig): JSONObject = JSONObject()
-        .put("nextRunAtOverride", nextRunAt)
-        .put("merchantLastNotifiedTripId", lastNotifiedTripId)
-        // 落盘「上次行商配置」，供下次自动开新行商留空时沿用。
-        .put(LocalTaskStore.KEY_MERCHANT_LAST_CITY, config.cityCode)
-        .put(LocalTaskStore.KEY_MERCHANT_LAST_TRANSPORT, config.transportId)
-        .put(LocalTaskStore.KEY_MERCHANT_LAST_PRINCIPAL, config.principal)
-
+    /** 查询生成每日轶闻；isFinish 表示可领取，领取只调用一次 complete-daily-lore。 */
     private fun runCheckin(task: JSONObject, request: JSONObject, credential: JSONObject): Outcome {
         val baseUrl = credential.optString("baseUrl").ifBlank { return Outcome("failed", "阅微服务器地址为空") }
         val token = credential.optString("token").ifBlank { return Outcome("paused", "阅微登录凭据无效") }
-        // 每日轶闻固定求运（LUCK）：先确认道观运签，没有就补一支。
-        val blessing = ensureTaoistBlessing(baseUrl, token, request, BLESSING_LUCK)
-        val blessingSuffix = if (blessing.failure != null) "（运签：${blessing.failure}）" else blessingNote(BLESSING_LUCK)
-        val body = postReaMicro(baseUrl, token, request.optJSONObject("body") ?: JSONObject(), request.optString("endpoint").ifBlank { "rest/community/get-daily-lore" })
-        val error = businessError(body)
-        if (error != null) return Outcome("failed", "获取每日轶闻失败：$error")
-        val data = body.optJSONObject("data") ?: JSONObject()
-        val loreId = data.optLong("id", data.optLong("loreId", body.optLong("id", 0L)))
-        var claimed = data.optBoolean("claimed", false)
-        var claimDueAt = task.optLong("claimDueAt", 0L).takeIf { it > 0L }
-            ?: data.optLong("endTime", 0L).let { if (it > 0L && it < 100_000_000_000L) it * 1_000L else it }
-        if (!data.optBoolean("isFinish", false)) {
-            if (loreId <= 0L) return Outcome("failed", "阅微每日轶闻响应缺少 userLoreId")
-            val complete = postReaMicro(baseUrl, token, JSONObject().put("userLoreId", loreId), request.optString("completeEndpoint").ifBlank { "rest/community/complete-daily-lore" })
-            val completeError = businessError(complete)
-            if (completeError != null) return Outcome("failed", "野社签到提交失败：$completeError")
-            claimed = (complete.optJSONObject("data") ?: complete).optBoolean("claimed", false)
-        }
-        if (!claimed && claimDueAt > 0L && System.currentTimeMillis() >= claimDueAt && loreId > 0L) {
-            val claim = postReaMicro(baseUrl, token, JSONObject().put("userLoreId", loreId), request.optString("completeEndpoint").ifBlank { "rest/community/complete-daily-lore" })
-            val claimError = businessError(claim)
-            if (claimError != null) return Outcome("failed", "签到奖励领取失败：$claimError")
-            claimed = (claim.optJSONObject("data") ?: claim).optBoolean("claimed", true)
-        }
+        val now = System.currentTimeMillis()
         val today = LocalDate.now(ZoneId.of("Asia/Shanghai")).toString()
-        if (claimDueAt <= 0L) claimDueAt = System.currentTimeMillis() + 8L * 3_600_000L
-        val state = JSONObject()
-            .put("lastCheckinDate", today)
-            .put("lastCheckinAt", System.currentTimeMillis())
+        val state = JSONObject(task.toString())
+            .put("nextRunAtOverride", now + TASK_RETRY_INTERVAL_MS)
+            .put("claimJustCompleted", false)
+        val blessingType = request.optString("blessingType").trim().uppercase()
+        val blessing = if (task.optString("lastCheckinDate") != today) {
+            ensureTaoistBlessing(baseUrl, token, request, blessingType)
+        } else BlessingCheck(null, JSONObject())
+        if (blessing.failure != null) return Outcome("failed", blessing.failure, state)
+        val body = runCatching {
+            postReaMicro(baseUrl, token, request.optJSONObject("body") ?: JSONObject(),
+                request.optString("endpoint").ifBlank { "rest/community/get-daily-lore" })
+        }.getOrElse { return Outcome("failed", "获取每日轶闻失败：${it.message}", state) }
+        operationError(body)?.let { return Outcome("failed", "获取每日轶闻失败：$it", state) }
+        val data = body.optJSONObject("data") ?: body
+        val loreId = data.optLong("id", data.optLong("loreId", 0L))
+        if (loreId <= 0L) return Outcome("failed", "阅微每日轶闻响应缺少 userLoreId", state)
+        val sameLore = task.optLong("claimLoreId") == loreId && task.optString("lastCheckinDate") == today
+        val previouslyClaimed = sameLore && task.optString("claimCompletedDate") == today
+        var claimed = data.optBoolean("claimed", false) || previouslyClaimed
+        var claimDueAt = epochMillis(data.optLong("endTime", 0L))
+            .takeIf { it > 0L } ?: if (sameLore) task.optLong("claimDueAt", 0L) else 0L
+        state.put("lastCheckinDate", today)
+            .put("lastCheckinAt", if (sameLore) task.optLong("lastCheckinAt", now) else now)
+            .put("claimLoreId", loreId)
             .put("claimDueAt", claimDueAt)
-            .put("nextRunAtOverride", if (claimed) 0L else claimDueAt)
             .put("claimCompletedDate", if (claimed) today else "")
-            .put("claimJustCompleted", claimed)
-        val checkinMessage = if (claimed) "签到完成，奖励已领取" else "签到完成，等待奖励解锁"
-        val detail = JSONObject()
-            .put("轶闻", request.optJSONObject("body")?.optString("title").orEmpty())
-            .put("奖励", if (claimed) "已领取" else "待解锁（${formatMerchantEpoch(claimDueAt)}）")
-        blessing.detail.takeIf { it.length() > 0 }?.let {
-            detail.put("运签", it.optString("运签"))
-            detail.put("运签效果", it.optString("效果"))
+        fun checkinOutcome(result: String, message: String): Outcome {
+            val nextCheck = state.optLong("nextRunAtOverride")
+            val detail = JSONObject()
+                .put("轶闻", data.optString("title"))
+                .put("奖励", if (claimed) "已领取" else "待领取（${formatMerchantEpoch(nextCheck)} 再次检查）")
+                .put(DAILY_LORE_DETAIL_KEY, dailyLoreSnapshot(data, claimed))
+            addActiveBlessing(detail, blessing.detail)
+            return Outcome(result, message, state, detail = detail)
         }
-        return Outcome("success", checkinMessage + blessingSuffix, state, detail = detail)
+        val ready = if (data.has("isFinish")) data.optBoolean("isFinish") else claimDueAt in 1..now
+        if (!claimed && ready) {
+            val claim = runCatching {
+                postReaMicro(baseUrl, token, JSONObject().put("userLoreId", loreId),
+                    request.optString("completeEndpoint").ifBlank { "rest/community/complete-daily-lore" })
+            }.getOrElse { return checkinOutcome("failed", "签到奖励领取失败：${it.message}") }
+            val error = operationError(claim)
+            if (error != null) {
+                if (listOf("已领取", "已经领取", "已领过").any(error::contains)) {
+                    claimed = true
+                } else if (listOf("未达到领取", "尚未解锁", "未到领取", "暂不可领取").any(error::contains)) {
+                    return checkinOutcome("success", "奖励尚未解锁，5 分钟后再次检查")
+                } else return checkinOutcome("failed", "签到奖励领取失败：$error")
+            } else {
+                val claimData = claim.optJSONObject("data") ?: claim
+                claimed = claimData.optBoolean("claimed", true)
+                epochMillis(claimData.optLong("endTime", 0L)).takeIf { it > 0L }?.let { claimDueAt = it }
+                for (key in listOf("endTime", "completeTime", "exp", "gem", "propId", "propName", "propQuality")) {
+                    if (claimData.has(key) && !claimData.isNull(key)) data.put(key, claimData.get(key))
+                }
+            }
+        }
+        val nextRunAt = when {
+            claimed -> 0L
+            claimDueAt > now -> claimDueAt
+            ready || claimDueAt > 0L -> now + TASK_RETRY_INTERVAL_MS
+            else -> now + CLAIM_RETRY_INTERVAL_MS
+        }
+        state.put("claimDueAt", claimDueAt)
+            .put("nextRunAtOverride", nextRunAt)
+            .put("claimCompletedDate", if (claimed) today else "")
+            .put("claimJustCompleted", claimed && !previouslyClaimed)
+        val message = when {
+            claimed -> "签到完成，奖励已领取"
+            claimDueAt > now -> "签到完成，奖励 ${formatMerchantEpoch(claimDueAt)} 解锁"
+            else -> "签到完成，奖励待领取，将于 ${formatMerchantEpoch(nextRunAt)} 再次检查"
+        }
+        return checkinOutcome("success", message + blessingNote(blessing, blessingType))
     }
+
+    /** 秒级 epoch 统一成毫秒：阅微有的接口给秒、有的给毫秒。 */
+    private fun epochMillis(raw: Long): Long =
+        if (raw in 1 until 100_000_000_000L) raw * 1_000L else raw
 
     private fun runDrawCard(task: JSONObject, request: JSONObject, credential: JSONObject): Outcome {
         val baseUrl = credential.optString("baseUrl").ifBlank { return Outcome("failed", "阅微服务器地址为空") }
@@ -381,12 +405,25 @@ object CloudTaskLocalRunner {
     }
 
     /**
-     * 任务执行前检查道观运签：**没有签才祈禳一支**，已有签不替换（替换会白白消耗祈禳道具）。
+     * 任务执行前把道观运签调整成**任务配置的那一支**。
      *
-     * 返回失败原因（调用方把它附到任务消息里，用户才知道"这次为什么没签加成"）；
-     * 成功、未配置签种、或已有签时返回 null。
+     * 规则（用户口径）：配置了签种就要那支签。账号上生效的是同一支 → 直接沿用（祈禳要消耗道具，
+     * 同签种没必要重来一遍）；没有签、或是别的签种 → 祈禳配置的那支。
+     *
+     * 早前这里是"已有签就不替换"，于是自动行商祈禳的求财签会把每日轶闻配置的求运签一直挡在门外，
+     * 而战报还写着「已祈禳求运签」——用户看到的正是"我明明配了求运，怎么求财去了"。
+     * 运签是账号上的单槽位，两个任务本就可能互相顶，这一点由返回值如实报出来，不藏。
      */
     private fun ensureTaoistBlessing(
+        baseUrl: String,
+        token: String,
+        request: JSONObject,
+        blessingType: String,
+    ): BlessingCheck = runCatching {
+        checkTaoistBlessing(baseUrl, token, request, blessingType)
+    }.getOrElse { BlessingCheck("查询或祈禳运签失败：${it.message}", JSONObject()) }
+
+    private fun checkTaoistBlessing(
         baseUrl: String,
         token: String,
         request: JSONObject,
@@ -394,6 +431,9 @@ object CloudTaskLocalRunner {
     ): BlessingCheck {
         val type = blessingType.trim().uppercase()
         if (type.isBlank()) return BlessingCheck(null, JSONObject())
+        if (type !in setOf(BLESSING_LUCK, BLESSING_SAFETY, BLESSING_WEALTH)) {
+            return BlessingCheck("不支持的运签配置：$type", JSONObject())
+        }
         val current = postReaMicro(
             baseUrl,
             token,
@@ -402,46 +442,40 @@ object CloudTaskLocalRunner {
         )
         businessError(current)?.let { return BlessingCheck("查询运签失败：$it", JSONObject()) }
         val data = current.optJSONObject("data") ?: current
-        // blessing 为 null 表示没有签；JSONObject.NULL 与缺失两种形态都要识别成"无签"。
-        val blessing = data.opt("blessing")
-        if (blessing is JSONObject) return BlessingCheck(null, blessingDetail(blessing, "沿用已有"))
+        // blessing 为 null（JSONObject.NULL 或缺失）都表示无签；只有拿到具体签种才算"已有"。
+        val blessing = data.opt("blessing") as? JSONObject
+        val activeType = blessing?.optString("blessingType").orEmpty()
+        if (activeType.equals(type, ignoreCase = true)) {
+            return BlessingCheck(null, blessingDetail(blessing!!, "沿用已有"), activeType = activeType)
+        }
         val pray = postReaMicro(
             baseUrl,
             token,
             JSONObject().put("blessingType", type),
             request.optString("prayEndpoint").ifBlank { "rest/community/pray-taoist-blessing" },
         )
-        businessError(pray)?.let { return BlessingCheck("祈禳${blessingLabel(type)}失败：$it", JSONObject()) }
-        val prayed = (pray.optJSONObject("data") ?: pray).optJSONObject("blessing")
-        return BlessingCheck(null, if (prayed != null) blessingDetail(prayed, "本次祈禳") else JSONObject())
+        operationError(pray)?.let { return BlessingCheck("祈禳${blessingLabel(type)}失败：$it", JSONObject()) }
+        val prayData = pray.optJSONObject("data") ?: pray
+        val prayed = prayData.optJSONObject("blessing") ?: run {
+            val refreshed = postReaMicro(baseUrl, token, JSONObject(),
+                request.optString("blessingEndpoint").ifBlank { "rest/community/get-taoist-blessing" })
+            operationError(refreshed)?.let { return BlessingCheck("确认运签失败：$it", JSONObject()) }
+            (refreshed.optJSONObject("data") ?: refreshed).optJSONObject("blessing")
+        }
+        val actualType = prayed?.optString("blessingType").orEmpty().trim().uppercase()
+        if (actualType != type) {
+            val reason = if (actualType.isBlank()) "服务端未返回生效运签" else "服务端返回${blessingLabel(actualType)}，与配置不符"
+            return BlessingCheck("祈禳${blessingLabel(type)}失败：$reason", JSONObject())
+        }
+        return BlessingCheck(
+            null,
+            blessingDetail(prayed!!, "本次祈禳"),
+            prayed = true,
+            activeType = actualType,
+            replacedType = activeType,
+        )
     }
 
-    /**
-     * 当前账户上生效的运签详情。
-     *
-     * 与"这次有没有祈禳"无关：祈禳只是补签，签本身是账户状态。任务设成不祈禳时也不会去发祈禳请求，
-     * 但这里仍要把它读出来——否则详情里看不到行商吃到的加成（用户报的就是这个）。
-     */
-    private fun currentBlessingDetail(
-        baseUrl: String,
-        token: String,
-        request: JSONObject,
-        prayed: BlessingCheck,
-    ): JSONObject {
-        if (prayed.detail.length() > 0) return prayed.detail
-        val current = runCatching {
-            postReaMicro(
-                baseUrl,
-                token,
-                JSONObject(),
-                request.optString("blessingEndpoint").ifBlank { "rest/community/get-taoist-blessing" },
-            )
-        }.getOrNull() ?: return JSONObject()
-        if (businessError(current) != null) return JSONObject()
-        val data = current.optJSONObject("data") ?: current
-        val blessing = data.opt("blessing") as? JSONObject ?: return JSONObject()
-        return blessingDetail(blessing, "当前生效")
-    }
 
     /** 运签详情：签种、签文名、效果描述（游戏原文，例如"下一次每日轶闻：绿色及以上概率提升 2 个百分点"）。 */
     private fun blessingDetail(blessing: JSONObject, source: String): JSONObject {
@@ -451,12 +485,37 @@ object CloudTaskLocalRunner {
             .put("效果", blessing.optString("description"))
     }
 
-    /** 运签检查结果：failure 非空表示这次没拿到签；detail 用于任务记录详情。 */
-    private data class BlessingCheck(val failure: String?, val detail: JSONObject)
+    /**
+     * 运签检查结果。
+     *
+     * [failure] 非空表示这次没拿到签；[prayed] 区分"这次真的祈禳了"与"沿用了已有的"——
+     * 两者都要如实告诉用户，早前统一按"已祈禳"播报，才会出现"配的求运、实际是求财"却写着
+     * 「已祈禳求运签」的矛盾记录。
+     */
+    internal data class BlessingCheck(
+        val failure: String?,
+        val detail: JSONObject,
+        /** 这次是否真的发出并成功了祈禳请求。 */
+        val prayed: Boolean = false,
+        /** 最终生效的签种（服务端回给我们的那个）。 */
+        val activeType: String = "",
+        /** 被这次祈禳顶掉的旧签种；没有则为空。 */
+        val replacedType: String = "",
+    )
 
-    /** 祈禳成功时给任务消息加一句，方便回查这次任务用的什么签。 */
-    private fun blessingNote(blessingType: String): String =
-        blessingType.trim().takeIf { it.isNotBlank() }?.let { " · 已祈禳${blessingLabel(it)}" }.orEmpty()
+    /** 祈禳结果给任务消息加一句：真的祈禳了、沿用了哪一支、还是失败了。 */
+    internal fun blessingNote(check: BlessingCheck, configuredType: String): String = when {
+        check.failure != null -> "（运签：${check.failure}）"
+        configuredType.isBlank() -> ""
+        check.prayed -> {
+            val label = blessingLabel(check.activeType.ifBlank { configuredType })
+            val replaced = check.replacedType.takeIf { it.isNotBlank() }
+                ?.let { "（顶掉原有${blessingLabel(it)}）" }.orEmpty()
+            " · 已祈禳$label$replaced"
+        }
+        check.activeType.isNotBlank() -> " · 沿用已有${blessingLabel(check.activeType)}"
+        else -> ""
+    }
 
     internal fun blessingLabel(type: String): String = when (type.trim().uppercase()) {
         // 空串是合法选择（用户明确要求"不祈禳"），不是"未知签种"。
@@ -584,10 +643,18 @@ object CloudTaskLocalRunner {
         return body.optString("message").ifBlank { body.optString("msg") }.ifBlank { "业务码 $code" }
     }
 
+    private fun operationError(body: JSONObject): String? {
+        businessError(body)?.let { return it }
+        val data = body.optJSONObject("data") ?: body
+        return if (data.has("success") && !data.optBoolean("success", false)) {
+            data.optString("message").ifBlank { data.optString("msg") }.ifBlank { "服务端未接受操作" }
+        } else null
+    }
+
     /** 从行商响应解析活跃行商。字段名与宿主 TravelingMerchantTrip 对齐；endTime 为秒级 epoch。 */
     internal fun parseMerchantTrip(body: JSONObject): MerchantTrip {
         val data = body.optJSONObject("data") ?: body
-        val trip = data.optJSONObject("activeTrip") ?: return MerchantTrip(hasTrip = false)
+        val trip = data.optJSONObject("activeTrip") ?: data.optJSONObject("trip") ?: return MerchantTrip(hasTrip = false)
         val endTimeRaw = trip.optLong("endTime", 0L)
         val endTimeMs = if (endTimeRaw in 1 until 100_000_000_000L) endTimeRaw * 1_000L else endTimeRaw
         val startTimeRaw = trip.optLong("startTime", 0L)
@@ -615,6 +682,49 @@ object CloudTaskLocalRunner {
         )
     }
 
+    /**
+     * 这一轮行商该做什么。
+     *
+     * 三件事互相独立、各按各的趟次记账，必须分开算：
+     * - [notify] 只决定"要不要发通知"，由"已播报过的趟次"去重；
+     * - [settle] 决定"这趟要不要自动结算"，由"已自动结算过的趟次"去重；
+     * - [start] 决定"要不要开新行商"，没在途行商时每次都试（失败下次再试），
+     *   有趟已结算的行商时按"为它开成功过没有"去重。
+     *
+     * 早前三件事共用"已通知趟次"这一个标记，先通知过、之后才打开自动完成的那一趟就再也
+     * 进不了结算分支——用户看到的就是"自动行商不领奖、也不开新行商"。
+     */
+    internal fun merchantAction(
+        hasTrip: Boolean,
+        phase: MerchantPhase,
+        tripId: Long,
+        lastNotifiedTripId: Long,
+        settledTripId: Long,
+        restartedAfterTripId: Long,
+        autoComplete: Boolean,
+        startConfigComplete: Boolean,
+    ): MerchantAction = MerchantAction(
+        notify = hasTrip && phase == MerchantPhase.SETTLED &&
+            tripId > 0L && tripId != lastNotifiedTripId,
+        settle = autoComplete && hasTrip && phase == MerchantPhase.SETTLED &&
+            tripId > 0L && tripId != settledTripId,
+        start = autoComplete && startConfigComplete && when {
+            !hasTrip -> true
+            phase == MerchantPhase.SETTLED -> tripId == settledTripId && tripId != restartedAfterTripId
+            else -> false
+        },
+    )
+
+    /** [merchantAction] 的结果。 */
+    internal data class MerchantAction(
+        /** 这趟还没播报过结果，该发通知。 */
+        val notify: Boolean,
+        /** 这趟已抵达、且还没自动结算过。 */
+        val settle: Boolean,
+        /** 该去开一趟新行商。 */
+        val start: Boolean,
+    )
+
     internal fun merchantPhase(trip: MerchantTrip, now: Long): MerchantPhase = when {
         !trip.hasTrip -> MerchantPhase.SETTLED
         trip.status.equals("SETTLED", ignoreCase = true) -> MerchantPhase.SETTLED
@@ -634,7 +744,7 @@ object CloudTaskLocalRunner {
     private fun formatMerchantEpoch(epochMs: Long): String =
         if (epochMs <= 0L) "未知" else MERCHANT_TIME_FORMAT.format(java.util.Date(epochMs))
 
-    internal enum class MerchantPhase { IN_TRANSIT, ARRIVED, SETTLED, NOTIFIED }
+    internal enum class MerchantPhase { IN_TRANSIT, ARRIVED, SETTLED }
 
     /** 在数组里按 [matchKey] 找到 [value] 对应的那一条，返回它的 [nameKey] 字段（找不到就退回原值）。 */
     private fun lookupName(array: JSONArray?, matchKey: String, value: String, nameKey: String): String {
@@ -732,5 +842,12 @@ object CloudTaskLocalRunner {
 
     private const val TRAVELING_MERCHANT_POLL_MS = 4L * 3_600_000L
     private const val TRAVELING_MERCHANT_ARRIVE_GRACE_MS = 60_000L
+    internal const val TASK_RETRY_INTERVAL_MS = 5 * 60_000L
+
+    /** 服务端没给奖励解锁时刻时的重试间隔：按小时回来问一次，直到领到。 */
+    private const val CLAIM_RETRY_INTERVAL_MS = 3_600_000L
+
+    /** 已播报过结果的趟次（只管通知去重，不代表已经自动完成）。 */
+    internal const val KEY_MERCHANT_NOTIFIED_TRIP = "merchantLastNotifiedTripId"
     private val MERCHANT_TIME_FORMAT = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
 }

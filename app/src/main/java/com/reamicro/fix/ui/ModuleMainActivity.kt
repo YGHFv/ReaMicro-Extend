@@ -126,18 +126,15 @@ class ModuleMainActivity : Activity() {
             add("结果：${resultLabel(record.result)}")
             add("")
             add(record.message)
-            if (detail != null && detail.length() > 0) {
-                add("")
-                detail.keys().forEach { key ->
-                    val value = detail.optString(key)
-                    if (value.isNotBlank()) add("$key：$value")
-                }
-            }
         }
         ui.contentDialog(
             title = "${taskTitle(record.taskType)} 详情",
-            content = lines.joinToString("\n"),
+            content = localTaskRecordDetailText(
+                lines.joinToString("\n"),
+                detail?.let { localTaskRecordDetailFields(record.taskType, it) }.orEmpty(),
+            ),
             actions = listOf(),
+            bodySizeSp = if (record.taskType == "yeshe_checkin") 14f else 12f,
         )
     }
 
@@ -181,8 +178,14 @@ class ModuleMainActivity : Activity() {
                         "任务概览",
                         buildString {
                             append("${accounts.size} 个账号、$enabled 个任务已启用")
-                            append("\n唤醒时刻：${formatTime(NextWakeHint.read(this@ModuleMainActivity))}")
-                            append("（看门狗按这个任务时刻唤醒；系统闹钟另有 15 分钟兜底）")
+                            val wakeAt = NextWakeHint.read(this@ModuleMainActivity)
+                            append("\n唤醒时刻：${wakeAt.takeIf { it > 0L }?.let(::formatTime) ?: "未排程"}")
+                            append("（看门狗按这个时刻唤醒；系统闹钟另有 15 分钟兜底）")
+                            // 唤醒可以**早于**最近的任务：零点例行唤醒、以及云端任务的完成时刻
+                            // 也会排进来。不说明的话，用户会以为"唤起时刻没跟着任务刷新"。
+                            if (nextTaskAt != null && wakeAt in 1 until nextTaskAt) {
+                                append("（早于任务时刻属正常：零点例行唤醒 / 云任务完成时刻）")
+                            }
                             append("\n下次任务时刻：${nextTaskAt?.let(::formatTime) ?: "无"}")
                             if (nextTaskAt != null) append("（任务自己排的时刻）")
                         },
@@ -199,7 +202,7 @@ class ModuleMainActivity : Activity() {
         } else {
             tasks.forEach { (accountId, task) -> children += taskCard(accountId, task) }
         }
-        children += ui.info("这里改的是模块进程执行用的那份本地任务配置；阅微设置页里的改动会在下次下发时覆盖它。")
+        children += ui.info("本地任务由模块进程执行；与阅微设置页同步时保留最新配置，旧镜像不会覆盖刚保存的选择。")
         children += ui.sectionTitle("权限与后台")
         children += wakeCard()
         children += ui.sectionTitle("通知与日志")
@@ -255,15 +258,20 @@ class ModuleMainActivity : Activity() {
         return if (task.nextRunAt > 0L) "下次 ${formatDateTime(task.nextRunAt)}" else "下次 待排程"
     }
 
-    /** 从最近一次行商执行记录的详情里取"行程"的结束时间。 */
-    private fun lastMerchantTripEnd(accountId: String, taskType: String): String? =
-        LocalTaskStore { applicationContext }.records(accountId)
+    private fun lastMerchantTripEnd(accountId: String, taskType: String): String? {
+        val store = LocalTaskStore { applicationContext }
+        val state = store.runtimeState(accountId, taskType)
+        if (state.has(LocalTaskStore.KEY_MERCHANT_END_TIME)) {
+            return state.optLong(LocalTaskStore.KEY_MERCHANT_END_TIME).takeIf { it > 0L }?.let(::formatDateTime)
+        }
+        return store.records(accountId)
             .firstOrNull { it.taskType == taskType }
             ?.detail
             ?.let { runCatching { JSONObject(it) }.getOrNull() }
             ?.optString("行程")
             ?.substringAfter(" → ", "")
             ?.takeIf { it.isNotBlank() }
+    }
 
     private fun runSingleTask(accountId: String, task: LocalTask) {
         ui.background(
@@ -304,7 +312,7 @@ class ModuleMainActivity : Activity() {
                     choose(
                         "运签",
                         spec.blessingOptions.map { it to CloudTaskLocalRunner.blessingLabel(it) },
-                        task.blessingType.ifBlank { spec.blessingOptions.first() },
+                        spec.resolveBlessingChoice(task.blessingType),
                     )
                 }
             },
@@ -357,10 +365,7 @@ class ModuleMainActivity : Activity() {
             parsed
         } else task.books
         val blessing = if (spec != null && spec.blessingOptions.isNotEmpty()) {
-            val raw = text("运签").uppercase()
-            spec.blessingOptions.firstOrNull { it == raw }
-                ?: spec.blessingOptions.firstOrNull { CloudTaskLocalRunner.blessingLabel(it) == raw }
-                ?: spec.blessingOptions.first()
+            spec.resolveBlessingChoice(text("运签"))
         } else task.blessingType
         return task.copy(
             timeOfDay = timeOfDay,

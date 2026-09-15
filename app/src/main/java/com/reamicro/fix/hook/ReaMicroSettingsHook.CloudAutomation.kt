@@ -36,11 +36,18 @@ internal data class CloudAutomationTaskSpec(
     /**
      * 这个任务跑之前要不要先检查道观运签、没有就祈禳一支；列表为空表示不需要。
      *
-     * 只有「每日轶闻」与「自动行商」需要（用户指定）：前者固定求运，后者可在求安/求财之间选。
+     * 「每日轶闻」可求运，「自动行商」可选求安/求财；两者都可显式选择不祈禳。
      * 值是 `CloudTaskLocalRunner.BLESSING_*` 的 wire 值——服务端按它判合法性，不能自造。
      */
     val blessingOptions: List<String> = emptyList(),
-)
+) {
+    fun resolveBlessingChoice(value: String?): String {
+        val normalized = value?.trim()?.uppercase()
+        return blessingOptions.firstOrNull {
+            it == normalized || CloudTaskLocalRunner.blessingLabel(it) == normalized
+        } ?: blessingOptions.firstOrNull().orEmpty()
+    }
+}
 
 private const val CLOUD_AUTOMATION_LOG_PREFIX = "[ReaMicroFix/CloudAutomation]"
 
@@ -49,7 +56,7 @@ internal val CLOUD_AUTOMATION_TASKS = listOf(
     CloudAutomationTaskSpec(
         taskType = "yeshe_checkin",
         title = "每日轶闻",
-        description = "自动完成野社签到并领取奖励；执行前检查道观运签，没有就补一支求运签",
+        description = "获取每日轶闻并按结束时间领取奖励；生成轶闻前按配置求运，也可选择不祈禳",
         blessingOptions = listOf(CloudTaskLocalRunner.BLESSING_LUCK, BLESSING_NONE),
     ),
     CloudAutomationTaskSpec(
@@ -415,10 +422,8 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
             setSingleLine(false)
         }
         val merchantAutoComplete = settingsDialogSwitchRow(activity, "自动完成行商", task?.merchantAutoComplete == true, colors)
-        // 运签：与本地页同一套语义（每日轶闻固定求运，自动行商在求安/求财之间切换）。
-        var blessingChoice = task?.blessingType?.trim()?.uppercase()
-            ?.takeIf { spec.blessingOptions.contains(it) }
-            ?: spec.blessingOptions.firstOrNull().orEmpty()
+        // 运签：与本地页共用选择逻辑，空串是显式不祈禳，不能当成未配置。
+        var blessingChoice = spec.resolveBlessingChoice(task?.blessingType)
         val blessingButton = spec.blessingOptions.takeIf { it.isNotEmpty() }?.let {
             settingsDialogButton(
                 activity,
@@ -533,7 +538,7 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
                             request.put("bookLimit", selectedBooks.length())
                         }
                     }
-                    if (blessingChoice.isNotBlank()) request.put("blessingType", blessingChoice)
+                    request.put("blessingType", blessingChoice)
                     if (spec.merchant) {
                         request.put("merchantAutoComplete", merchantAutoComplete.isChecked)
                         merchantCity.text.toString().trim().takeIf(String::isNotBlank)?.let { request.put("merchantCityCode", it) }

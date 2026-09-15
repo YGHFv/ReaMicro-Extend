@@ -68,7 +68,11 @@ class MerchantSettledNotificationTest(_Base):
                 if extra:
                     trip.update(extra)
                 return 200, {"code": 0, "data": {"activeTrip": trip}}, "{}"
-            return 200, {"code": 0, "data": {}}, "{}"
+            if endpoint == "rest/community/start-traveling-merchant":
+                return 200, {"code": 0, "data": {"success": True, "trip": {
+                    "id": 43, "status": "TRAVELING", "endTime": _now_ms() + 3_600_000, **payload,
+                }}}, "{}"
+            return 200, {"code": 0, "data": {"success": True}}, "{}"
 
         executors.json_http_request = fake
 
@@ -111,7 +115,9 @@ class MerchantSettledNotificationTest(_Base):
             self.calls.append((endpoint, payload))
             if endpoint == "rest/community/get-traveling-merchant":
                 return 200, {"code": 0, "data": {"activeTrip": None}}, "{}"
-            return 200, {"code": 0, "data": {}}, "{}"
+            return 200, {"code": 0, "data": {"success": True, "trip": {
+                "id": 43, "status": "TRAVELING", "endTime": _now_ms() + 3_600_000, **payload,
+            }}}, "{}"
 
         executors.json_http_request = fake
         task = self.task("traveling_merchant", {
@@ -132,7 +138,7 @@ class TaoistBlessingTest(_Base):
             self.calls.append((endpoint, payload))
             if endpoint == "rest/community/get-taoist-blessing":
                 return 200, {"code": 0, "data": {"blessing": blessing}}, "{}"
-            return 200, {"code": 0, "data": {"success": True}}, "{}"
+            return 200, {"code": 0, "data": {"success": True, "blessing": {"blessingType": payload["blessingType"]}}}, "{}"
 
         executors.json_http_request = fake
 
@@ -146,9 +152,8 @@ class TaoistBlessingTest(_Base):
         )
         self.assertEqual("LUCK", self.calls[1][1]["blessingType"])
 
-    def test_keeps_existing_blessing(self):
-        # 已有签就不替换：替换会白白消耗祈禳道具。
-        self._http({"blessingType": "SAFETY", "name": "平安签"})
+    def test_keeps_existing_matching_blessing(self):
+        self._http({"blessingType": "WEALTH", "name": "求财签"})
         self.assertIsNone(executors.ensure_taoist_blessing("https://example.invalid/", "t", {}, "WEALTH"))
         self.assertEqual(["rest/community/get-taoist-blessing"], [e for e, _ in self.calls])
 

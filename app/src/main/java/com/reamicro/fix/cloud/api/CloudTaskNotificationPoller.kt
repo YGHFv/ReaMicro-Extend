@@ -231,27 +231,55 @@ object CloudTaskNotificationPoller {
 
 /** 使用系统闹钟在零点和下一次云任务完成附近静默唤醒模块。 */
 object CloudTaskWakeScheduler {
-    fun schedule(context: Context, nextTaskAt: Long = 0L) {
-        val alarm = context.getSystemService(AlarmManager::class.java) ?: return
+    @Synchronized
+    fun schedule(context: Context, nextTaskAt: Long? = null) {
+        val appContext = context.applicationContext
+        // 闹钟**只能由模块进程排**。阅微进程里这个对象也会被调用（前台心跳 / 云端轮询 / 设置页），
+        // 而在那边排会有两个后果，实机都出现过：
+        // 1. 同一时刻挂出第二个闹钟——`PendingIntent` 的归属按调用方 UID 算，阅微排出来的是
+        //    `app.zhendong.reamicro` 名下的**模糊**闹钟（未获精确闹钟授权，带十几分钟窗口），
+        //    与模块排的精确闹钟并存，实际唤醒时刻变成两者的最小值；
+        // 2. [NextWakeHint] 写在模块自己的 `filesDir` 下（root 看门狗读的就是它），宿主进程写不进去，
+        //    `write()` 会静默返回——于是"下次任务时刻刷新了、唤起时刻却停在旧值"。
+        // 交给模块排：它读自己的存储，算出来的时刻与它写下的提示天然一致。
+        if (appContext.packageName != CloudTaskNotifications.MODULE_PACKAGE_NAME) {
+            runCatching {
+                PendingIntent.getBroadcast(appContext, REQUEST_CODE, wakeIntent(),
+                    PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE)?.let { legacy ->
+                    appContext.getSystemService(AlarmManager::class.java)?.cancel(legacy)
+                    legacy.cancel()
+                }
+            }
+            requestReschedule(appContext, nextTaskAt)
+            return
+        }
+        val prefs = appContext.getSharedPreferences(WAKE_PREFS, Context.MODE_PRIVATE)
+        val settings = ApiServerSettingsStore { appContext }.get()
+        val previousCloudTaskAt = prefs.getLong(KEY_CLOUD_TASK_AT, 0L)
+        val cloudTaskAt = updatedCloudTaskAt(
+            previousCloudTaskAt, nextTaskAt, settings.enabled && settings.baseUrl.isNotBlank(),
+        )
+        if (cloudTaskAt != previousCloudTaskAt) prefs.edit().putLong(KEY_CLOUD_TASK_AT, cloudTaskAt).commit()
+        val alarm = appContext.getSystemService(AlarmManager::class.java) ?: return
         val pending = PendingIntent.getBroadcast(
-            context,
+            appContext,
             REQUEST_CODE,
             wakeIntent(),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val now = System.currentTimeMillis()
-        val calendar = java.util.Calendar.getInstance().apply {
+        val calendar = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("Asia/Shanghai")).apply {
             add(java.util.Calendar.DAY_OF_YEAR, 1)
             set(java.util.Calendar.HOUR_OF_DAY, 0)
             set(java.util.Calendar.MINUTE, 0)
             set(java.util.Calendar.SECOND, 0)
             set(java.util.Calendar.MILLISECOND, 0)
         }
-        val taskWake = nextTaskAt.takeIf { it > now }?.plus(TASK_FINISH_GRACE_MS) ?: Long.MAX_VALUE
+        val taskWake = cloudTaskAt.takeIf { it > 0L }?.plus(TASK_FINISH_GRACE_MS) ?: Long.MAX_VALUE
         // 本地自动任务（含行商 endTime）也纳入排程，让行商完成时刻能较准时唤醒。
         val localWake = runCatching {
-            com.reamicro.fix.cloud.local.LocalTaskStore { context.applicationContext }.earliestNextRunAt()
-        }.getOrDefault(0L).takeIf { it > now } ?: Long.MAX_VALUE
+            com.reamicro.fix.cloud.local.LocalTaskStore { appContext }.earliestNextRunAt()
+        }.getOrDefault(0L).takeIf { it > 0L } ?: Long.MAX_VALUE
         // 服务器没有任务时间、网络失败或系统错过闹钟时，固定短周期保证模块仍能自行恢复。
         val fallbackWake = now + FALLBACK_POLL_INTERVAL_MS
         // **只由任务自身决定的**唤醒时刻（不含 15 分钟兜底）。
@@ -259,7 +287,7 @@ object CloudTaskWakeScheduler {
         val triggerAt = minOf(taskDrivenWake, fallbackWake)
         // 写给 root 看门狗的是上面的"任务时刻"。这里曾经写的是 triggerAt —— 而它因为含 15 分钟兜底
         // 永远 ≤15 分钟，于是开了 root 增强也一样每 15 分钟醒一次，与"按任务时刻唤醒"完全相反。
-        NextWakeHint.write(context, taskDrivenWake)
+        NextWakeHint.write(appContext, taskDrivenWake)
         val exact = canScheduleExact(alarm)
         runCatching {
             if (exact) {
@@ -293,6 +321,23 @@ object CloudTaskWakeScheduler {
         .setClassName(CloudTaskNotifications.MODULE_PACKAGE_NAME, HEARTBEAT_RECEIVER_CLASS)
         .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
 
+    /**
+     * 非模块进程请求模块重新排程：把 [nextTaskAt] 一起带过去，由模块用自己的存储与
+     * [NextWakeHint] 算出真正的唤醒时刻。闹钟与提示都必须同源，否则两者会各说各话。
+     */
+    private fun requestReschedule(context: Context, nextTaskAt: Long?) {
+        runCatching {
+            context.sendBroadcast(
+                Intent(ACTION_RESCHEDULE)
+                    .setClassName(CloudTaskNotifications.MODULE_PACKAGE_NAME, RESCHEDULE_RECEIVER_CLASS)
+                    .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+                    .apply { if (nextTaskAt != null) putExtra(EXTRA_NEXT_TASK_AT, nextTaskAt) },
+            )
+        }.onFailure {
+            XposedBridge.log("ReaMicro wake reschedule request failed: ${it.message}")
+        }
+    }
+
     /** Android 12+ 未获精确闹钟授权时只能用非精确闹钟。 */
     fun canScheduleExact(alarm: AlarmManager): Boolean =
         Build.VERSION.SDK_INT < 31 || runCatching { alarm.canScheduleExactAlarms() }.getOrDefault(false)
@@ -309,14 +354,25 @@ object CloudTaskWakeScheduler {
     internal fun taskDrivenWakeAt(now: Long, midnight: Long, nextTaskAt: Long, localNextRunAt: Long): Long =
         minOf(
             midnight,
-            nextTaskAt.takeIf { it > now } ?: Long.MAX_VALUE,
-            localNextRunAt.takeIf { it > now } ?: Long.MAX_VALUE,
+            nextTaskAt.takeIf { it > 0L }?.let { if (it <= now) now + OVERDUE_RETRY_MS else it } ?: Long.MAX_VALUE,
+            localNextRunAt.takeIf { it > 0L }?.let { if (it <= now) now + OVERDUE_RETRY_MS else it } ?: Long.MAX_VALUE,
         )
 
+    internal fun updatedCloudTaskAt(current: Long, updated: Long?, enabled: Boolean = true): Long =
+        if (enabled) updated?.coerceAtLeast(0L) ?: current else 0L
+
     const val ACTION_WAKE = "com.reamicro.fix.CLOUD_TASK_HEARTBEAT"
+
+    /** 宿主进程请求模块重排唤醒（见 [schedule]）。模块自己不会发这个 action。 */
+    const val ACTION_RESCHEDULE = "com.reamicro.fix.RESCHEDULE_WAKE"
+    const val EXTRA_NEXT_TASK_AT = "nextTaskAt"
     private const val HEARTBEAT_RECEIVER_CLASS = "com.reamicro.fix.cloud.api.CloudTaskHeartbeatReceiver"
+    private const val RESCHEDULE_RECEIVER_CLASS = "com.reamicro.fix.cloud.api.CloudTaskRescheduleReceiver"
     internal val heartbeatReceiverClassForTest: String get() = HEARTBEAT_RECEIVER_CLASS
     private const val REQUEST_CODE = 260827
     private const val TASK_FINISH_GRACE_MS = 2 * 60_000L
+    private const val OVERDUE_RETRY_MS = 60_000L
+    private const val WAKE_PREFS = "reamicro-task-wake"
+    private const val KEY_CLOUD_TASK_AT = "nextCloudTaskAt"
     private const val FALLBACK_POLL_INTERVAL_MS = 15 * 60_000L
 }

@@ -1,7 +1,7 @@
 """云端任务的实际执行。
 
-野社签到分两步：先 complete-daily-lore 完成签到，签到 8 小时后奖励解锁，再用同一个
-complete-daily-lore 接口和同一个 userLoreId 领取奖励。阅微界面的“领取奖励”按钮也是这条链路。
+get-daily-lore 获取每日轶闻及 endTime；isFinish=true 后才能调用 complete-daily-lore 领取奖励。
+等待中的轶闻只安排后续检查，不提前调用领取接口，也不猜测固定的 8 小时等待期。
 注意不要与文社**周**奖励（claim-literary-society-weekly-reward）搞混——那是另一个奖励，
 早年误用它导致每天都拿到"上一周奖励已领取"并被判成可重试失败。
 """
@@ -70,6 +70,16 @@ def reamicro_business_error(body: Any) -> str:
         return ""
     message = body.get("message") or body.get("msg") or "未提供错误说明"
     return f"阅微业务码 {code}：{redact_message(str(message))}"
+
+
+def reamicro_operation_error(body: Any) -> str:
+    error = reamicro_business_error(body)
+    if error:
+        return error
+    data = nested_value(body, "data") or body
+    if isinstance(data, dict) and data.get("success") is False:
+        return str(data.get("message") or data.get("msg") or "服务端未接受操作")
+    return ""
 
 
 LOTTERY_QUALITY_PRIORITY = {
@@ -225,14 +235,14 @@ def claim_daily_lore_reward(base_url: str, token: str, request: dict[str, Any], 
         return "failed", f"签到奖励领取失败 HTTP {status_code}: {redact_message(raw)}"
 
     message = nested_value(body, "data", "message") or nested_value(body, "message") or nested_value(body, "msg") or ""
-    business_error = reamicro_business_error(body)
-    if not business_error:
+    business_error = reamicro_operation_error(body)
+    if not business_error and nested_value(body, "data", "claimed") is not False:
         return "granted", "签到奖励领取成功"
     if claim_reward_already_granted(message, body):
         return "already", "签到奖励此前已领取"
     if reward_not_ready(message):
         return "locked", "签到奖励尚未解锁，5 分钟后再次检查"
-    return "failed", business_error
+    return "failed", business_error or "服务端尚未确认奖励已领取"
 
 
 def claim_reward_already_granted(message: Any, body: Any = None) -> bool:
@@ -356,39 +366,36 @@ def execute_http_task(task: dict[str, Any]) -> tuple[str, str]:
 
 
 def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
-    """任务执行入口：先做道观运签前置检查，再走各任务自己的实现。
-
-    运签只对两个任务生效（用户指定）：每日轶闻固定求运（LUCK），自动行商按配置求安/求财。
-    「没有签才祈禳」——已有签不替换，替换会白白消耗祈禳道具。
-    """
-    task_type = str(task.get("taskType"))
-    if task_type == "pawn":
+    if task.get("taskType") == "pawn":
         return execute_pawn_task(task)
-    blessing_note = ""
-    if task_type in ("yeshe_checkin", "traveling_merchant"):
-        request, secret = credential_for_task(task)
-        base_url = str(secret.get("baseUrl") or "https://api.reamicro.zhendong.ltd/").strip()
-        token = str(secret.get("token"))
-        requested = "LUCK" if task_type == "yeshe_checkin" else str(request.get("blessingType") or "")
-        failure = ensure_taoist_blessing(base_url, token, request, requested)
-        if failure:
-            blessing_note = f"（运签：{failure}）"
-        else:
-            label = blessing_label(requested)
-            blessing_note = f" · 已祈禳{label}" if label else ""
-    result, message = _execute_reamicro_task_body(task)
-    return result, f"{message}{blessing_note}"
+    if task.get("taskType") == "traveling_merchant":
+        return execute_traveling_merchant_task(task)
+    return _execute_reamicro_task_body(task)
 
 
 def blessing_label(blessing_type: Any) -> str:
     return {"LUCK": "求运签", "SAFETY": "求安签", "WEALTH": "求财签"}.get(str(blessing_type or "").strip().upper(), "")
 
 
-def ensure_taoist_blessing(base_url: str, token: str, request: dict[str, Any], blessing_type: Any) -> str | None:
-    """检查道观运签，没有就祈禳一支。返回失败原因（成功或无需祈禳时为 None）。"""
+def blessing_note(details: dict[str, Any]) -> str:
+    label = blessing_label(details.get("activeType"))
+    if not label:
+        return ""
+    if not details.get("prayed"):
+        return f" · 沿用已有{label}"
+    replaced = blessing_label(details.get("replacedType"))
+    return f" · 已祈禳{label}" + (f"（顶掉原有{replaced}）" if replaced else "")
+
+
+def ensure_taoist_blessing(
+    base_url: str, token: str, request: dict[str, Any], blessing_type: Any,
+    details: dict[str, Any] | None = None,
+) -> str | None:
     requested = str(blessing_type or "").strip().upper()
     if not requested:
         return None
+    if not blessing_label(requested):
+        return f"不支持的运签配置：{requested}"
     status, body, raw = json_http_request(
         base_url, token, {}, str(request.get("blessingEndpoint") or "rest/community/get-taoist-blessing"),
     )
@@ -396,12 +403,15 @@ def ensure_taoist_blessing(base_url: str, token: str, request: dict[str, Any], b
         return f"查询运签触发认证/风控 HTTP {status}"
     if status < 200 or status >= 300:
         return f"查询运签失败 HTTP {status}"
-    error = reamicro_business_error(body)
+    error = reamicro_operation_error(body)
     if error:
         return f"查询运签失败：{error}"
-    data = nested_value(body, "data")
-    if isinstance(data, dict) and isinstance(data.get("blessing"), dict):
-        # 已有签就不动它：替换会浪费祈禳道具。
+    data = nested_value(body, "data") or body
+    blessing = data.get("blessing") if isinstance(data, dict) else None
+    active_type = str(blessing.get("blessingType") or "").strip().upper() if isinstance(blessing, dict) else ""
+    if active_type == requested:
+        if details is not None:
+            details.update(activeType=active_type, prayed=False)
         return None
     status, body, raw = json_http_request(
         base_url, token, {"blessingType": requested},
@@ -411,8 +421,26 @@ def ensure_taoist_blessing(base_url: str, token: str, request: dict[str, Any], b
         return f"祈禳触发认证/风控 HTTP {status}"
     if status < 200 or status >= 300:
         return f"祈禳失败 HTTP {status}: {redact_message(raw)}"
-    error = reamicro_business_error(body)
-    return f"祈禳失败：{error}" if error else None
+    error = reamicro_operation_error(body)
+    if error:
+        return f"祈禳失败：{error}"
+    data = nested_value(body, "data") or body
+    prayed = data.get("blessing") if isinstance(data, dict) else None
+    if not isinstance(prayed, dict):
+        status, body, raw = json_http_request(
+            base_url, token, {}, str(request.get("blessingEndpoint") or "rest/community/get-taoist-blessing"),
+        )
+        error = reamicro_operation_error(body)
+        if status < 200 or status >= 300 or error:
+            return f"确认运签失败：{error or f'HTTP {status}'}"
+        data = nested_value(body, "data") or body
+        prayed = data.get("blessing") if isinstance(data, dict) else None
+    actual_type = str(prayed.get("blessingType") or "").strip().upper() if isinstance(prayed, dict) else ""
+    if actual_type != requested:
+        return "服务端未返回生效运签" if not actual_type else f"服务端返回{blessing_label(actual_type)}，与配置不符"
+    if details is not None:
+        details.update(activeType=actual_type, prayed=True, replacedType=active_type)
+    return None
 
 
 def _execute_reamicro_task_body(task: dict[str, Any]) -> tuple[str, str]:
@@ -508,80 +536,72 @@ def _execute_reamicro_task_body(task: dict[str, Any]) -> tuple[str, str]:
         china_zone = timezone(timedelta(hours=8))
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         today = datetime.fromtimestamp(now_ms / 1000, china_zone).date().isoformat()
+        same_day = task.get("lastCheckinDate") == today
+        task.pop("claimJustCompleted", None)
+        task.pop("nextRunAtOverride", None)
+        blessing_details: dict[str, Any] = {}
+        if not same_day:
+            failure = ensure_taoist_blessing(base_url, token, request, request.get("blessingType"), blessing_details)
+            if failure:
+                task["nextRunAtOverride"] = now_ms + 5 * 60_000
+                return "failed", failure
+        suffix = blessing_note(blessing_details)
         status_code, lore, raw = json_http_request(base_url, token, configured_body, str(request.get("endpoint") or "rest/community/get-daily-lore"))
         if status_code in (401, 403, 429):
             return "paused", f"阅微认证/风控响应 HTTP {status_code}"
         if status_code < 200 or status_code >= 300:
             return "failed", f"获取野社每日轶闻失败 HTTP {status_code}: {redact_message(raw)}"
-        lore_id = nested_value(lore, "data", "id") or nested_value(lore, "data", "loreId") or nested_value(lore, "id")
-        is_finished = bool(nested_value(lore, "data", "isFinish"))
-        reward_claimed = bool(nested_value(lore, "data", "claimed"))
-        reward_items = daily_lore_reward_items(lore)
-        reward_summary = lottery_items_summary(reward_items)
-        if not is_finished:
-            if not lore_id:
-                return "failed", "阅微每日轶闻响应缺少 userLoreId"
-            status_code, body, raw = json_http_request(base_url, token, {"userLoreId": int(lore_id)}, str(request.get("completeEndpoint") or "rest/community/complete-daily-lore"))
-            if status_code in (401, 403, 429):
-                return "paused", f"阅微认证/风控响应 HTTP {status_code}"
-            if status_code < 200 or status_code >= 300:
-                return "failed", f"野社签到提交失败 HTTP {status_code}: {redact_message(raw)}"
-            business_error = reamicro_business_error(body)
-            if business_error:
-                return "failed", f"野社签到提交失败：{business_error}"
-            # 部分阅微版本只在提交签到后返回奖励解锁时间，必须优先采用该时间，
-            # 否则服务器会误把奖励安排到错误的 8 小时窗口。
-            completed_data = body.get("data") if isinstance(body, dict) else None
-            completed_data = completed_data if isinstance(completed_data, dict) else body
-            completed_end = timestamp_millis(completed_data.get("endTime")) if isinstance(completed_data, dict) else 0
-            if completed_end:
-                task["claimDueAt"] = completed_end
-        if task.get("lastCheckinDate") != today:
-            task["lastCheckinDate"] = today
-            complete_time = timestamp_millis(nested_value(lore, "data", "completeTime"))
-            task["lastCheckinAt"] = complete_time or now_ms
-            end_time = timestamp_millis(nested_value(lore, "data", "endTime"))
-            task["claimDueAt"] = end_time or (complete_time + 8 * 3_600_000 if complete_time else now_ms + 8 * 3_600_000)
+        business_error = reamicro_operation_error(lore)
+        if business_error:
+            return "failed", f"获取野社每日轶闻失败：{business_error}"
+        data = nested_value(lore, "data") or lore
+        data = data if isinstance(data, dict) else {}
+        lore_id = _safe_long(data.get("id") or data.get("loreId"))
+        if lore_id <= 0:
+            return "failed", "阅微每日轶闻响应缺少 userLoreId"
+        previous_id = _safe_long(task.get("claimLoreId"))
+        same_lore = same_day and previous_id in (0, lore_id)
+        if same_lore and previous_id == lore_id and task.get("claimCompletedDate") == today:
+            return "success", "今日已领取"
+        if not same_lore:
             task["claimRetryCount"] = 0
             task["claimFinalAttemptDate"] = ""
             task["claimCompletedDate"] = ""
-        if task.get("claimCompletedDate") == today:
-            return "success", "今日已领取"
+        task["lastCheckinDate"] = today
+        task["lastCheckinAt"] = task.get("lastCheckinAt", now_ms) if same_lore else now_ms
+        task["claimLoreId"] = lore_id
+        end_time = timestamp_millis(data.get("endTime"))
+        claim_due_at = end_time or (_safe_long(task.get("claimDueAt")) if same_lore else 0)
+        task["claimDueAt"] = claim_due_at
+        reward_claimed = bool(data.get("claimed"))
+        reward_items = daily_lore_reward_items(lore)
+        reward_summary = lottery_items_summary(reward_items)
+        ready = bool(data.get("isFinish")) if "isFinish" in data else 0 < claim_due_at <= now_ms
+        if not reward_claimed and not ready:
+            if claim_due_at > now_ms:
+                task["nextRunAtOverride"] = claim_due_at
+                end_label = datetime.fromtimestamp(claim_due_at / 1000, china_zone).strftime("%m-%d %H:%M")
+                return "success", f"签到完成，奖励待领取（{end_label} 解锁）{suffix}"
+            task["nextRunAtOverride"] = now_ms + (5 * 60_000 if claim_due_at else 3_600_000)
+            return "success", f"签到完成，奖励待领取，已安排后续查询{suffix}"
         if reward_claimed:
-            task["lastClaimAt"] = now_ms
-            task["claimCompletedDate"] = today
-            task["claimRetryCount"] = 0
-            task["claimFinalAttemptDate"] = ""
-            task["claimJustCompleted"] = True
-            task["notificationItems"] = reward_items
-            detail = f"：{reward_summary}" if reward_summary else ""
-            return "success", f"奖励已领取{detail}"
-        claim_due_at = bounded_config_int(task.get("claimDueAt", 0), now_ms + 8 * 3_600_000, 0)
-        if now_ms < claim_due_at:
-            task["nextRunAtOverride"] = claim_due_at
-            return "success", "签到完成，奖励待领取"
-
-        if not lore_id:
-            return "failed", "阅微每日轶闻响应缺少 userLoreId，无法领取签到奖励"
-        # 阅微界面的“领取奖励”会再次调用 complete-daily-lore，并继续传当前轶闻的 id。
-        claim_result, claim_message = claim_daily_lore_reward(base_url, token, request, int(lore_id))
+            claim_result, claim_message = "already", "签到奖励此前已领取"
+        else:
+            claim_result, claim_message = claim_daily_lore_reward(base_url, token, request, lore_id)
         if claim_result == "paused":
             return "paused", claim_message
         if claim_result in {"granted", "already", "locked"}:
             task["claimRetryCount"] = 0
             task["claimFinalAttemptDate"] = ""
             if claim_result == "locked":
-                # 奖励尚未解锁不是失败，但必须在当天继续检查，不能等到次日签到。
                 task["nextRunAtOverride"] = now_ms + 5 * 60_000
                 return "success", "奖励尚未解锁，5 分钟后再次检查"
             task["lastClaimAt"] = now_ms
             task["claimCompletedDate"] = today
-            # 已领取状态同样放行联动抽卡，否则抽卡会一直等在"等待签到奖励领取完成"。
             task["claimJustCompleted"] = True
             task["notificationItems"] = reward_items
             detail = f"：{reward_summary}" if reward_summary else ""
-            return "success", f"奖励已领取{detail}"
-
+            return "success", f"奖励已领取{detail}{suffix}"
         retry_count = bounded_config_int(task.get("claimRetryCount", 0), 0, 0) + 1
         task["claimRetryCount"] = retry_count
         local_now = datetime.fromtimestamp(now_ms / 1000, china_zone)
@@ -777,96 +797,121 @@ def merchant_profit_text(event_title: Any, settlement_amount: Any, principal: An
 
 
 def execute_traveling_merchant_task(task: dict[str, Any]) -> tuple[str, str]:
-    """行商通知任务。
-
-    每 4 小时检查一次行商状态：
-    - 无活跃行商：静默，下次按调度间隔再查。
-    - 行商在途（now < endTime）：把下次检查排到 endTime，暂停常规轮询。
-    - 行商已抵达（now >= endTime 且未结算、未通知过）：通知收益/亏损；
-      若开启自动完成则 settle，并在配置齐全时 start 新行商。
-    """
+    """SETTLED 是待领取状态；领取成功后才按配置祈禳并续开。"""
     request, secret = credential_for_task(task)
     base_url = str(secret.get("baseUrl") or "https://api.reamicro.zhendong.ltd/").strip()
     token = str(secret.get("token"))
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    poll_again = now_ms + 4 * 3_600_000
-    last_notified = bounded_config_int(task.get("merchantLastNotifiedTripId", 0), 0, 0)
-
+    task["nextRunAtOverride"] = now_ms + 5 * 60_000
+    task.pop("notificationItems", None)
     status_code, body, raw = json_http_request(
-        base_url, token, request.get("body", {}) or {},
+        base_url, token, request.get("body", {}),
         str(request.get("endpoint") or "rest/community/get-traveling-merchant"),
     )
     if status_code in (401, 403, 429):
         return "paused", f"阅微认证/风控响应 HTTP {status_code}"
     if status_code < 200 or status_code >= 300:
         return "failed", f"获取行商状态失败 HTTP {status_code}: {redact_message(raw)}"
-    business_error = reamicro_business_error(body)
+    business_error = reamicro_operation_error(body)
     if business_error:
         return "failed", f"获取行商状态失败：{business_error}"
-
-    trip = nested_value(body, "data", "activeTrip") or nested_value(body, "activeTrip")
-    if not isinstance(trip, dict):
-        # 没有在途行商：开着"自动完成"且参数齐全时补开一趟，否则这条链会在
-        # （比如手动结算过一次之后）彻底断掉，表现就是"自动行商不工作"。
-        if request.get("merchantAutoComplete"):
-            config = _merchant_start_config(request, _merchant_remembered_config(task, None))
-            if config["cityCode"] and config["principal"] > 0 and config["transportId"] > 0:
-                if _start_traveling_merchant(base_url, token, request, config):
-                    _remember_merchant_config(task, config)
-                    task["nextRunAtOverride"] = poll_again
-                    return "success", "当前没有进行中的行商，已按配置开启新行商"
-        task["nextRunAtOverride"] = poll_again
-        return "success", "当前没有进行中的行商"
-
-    trip_id = bounded_config_int(trip.get("id", 0), 0, 0)
-    status = str(trip.get("status") or "")
-    end_time_ms = timestamp_millis(trip.get("endTime"))
-    settlement_amount = _safe_long(trip.get("settlementAmount", 0))
-    principal = _safe_long(trip.get("principal", 0))
-    event_title = trip.get("eventTitle")
-
-    if status.upper() == "SETTLED":
-        # 游戏在 endTime 到达时就把它置成 SETTLED —— 这里才是常见路径。此前只说一句
-        # "行商已结算"，通知里既没有事件也没有收益/亏损；现在按趟去重后如实播报结算结果。
-        if not trip_id or trip_id == last_notified:
-            task["nextRunAtOverride"] = poll_again
-            return "success", "行商已结算"
-        message = merchant_profit_text(event_title, settlement_amount, principal)
-        remembered = _merchant_remembered_config(task, trip)
-        if request.get("merchantAutoComplete"):
-            config = _merchant_start_config(request, remembered)
-            if config["cityCode"] and config["principal"] > 0 and config["transportId"] > 0:
-                started = _start_traveling_merchant(base_url, token, request, config)
-                message += "，已开启新行商" if started else "（未能开启新行商）"
-                _remember_merchant_config(task, config)
-            else:
-                message += f"（未能开启新行商：{_merchant_start_hint(config)}）"
+    trip = _merchant_trip(body)
+    remembered = _merchant_remembered_config(task, trip)
+    _remember_merchant_config(task, remembered)
+    config = _merchant_start_config(request, remembered)
+    auto_complete = bool(request.get("merchantAutoComplete"))
+    trip_id = _safe_long(trip.get("id")) if trip else 0
+    end_time_ms = timestamp_millis(trip.get("endTime")) if trip else 0
+    task["merchantEndTime"] = end_time_ms
+    if trip and trip_id <= 0:
+        return "failed", "行商响应缺少 tripId"
+    if trip and str(trip.get("status") or "").upper() != "SETTLED":
+        if not end_time_ms or now_ms < end_time_ms:
+            task["nextRunAtOverride"] = _merchant_next_run(trip, now_ms)
+            return "success", "行商进行中，等待完成"
+        task["nextRunAtOverride"] = now_ms + 60_000
+        return "success", "行商已到预计结束时间，等待服务端生成结算结果"
+    last_notified = _safe_long(task.get("merchantLastNotifiedTripId"))
+    notify = bool(trip and trip_id != last_notified)
+    if notify:
         task["merchantLastNotifiedTripId"] = trip_id
-        task["nextRunAtOverride"] = poll_again
-        return "success", message
-    if end_time_ms > 0 and now_ms < end_time_ms:
-        task["nextRunAtOverride"] = end_time_ms + 60_000
-        return "success", "行商进行中，等待完成"
-    if trip_id and trip_id == last_notified:
-        task["nextRunAtOverride"] = poll_again
-        return "success", "行商已通知，等待结算"
-
-    message = merchant_profit_text(event_title, settlement_amount, principal)
-    if request.get("merchantAutoComplete") and trip_id:
-        settle_status, settle_body, settle_raw = json_http_request(
-            base_url, token, {"tripId": trip_id},
-            str(request.get("settleEndpoint") or "rest/community/settle-traveling-merchant"),
-        )
-        settle_error = reamicro_business_error(settle_body) if 200 <= settle_status < 300 else f"HTTP {settle_status}"
+    message = merchant_profit_text(trip.get("eventTitle"), trip.get("settlementAmount"), trip.get("principal")) if notify else "行商奖励待领取"
+    if not trip:
+        message = "当前没有进行中的行商"
+    settled_trip_id = _safe_long(task.get("merchantSettledTripId"))
+    if trip and auto_complete and trip_id != settled_trip_id:
+        try:
+            settle_status, settled, settle_raw = json_http_request(
+                base_url, token, {"tripId": trip_id},
+                str(request.get("settleEndpoint") or "rest/community/settle-traveling-merchant"),
+            )
+        except Exception as error:
+            return "failed", f"{message}（领取行商奖励失败：{redact_message(str(error))}）"
+        settle_error = reamicro_operation_error(settled) if 200 <= settle_status < 300 else f"HTTP {settle_status}"
         if settle_error:
-            message += f"（自动完成失败：{redact_message(str(settle_error))}）"
-        else:
-            message += "，已自动完成行商"
-            if _start_traveling_merchant(base_url, token, request):
-                message += "并开启新行商"
-    task["merchantLastNotifiedTripId"] = trip_id
-    task["nextRunAtOverride"] = poll_again
+            return "failed", f"{message}（领取行商奖励失败：{settle_error}）"
+        task["merchantSettledTripId"] = trip_id
+        task["merchantEndTime"] = 0
+        settled_trip_id = trip_id
+        settled_trip = _merchant_trip(settled)
+        if settled_trip:
+            trip = settled_trip
+        message = merchant_profit_text(trip.get("eventTitle"), trip.get("settlementAmount"), trip.get("principal")) + "，已领取行商奖励"
+    elif trip and trip_id == settled_trip_id:
+        message = "行商奖励已领取"
+        task["merchantEndTime"] = 0
+    can_start = auto_complete and (not trip or (
+        trip_id == settled_trip_id and trip_id != _safe_long(task.get("merchantRestartedAfterTripId"))
+    ))
+    if can_start:
+        if not config["cityCode"] or config["principal"] <= 0 or config["transportId"] < 0:
+            return "failed", f"{message}（未能开启新行商：{_merchant_start_hint(config)}）"
+        blessing_details: dict[str, Any] = {}
+        try:
+            failure = ensure_taoist_blessing(base_url, token, request, request.get("blessingType"), blessing_details)
+        except Exception as error:
+            failure = redact_message(str(error))
+        if failure:
+            return "failed", f"{message}（运签：{failure}）"
+        started, start_error = _start_traveling_merchant(base_url, token, request, config)
+        if start_error:
+            return "failed", f"{message}（未能开启新行商：{start_error}）"
+        next_trip = _merchant_trip(started)
+        if not next_trip:
+            try:
+                refresh_status, refreshed, _ = json_http_request(
+                    base_url, token, {}, str(request.get("endpoint") or "rest/community/get-traveling-merchant"),
+                )
+                if 200 <= refresh_status < 300 and not reamicro_operation_error(refreshed):
+                    next_trip = _merchant_trip(refreshed)
+            except Exception:
+                pass
+        start_data = nested_value(started, "data") or started
+        confirmed = isinstance(start_data, dict) and start_data.get("success") is True
+        if (not next_trip or _safe_long(next_trip.get("id")) == trip_id) and not confirmed:
+            return "failed", f"{message}（未能确认新行商已开启）"
+        if trip_id:
+            task["merchantRestartedAfterTripId"] = trip_id
+        _remember_merchant_config(task, config)
+        task["merchantEndTime"] = timestamp_millis(next_trip.get("endTime")) if next_trip else 0
+        task["nextRunAtOverride"] = _merchant_next_run(next_trip, now_ms)
+        started_message = "，已开启新行商" if trip_id else "，已按配置开启新行商"
+        return "success", f"{message}{started_message}{blessing_note(blessing_details)}"
+    task["nextRunAtOverride"] = now_ms + 4 * 3_600_000
     return "success", message
+
+
+def _merchant_trip(body: Any) -> dict[str, Any] | None:
+    data = nested_value(body, "data") or body
+    if not isinstance(data, dict):
+        return None
+    trip = data.get("activeTrip") or data.get("trip")
+    return trip if isinstance(trip, dict) else None
+
+
+def _merchant_next_run(trip: dict[str, Any] | None, now_ms: int) -> int:
+    end_time = timestamp_millis(trip.get("endTime")) if trip else 0
+    return end_time + 60_000 if end_time > now_ms else now_ms + 5 * 60_000
 
 
 def _merchant_remembered_config(task: dict[str, Any], trip: Any) -> dict[str, Any]:
@@ -874,7 +919,7 @@ def _merchant_remembered_config(task: dict[str, Any], trip: Any) -> dict[str, An
     trip = trip if isinstance(trip, dict) else {}
     return {
         "cityCode": str(trip.get("cityCode") or task.get("merchantLastCityCode") or "").strip(),
-        "transportId": bounded_config_int(trip.get("transportId") or task.get("merchantLastTransportId", 0), 0, 0),
+        "transportId": bounded_config_int(trip.get("transportId", task.get("merchantLastTransportId", 0)), 0, 0),
         "principal": bounded_config_int(trip.get("principal") or task.get("merchantLastPrincipal", 0), 0, 0),
     }
 
@@ -891,8 +936,8 @@ def _merchant_start_config(request: dict[str, Any], remembered: dict[str, Any]) 
 def _merchant_start_hint(config: dict[str, Any]) -> str:
     if not config.get("cityCode"):
         return "缺少城池"
-    if int(config.get("transportId") or 0) <= 0:
-        return "缺少车马"
+    if int(config.get("transportId") or 0) < 0:
+        return "车马配置无效"
     if int(config.get("principal") or 0) <= 0:
         return "缺少本金"
     return "参数不完整"
@@ -905,34 +950,31 @@ def _remember_merchant_config(task: dict[str, Any], config: dict[str, Any]) -> N
 
 
 def _start_traveling_merchant(
-    base_url: str, token: str, request: dict[str, Any], config: dict[str, Any] | None = None,
-) -> bool:
-    config = config or {
-        "cityCode": str(request.get("merchantCityCode") or "").strip(),
-        "transportId": bounded_config_int(request.get("merchantTransportId", 0), 0, 0),
-        "principal": bounded_config_int(request.get("merchantPrincipal", 0), 0, 0),
-    }
-    city_code = str(config.get("cityCode") or "").strip()
-    principal = bounded_config_int(config.get("principal", 0), 0, 0)
-    transport_id = bounded_config_int(config.get("transportId", 0), 0, 0)
-    if not city_code or principal <= 0 or transport_id <= 0:
-        return False
-    status_code, body, _ = json_http_request(
-        base_url, token,
-        {"cityCode": city_code, "principal": principal, "transportId": transport_id},
-        str(request.get("startEndpoint") or "rest/community/start-traveling-merchant"),
-    )
-    return 200 <= status_code < 300 and not reamicro_business_error(body)
+    base_url: str, token: str, request: dict[str, Any], config: dict[str, Any],
+) -> tuple[Any, str]:
+    try:
+        status_code, body, _ = json_http_request(
+            base_url, token,
+            {"cityCode": config["cityCode"], "principal": config["principal"], "transportId": config["transportId"]},
+            str(request.get("startEndpoint") or "rest/community/start-traveling-merchant"),
+        )
+    except Exception as error:
+        return None, redact_message(str(error))
+    error = reamicro_operation_error(body) if 200 <= status_code < 300 else f"HTTP {status_code}"
+    return body, error
 
 
 def execute_task(task: dict[str, Any]) -> tuple[str, str]:
-    if task.get("taskType") in {"http"}:
-        return execute_http_task(task)
-    if task.get("taskType") == "traveling_merchant":
-        return execute_traveling_merchant_task(task)
-    if task.get("taskType") in {"yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"}:
-        return execute_reamicro_task(task)
-    return "failed", f"未知任务类型：{task.get('taskType')}"
+    try:
+        if task.get("taskType") == "http":
+            return execute_http_task(task)
+        if task.get("taskType") == "traveling_merchant":
+            return execute_traveling_merchant_task(task)
+        if task.get("taskType") in {"yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"}:
+            return execute_reamicro_task(task)
+        return "failed", f"未知任务类型：{task.get('taskType')}"
+    except Exception as error:
+        return "failed", redact_message(str(error))
 
 
 async def verify_reamicro_secret(token: str, base_url: str) -> tuple[bool, str]:

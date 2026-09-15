@@ -7,7 +7,6 @@ import android.widget.TextView
 import com.reamicro.fix.cloud.api.ApiServerClient
 import com.reamicro.fix.cloud.api.ApiServerSettingsStore
 import com.reamicro.fix.cloud.api.CloudTaskManager
-import com.reamicro.fix.cloud.api.CloudTaskWakeScheduler
 import com.reamicro.fix.cloud.local.LocalTask
 import com.reamicro.fix.cloud.local.LocalTaskBook
 import com.reamicro.fix.cloud.local.LocalTaskMirror
@@ -19,18 +18,21 @@ import de.robv.android.xposed.XposedBridge
 private const val LOCAL_AUTOMATION_LOG_PREFIX = "[ReaMicroFix/LocalAutomation]"
 
 /**
- * 配置变更后统一下发镜像并重排闹钟。
+ * 配置变更后统一下发镜像。
  *
- * 两件事缺一不可：
- * 1. **镜像**：设置页在宿主进程写的是宿主的 prefs，而闹钟唤醒后执行任务的模块进程读的是
- *    自己的 prefs，不同步过去后台就是空配置（表现为"设了任务却从不自启"）。
- * 2. **排闹钟**：`schedule()` 此前只在云端轮询/模块 provider 路径被调用，用户在设置页启用
- *    本地任务时从不排程，没有 API 服务器时闹钟根本不存在。
+ * 为什么要镜像：设置页在宿主进程写的是宿主的 prefs，而闹钟唤醒后执行任务的模块进程读的是
+ * 自己的 prefs，不同步过去后台就是空配置（表现为"设了任务却从不自启"）。
+ *
+ * 为什么**不在这里执行任务、也不在这里排闹钟**：
+ * - 执行：宿主与模块会同时发请求。实机见过保存配置那一刻就撞出「操作过于频繁，请稍后再重试」。
+ *   保存配置只该改配置，跑不跑由模块自己的节奏决定。
+ * - 排闹钟：阅微进程排出来的是阅微名下的**模糊**闹钟（没有精确闹钟授权），会与模块的精确闹钟
+ *   并存；而 [com.reamicro.fix.cloud.api.NextWakeHint] 写在模块的 filesDir 下，宿主也写不进去。
+ *   收下镜像的 `LocalTaskMirrorReceiver` 会以模块身份排程，两者同源。
  */
 private fun ReaMicroSettingsHook.publishLocalAutomationChange() {
     val appContext = activityProvider()?.applicationContext ?: return
-    LocalTaskMirror.push(appContext)
-    runCatching { CloudTaskWakeScheduler.schedule(appContext) }
+    LocalTaskMirror.push(appContext, onComplete = ::reloadLocalAutomationState)
 }
 
 /**
@@ -49,7 +51,7 @@ internal fun ReaMicroSettingsHook.renderLocalAutomationSettingsContent(innerPadd
                 title = currentCredential?.label?.ifBlank { "当前阅微账号" } ?: "当前未登录阅微账号",
                 subtitle = localAutomationAccountSubtitle(currentCredential),
                 trailing = "刷新",
-                onClick = ::reloadLocalAutomationState,
+                onClick = ::publishLocalAutomationChange,
             ),
         )
         val taskRows = CLOUD_AUTOMATION_TASKS.map { spec ->
@@ -357,10 +359,7 @@ private fun ReaMicroSettingsHook.setLocalAutomationTaskEnabled(
     if (enabled) disableCloudAutomationTask(accountId, spec.taskType)
     localAutomationTasks = store.list(accountId)
     bumpLocalAutomationVersion()
-    if (enabled) {
-        val appContext = activity.applicationContext
-        Thread { runCatching { com.reamicro.fix.cloud.local.LocalTaskRunner.runDue(appContext) } }.start()
-    }
+    // 只下发配置，不在这里抢跑：启用那一刻宿主与模块同时发请求会撞出「操作过于频繁」。
     publishLocalAutomationChange()
     showToast(if (enabled) "已启用${spec.title}" else "已停用${spec.title}")
     return enabled
@@ -417,10 +416,8 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
         val merchantTransport = apiServerEdit(activity, colors, "新行商车马 transportId（留空沿用上次）", (task?.merchantTransportId?.takeIf { it > 0L })?.toString().orEmpty()).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
         }
-        // 运签：每日轶闻固定求运；自动行商在求安/求财之间切换（游戏只认这三个 wire 值）。
-        var blessingChoice = task?.blessingType?.trim()?.uppercase()
-            ?.takeIf { spec.blessingOptions.contains(it) }
-            ?: spec.blessingOptions.firstOrNull().orEmpty()
+        // 运签：轶闻可求运，行商可求安/求财；两者都可显式不祈禳。
+        var blessingChoice = spec.resolveBlessingChoice(task?.blessingType)
         val blessingButton = spec.blessingOptions.takeIf { it.isNotEmpty() }?.let {
             settingsDialogButton(
                 activity,
@@ -510,10 +507,7 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
             if (enabled) disableCloudAutomationTask(accountId, spec.taskType)
             dialog.dismiss()
             showToast(if (enableAfterSave == true) "已配置并启用${spec.title}" else "${spec.title}配置已保存")
-            if (enabled) {
-                val appContext = activity.applicationContext
-                Thread { runCatching { com.reamicro.fix.cloud.local.LocalTaskRunner.runDue(appContext) } }.start()
-            }
+            // 保存配置同样只下发、不执行：跑不跑交给模块进程自己的节奏。
             publishLocalAutomationChange()
             reloadLocalAutomationState()
         }

@@ -32,13 +32,41 @@ class TaskDrivenWakeAtTest {
     }
 
     @Test
-    fun `已经过去的任务时刻不算数`() {
-        // 过期时刻应当被忽略（它会由立即执行/重排修正），不能因此把唤醒安排在"过去"。
+    fun `已经到期的任务尽快唤醒而不是跳到零点`() {
         val future = now + 3_600_000L
         assertEquals(
-            future,
+            now + 60_000L,
             CloudTaskWakeScheduler.taskDrivenWakeAt(now, future, now - 1_000L, now - 2_000L),
         )
+    }
+
+    @Test
+    fun `本地重排和网络失败不能清掉已知云任务时间`() {
+        assertEquals(now + 3_600_000L, CloudTaskWakeScheduler.updatedCloudTaskAt(now + 3_600_000L, null))
+    }
+
+    @Test
+    fun `服务器明确没有云任务时清空缓存`() {
+        assertEquals(0L, CloudTaskWakeScheduler.updatedCloudTaskAt(now + 3_600_000L, 0L))
+    }
+
+    @Test
+    fun `服务器新时刻替换旧缓存`() {
+        assertEquals(now + 60_000L, CloudTaskWakeScheduler.updatedCloudTaskAt(now + 3_600_000L, now + 60_000L))
+    }
+
+    @Test
+    fun `停用云端后本地重排清除云端唤醒缓存`() {
+        val cloudTaskAt = CloudTaskWakeScheduler.updatedCloudTaskAt(now - 60_000L, null, enabled = false)
+        assertEquals(0L, cloudTaskAt)
+        assertEquals(now + 3_600_000L,
+            CloudTaskWakeScheduler.taskDrivenWakeAt(now, midnight, cloudTaskAt, now + 3_600_000L))
+    }
+
+    @Test
+    fun `停用后迟到的云端响应不能恢复唤醒缓存`() {
+        assertEquals(0L,
+            CloudTaskWakeScheduler.updatedCloudTaskAt(now + 60_000L, now + 3_600_000L, enabled = false))
     }
 
     @Test

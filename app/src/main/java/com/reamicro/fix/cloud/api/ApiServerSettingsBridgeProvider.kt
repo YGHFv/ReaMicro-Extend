@@ -22,6 +22,9 @@ class ApiServerSettingsBridgeProvider : ContentProvider() {
             return Bundle().apply { putBoolean("saved", false) }
         }
         val appContext = context?.applicationContext ?: return null
+        if (method == METHOD_LOCAL_TASK_SNAPSHOT) {
+            return Bundle().apply { putString(RESULT_SNAPSHOT, LocalTaskStore { appContext }.snapshotPayload().toString()) }
+        }
         if (method == METHOD_LOCAL_TASK_RECORDS) {
             // 后台（模块进程）跑出来的执行记录，供设置页与前台记录合并展示。
             // 模块处于 stopped 时本调用不可达，调用方需容忍失败。
@@ -52,7 +55,8 @@ class ApiServerSettingsBridgeProvider : ContentProvider() {
                         .put("at", record.at)
                         .put("taskType", record.taskType)
                         .put("result", record.result)
-                        .put("message", record.message),
+                        .put("message", record.message)
+                        .put("detail", record.detail),
                 )
             }
         }.onFailure {
@@ -72,6 +76,8 @@ class ApiServerSettingsBridgeProvider : ContentProvider() {
         const val METHOD_SAVE = "save"
         /** 读取模块进程侧的本地任务执行记录（后台唤醒跑出来的那些）。 */
         const val METHOD_LOCAL_TASK_RECORDS = "local-task-records"
+        const val METHOD_LOCAL_TASK_SNAPSHOT = "local-task-snapshot"
+        const val RESULT_SNAPSHOT = "snapshot"
         const val EXTRA_ACCOUNT_ID = "accountId"
         const val RESULT_RECORDS = "records"
         private const val MAX_MIRRORED_RECORDS = 100
@@ -106,6 +112,7 @@ fun readModuleLocalTaskRecords(context: android.content.Context, accountId: Stri
             taskType = item.optString("taskType"),
             result = item.optString("result"),
             message = item.optString("message"),
+            detail = item.optString("detail"),
         )
     }
 }

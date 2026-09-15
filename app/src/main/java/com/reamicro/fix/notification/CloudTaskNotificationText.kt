@@ -25,7 +25,7 @@ fun cloudTaskNotificationText(fallback: String, itemsJson: String): CharSequence
         val start = text.length
         text.append(item.name)
         val end = text.length
-        qualityColor(item.quality)?.let { spans += Triple(start, end, it) }
+        cloudTaskQualityColor(item.quality)?.let { spans += Triple(start, end, it) }
         text.append(" x").append(item.count)
     }
     return SpannableString(text.toString()).apply {
@@ -74,7 +74,7 @@ private fun qualityPriority(quality: String): Int = when (normalizeQuality(quali
     else -> 0
 }
 
-private fun qualityColor(quality: String): Int? = when (normalizeQuality(quality)) {
+internal fun cloudTaskQualityColor(quality: String): Int? = when (normalizeQuality(quality)) {
     "RED" -> 0xFFE53935.toInt()
     "ORANGE", "GOLD", "YELLOW" -> 0xFFC77800.toInt()
     "PURPLE" -> 0xFF8E24AA.toInt()

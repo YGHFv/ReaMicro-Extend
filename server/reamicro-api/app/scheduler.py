@@ -70,8 +70,8 @@ def next_task_run(task: dict[str, Any], now_ms: int | None = None) -> int:
         return 0
     now_ms = now_ms or int(datetime.now(timezone.utc).timestamp() * 1000)
     override = bounded_config_int(task.pop("nextRunAtOverride", 0), 0, 0)
-    if override > now_ms:
-        return override
+    if override > 0:
+        return override if override > now_ms else now_ms + 60_000
     schedule = task.get("schedule", {})
     if not isinstance(schedule, dict) or not schedule.get("timeOfDay"):
         return now_ms + task_interval(task) * 1000
@@ -231,6 +231,23 @@ def execute_linked_draw_task(tasks: dict[str, dict[str, Any]], checkin_task: dic
     return result, message
 
 
+def requires_automation_recovery(task: dict[str, Any]) -> bool:
+    return (task.get("taskType") in {"yeshe_checkin", "traveling_merchant"}
+            and task.get("enabled", True) and task.get("status") not in {"paused", "cancelled", "running"}
+            and bounded_config_int(task.get("automationStateVersion", 0), 0, 0) < 1)
+
+
+def recover_automation_task(task: dict[str, Any], now_ms: int) -> bool:
+    if not requires_automation_recovery(task):
+        return False
+    task["automationStateVersion"] = 1
+    task["nextRunAt"] = now_ms
+    if task.get("taskType") == "traveling_merchant":
+        task["merchantSettledTripId"] = 0
+        task["merchantRestartedAfterTripId"] = 0
+    return True
+
+
 async def task_scheduler_loop() -> None:
     worker_id = "worker_" + secrets.token_hex(6)
     while True:
@@ -249,10 +266,11 @@ async def task_scheduler_loop() -> None:
                         changed = True
                     continue
                 next_run = int(task.get("nextRunAt", 0))
-                if next_run > now:
+                if next_run > now and not requires_automation_recovery(task):
                     continue
                 if not runtime.get_state_store().acquire_task_lock(task_id, worker_id, now + 15 * 60 * 1000, now):
                     continue
+                recover_automation_task(task, now)
                 task["status"] = "running"
                 task["lastRunAt"] = now
                 changed = True
@@ -267,13 +285,13 @@ async def task_scheduler_loop() -> None:
                     task["runCount"] = int(task.get("runCount", 0)) + 1
                     if result == "success":
                         task["consecutiveFailures"] = 0
-                        task["nextRunAt"] = next_task_run(task, now)
+                        task["nextRunAt"] = next_task_run(task, finished_at)
                     elif result == "failed":
                         task["consecutiveFailures"] = int(task.get("consecutiveFailures", 0)) + 1
                         max_retries = max(0, min(int(task.get("maxRetries", 3)), 10))
                         if task["consecutiveFailures"] <= max_retries:
                             task["status"] = "scheduled"
-                            task["nextRunAt"] = now + retry_delay_seconds(task) * 1000
+                            task["nextRunAt"] = finished_at + retry_delay_seconds(task) * 1000
                             task["lastMessage"] = f"{message}；将在退避后重试"
                         else:
                             task["status"] = "paused"

@@ -1,6 +1,6 @@
 """野社每日签到与签到奖励领取回归测试。
 
-阅微 2.3.1 的签到与奖励领取都调用 complete-daily-lore，并传同一个 userLoreId。
+阅微 2.3.2 查询 get-daily-lore 获取轶闻，complete-daily-lore 只用于领取奖励。
 领取按钮只在 isFinish=true 且 claimed=false 时启用；成功后客户端把 claimed 更新为 true。
 通用任务中心的 get-my-task-list / receive-reward 与野社每日轶闻奖励无关。
 """
@@ -173,9 +173,13 @@ class YesheCheckinClaimTest(unittest.TestCase):
         executors.execute_reamicro_task(task)
         self.assertEqual(datetime.now(CHINA).date().isoformat(), task["claimCompletedDate"])
 
-        # 次日：日期推进后重置，重新进入 8 小时等待。
+        # 次日返回新的未结束轶闻，等待服务端给出的结束时间。
         self.calls.clear()
         task["lastCheckinDate"] = (datetime.now(CHINA) - timedelta(days=1)).date().isoformat()
+        self._stub(lore={"code": 0, "data": {
+            "id": 100, "isFinish": False, "claimed": False,
+            "endTime": int(datetime.now(timezone.utc).timestamp() * 1000) + 3_600_000,
+        }})
         result, message = executors.execute_reamicro_task(task)
         self.assertEqual("success", result)
         self.assertEqual("", task["claimCompletedDate"], "跨天必须清掉当日领取标记")
@@ -231,8 +235,10 @@ class YesheCheckinClaimTest(unittest.TestCase):
     # ---------- 其余不变 ----------
 
     def test_waiting_period_unchanged(self):
-        self._stub()
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        self._stub(lore={"code": 0, "data": {
+            "id": 99, "isFinish": False, "claimed": False, "endTime": now_ms + 4 * 3_600_000,
+        }})
         task = self._task(
             lastCheckinDate=datetime.now(CHINA).date().isoformat(),
             claimDueAt=now_ms + 4 * 3_600_000,
@@ -246,7 +252,7 @@ class YesheCheckinClaimTest(unittest.TestCase):
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         end_seconds = (now_ms + 30 * 60_000) // 1000
         self._stub(lore={"code": 0, "data": {
-            "id": 99, "isFinish": True, "claimed": False, "endTime": end_seconds,
+            "id": 99, "isFinish": False, "claimed": False, "endTime": end_seconds,
         }})
         task = self._task(lastCheckinDate="")
         result, message = executors.execute_reamicro_task(task)
@@ -260,13 +266,11 @@ class YesheCheckinClaimTest(unittest.TestCase):
         self.assertEqual(timestamp, executors.timestamp_millis(timestamp))
 
     def test_initial_checkin_business_error_is_not_success(self):
-        self._stub(
-            lore={"code": 0, "data": {"id": 99, "isFinish": False, "claimed": False}},
-            claim_response=(200, {"code": 500, "message": "签到失败"}, "{}"),
-        )
+        self._stub(lore={"code": 500, "message": "业务失败"})
         result, message = executors.execute_reamicro_task(self._task())
         self.assertEqual("failed", result)
-        self.assertIn("阅微业务码 500", message)
+        self.assertIn("获取野社每日轶闻失败", message)
+        self.assertEqual([], self._completed_lore_ids())
 
     def test_claim_already_granted_patterns(self):
         detect = executors.claim_reward_already_granted
