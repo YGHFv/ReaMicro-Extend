@@ -32,6 +32,7 @@ tools/*
 !tools/split-config/
 !tools/gen-settings-contract-test.mjs
 !tools/build-ksu-module.py
+!tools/test-build-ksu-module.py
 !tools/move-packages.mjs
 decompiled/
 dex_tmp/

@@ -4,6 +4,13 @@
 
 **能降低对 Android 应用进程存活的依赖，但不能保证永不被杀或绝对准时。** 深度休眠、断网、登录失效、风控、root/SELinux 限制仍然存在。
 
+## 下载
+
+- 推荐打开 [GitHub Releases](https://github.com/YGHFv/ReaMicro-Extend/releases)，在同一条 CI 预发布的 Assets 中下载配套 APK 和 `ReaMicro-Automation-KSU-<版本号>.zip`。不要使用只筛选正式版的 `releases/latest`，CI 产物标记为预发布。
+- 模块应用「配置 → 权限与后台 → 本地任务执行模式 → 说明与切换 → 下载 KSU」也会打开该页面。旧发布只有 APK，不会自动补上 ZIP。
+- 也可在 [Actions → CI](https://github.com/YGHFv/ReaMicro-Extend/actions/workflows/ci.yml) 的成功构建中下载 `ReaMicro-Automation-ci-ksu` artifact（保留 14 天，需要登录 GitHub）；先解压 artifact 外层压缩包，再刷里面的模块 ZIP，不要把外层包交给 KernelSU。
+- `main` 上 APK、`ksu/` 或打包脚本变更，以及手动运行 CI，都会在校验通过后构建 APK 和模块 ZIP；ZIP 同时上传到 Actions artifact 和该次 GitHub Release。ZIP 版本号来自 `module.prop`，不跟 APK 版本号强行绑定。
+
 ## 安装和启用
 
 1. 安装包含本次 KSU 执行入口的配套 ReaMicro Extend APK；旧 APK 没有此功能。
@@ -17,6 +24,16 @@
 
 「立即执行」在 KSU 模式下表示提交排队请求，不是等待 root 任务全部执行完成；设备醒着时通常在下一次 15 秒检查内取走，完成后可同步记录。
 
+## 共用配置与切换等待
+
+两种模式使用**同一套本地任务设置**，账号、任务参数和启用开关不需要重新配置；并不是让用户维护两套独立配置。
+
+底层存储目前分开：Android 使用应用私有的 SharedPreferences，并用该应用 UID 的 Android Keystore 加密 token；KSU 使用 root 私有 JSON，应用通过受控命令同步配置与进度。root 不能直接用自己的 UID 解密应用的 Keystore 密文，也不能绕过 SharedPreferences 的进程内缓存直接修改同一个 XML 文件。
+
+切换等待的不是复制配置，而是**本机已经开始执行的这一轮请求结束并保存最终进度**。行商旅程、轶闻等待领奖等服务端计时只保留下次执行时刻，不会一直占用本机执行锁，不需要等这些计时结束才能切换。
+
+即使以后迁到共用 JSON，仍需要跨进程执行锁和安全交接：旧执行器发出的请求可能已在服务端生效，新执行器如果立即重跑，仍可能重复祈愿、典当或覆盖计数。缩短界面等待应使用后台交接，而不是放开两端同时执行；当前版本仍保留原有安全交接机制。
+
 ## 后台卡片
 
 「配置 → 权限与后台 → 隐藏后台卡片」默认关闭。开启后，返回桌面或离开模块 Activity 时从最近任务列表隐藏模块卡片；重新进入模块时恢复前台卡片。关闭开关恢复普通显示。
@@ -26,7 +43,7 @@
 ## 切回和卸载
 
 1. 保持 APK 和 KSU 模块都在。
-2. 在「本地任务执行模式」选择「使用 Android」。执行器会先停止领取新任务、等当前执行结束、导回最终进度，再清除 root 目录的 token 副本。
+2. 在「本地任务执行模式」选择「使用 Android」。执行器会先停止领取新任务、等当前本机执行结束、清除 root 目录的 token 副本并导回最终进度；不等待行商旅程或轶闻解锁。
 3. 确认显示 Android 模式后，再去 KernelSU 卸载模块。
 
 清除模块应用数据、重装 APK 前也必须先正常交接；清数据会丢失应用里的执行权标记，但不会替你删除或停用 root 私有状态。
@@ -53,6 +70,7 @@
 
 ```powershell
 .\gradlew.bat :app:assembleRelease
+python tools/test-build-ksu-module.py
 python tools/build-ksu-module.py
 ```
 
@@ -61,7 +79,7 @@ python tools/build-ksu-module.py
 - `app/build/outputs/apk/release/app-release.apk`
 - `outputs/ReaMicro-Automation-KSU-0.1.0.zip`
 
-ZIP 内只有模块脚本和属性，不包含账号配置、token 或测试数据。脚本统一为 LF，并带 Unix 执行权限。模块运行时加载已安装 APK，因此需要配套更新，不能删掉 APK 后单独运行 ZIP。
+ZIP 文件名按 `ksu/reamicro-automation/module.prop` 的 `version` 生成，当前是 `0.1.0`。打包白名单只包括五个模块脚本和 `module.prop`，缺少文件或版本号不合法会中止打包，不包含账号配置、token 或测试数据。脚本统一为 UTF-8 无 BOM、LF，并带 Unix 执行权限。模块运行时加载已安装 APK，因此需要配套更新，不能删掉 APK 后单独运行 ZIP。
 
 ## 无副作用自检
 

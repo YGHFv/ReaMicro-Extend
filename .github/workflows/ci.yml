@@ -5,9 +5,12 @@ on:
   push:
     branches:
       - main
-    # 模块本体变更时触发 APK 构建；服务端单独变更由 Docker workflow 负责。
+    # 模块本体或 KSU 脚本变更时构建配套 APK 和 ZIP；服务端单独变更由 Docker workflow 负责。
     paths:
       - "app/**"
+      - "ksu/**"
+      - "tools/build-ksu-module.py"
+      - "tools/test-build-ksu-module.py"
       - "gradle/**"
       - "gradle.properties"
       - "gradlew"
@@ -24,7 +27,7 @@ permissions:
 
 jobs:
   build:
-    name: Build APK
+    name: Build APK and KSU module
     runs-on: ubuntu-latest
 
     steps:
@@ -60,6 +63,13 @@ jobs:
 
       - name: Test
         run: ./gradlew :app:testDebugUnitTest
+
+      - name: Test KSU module packaging
+        run: |
+          python3 tools/test-build-ksu-module.py
+          for script in ksu/reamicro-automation/*.sh; do
+            sh -n "$script"
+          done
 
       # 体积/复杂度基线度量，只报数不阻断构建（见 config/detekt/detekt.yml）。
       - name: Detekt (report only)
@@ -106,6 +116,12 @@ jobs:
             echo "APK_VARIANT=debug" >> "$GITHUB_ENV"
           fi
 
+      - name: Build KSU module
+        run: |
+          python3 tools/build-ksu-module.py
+          mkdir -p artifacts
+          cp outputs/ReaMicro-Automation-KSU-*.zip artifacts/
+
       - name: Prepare CI APK artifact
         run: |
           mkdir -p artifacts
@@ -128,6 +144,14 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Upload CI KSU module
+        uses: actions/upload-artifact@v5
+        with:
+          name: ReaMicro-Automation-ci-ksu
+          path: artifacts/ReaMicro-Automation-KSU-*.zip
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Create CI release
         if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         env:
@@ -140,8 +164,8 @@ jobs:
           else
             TITLE="CI ${VERSION_NAME} #${GITHUB_RUN_NUMBER}"
           fi
-          gh release create "$TAG" artifacts/*.apk \
+          gh release create "$TAG" artifacts/*.apk artifacts/ReaMicro-Automation-KSU-*.zip \
             --target "$GITHUB_SHA" \
             --title "$TITLE" \
-            --notes "Automated CI build from ${GITHUB_SHA}." \
+            --notes "Automated CI build from ${GITHUB_SHA}. Includes the matching APK and experimental KSU module ZIP. Install the APK before enabling the KSU module." \
             --prerelease

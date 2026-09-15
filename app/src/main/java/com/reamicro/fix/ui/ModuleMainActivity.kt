@@ -7,6 +7,7 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.drawable.ColorDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.View
@@ -489,9 +490,15 @@ class ModuleMainActivity : Activity() {
         ui.contentDialog(
             "本地任务执行模式",
             "Android 模式由系统闹钟与后台任务执行。KSU 模式由刷入模块的独立进程运行同一套任务逻辑，APK 被关闭也能继续。\n\n" +
-                "KSU 模式为实验功能：需刷入配套 ZIP、授权本应用 root，只支持主用户。登录凭据会复制到 /data/adb/reamicro-automation 的 root 私有文件（目录 700、文件 600），普通应用不可读。切回 Android 会先等待在途任务结束、同步记录并清除该凭据副本。\n\n" +
+                "两种模式共用原来的本地任务设置，不需要重新配置。切换只等待本机正在执行的这一轮完成并保存进度，不会等待行商旅程结束或轶闻解锁；共用配置也不能跳过这个防重复执行的交接。\n\n" +
+                "KSU 模式为实验功能：需刷入配套 ZIP、授权本应用 root，只支持主用户。登录凭据会复制到 /data/adb/reamicro-automation 的 root 私有文件（目录 700、文件 600），普通应用不可读。切回 Android 会同步最终记录并清除该凭据副本。\n\n" +
+                "点击「下载 KSU」打开 GitHub Releases，从同一条 CI 发布下载配套 APK 和 ReaMicro-Automation-KSU-版本号.zip；旧发布可能只有 APK。\n\n" +
                 "KSU 仍可能受设备休眠、断网、模块停用、token 失效或接口风控影响，并非绝对准时。检测失败时不自动切回，避免重复消费。卸载 KSU 模块前必须先切回 Android。",
             actions = listOf(
+                "下载 KSU" to {
+                    runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/YGHFv/ReaMicro-Extend/releases"))) }
+                        .onFailure { ui.toast("无法打开浏览器，请手动访问 GitHub Releases 下载") }
+                },
                 "使用 KSU" to { rootAction { KsuTaskBridge.enable(applicationContext) } },
                 "使用 Android" to { rootAction { KsuTaskBridge.disable(applicationContext) } },
             ),
