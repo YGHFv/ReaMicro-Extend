@@ -3,9 +3,9 @@ package com.reamicro.fix.ui
 import android.content.Context
 import com.reamicro.fix.cloud.api.CloudTaskWakeScheduler
 import com.reamicro.fix.cloud.api.NextWakeHint
+import com.reamicro.fix.cloud.ksu.RootCommandRunner
 import com.reamicro.fix.logging.ModuleAndroidLog
 import com.reamicro.fix.notification.CloudTaskNotifications
-import java.util.concurrent.TimeUnit
 
 /**
  * Root 增强：把「定时唤醒」交给 root 侧的看门狗。
@@ -115,6 +115,7 @@ object RootWakeController {
      *
      * 返回可读的结果说明，直接显示给用户（root 操作失败的原因需要让用户看到，而不是静默）。
      */
+    @Synchronized
     fun enable(context: Context): String {
         if (!isRootAvailable()) return "未检测到 root，无法启用"
         val appContext = context.applicationContext
@@ -125,8 +126,9 @@ object RootWakeController {
                 "mkdir -p ${ADB_DIR}/service.d && cat > $WATCHDOG_PATH <<'EOF'\n$script\nEOF\nchmod 755 $WATCHDOG_PATH",
                 timeoutSeconds = 20,
             )
+            check(write.exitCode == 0) { "看门狗脚本写入失败" }
             // 2) 顺手把模块加进 Doze 白名单与活跃待机桶：降低被系统冻结/延迟的概率。
-            //    这只是"降低概率"，真正保证能被叫醒的是看门狗，两者互不替代。
+            //    白名单和看门狗都只降低延迟概率，仍会受休眠及厂商后台策略影响。
             val whitelist = runCatching {
                 runRoot("cmd deviceidle whitelist +${CloudTaskNotifications.MODULE_PACKAGE_NAME}", 15).output
             }.getOrDefault("")
@@ -137,7 +139,7 @@ object RootWakeController {
             // 3) 先把当前的下次唤醒时刻写出去，看门狗一起步就能按它睡，不必先空转一轮。
             CloudTaskWakeScheduler.schedule(appContext)
             // 3) 立刻起一份，不必等重启。
-            runRoot("$WATCHDOG_PATH >/dev/null 2>&1 &", timeoutSeconds = 10)
+            if (!isWatchdogRunning()) runRoot("$WATCHDOG_PATH </dev/null >/dev/null 2>&1 &", timeoutSeconds = 10)
             prefs(context).edit().putBoolean(KEY_ENABLED, true).commit()
             ModuleAndroidLog.legacy(LOG_TAG, "root watchdog enabled at $WATCHDOG_PATH")
             if (probeYes("test -f $WATCHDOG_PATH && echo yes")) {
@@ -153,7 +155,8 @@ object RootWakeController {
 
     /** 关闭：删脚本并结束循环。 */
     fun disable(context: Context): String = runCatching {
-        runRoot("rm -f $WATCHDOG_PATH; pkill -f reamicro-watchdog", timeoutSeconds = 15)
+        runRoot("rm -f $WATCHDOG_PATH; pkill -f [r]eamicro-watchdog.sh", timeoutSeconds = 15)
+        check(!isWatchdogRunning()) { "看门狗尚未停止，请重试" }
         prefs(context).edit().putBoolean(KEY_ENABLED, false).commit()
         ModuleAndroidLog.legacy(LOG_TAG, "root watchdog disabled")
         "看门狗已停用"
@@ -233,15 +236,8 @@ object RootWakeController {
      * 命令非零退出，由调用方转成"无 root"。
      */
     private fun runRoot(command: String, timeoutSeconds: Long): RootCommand {
-        val process = ProcessBuilder("su", "-c", command)
-            .redirectErrorStream(true)
-            .start()
-        val output = process.inputStream.bufferedReader().use { it.readText() }
-        if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
-            process.destroyForcibly()
-            error("root 命令超时")
-        }
-        return RootCommand(process.exitValue(), output.trim())
+        val result = RootCommandRunner.run(command, timeoutSeconds = timeoutSeconds)
+        return RootCommand(result.exitCode, result.output)
     }
 
     private const val LOG_TAG = "ReaMicroRoot"

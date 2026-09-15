@@ -370,7 +370,10 @@ def execute_reamicro_task(task: dict[str, Any]) -> tuple[str, str]:
         return execute_pawn_task(task)
     if task.get("taskType") == "traveling_merchant":
         return execute_traveling_merchant_task(task)
-    return _execute_reamicro_task_body(task)
+    result, message = _execute_reamicro_task_body(task)
+    if task.get("taskType") == "yeshe_draw_card" and result == "success":
+        task["triggeredByCheckinReward"] = False
+    return result, message
 
 
 def blessing_label(blessing_type: Any) -> str:
@@ -456,7 +459,7 @@ def _execute_reamicro_task_body(task: dict[str, Any]) -> tuple[str, str]:
         except ValueError:
             configured_body = {}
     if task_type == "yeshe_draw_card":
-        if not task.pop("triggeredByCheckinReward", False):
+        if not task.get("triggeredByCheckinReward", False):
             task["waitingForCheckinReward"] = True
             return "success", "等待签到奖励领取后触发"
         daily_limit = min(bounded_config_int(request.get("dailyLimit", 3), 3, 0), 20)
@@ -640,18 +643,21 @@ def _execute_reamicro_task_body(task: dict[str, Any]) -> tuple[str, str]:
             books = []
         books = books[: max(1, min(int(request.get("bookLimit", 1) or 1), 10))]
         duration_minutes = max(1, min(int(request.get("durationMinutes", 30) or 30), 720))
-        daily_limit_minutes = max(duration_minutes, min(int(request.get("dailyLimitMinutes", 720) or 720), 1440))
+        daily_limit_minutes = max(1, min(int(request.get("dailyLimitMinutes", 720) or 720), 1440))
         today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
         used_today = int(task.get("dailyReadMinutes", 0)) if task.get("dailyReadDate") == today else 0
         duration_minutes = min(duration_minutes, max(daily_limit_minutes - used_today, 0))
         if duration_minutes <= 0:
             return "success", f"今日已达到 {daily_limit_minutes} 分钟上限"
-        duration_seconds = duration_minutes * 60
         rotation = int(task.get("bookRotation", 0)) % max(len(books), 1)
         books = books[rotation:] + books[:rotation]
         completed = 0
+        completed_minutes = 0
         completed_books: list[str] = []
-        for book in books:
+        for offset, book in enumerate(books):
+            current_duration = min(duration_minutes, max(daily_limit_minutes - used_today - completed_minutes, 0))
+            if current_duration <= 0:
+                break
             if not isinstance(book, dict):
                 continue
             raw_book_id = book.get("bookId")
@@ -664,8 +670,7 @@ def _execute_reamicro_task_body(task: dict[str, Any]) -> tuple[str, str]:
                 continue
             if book_id <= 0:
                 continue
-            china_date = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
-            time_payload = {"list": [{"bookId": book_id, "date": china_date, "duration": duration_seconds, "verify": ""}]}
+            time_payload = {"list": [{"bookId": book_id, "date": today, "duration": current_duration * 60, "verify": ""}]}
             time_endpoint = str(request.get("timeEndpoint") or "rest/reader/update-read-time-by-date")
             time_status, time_body, time_raw = json_http_request(base_url, token, time_payload, time_endpoint)
             if time_status in (401, 403, 429):
@@ -676,14 +681,14 @@ def _execute_reamicro_task_body(task: dict[str, Any]) -> tuple[str, str]:
             if business_error:
                 return "failed", f"上报阅读时长失败：{business_error}"
             completed += 1
+            completed_minutes += current_duration
+            task["dailyReadDate"] = today
+            task["dailyReadMinutes"] = used_today + completed_minutes
+            task["bookRotation"] = rotation + offset + 1
             completed_books.append(str(book.get("name") or book.get("bookName") or f"图书 {book_id}").strip())
         if completed:
-            task["dailyReadDate"] = today
-            task["dailyReadMinutes"] = used_today + duration_minutes
-            task["bookRotation"] = rotation + completed
-        if completed:
             book_summary = "、".join(completed_books)
-            return "success", f"{book_summary} · {duration_minutes} 分钟"
+            return "success", f"{book_summary} · {completed_minutes} 分钟"
         return "failed", "没有找到可阅读的图书"
     return "failed", f"未知阅微任务类型：{task_type}"
 
@@ -767,7 +772,7 @@ def execute_pawn_task(task: dict[str, Any]) -> tuple[str, str]:
         if status < 200 or status >= 300:
             failure = f"HTTP {status}: {redact_message(raw)}"
             break
-        error = reamicro_business_error(body)
+        error = reamicro_operation_error(body)
         if error:
             failure = str(error)
             break
@@ -779,7 +784,7 @@ def execute_pawn_task(task: dict[str, Any]) -> tuple[str, str]:
     if success_count == 0:
         return "failed", f"典当失败：{failure or '未知原因'}"
     tail = f"（第 {success_count + 1} 次中断：{failure}）" if failure else ""
-    return "success", f"典当「{prop_name}」{success_count} 件，获得铜钱 {coin} 文{tail}"
+    return ("failed" if failure else "success"), f"典当「{prop_name}」{success_count} 件，获得铜钱 {coin} 文{tail}"
 
 def _safe_long(value: Any) -> int:
     try:
@@ -970,7 +975,7 @@ def execute_task(task: dict[str, Any]) -> tuple[str, str]:
             return execute_http_task(task)
         if task.get("taskType") == "traveling_merchant":
             return execute_traveling_merchant_task(task)
-        if task.get("taskType") in {"yeshe_checkin", "yeshe_draw_card", "cloud_auto_read"}:
+        if task.get("taskType") in {"yeshe_checkin", "yeshe_draw_card", "cloud_auto_read", "pawn"}:
             return execute_reamicro_task(task)
         return "failed", f"未知任务类型：{task.get('taskType')}"
     except Exception as error:

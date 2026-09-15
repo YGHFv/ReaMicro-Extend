@@ -36,6 +36,7 @@ class LocalTaskMirrorReceiver : BroadcastReceiver() {
                 accountId,
                 entry.optJSONObject(LocalTaskStore.KEY_TASKS) ?: JSONObject(),
                 entry.optString(LocalTaskStore.KEY_TOKEN),
+                entry.optLong("recordsClearedAt"),
             )
         }
         XposedBridge.log("ReaMicro local task mirror applied accounts=${accounts.length()} runDue=$runDue")
@@ -45,7 +46,7 @@ class LocalTaskMirrorReceiver : BroadcastReceiver() {
                 // 配置变了必须重排闹钟，否则新启用的任务不会被唤醒执行。
                 CloudTaskWakeScheduler.schedule(appContext)
                 if (runDue) {
-                    runCatching { LocalTaskRunner.runDue(appContext) }
+                    runCatching { LocalTaskJobService.enqueue(appContext, "local-task-mirror") }
                         .onFailure { XposedBridge.log("ReaMicro local task run failed: ${it.message}") }
                 }
             } finally {

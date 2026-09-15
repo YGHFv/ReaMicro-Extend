@@ -32,6 +32,7 @@ data class LocalTask(
     val nextRunAt: Long = 0L,
     val lastMessage: String = "",
     val lastRunAt: Long = 0L,
+    val configUpdatedAt: Long = 0L,
 )
 
 data class LocalTaskBook(
@@ -61,19 +62,19 @@ data class LocalTaskRecord(
  * 运行时状态（下次执行时间、每日计数、行商已通知 tripId 等）也一并落盘，
  * 便于系统闹钟静默唤醒时无 UI 也能续跑。
  */
-class LocalTaskStore(private val contextProvider: () -> Context?) {
+class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRepository {
 
     /** 读取某账号下的所有本地任务配置（含运行时状态）。 */
-    fun list(accountId: String): List<LocalTask> {
+    override fun list(accountId: String): List<LocalTask> {
         if (accountId.isBlank()) return emptyList()
         val root = readAccount(accountId) ?: return emptyList()
         val tasks = root.optJSONObject(KEY_TASKS) ?: return emptyList()
         return tasks.keys().asSequence().mapNotNull { type ->
-            tasks.optJSONObject(type)?.let { parseTask(type, it) }
+            tasks.optJSONObject(type)?.let { localTaskFromJson(type, it) }
         }.toList()
     }
 
-    fun get(accountId: String, taskType: String): LocalTask? =
+    override fun get(accountId: String, taskType: String): LocalTask? =
         list(accountId).firstOrNull { it.taskType == taskType }
 
     /** 保存（新建或更新）一条任务的配置。保存时刷新加密 token，重置 nextRunAt 让其尽快执行。 */
@@ -98,6 +99,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
             tasks.put(task.taskType, merged)
             if (token.isNotBlank()) root.put(KEY_TOKEN, encrypt(token))
         }
+        syncKsuConfiguration()
     }
 
     /** 切换启用状态，不改动其它配置。 */
@@ -111,10 +113,11 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
             tasks.put(taskType, obj)
             if (enabled && token.isNotBlank()) root.put(KEY_TOKEN, encrypt(token))
         }
+        syncKsuConfiguration()
     }
 
     /** 写回运行时状态（下次执行时间、最近消息、每日计数等）。state 为要合并的键值。 */
-    fun recordState(accountId: String, taskType: String, state: JSONObject) {
+    override fun recordState(accountId: String, taskType: String, state: JSONObject) {
         if (accountId.isBlank()) return
         editAccount(accountId) { _, tasks ->
             val obj = tasks.optJSONObject(taskType) ?: return@editAccount
@@ -124,16 +127,16 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
     }
 
     /** 取当前账号已加密保存的阅微 token（供无 UI 唤醒时使用）。 */
-    fun token(accountId: String): String {
+    override fun token(accountId: String): String {
         val root = readAccount(accountId) ?: return ""
-        return decrypt(root.optString(KEY_TOKEN, null))
+        return decrypt(root.optString(KEY_TOKEN))
     }
 
     /**
      * 读取某任务已落盘的运行时状态（每日计数、轮转、签到时间、行商已通知 tripId 等），
      * 供执行器读取上次执行结果续跑。返回的 JSON 只含 RUNTIME_STATE_KEYS 里的键。
      */
-    fun runtimeState(accountId: String, taskType: String): JSONObject {
+    override fun runtimeState(accountId: String, taskType: String): JSONObject {
         val obj = readAccount(accountId)?.optJSONObject(KEY_TASKS)?.optJSONObject(taskType) ?: return JSONObject()
         val state = JSONObject()
         for (stateKey in RUNTIME_STATE_KEYS) {
@@ -145,10 +148,11 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
     /** 所有账号中「已启用任务」的最近一次待执行时间，供闹钟排程取 min。0 表示无。 */
     fun earliestNextRunAt(): Long {
         var earliest = Long.MAX_VALUE
+        val now = System.currentTimeMillis()
         for (accountId in storedAccountIds()) {
+            val checkin = runtimeState(accountId, "yeshe_checkin")
             for (task in list(accountId)) {
-                if (!task.enabled) continue
-                val next = task.nextRunAt.coerceAtLeast(1L)
+                val next = nextLocalTaskAt(task, runtimeState(accountId, task.taskType), checkin, now) ?: continue
                 if (next in 1 until earliest) earliest = next
             }
         }
@@ -175,7 +179,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
      * 给模块主界面用：那里要展示"本机存了哪些账号的任务记录"，只取已启用账号会在用户
      * 临时关掉任务后让记录凭空消失。
      */
-    fun accountIds(): List<String> = storedAccountIds()
+    override fun accountIds(): List<String> = storedAccountIds()
 
     /**
      * 按任务配置的时间点重算已启用任务的下次执行时刻（**不执行任务**）。
@@ -189,27 +193,11 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
      * 旧值更早说明是一个仍在等待中的节点，保留它。
      */
     fun rescheduleEnabledTasks(now: Long = System.currentTimeMillis()): Int {
-        var updated = 0
-        for (accountId in storedAccountIds()) {
-            for (task in list(accountId)) {
-                if (!task.enabled) continue
-                val state = runtimeState(accountId, task.taskType)
-                val pendingClaim = if (task.taskType == "yeshe_checkin" &&
-                    state.optString("claimCompletedDate") != state.optString("lastCheckinDate")
-                ) state.optLong("claimDueAt") else 0L
-                val next = rescheduledNextRunAt(
-                    task.taskType,
-                    task.timeOfDay,
-                    task.nextRunAt.takeIf { it > 0L },
-                    now,
-                    pendingClaim,
-                )
-                if (next == task.nextRunAt) continue
-                recordState(accountId, task.taskType, JSONObject().put(KEY_NEXT_RUN_AT, next))
-                updated++
-            }
+        val context = contextProvider()
+        if (context != null && com.reamicro.fix.cloud.ksu.KsuTaskBridge.isEnabled(context)) {
+            return com.reamicro.fix.cloud.ksu.KsuTaskBridge.reschedule(context)
         }
-        return updated
+        return rescheduleLocalTasks(this, now)
     }
 
     /** 所有已启用任务的账号集合（去重）。 */
@@ -272,7 +260,12 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
 
     fun clearRecords(accountId: String) {
         if (accountId.isBlank()) return
-        editAccount(accountId) { root, _ -> root.put(KEY_RECORDS, JSONArray()) }
+        editAccount(accountId) { root, _ ->
+            clearLocalTaskRecordsBefore(root, maxOf(System.currentTimeMillis(), root.optLong("recordsClearedAt") + 1L))
+        }
+        val context = contextProvider() ?: return
+        if (context.packageName == LocalTaskMirror.MODULE_PACKAGE) syncKsuConfiguration()
+        else LocalTaskMirror.push(context)
     }
 
     /**
@@ -290,7 +283,8 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
             accounts.put(
                 accountId,
                 JSONObject()
-                    .put(KEY_TOKEN, decrypt(root.optString(KEY_TOKEN, null)))
+                    .put(KEY_TOKEN, decrypt(root.optString(KEY_TOKEN)))
+                    .put("recordsClearedAt", root.optLong("recordsClearedAt"))
                     .put(KEY_TASKS, root.optJSONObject(KEY_TASKS) ?: JSONObject()),
             )
         }
@@ -298,7 +292,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
     }
 
     /** 镜像只接纳更新的配置，执行状态以模块进程为准。 */
-    fun applyMirror(accountId: String, tasks: JSONObject, token: String) {
+    fun applyMirror(accountId: String, tasks: JSONObject, token: String, recordsClearedAt: Long = 0L) {
         if (accountId.isBlank()) return
         editAccount(accountId) { root, existing ->
             tasks.keys().forEach { taskType ->
@@ -307,7 +301,9 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
                 existing.put(taskType, mergeMirroredTask(current, incoming, System.currentTimeMillis()).put(KEY_TASK_TYPE, taskType))
             }
             if (token.isNotBlank()) root.put(KEY_TOKEN, encrypt(token))
+            clearLocalTaskRecordsBefore(root, recordsClearedAt)
         }
+        syncKsuConfiguration()
     }
 
     fun snapshotPayload(): JSONObject {
@@ -319,6 +315,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
             for (index in (records.length() - 20).coerceAtLeast(0) until records.length()) recent.put(records.get(index))
             accounts.put(accountId, JSONObject()
                 .put(KEY_TASKS, root.optJSONObject(KEY_TASKS) ?: JSONObject())
+                .put("recordsClearedAt", root.optLong("recordsClearedAt"))
                 .put(KEY_RECORDS, recent))
         }
         return JSONObject().put(KEY_ACCOUNTS, accounts)
@@ -333,39 +330,32 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
                 incomingTasks.keys().forEach taskLoop@ { taskType ->
                     val incoming = incomingTasks.optJSONObject(taskType) ?: return@taskLoop
                     val current = existing.optJSONObject(taskType)
-                    if ((current?.optLong(KEY_CONFIG_UPDATED_AT) ?: 0L) <= incoming.optLong(KEY_CONFIG_UPDATED_AT)) {
-                        existing.put(taskType, JSONObject(incoming.toString()))
-                    }
+                    existing.put(taskType, mergeLocalTaskSnapshot(current, incoming))
                 }
-                account.optJSONArray(KEY_RECORDS)?.let { root.put(KEY_RECORDS, it) }
+                applyLocalTaskRecordsSnapshot(root, account)
             }
         }
     }
 
-    private fun parseTask(taskType: String, obj: JSONObject): LocalTask {
-        val booksJson = obj.optJSONArray(KEY_BOOKS) ?: JSONArray()
-        val books = (0 until booksJson.length()).mapNotNull { index ->
-            val item = booksJson.optJSONObject(index) ?: return@mapNotNull null
-            val bookId = item.optLong("bookId", 0L)
-            if (bookId <= 0L) return@mapNotNull null
-            LocalTaskBook(bookId = bookId, name = item.optString("name"))
+    override fun recordExecution(accountId: String, task: LocalTask, state: JSONObject, record: LocalTaskRecord) {
+        editAccount(accountId) { root, tasks ->
+            val current = tasks.optJSONObject(task.taskType) ?: return@editAccount
+            applyLocalTaskExecution(current, task, state)
+            appendLocalTaskRecord(root, record)
         }
-        return LocalTask(
-            taskType = taskType,
-            enabled = obj.optBoolean(KEY_ENABLED, false),
-            timeOfDay = obj.optString(KEY_TIME_OF_DAY, "00:05").ifBlank { "00:05" },
-            durationMinutes = obj.optInt(KEY_DURATION_MINUTES, 30).coerceIn(1, 720),
-            dailyDrawLimit = obj.optInt(KEY_DAILY_DRAW_LIMIT, 3).coerceIn(0, 20),
-            books = books,
-            merchantAutoComplete = obj.optBoolean(KEY_MERCHANT_AUTO_COMPLETE, false),
-            merchantCityCode = obj.optString(KEY_MERCHANT_CITY_CODE),
-            merchantPrincipal = obj.optLong(KEY_MERCHANT_PRINCIPAL, 0L).coerceAtLeast(0L),
-            merchantTransportId = obj.optLong(KEY_MERCHANT_TRANSPORT_ID, 0L).coerceAtLeast(0L),
-            blessingType = obj.optString(KEY_BLESSING_TYPE).trim().uppercase(),
-            nextRunAt = obj.optLong(KEY_NEXT_RUN_AT, 0L),
-            lastMessage = obj.optString(KEY_LAST_MESSAGE),
-            lastRunAt = obj.optLong(KEY_LAST_RUN_AT, 0L),
-        )
+    }
+
+    internal fun executionPayload(): JSONObject {
+        val accounts = JSONObject()
+        for (accountId in accountIds()) {
+            val root = readAccount(accountId) ?: continue
+            accounts.put(accountId, root.put(KEY_TOKEN, token(accountId)))
+        }
+        return JSONObject().put(KEY_ACCOUNTS, accounts)
+    }
+
+    private fun syncKsuConfiguration() {
+        contextProvider()?.let { com.reamicro.fix.cloud.ksu.KsuTaskBridge.requestSync(it) }
     }
 
     private fun writeTaskConfig(task: LocalTask): JSONObject = JSONObject()
@@ -393,7 +383,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
             val tasks = root.optJSONObject(KEY_TASKS) ?: JSONObject().also { root.put(KEY_TASKS, it) }
             block(root, tasks)
             root.put(KEY_TASKS, tasks)
-            prefs.edit().putString(accountKey(accountId), root.toString()).commit()
+            check(prefs.edit().putString(accountKey(accountId), root.toString()).commit()) { "本地任务状态保存失败" }
         }
     }
 
@@ -474,7 +464,9 @@ class LocalTaskStore(private val contextProvider: () -> Context?) {
         internal val RUNTIME_STATE_KEYS = setOf(
             KEY_NEXT_RUN_AT, KEY_LAST_MESSAGE, KEY_LAST_RUN_AT,
             "dailyCounterDate", "dailyCounter", "lastDrawItems", "lastDrawResult", "lastDrawAt",
+            "drawPending", "drawRewardLoreId",
             "dailyReadDate", "dailyReadMinutes", "bookRotation",
+            "lastPawnDate", "pawnUsedToday", "pawnLastCoin",
             "lastCheckinDate", "lastCheckinAt", "claimDueAt", "claimCompletedDate", "claimLoreId", "automationStateVersion",
             CloudTaskLocalRunner.KEY_MERCHANT_NOTIFIED_TRIP, "merchantPausedUntil", "merchantStartAfterSettle",
             // 行商按趟记账：结算过哪趟、为哪趟开过新行商、哪趟查过运签。三者缺一都会让

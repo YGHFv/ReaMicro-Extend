@@ -8,6 +8,7 @@
 import asyncio
 import json
 import secrets
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -19,7 +20,7 @@ from app.backups import create_server_snapshot, prune_server_snapshots
 from app.retention import run_retention
 from app.config_store import bounded_config_int, load_config
 from app.crypto import decrypt_secret, encrypt_secret
-from app.executors import execute_reamicro_task, execute_task, redact_message
+from app.executors import execute_task, redact_message
 from app.releases import sync_module_release
 from app.responses import response
 from app.state import (
@@ -31,6 +32,12 @@ from app.state import (
 
 
 YESHE_DRAW_TRIGGER_EVENT = "yeshe_checkin_reward_claimed"
+
+TASK_CONFIGURATION_FIELDS = {
+    "id", "owner", "taskType", "credentialId", "requestEncrypted", "executionMode",
+    "schedule", "createdAt", "updatedAt", "maxRetries", "runRequestedAt",
+    "enabled", "status", "nextRunAt",
+}
 
 
 def normalized_task_schedule(task_type: str, schedule: dict[str, Any]) -> dict[str, Any]:
@@ -102,7 +109,7 @@ def recover_interrupted_tasks() -> int:
             continue
         task["status"] = "scheduled"
         task["lastMessage"] = "服务器重启后已恢复中断任务"
-        task["nextRunAt"] = 0 if task.get("taskType") == "yeshe_draw_card" else now + 60_000
+        task["nextRunAt"] = 0 if task.get("taskType") == "yeshe_draw_card" and not task.get("triggeredByCheckinReward") else now + 60_000
         recovered += 1
     if recovered:
         save_tasks(tasks)
@@ -155,7 +162,11 @@ def normalized_time_of_day(value: Any) -> str:
 def apply_task_action(task: dict[str, Any], action: str, now: int | None = None) -> str:
     now = now or int(datetime.now(timezone.utc).timestamp() * 1000)
     task_id = str(task.get("id", ""))
+    if action not in {"run", "pause", "resume", "cancel"}:
+        raise ValueError("不支持的任务操作")
+    task["updatedAt"] = max(now, bounded_config_int(task.get("updatedAt", 0), 0, 0) + 1)
     if action == "run":
+        task["runRequestedAt"] = max(now, bounded_config_int(task.get("runRequestedAt", 0), 0, 0) + 1)
         if task.get("taskType") == "yeshe_draw_card":
             task["triggeredByCheckinReward"] = True
         task["status"] = "scheduled"
@@ -170,7 +181,7 @@ def apply_task_action(task: dict[str, Any], action: str, now: int | None = None)
     if action == "resume":
         task["status"] = "scheduled"
         task["enabled"] = True
-        task["nextRunAt"] = 0 if task.get("taskType") == "yeshe_draw_card" else now
+        task["nextRunAt"] = 0 if task.get("taskType") == "yeshe_draw_card" and not task.get("triggeredByCheckinReward") else now
         return f"任务 {task_id} 已恢复"
     if action == "cancel":
         task["status"] = "cancelled"
@@ -198,8 +209,8 @@ def record_task_execution(task: dict[str, Any], result: str, message: str, start
     task["lastExecution"] = history[-1]
 
 
-def execute_linked_draw_task(tasks: dict[str, dict[str, Any]], checkin_task: dict[str, Any], started_at: int) -> tuple[str, str] | None:
-    """签到奖励领取成功后，立即运行同账号已启用的抽卡任务。"""
+def schedule_linked_draw_task(tasks: dict[str, dict[str, Any]], checkin_task: dict[str, Any], started_at: int) -> tuple[str, str] | None:
+    """领奖后排入同一调度通道，让抽卡也经过任务锁、记账和失败重试。"""
     if not checkin_task.pop("claimJustCompleted", False):
         return None
     owner = str(checkin_task.get("owner", ""))
@@ -210,25 +221,15 @@ def execute_linked_draw_task(tasks: dict[str, dict[str, Any]], checkin_task: dic
         and task.get("taskType") == "yeshe_draw_card"
         and task_credential_id(task) == credential_id
         and task.get("enabled", True)
-        and task.get("status") not in {"paused", "cancelled"}
+        and task.get("status") not in {"paused", "cancelled", "running"}
     ]
     if not candidates:
         return None
     draw_task = max(candidates, key=lambda item: bounded_config_int(item.get("updatedAt", item.get("createdAt", 0)), 0, 0))
     draw_task["triggeredByCheckinReward"] = True
-    draw_task["status"] = "running"
-    draw_task["lastRunAt"] = started_at
-    result, message = execute_reamicro_task(draw_task)
-    finished_at = int(datetime.now(timezone.utc).timestamp() * 1000)
-    draw_task["status"] = result
-    draw_task["lastMessage"] = message
-    draw_task["runCount"] = int(draw_task.get("runCount", 0)) + 1
-    draw_task["consecutiveFailures"] = 0 if result == "success" else int(draw_task.get("consecutiveFailures", 0)) + 1
-    draw_task["nextRunAt"] = 0
-    record_task_execution(draw_task, result, message, started_at, finished_at)
-    task_log(str(draw_task.get("id", "")), message, "ERROR" if result == "failed" else "WARN" if result == "paused" else "INFO")
-    enqueue_task_notification(draw_task, result, message, finished_at)
-    return result, message
+    draw_task["status"] = "scheduled"
+    draw_task["nextRunAt"] = started_at
+    return "scheduled", "签到奖励已领取，祈愿已排入执行队列"
 
 
 def requires_automation_recovery(task: dict[str, Any]) -> bool:
@@ -248,14 +249,57 @@ def recover_automation_task(task: dict[str, Any], now_ms: int) -> bool:
     return True
 
 
+def complete_task_execution(current: dict[str, Any], original: dict[str, Any], executed: dict[str, Any],
+                            result: str, message: str, started_at: int, finished_at: int) -> dict[str, Any]:
+    task = dict(current)
+    for field in (original.keys() | executed.keys()) - TASK_CONFIGURATION_FIELDS:
+        if field in executed:
+            task[field] = executed[field]
+        else:
+            task.pop(field, None)
+    task["status"] = result
+    task["lastMessage"] = message
+    task["runCount"] = bounded_config_int(task.get("runCount", 0), 0, 0) + 1
+    if result == "success":
+        task["consecutiveFailures"] = 0
+        task["nextRunAt"] = next_task_run(task, finished_at)
+    elif result == "failed":
+        task["consecutiveFailures"] = bounded_config_int(task.get("consecutiveFailures", 0), 0, 0) + 1
+        max_retries = min(bounded_config_int(task.get("maxRetries", 3), 3, 0), 10)
+        if task["consecutiveFailures"] <= max_retries:
+            task["status"] = "scheduled"
+            task["nextRunAt"] = finished_at + retry_delay_seconds(task) * 1000
+            task["lastMessage"] = f"{message}；将在退避后重试"
+        else:
+            task["status"] = "paused"
+            task["enabled"] = False
+            task["nextRunAt"] = 0
+            task["lastMessage"] = f"{message}；连续失败超过上限，任务已暂停"
+    else:
+        task["nextRunAt"] = 0
+    controls_changed = any(current.get(field) != original.get(field) for field in ("enabled", "status", "nextRunAt", "runRequestedAt"))
+    if controls_changed:
+        for field in ("enabled", "status", "nextRunAt"):
+            if field in current:
+                task[field] = current[field]
+        if current.get("runRequestedAt") != original.get("runRequestedAt") and task.get("taskType") == "yeshe_draw_card":
+            task["triggeredByCheckinReward"] = True
+    if not task.get("enabled", True) or task.get("status") in {"paused", "cancelled"}:
+        task["nextRunAt"] = 0
+    record_task_execution(task, result, message, started_at, finished_at)
+    return task
+
+
 async def task_scheduler_loop() -> None:
     worker_id = "worker_" + secrets.token_hex(6)
     while True:
         try:
-            tasks = load_tasks()
-            now = int(datetime.now(timezone.utc).timestamp() * 1000)
-            changed = False
-            for task_id, task in tasks.items():
+            for task_id in list(load_tasks()):
+                tasks = load_tasks()
+                task = tasks.get(task_id)
+                if task is None:
+                    continue
+                now = int(datetime.now(timezone.utc).timestamp() * 1000)
                 if not task.get("enabled", True) or task.get("status") in {"paused", "cancelled", "running"}:
                     continue
                 if task.get("taskType") == "yeshe_draw_card" and not task.get("triggeredByCheckinReward"):
@@ -263,7 +307,7 @@ async def task_scheduler_loop() -> None:
                         task["status"] = "scheduled"
                         task["nextRunAt"] = 0
                         task["schedule"] = {"event": YESHE_DRAW_TRIGGER_EVENT}
-                        changed = True
+                        save_tasks(tasks)
                     continue
                 next_run = int(task.get("nextRunAt", 0))
                 if next_run > now and not requires_automation_recovery(task):
@@ -273,44 +317,26 @@ async def task_scheduler_loop() -> None:
                 recover_automation_task(task, now)
                 task["status"] = "running"
                 task["lastRunAt"] = now
-                changed = True
                 save_tasks(tasks)
+                original = deepcopy(task)
                 try:
                     started_at = int(datetime.now(timezone.utc).timestamp() * 1000)
                     result, message = await asyncio.to_thread(execute_task, task)
                     finished_at = int(datetime.now(timezone.utc).timestamp() * 1000)
                     task_log(task_id, message, "ERROR" if result == "failed" else "WARN" if result == "paused" else "INFO")
-                    task["status"] = result
-                    task["lastMessage"] = message
-                    task["runCount"] = int(task.get("runCount", 0)) + 1
-                    if result == "success":
-                        task["consecutiveFailures"] = 0
-                        task["nextRunAt"] = next_task_run(task, finished_at)
-                    elif result == "failed":
-                        task["consecutiveFailures"] = int(task.get("consecutiveFailures", 0)) + 1
-                        max_retries = max(0, min(int(task.get("maxRetries", 3)), 10))
-                        if task["consecutiveFailures"] <= max_retries:
-                            task["status"] = "scheduled"
-                            task["nextRunAt"] = finished_at + retry_delay_seconds(task) * 1000
-                            task["lastMessage"] = f"{message}；将在退避后重试"
-                        else:
-                            task["status"] = "paused"
-                            task["enabled"] = False
-                            task["nextRunAt"] = 0
-                            task["lastMessage"] = f"{message}；连续失败超过上限，任务已暂停"
-                    else:
-                        task["nextRunAt"] = 0
-                    record_task_execution(task, result, message, started_at, finished_at)
+                    tasks = load_tasks()
+                    current = tasks.get(task_id)
+                    if current is None:
+                        continue
+                    task = complete_task_execution(current, original, task, result, message, started_at, finished_at)
+                    tasks[task_id] = task
                     enqueue_task_notification(task, result, message, finished_at)
-                    linked_draw = await asyncio.to_thread(execute_linked_draw_task, tasks, task, finished_at)
+                    linked_draw = schedule_linked_draw_task(tasks, task, finished_at)
                     if linked_draw:
                         task["lastMessage"] = message
-                    changed = True
                     save_tasks(tasks)
                 finally:
                     runtime.get_state_store().release_task_lock(task_id, worker_id)
-            if changed:
-                save_tasks(tasks)
         except Exception as error:
             print(f"task scheduler failed: {error}", flush=True)
         await asyncio.sleep(15)

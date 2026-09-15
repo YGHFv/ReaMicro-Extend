@@ -1,0 +1,6 @@
+id=reamicro_automation
+name=ReaMicro Local Automation
+version=0.1.0
+versionCode=1
+author=ReaMicro Extend
+description=Experimental independent local task runner for ReaMicro Extend. Requires matching APK and explicit opt-in in module settings.

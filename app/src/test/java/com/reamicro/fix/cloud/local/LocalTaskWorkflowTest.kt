@@ -1,6 +1,7 @@
 package com.reamicro.fix.cloud.local
 
 import com.sun.net.httpserver.HttpServer
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -63,6 +64,118 @@ class LocalTaskWorkflowTest {
 
     private fun autoMerchant(blessing: String = "") =
         JSONObject().put("merchantAutoComplete", true).put("blessingType", blessing)
+
+    @Test
+    fun `阅读每日上限可以小于单本配置时长`() {
+        reply("update-read-time-by-date", JSONObject())
+        val request = JSONObject().put("books", JSONArray().put(JSONObject().put("bookId", 1)))
+            .put("durationMinutes", 30).put("dailyLimitMinutes", 10)
+        val result = run("cloud_auto_read", request = request)
+        assertEquals("success", result.result)
+        assertEquals(10, result.state.getInt("dailyReadMinutes"))
+        assertEquals(600, calls.single().second.getJSONArray("list").getJSONObject(0).getInt("duration"))
+    }
+
+    @Test
+    fun `中断后不再发起下一次祈愿且保留进度`() {
+        reply("wish", JSONObject().put("success", true).put("props", JSONArray()))
+        try {
+            val result = CloudTaskLocalRunner.runTask("yeshe_draw_card", JSONObject(), JSONObject().put("dailyLimit", 3), credential) {
+                Thread.currentThread().interrupt()
+            }
+            assertEquals("failed", result.result)
+            assertEquals(1, result.state.getInt("dailyCounter"))
+            assertEquals(1, calls.size)
+        } finally {
+            Thread.interrupted()
+        }
+    }
+
+    @Test
+    fun `典当逐次落盘并保留中途失败之前的铜钱`() {
+        reply("get-pawn-count", JSONObject().put("remaining", 2).put("usedToday", 1).put("specialPropId", 999))
+        reply("get-user-materials", JSONObject().put("materials", JSONArray().put(JSONObject()
+            .put("propId", 999).put("userPropId", 42).put("quantity", 2))))
+        reply("pawn", JSONObject().put("success", true).put("coin", 8), JSONObject().put("success", false))
+        val checkpoints = mutableListOf<JSONObject>()
+        val result = CloudTaskLocalRunner.runTask("pawn", JSONObject(), JSONObject(), credential) {
+            checkpoints += JSONObject(it.toString())
+        }
+        assertEquals("failed", result.result)
+        assertEquals(2, checkpoints.single().getInt("pawnUsedToday"))
+        assertEquals(8L, checkpoints.single().getLong("pawnLastCoin"))
+    }
+
+    @Test
+    fun `两次祈愿使用两次单抽而不是不支持的二连抽`() {
+        reply("wish", JSONObject().put("success", true).put("props", JSONArray()))
+        val result = run("yeshe_draw_card", request = JSONObject().put("dailyLimit", 2))
+        assertEquals("success", result.result)
+        assertEquals(listOf(1, 1), calls.map { it.second.getInt("count") })
+        assertEquals(2, result.state.getInt("dailyCounter"))
+    }
+
+    @Test
+    fun `祈愿中途失败保留已消费次数和检查点`() {
+        reply("wish", JSONObject().put("success", true).put("props", JSONArray()),
+            JSONObject().put("success", false).put("message", "操作频繁"))
+        val checkpoints = mutableListOf<Int>()
+        val result = CloudTaskLocalRunner.runTask("yeshe_draw_card", JSONObject(), JSONObject().put("dailyLimit", 3), credential) {
+            checkpoints += it.getInt("dailyCounter")
+        }
+        assertEquals("failed", result.result)
+        assertEquals(1, result.state.getInt("dailyCounter"))
+        assertEquals(listOf(1), checkpoints)
+    }
+
+    @Test
+    fun `彩筹不足停止消费但不是虚报一次成功抽卡`() {
+        reply("wish", JSONObject().put("success", false).put("message", "彩筹不足"))
+        val result = run("yeshe_draw_card")
+        assertEquals("success", result.result)
+        assertEquals(0, result.state.getInt("dailyCounter"))
+        assertEquals("彩筹已用完", result.message)
+    }
+
+    @Test
+    fun `多本阅读按真实总分钟记账并遵守上限`() {
+        reply("update-read-time-by-date", JSONObject())
+        val books = JSONArray().put(JSONObject().put("bookId", 1)).put(JSONObject().put("bookId", 2)).put(JSONObject().put("bookId", 3))
+        val result = run("cloud_auto_read", request = JSONObject().put("books", books).put("durationMinutes", 30).put("dailyLimitMinutes", 50))
+        assertEquals("success", result.result)
+        assertEquals(50, result.state.getInt("dailyReadMinutes"))
+        assertEquals(listOf(1800, 1200), calls.map { it.second.getJSONArray("list").getJSONObject(0).getInt("duration") })
+    }
+
+    @Test
+    fun `最近阅读缺少用户书籍ID时不能改用公共云书ID`() {
+        reply("get-read-record-list", JSONObject().put("list", JSONArray().put(JSONObject().put("cloudBookId", 99))))
+        val result = run("cloud_auto_read")
+        assertEquals("failed", result.result)
+        assertEquals(listOf("get-read-record-list"), calls.map { it.first })
+    }
+
+    @Test
+    fun `多本阅读部分失败保留已上报分钟和轮转位置`() {
+        reply("update-read-time-by-date", JSONObject(), JSONObject().put("success", false).put("message", "操作频繁"))
+        val books = JSONArray().put(JSONObject().put("bookId", 1)).put(JSONObject().put("bookId", 2))
+        val result = run("cloud_auto_read", request = JSONObject().put("books", books).put("durationMinutes", 30))
+        assertEquals("failed", result.result)
+        assertEquals(30, result.state.getInt("dailyReadMinutes"))
+        assertEquals(1, result.state.getInt("bookRotation"))
+    }
+
+    @Test
+    fun `典当内层失败不能记为领取铜钱成功`() {
+        reply("get-pawn-count", JSONObject().put("remaining", 2).put("specialPropId", 999).put("specialPropName", "测试期物"))
+        reply("get-user-materials", JSONObject().put("materials", JSONArray().put(
+            JSONObject().put("propId", 999).put("userPropId", 42).put("quantity", 2))))
+        reply("pawn", JSONObject().put("success", true).put("coin", 8), JSONObject().put("success", false).put("message", "频繁"))
+        val result = run("pawn")
+        assertEquals("failed", result.result)
+        assertEquals(1, result.state.getInt("pawnUsedToday"))
+        assertEquals(8L, result.state.getLong("pawnLastCoin"))
+    }
 
     private fun configureMerchantStart(end: Long = now + 6 * 3_600_000L) {
         reply("settle-traveling-merchant", JSONObject().put("success", true).put("trip", trip()))

@@ -21,6 +21,7 @@ from app.config_store import bounded_config_int
 from app.crypto import encrypt_secret
 from app.responses import response
 from app.scheduler import (
+    apply_task_action,
     find_owned_task,
     next_task_run,
     normalized_task_schedule,
@@ -61,7 +62,7 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
         if previous:
             return previous
     task_type = str(payload.get("taskType", "")).strip()
-    if task_type not in {"http", "yeshe_checkin", "yeshe_draw_card", "cloud_auto_read", "traveling_merchant"}:
+    if task_type not in {"http", "yeshe_checkin", "yeshe_draw_card", "cloud_auto_read", "traveling_merchant", "pawn"}:
         raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="不支持的任务类型"))
     # 云端任务一律在服务器执行。device 模式已废弃，客户端仍会带这个字段，这里直接落成
     # "server"，避免历史客户端又造出永远不执行的设备任务。
@@ -92,7 +93,7 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
         "nextRunAt": 0 if task_type == "yeshe_draw_card" else int(payload.get("nextRunAt", now)),
         "runCount": 0,
         "automationStateVersion": 1,
-        "maxRetries": max(0, min(int(payload.get("maxRetries", 3) or 3), 10)),
+        "maxRetries": min(bounded_config_int(payload.get("maxRetries", 3), 3, 0), 10),
         "consecutiveFailures": 0,
         "executionMode": execution_mode,
     }
@@ -109,6 +110,9 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
         task["automationStateVersion"] = previous.get("automationStateVersion", 0)
         task["updatedAt"] = now
         for field in ("automationStateVersion", "executionHistory", "lastExecution", "runCount", "consecutiveFailures", "dailyCounterDate", "dailyCounter", "dailyReadDate", "dailyReadMinutes", "bookRotation", "lastCheckinDate", "lastCheckinAt", "claimDueAt", "claimLoreId", "claimRetryCount", "claimFinalAttemptDate", "claimCompletedDate", "claimFinalFailedDate", "lastClaimAt", "merchantLastNotifiedTripId", "merchantSettledTripId", "merchantRestartedAfterTripId", "merchantEndTime", "merchantLastCityCode", "merchantLastTransportId", "merchantLastPrincipal"):
+            if field in previous:
+                task[field] = previous[field]
+        for field in ("triggeredByCheckinReward", "waitingForCheckinReward", "lastPawnDate", "pawnUsedToday", "pawnLastCoin"):
             if field in previous:
                 task[field] = previous[field]
     tasks[task_id] = task
@@ -204,9 +208,7 @@ async def get_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str, 
 @router.post("/v1/tasks/{task_id}/pause")
 async def pause_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
     tasks, task = find_owned_task(task_id, owner)
-    task["status"] = "paused"
-    task["enabled"] = False
-    task["nextRunAt"] = 0
+    apply_task_action(task, "pause")
     save_tasks(tasks)
     task_log(task_id, "任务已暂停")
     return response(public_task(task))
@@ -215,9 +217,7 @@ async def pause_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str
 @router.post("/v1/tasks/{task_id}/resume")
 async def resume_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
     tasks, task = find_owned_task(task_id, owner)
-    task["status"] = "scheduled"
-    task["enabled"] = True
-    task["nextRunAt"] = 0 if task.get("taskType") == "yeshe_draw_card" else int(datetime.now(timezone.utc).timestamp() * 1000)
+    apply_task_action(task, "resume")
     save_tasks(tasks)
     task_log(task_id, "任务已恢复")
     return response(public_task(task))
@@ -226,8 +226,7 @@ async def resume_task(task_id: str, owner: str = Depends(task_owner)) -> dict[st
 @router.post("/v1/tasks/{task_id}/cancel")
 async def cancel_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
     tasks, task = find_owned_task(task_id, owner)
-    task["status"] = "cancelled"
-    task["enabled"] = False
+    apply_task_action(task, "cancel")
     save_tasks(tasks)
     task_log(task_id, "任务已取消")
     return response(public_task(task))
@@ -236,11 +235,7 @@ async def cancel_task(task_id: str, owner: str = Depends(task_owner)) -> dict[st
 @router.post("/v1/tasks/{task_id}/run")
 async def run_task_now(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
     tasks, task = find_owned_task(task_id, owner)
-    if task.get("taskType") == "yeshe_draw_card":
-        task["triggeredByCheckinReward"] = True
-    task["status"] = "scheduled"
-    task["enabled"] = True
-    task["nextRunAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+    apply_task_action(task, "run")
     save_tasks(tasks)
     task_log(task_id, "任务已安排立即执行")
     return response(public_task(task))

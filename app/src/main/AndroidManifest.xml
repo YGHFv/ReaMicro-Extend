@@ -1,5 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -97,12 +98,18 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="com.reamicro.fix.CLOUD_TASK_HEARTBEAT" />
+                <action android:name="com.reamicro.fix.KSU_TASK_SYNC" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
                 <action android:name="android.intent.action.TIME_SET" />
                 <action android:name="android.intent.action.TIMEZONE_CHANGED" />
             </intent-filter>
         </receiver>
+
+        <service
+            android:name=".cloud.local.LocalTaskJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
 
         <!-- 宿主进程自己排不了闹钟：它排出来的是阅微名下的模糊闹钟，且写不进模块的唤醒时刻文件。
              这里只重排、不执行任务。 -->

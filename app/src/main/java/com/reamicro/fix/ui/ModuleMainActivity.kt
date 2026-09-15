@@ -2,6 +2,7 @@ package com.reamicro.fix.ui
 
 import android.Manifest
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -20,6 +21,7 @@ import com.reamicro.fix.cloud.local.LocalTaskBook
 import com.reamicro.fix.cloud.local.LocalTaskRecord
 import com.reamicro.fix.cloud.local.LocalTaskRunner
 import com.reamicro.fix.cloud.local.LocalTaskStore
+import com.reamicro.fix.cloud.ksu.KsuTaskBridge
 import com.reamicro.fix.hook.CLOUD_AUTOMATION_TASKS
 import com.reamicro.fix.hook.CloudAutomationTaskSpec
 import com.reamicro.fix.logging.ModuleAndroidLog
@@ -53,6 +55,44 @@ class ModuleMainActivity : Activity() {
         window?.setBackgroundDrawable(ColorDrawable(ui.palette.pageBackground))
         applyStatusBarIcons()
         ModuleAndroidLog.legacy(LOG_TAG, "module main ui opened")
+        refresh()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        setTaskExcludedFromRecents(false)
+        KsuTaskBridge.requestSync(applicationContext) { runOnUiThread { if (!isFinishing && !isDestroyed) refresh() } }
+    }
+
+    override fun onUserLeaveHint() {
+        if (hideRecentTaskEnabled()) setTaskExcludedFromRecents(true)
+        super.onUserLeaveHint()
+    }
+
+    override fun onStop() {
+        if (!isChangingConfigurations && hideRecentTaskEnabled()) setTaskExcludedFromRecents(true)
+        super.onStop()
+    }
+
+    private fun hideRecentTaskEnabled(): Boolean =
+        getSharedPreferences("reamicro_module_ui", MODE_PRIVATE).getBoolean("hideRecentTask", false)
+
+    private fun setTaskExcludedFromRecents(excluded: Boolean) {
+        runCatching {
+            getSystemService(ActivityManager::class.java)?.appTasks
+                ?.firstOrNull { appTask ->
+                    val info = appTask.taskInfo
+                    val recentTaskId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) info.taskId else info.persistentId
+                    recentTaskId == taskId
+                }?.setExcludeFromRecents(excluded)
+        }.onFailure { ModuleAndroidLog.error(LOG_TAG, "更新后台卡片可见性失败", it) }
+    }
+
+    private fun toggleHideRecentTask() {
+        val enabled = !hideRecentTaskEnabled()
+        getSharedPreferences("reamicro_module_ui", MODE_PRIVATE).edit().putBoolean("hideRecentTask", enabled).commit()
+        setTaskExcludedFromRecents(false)
+        ui.toast(if (enabled) "返回桌面后自动隐藏模块后台卡片" else "模块后台卡片恢复显示")
         refresh()
     }
 
@@ -143,7 +183,8 @@ class ModuleMainActivity : Activity() {
         ui.background(
             work = {
                 val count = LocalTaskRunner.runDue(applicationContext, force = true)
-                if (count > 0) "已执行 $count 个任务" else "没有已启用的本地任务"
+                if (KsuTaskBridge.isEnabled(applicationContext)) "已提交 KSU 执行，请稍后同步任务记录"
+                else if (count > 0) "已执行 $count 个任务" else "没有已启用的本地任务"
             },
             then = { ui.toast(it); refresh() },
         )
@@ -392,6 +433,20 @@ class ModuleMainActivity : Activity() {
                 ),
                 ui.info(status.details().joinToString("\n")),
                 ui.row(
+                    "本地任务执行模式",
+                    KsuTaskBridge.statusText(applicationContext),
+                    actions = listOf(
+                        "说明与切换" to { showExecutionModeDialog() },
+                        "同步状态" to { rootAction { KsuTaskBridge.synchronize(applicationContext); "状态已同步" } },
+                    ),
+                ),
+                ui.row(
+                    "后台卡片",
+                    if (hideRecentTaskEnabled()) "已开启：返回桌面后隐藏最近任务卡片，不停止自动任务，也不等于后台保活。"
+                    else "可在返回桌面时隐藏模块的最近任务卡片，不影响自动任务执行。",
+                    actions = listOf((if (hideRecentTaskEnabled()) "显示后台卡片" else "隐藏后台卡片") to { toggleHideRecentTask() }),
+                ),
+                ui.row(
                     "授权与跳转",
                     "通知权限要在这里授予；精确闹钟与电池优化放行后，通知才不会延迟数小时。",
                     actions = buildList<Pair<String, () -> Unit>> {
@@ -426,6 +481,19 @@ class ModuleMainActivity : Activity() {
                         "清空" to { store.clear(); ui.toast("通知记录已清空"); refresh() },
                     ),
                 ),
+            ),
+        )
+    }
+
+    private fun showExecutionModeDialog() {
+        ui.contentDialog(
+            "本地任务执行模式",
+            "Android 模式由系统闹钟与后台任务执行。KSU 模式由刷入模块的独立进程运行同一套任务逻辑，APK 被关闭也能继续。\n\n" +
+                "KSU 模式为实验功能：需刷入配套 ZIP、授权本应用 root，只支持主用户。登录凭据会复制到 /data/adb/reamicro-automation 的 root 私有文件（目录 700、文件 600），普通应用不可读。切回 Android 会先等待在途任务结束、同步记录并清除该凭据副本。\n\n" +
+                "KSU 仍可能受设备休眠、断网、模块停用、token 失效或接口风控影响，并非绝对准时。检测失败时不自动切回，避免重复消费。卸载 KSU 模块前必须先切回 Android。",
+            actions = listOf(
+                "使用 KSU" to { rootAction { KsuTaskBridge.enable(applicationContext) } },
+                "使用 Android" to { rootAction { KsuTaskBridge.disable(applicationContext) } },
             ),
         )
     }
