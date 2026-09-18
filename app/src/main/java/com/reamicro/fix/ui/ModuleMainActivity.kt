@@ -29,6 +29,7 @@ import com.reamicro.fix.logging.ModuleLogBuffer
 import com.reamicro.fix.notification.CloudTaskNotifications
 import com.reamicro.fix.notification.NotificationRecord
 import com.reamicro.fix.notification.NotificationRecordStore
+import com.reamicro.fix.notification.cloudTaskQualityColor
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -335,7 +336,7 @@ class ModuleMainActivity : Activity() {
         val fields = linkedMapOf<String, () -> String>()
         ui.editDialog(
             title = spec?.title ?: taskTitle(task.taskType),
-            build = { add, choose ->
+            build = { add, choose, multi ->
                 if (spec?.rewardTriggered != true && spec?.merchant != true) add("执行时间", "HH:mm", task.timeOfDay)
                 if (spec?.autoRead == true) {
                     add("阅读时长", "分钟", task.durationMinutes.toString())
@@ -343,10 +344,15 @@ class ModuleMainActivity : Activity() {
                 }
                 if (spec?.rewardTriggered == true) add("每日祈愿上限", "0 表示抽完彩筹", task.dailyDrawLimit.toString())
                 if (spec?.taskType == "pawn") {
-                    add(
+                    // 期物清单来自执行时学到的图鉴：点一下就锁定，不让用户在配置里手打 propId。
+                    val pawnState = LocalTaskStore { applicationContext }.runtimeState(accountId, "pawn")
+                    multi(
                         "禁当期物",
-                        "每行 propId 或 propId|备注，清空=不禁止",
-                        CloudTaskLocalRunner.formatForbiddenPawnPropIds(task.forbiddenPawnPropIds),
+                        "点一下锁定期物禁止典当；清单来自当日期物与背包里见过的期物",
+                        CloudTaskLocalRunner.pawnPropChoices(pawnState).map {
+                            MultiSelectOption(it.propId, it.label, cloudTaskQualityColor(it.quality))
+                        },
+                        task.forbiddenPawnPropIds,
                     )
                 }
                 if (spec?.merchant == true) {
@@ -722,7 +728,7 @@ class ModuleMainActivity : Activity() {
         }
 
     private fun versionLine(): String =
-        runCatching { packageManager.getPackageInfo(packageName, 0).versionName.orEmpty() }.getOrDefault("2.3.2")
+        runCatching { packageManager.getPackageInfo(packageName, 0).versionName.orEmpty() }.getOrDefault("2.3.3")
 
     private fun formatTime(at: Long): String =
         if (at <= 0L) "未排程" else SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(at))

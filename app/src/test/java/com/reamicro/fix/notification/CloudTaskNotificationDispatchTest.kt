@@ -63,10 +63,10 @@ class CloudTaskNotificationDispatchTest {
 
     @Test
     fun `抽卡品质优先级从高到低稳定`() {
-        assertTrue(cloudTaskQualityPriorityForTest("RED") > cloudTaskQualityPriorityForTest("PURPLE"))
-        assertTrue(cloudTaskQualityPriorityForTest("PURPLE") > cloudTaskQualityPriorityForTest("BLUE"))
-        assertTrue(cloudTaskQualityPriorityForTest("BLUE") > cloudTaskQualityPriorityForTest("GREEN"))
-        assertTrue(cloudTaskQualityPriorityForTest("GREEN") > cloudTaskQualityPriorityForTest("GREY"))
+        assertTrue(cloudTaskQualityPriority("RED") > cloudTaskQualityPriority("PURPLE"))
+        assertTrue(cloudTaskQualityPriority("PURPLE") > cloudTaskQualityPriority("BLUE"))
+        assertTrue(cloudTaskQualityPriority("BLUE") > cloudTaskQualityPriority("GREEN"))
+        assertTrue(cloudTaskQualityPriority("GREEN") > cloudTaskQualityPriority("GREY"))
     }
 
     @Test

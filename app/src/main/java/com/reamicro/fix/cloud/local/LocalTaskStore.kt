@@ -476,6 +476,8 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             "drawPending", "drawRewardLoreId",
             "dailyReadDate", "dailyReadMinutes", "bookRotation",
             "lastPawnDate", "pawnUsedToday", "pawnLastCoin",
+            // 期物图鉴：执行时学到的 propId → 名字/品质，配置页的「禁当期物」列表就靠它。
+            CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG,
             "lastCheckinDate", "lastCheckinAt", "claimDueAt", "claimCompletedDate", "claimLoreId", "automationStateVersion",
             CloudTaskLocalRunner.KEY_MERCHANT_NOTIFIED_TRIP, "merchantPausedUntil", "merchantStartAfterSettle",
             // 行商按趟记账：结算过哪趟、为哪趟开过新行商、哪趟查过运签。三者缺一都会让

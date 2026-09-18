@@ -2,6 +2,7 @@ package com.reamicro.fix.cloud.local
 
 import com.reamicro.fix.association.network.HttpClient
 import com.reamicro.fix.notification.cloudTaskItemsSummary
+import com.reamicro.fix.notification.cloudTaskQualityPriority
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.LocalDate
@@ -581,14 +582,19 @@ object CloudTaskLocalRunner {
         val usedToday = data.optInt("usedToday", 0).coerceAtLeast(0)
         val propId = data.opt("specialPropId")?.toString().orEmpty().trim()
         val propName = data.optString("specialPropName").ifBlank { "期物" }
+        // 顺手把当日期物并进图鉴：名字与品质只有服务端当天才给，错过这次就再也补不回来。
+        var catalog = mergePawnPropCatalog(
+            pawnPropCatalog(task),
+            listOf(PawnPropChoice(propId, propName, data.optString("specialPropQuality"))),
+        )
         if (remaining <= 0) {
-            return Outcome("success", "今日可典当次数已用完（$usedToday/$maxPerDay）", JSONObject(), notify = false)
+            return Outcome("success", "今日可典当次数已用完（$usedToday/$maxPerDay）", pawnCatalogState(catalog), notify = false)
         }
         if (propId in forbiddenPawnPropIds(request)) {
             // 跳过不是故障：今天的期物恰好是要留着的消耗品，明天再看。
             val hint = PROHIBITED_PAWN_PROP_HINTS[propId]
             val why = if (hint.isNullOrBlank()) "在禁当清单里" else "是$hint"
-            return Outcome("success", "今日期物「$propName」$why，跳过典当", JSONObject(), notify = false)
+            return Outcome("success", "今日期物「$propName」$why，跳过典当", pawnCatalogState(catalog), notify = false)
         }
         val materials = postReaMicro(
             baseUrl,
@@ -596,10 +602,12 @@ object CloudTaskLocalRunner {
             JSONObject(),
             request.optString("materialsEndpoint").ifBlank { "rest/community/get-user-materials" },
         )
-        operationError(materials)?.let { return Outcome("failed", "读取背包失败：$it") }
+        operationError(materials)?.let { return Outcome("failed", "读取背包失败：$it", pawnCatalogState(catalog)) }
         val list = materials.optJSONObject("data")?.optJSONArray("materials")
             ?: materials.optJSONArray("materials")
             ?: JSONArray()
+        // 背包里的每件都记进图鉴：只有这里能一次性拿到期物的名字与品质。
+        catalog = mergePawnPropCatalog(catalog, bagPawnPropChoices(list))
         var target: JSONObject? = null
         for (index in 0 until list.length()) {
             val item = list.optJSONObject(index) ?: continue
@@ -609,20 +617,21 @@ object CloudTaskLocalRunner {
             }
         }
         if (target == null) {
-            return Outcome("success", "背包里没有期物「$propName」，跳过典当", JSONObject(), notify = false)
+            return Outcome("success", "背包里没有期物「$propName」，跳过典当", pawnCatalogState(catalog), notify = false)
         }
         val quantity = target.optInt("quantity", 0).coerceAtLeast(0)
         if (quantity <= 0) {
-            return Outcome("success", "期物「$propName」持有数量为 0，跳过典当", JSONObject(), notify = false)
+            return Outcome("success", "期物「$propName」持有数量为 0，跳过典当", pawnCatalogState(catalog), notify = false)
         }
         val userPropId = target.opt("userPropId")?.toString()?.trim().orEmpty()
             .takeIf { it.isNotBlank() }
-            ?: return Outcome("failed", "期物「$propName」缺少 userPropId，无法典当")
+            ?: return Outcome("failed", "期物「$propName」缺少 userPropId，无法典当", pawnCatalogState(catalog))
         var successCount = 0
         var coin = 0L
         var failure: String? = null
         val today = LocalDate.now(ZoneId.of("Asia/Shanghai")).toString()
         val state = JSONObject().put("lastPawnDate", today).put("pawnUsedToday", usedToday).put("pawnLastCoin", 0L)
+            .put(KEY_PAWN_PROP_CATALOG, catalog)
         repeat(minOf(remaining, quantity)) {
             if (failure != null) return@repeat
             val pawn = runCatching {
@@ -875,6 +884,93 @@ object CloudTaskLocalRunner {
     )
 
     /**
+     * 期物图鉴的落盘键（存在任务运行时状态里，随 KSU 快照一起同步）。
+     *
+     * 「所有期物」没有静态数据源：客户端不存期物表，名字与品质都是服务端当天现给的
+     * （`get-pawn-count` 的 specialPropName/specialPropQuality、背包的 propName/propQuality）。
+     * 所以只能在执行时把见过的记下来，配置页才有点得动的期物清单，而不是让用户手打 propId。
+     */
+    internal const val KEY_PAWN_PROP_CATALOG = "pawnPropCatalog"
+
+    /** 期物图鉴里的一条：配置页按品质排序、按品质着色，点一下就锁。 */
+    internal data class PawnPropChoice(
+        val propId: String,
+        val name: String,
+        val quality: String,
+        val hint: String = "",
+    ) {
+        /** 配置页上的一行：名字 +（用途备注）。 */
+        val label: String get() = if (hint.isBlank()) name else "$name（$hint）"
+    }
+
+    /** 从任务状态里取期物图鉴（没跑过就是空表）。 */
+    internal fun pawnPropCatalog(state: JSONObject): JSONObject =
+        state.optJSONObject(KEY_PAWN_PROP_CATALOG) ?: JSONObject()
+
+    /** 把这次见到的期物并进图鉴。服务端没给品质时保留上次记下的，别把已知品质抹成空。 */
+    internal fun mergePawnPropCatalog(catalog: JSONObject, seen: List<PawnPropChoice>): JSONObject {
+        val merged = JSONObject(catalog.toString())
+        for (choice in seen) {
+            val propId = choice.propId.trim()
+            val name = choice.name.trim()
+            if (propId.isEmpty() || name.isEmpty()) continue
+            val previous = merged.optJSONObject(propId)
+            merged.put(
+                propId,
+                JSONObject()
+                    .put("name", name)
+                    .put("quality", choice.quality.trim().ifBlank { previous?.optString("quality").orEmpty() }),
+            )
+        }
+        return merged
+    }
+
+    /** 背包响应里带得出名字的条目：服务端给了 propName/propQuality，配置页才排得出品质、上得了色。 */
+    internal fun bagPawnPropChoices(materials: JSONArray): List<PawnPropChoice> =
+        (0 until materials.length()).mapNotNull { index ->
+            val item = materials.optJSONObject(index) ?: return@mapNotNull null
+            PawnPropChoice(
+                propId = item.opt("propId")?.toString().orEmpty().trim(),
+                name = item.optString("propName").trim(),
+                quality = item.optString("propQuality").trim(),
+            )
+        }
+
+    /**
+     * 配置页要展示的期物清单：图鉴里见过的 + 内置默认清单里还没见过的。
+     *
+     * 按品质从高到低排，同品质按名字排，没有品质的排最后——用户第一眼看到的就是最该留意的那些。
+     */
+    internal fun pawnPropChoices(state: JSONObject): List<PawnPropChoice> {
+        val catalog = pawnPropCatalog(state)
+        val entries = LinkedHashMap<String, PawnPropChoice>()
+        for ((propId, hint) in PROHIBITED_PAWN_PROP_HINTS) {
+            // 内置清单只写得出用途（"传承消耗物品（清酒）"），期物名在括号里。
+            entries[propId] = PawnPropChoice(propId, hint.substringAfter('（', hint).substringBefore('）'), "", hint.substringBefore('（'))
+        }
+        catalog.keys().forEach { propId ->
+            val item = catalog.optJSONObject(propId) ?: return@forEach
+            val name = item.optString("name").trim()
+            if (name.isEmpty()) return@forEach
+            entries[propId] = PawnPropChoice(
+                propId = propId,
+                name = name,
+                quality = item.optString("quality").trim(),
+                hint = PROHIBITED_PAWN_PROP_HINTS[propId]?.substringBefore('（').orEmpty(),
+            )
+        }
+        return entries.values.sortedWith(
+            compareByDescending<PawnPropChoice> { cloudTaskQualityPriority(it.quality) }
+                .thenBy { it.name }
+                .thenBy { it.propId.toLongOrNull() ?: Long.MAX_VALUE },
+        )
+    }
+
+    /** 只装图鉴的状态对象：给那些"没有别的状态要更新、但学会了新期物"的分支用。 */
+    private fun pawnCatalogState(catalog: JSONObject): JSONObject =
+        JSONObject().put(KEY_PAWN_PROP_CATALOG, catalog)
+
+    /**
      * 本次执行要跳过的期物 ID。
      *
      * 请求里带了清单就用用户的配置（显式清空表示不禁止任何期物）；旧配置、旧请求没有这个
@@ -887,17 +983,9 @@ object CloudTaskLocalRunner {
             }.toSet()
         } ?: PROHIBITED_PAWN_PROP_HINTS.keys
 
-    /** 解析配置页的「禁当期物」多行文本：每行 `propId` 或 `propId|备注`，`#` 起为注释。 */
+    /** 解析配置页期物选择器回传的 ID 列表（逗号分隔，沿用「按标签取字符串」这条通道）。 */
     internal fun parseForbiddenPawnPropIds(text: String): Set<String> =
-        text.lineSequence()
-            .map { it.substringBefore('#').substringBefore('|').trim() }
-            .filter { it.isNotEmpty() }
-            .toSet()
-
-    /** 把禁当集合渲染回多行文本（已知 ID 带上用途备注），供配置页预填与回显。 */
-    internal fun formatForbiddenPawnPropIds(ids: Set<String>): String =
-        ids.sortedWith(compareBy({ it.toLongOrNull() ?: Long.MAX_VALUE }, { it }))
-            .joinToString("\n") { id -> PROHIBITED_PAWN_PROP_HINTS[id]?.let { "$id|$it" } ?: id }
+        text.split(',').map(String::trim).filter(String::isNotEmpty).toSet()
 
     private const val TRAVELING_MERCHANT_POLL_MS = 4L * 3_600_000L
     private const val TRAVELING_MERCHANT_ARRIVE_GRACE_MS = 60_000L

@@ -119,4 +119,5 @@ internal fun cloudTaskQualityColor(quality: String): Int? = when (normalizeQuali
     else -> null
 }
 
-internal fun cloudTaskQualityPriorityForTest(quality: String): Int = qualityPriority(quality)
+/** 品质权重：通知聚合与期物配置页排序共用同一套，数值越大品质越高。 */
+internal fun cloudTaskQualityPriority(quality: String): Int = qualityPriority(quality)

@@ -54,14 +54,56 @@ class CloudTaskBlessingAndPawnTest {
     }
 
     @Test
-    fun `禁当清单文本解析与回显`() {
-        assertEquals(setOf("11", "12"), CloudTaskLocalRunner.parseForbiddenPawnPropIds("11|清酒\n12|剡藤\n"))
-        assertEquals(setOf("99"), CloudTaskLocalRunner.parseForbiddenPawnPropIds("99"))
-        assertEquals(emptySet<String>(), CloudTaskLocalRunner.parseForbiddenPawnPropIds("  \n# 只是注释\n"))
-        val formatted = CloudTaskLocalRunner.formatForbiddenPawnPropIds(setOf("12", "99", "11"))
-        assertEquals("11|传承消耗物品（清酒）\n12|祈禳消耗物品（剡藤）\n99", formatted)
-        // 回显再解析必须回到同一个集合，否则用户只是打开保存一次就会改坏配置。
-        assertEquals(setOf("11", "12", "99"), CloudTaskLocalRunner.parseForbiddenPawnPropIds(formatted))
+    fun `禁当清单解析选择器回传的 ID 列表`() {
+        assertEquals(setOf("11", "12"), CloudTaskLocalRunner.parseForbiddenPawnPropIds("11,12"))
+        assertEquals(setOf("99"), CloudTaskLocalRunner.parseForbiddenPawnPropIds(" 99 "))
+        // 一项都没选 = 显式不禁止任何期物，不能回落成默认清单。
+        assertEquals(emptySet<String>(), CloudTaskLocalRunner.parseForbiddenPawnPropIds(""))
+    }
+
+    @Test
+    fun `图鉴合并保留已学到的品质，不完整条目直接丢掉`() {
+        val catalog = JSONObject().put("21", JSONObject().put("name", "青玉").put("quality", "BLUE"))
+        val merged = CloudTaskLocalRunner.mergePawnPropCatalog(
+            catalog,
+            listOf(
+                // 背包只给了名字没给品质：不能把上次记下的品质抹掉。
+                CloudTaskLocalRunner.PawnPropChoice("21", "青玉", ""),
+                // 缺 ID 或缺名字的条目记下来只会污染清单。
+                CloudTaskLocalRunner.PawnPropChoice("", "没有 ID", "RED"),
+                CloudTaskLocalRunner.PawnPropChoice("23", "", "RED"),
+                CloudTaskLocalRunner.PawnPropChoice("24", "残卷", "RED"),
+            ),
+        )
+        assertEquals("BLUE", merged.getJSONObject("21").getString("quality"))
+        assertEquals(2, merged.length())
+        assertEquals("RED", merged.getJSONObject("24").getString("quality"))
+    }
+
+    @Test
+    fun `配置页期物清单按品质排序且不丢内置清单`() {
+        val state = JSONObject().put(
+            CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG,
+            JSONObject()
+                .put("21", JSONObject().put("name", "青玉").put("quality", "BLUE"))
+                .put("22", JSONObject().put("name", "残卷").put("quality", "RED")),
+        )
+        val choices = CloudTaskLocalRunner.pawnPropChoices(state)
+        // 还没见过的期物也必须留在清单里，否则用户没法提前锁它。
+        assertTrue(choices.map { it.propId }.containsAll((11..18).map(Int::toString)))
+        // 品质高的排前面，没有品质的（内置清单里的那些）垫底。
+        val red = choices.indexOfFirst { it.propId == "22" }
+        val blue = choices.indexOfFirst { it.propId == "21" }
+        val unknown = choices.indexOfFirst { it.propId == "11" }
+        assertTrue(red < blue && blue < unknown)
+        // 内置清单只写得出用途，期物名在括号里，列表要显示名字而不是整句用途。
+        val seed = choices.first { it.propId == "11" }
+        assertEquals("清酒", seed.name)
+        assertEquals("传承消耗物品", seed.hint)
+        assertEquals("清酒（传承消耗物品）", seed.label)
+        // 学到的名字盖掉内置的推断名；不在内置清单里的期物只显示名字。
+        assertEquals("青玉", choices.first { it.propId == "21" }.label)
+        assertEquals("剡藤（祈禳消耗物品）", choices.first { it.propId == "12" }.label)
     }
 
     @Test

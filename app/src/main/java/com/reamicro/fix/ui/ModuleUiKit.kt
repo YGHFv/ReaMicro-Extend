@@ -14,6 +14,19 @@ import android.widget.ScrollView
 import android.widget.TextView
 import com.reamicro.fix.hook.ModuleDialogTheme
 
+/** 多选列表里的一项：value 是落盘值，label 是给人看的名字，color 非空时按品质着色。 */
+internal data class MultiSelectOption(val value: String, val label: String, val color: Int? = null)
+
+/** 多选按钮上的一句话摘要：锁了几项，或者一项都没锁（= 全部可典当）。 */
+internal fun multiSelectSummary(options: List<MultiSelectOption>, selected: Set<String>): String {
+    val locked = options.count { it.value in selected }
+    return when {
+        options.isEmpty() -> "暂无可选期物"
+        locked == 0 -> "未锁定任何项（全部可典当）"
+        else -> "已锁定 $locked/${options.size} 项"
+    }
+}
+
 /**
  * 模块主界面的轻量视图工具。
  *
@@ -354,6 +367,7 @@ internal class ModuleUiKit(private val context: Context) {
         build: (
             add: (label: String, hint: String, value: String) -> Unit,
             choose: (label: String, options: List<Pair<String, String>>, value: String) -> Unit,
+            multi: (label: String, hint: String, options: List<MultiSelectOption>, selected: Set<String>) -> Unit,
         ) -> Unit,
         register: (label: String, value: () -> String) -> Unit,
         onSave: () -> Boolean,
@@ -392,6 +406,20 @@ internal class ModuleUiKit(private val context: Context) {
                 form.addView(picker)
                 register(label) { selected?.first.orEmpty() }
             },
+            { label, hint, options, selected ->
+                form.addView(fieldRow(label, hint))
+                var picked = selected
+                val summary = button(multiSelectSummary(options, picked), role = Role.Neutral) {}
+                summary.setOnClickListener {
+                    multiSelectDialog(label, hint, options, picked) { confirmed ->
+                        picked = confirmed
+                        summary.text = multiSelectSummary(options, picked)
+                    }
+                }
+                form.addView(summary)
+                // 落盘还是同一份 ID 集合，只是沿用「按标签取字符串」这条既有通道回传。
+                register(label) { picked.sortedWith(compareBy({ it.toLongOrNull() ?: Long.MAX_VALUE }, { it })).joinToString(",") }
+            },
         )
         val scroll = ScrollView(context).apply {
             addView(form)
@@ -406,6 +434,88 @@ internal class ModuleUiKit(private val context: Context) {
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(0, px(12), 0, 0)
                 addView(button("保存", onClick = { if (onSave()) dialog.dismiss() }))
+                addView(button("取消", onClick = { dialog.dismiss() }))
+            },
+        )
+        dialog.setContentView(card)
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
+            dialog.window?.setLayout((metrics.widthPixels * 0.9f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        dialog.show()
+        return dialog
+    }
+
+    /**
+     * 多选弹窗：一行一个选项，点一下就切换锁定状态。
+     *
+     * 「禁当期物」这种配置天然是一组开关——让用户手打 propId 既记不住也看不见，
+     * 所以直接把期物列出来点选。[onConfirm] 拿到的是确认后的取值集合，取消则原样保留。
+     */
+    fun multiSelectDialog(
+        title: String,
+        hint: String,
+        options: List<MultiSelectOption>,
+        selected: Set<String>,
+        onConfirm: (Set<String>) -> Unit,
+    ): Dialog {
+        val dialog = Dialog(context)
+        val metrics = context.resources.displayMetrics
+        val card = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(palette.rowBackground, 12f)
+            setPadding(px(18), px(18), px(18), px(14))
+        }
+        card.addView(textView(title, 18f, palette.title, bold = true))
+        if (hint.isNotBlank()) {
+            card.addView(textView(hint, 12f, palette.body).apply { setPadding(0, px(6), 0, px(10)) })
+        }
+        val picked = selected.toMutableSet()
+        val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        options.forEach { option ->
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(px(12), px(10), px(12), px(10))
+            }
+            val name = textView(option.label, 14f, option.color ?: palette.title)
+            name.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            val state = textView("", 12f, palette.body)
+            row.addView(name)
+            row.addView(state)
+            // 锁定状态同时改文案、配色和底色：只改一个的话，彩色期物名会让人看不出哪行被锁了。
+            fun apply() {
+                val locked = option.value in picked
+                state.text = if (locked) "已锁定" else "可典当"
+                state.setTextColor(if (locked) palette.primaryText else palette.body)
+                row.background = rounded(if (locked) palette.primarySoft else palette.pageBackground, 8f).apply {
+                    setStroke((1.2f * dp).toInt(), palette.border)
+                }
+            }
+            apply()
+            row.isClickable = true
+            row.setOnClickListener {
+                if (!picked.add(option.value)) picked.remove(option.value)
+                apply()
+            }
+            list.addView(row, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = px(6) })
+        }
+        card.addView(
+            ScrollView(context).apply {
+                addView(list)
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    (metrics.heightPixels * 0.5f).toInt(),
+                )
+            },
+        )
+        card.addView(
+            LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, px(12), 0, 0)
+                addView(button("完成", onClick = { onConfirm(picked.toSet()); dialog.dismiss() }))
                 addView(button("取消", onClick = { dialog.dismiss() }))
             },
         )

@@ -441,4 +441,34 @@ class LocalTaskWorkflowTest {
         assertTrue(pawned.message.contains("获得铜钱 5 文"))
         assertEquals(1, calls.count { it.first == "pawn" })
     }
+
+    @Test
+    fun `典当把当日期物与背包物品记进图鉴`() {
+        reply("get-pawn-count", JSONObject().put("remaining", 1).put("specialPropId", 21)
+            .put("specialPropName", "青玉").put("specialPropQuality", "BLUE"))
+        reply("get-user-materials", JSONObject().put("materials", JSONArray()
+            .put(JSONObject().put("propId", 21).put("propName", "青玉").put("propQuality", "BLUE")
+                .put("userPropId", 42).put("quantity", 1))
+            // 没名字的条目（别的材料）不该混进期物清单。
+            .put(JSONObject().put("propId", 31).put("quantity", 3))))
+        reply("pawn", JSONObject().put("success", true).put("coin", 5))
+        val result = run("pawn", request = JSONObject().put("forbiddenPawnPropIds", JSONArray()))
+        assertEquals("success", result.result)
+        val catalog = CloudTaskLocalRunner.pawnPropCatalog(result.state)
+        assertEquals("青玉", catalog.getJSONObject("21").getString("name"))
+        assertEquals("BLUE", catalog.getJSONObject("21").getString("quality"))
+        assertEquals(1, catalog.length())
+    }
+
+    @Test
+    fun `被禁当而跳过的期物同样进图鉴`() {
+        // 今天的期物是剡藤：默认清单会跳过典当，但名字与品质只有这次能拿到，必须记下来。
+        reply("get-pawn-count", JSONObject().put("remaining", 2).put("specialPropId", 12)
+            .put("specialPropName", "剡藤").put("specialPropQuality", "PURPLE"))
+        val result = run("pawn")
+        assertEquals("success", result.result)
+        assertTrue(result.message.contains("跳过典当"))
+        assertFalse(calls.any { it.first == "pawn" })
+        assertEquals("剡藤", CloudTaskLocalRunner.pawnPropCatalog(result.state).getJSONObject("12").getString("name"))
+    }
 }
