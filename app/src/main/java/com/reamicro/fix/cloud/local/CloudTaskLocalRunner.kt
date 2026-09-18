@@ -583,9 +583,11 @@ object CloudTaskLocalRunner {
         val propId = data.opt("specialPropId")?.toString().orEmpty().trim()
         val propName = data.optString("specialPropName").ifBlank { "期物" }
         // 顺手把当日期物并进图鉴：名字与品质只有服务端当天才给，错过这次就再也补不回来。
+        // 并进去的是服务端原始名字，不是上面那句给消息用的"期物"兜底文案——今天没有期物时
+        // 服务端给空名字，图鉴就该什么都没有，而不是多出一行叫"期物"的假条目。
         var catalog = mergePawnPropCatalog(
             pawnPropCatalog(task),
-            listOf(PawnPropChoice(propId, propName, data.optString("specialPropQuality"))),
+            listOf(PawnPropChoice(propId, data.optString("specialPropName").trim(), data.optString("specialPropQuality"))),
         )
         if (remaining <= 0) {
             return Outcome("success", "今日可典当次数已用完（$usedToday/$maxPerDay）", pawnCatalogState(catalog), notify = false)
@@ -886,9 +888,10 @@ object CloudTaskLocalRunner {
     /**
      * 期物图鉴的落盘键（存在任务运行时状态里，随 KSU 快照一起同步）。
      *
-     * 「所有期物」没有静态数据源：客户端不存期物表，名字与品质都是服务端当天现给的
-     * （`get-pawn-count` 的 specialPropName/specialPropQuality、背包的 propName/propQuality）。
-     * 所以只能在执行时把见过的记下来，配置页才有点得动的期物清单，而不是让用户手打 propId。
+     * 「所有期物」没有静态数据源：客户端不存期物表，名字与品质只存在于两份响应里——
+     * 当日期物的 `get-pawn-count`（specialPropId/specialPropName/specialPropQuality）与
+     * 背包的 `get-user-materials`（`MaterialItem.propId/name/quality`）。
+     * 所以只能把见过的记下来，配置页才有点得动的期物清单，而不是让用户手打 propId。
      */
     internal const val KEY_PAWN_PROP_CATALOG = "pawnPropCatalog"
 
@@ -913,7 +916,8 @@ object CloudTaskLocalRunner {
         for (choice in seen) {
             val propId = choice.propId.trim()
             val name = choice.name.trim()
-            if (propId.isEmpty() || name.isEmpty()) continue
+            // propId 为 0 是服务端"今天没有期物"的占位值；记下来只会变成一行点不动的空条目。
+            if (propId.isEmpty() || propId == "0" || name.isEmpty()) continue
             val previous = merged.optJSONObject(propId)
             merged.put(
                 propId,
@@ -925,14 +929,20 @@ object CloudTaskLocalRunner {
         return merged
     }
 
-    /** 背包响应里带得出名字的条目：服务端给了 propName/propQuality，配置页才排得出品质、上得了色。 */
+    /**
+     * 背包响应里带得出名字的条目。
+     *
+     * 字段名照抄宿主 `data/res/community/MaterialItem`（`userPropId/propId/name/quality/quantity`）。
+     * 这里原来读的是根本不存在的 `propName`/`propQuality`，于是每条都因"名字为空"被丢掉，
+     * 配置页只剩内置清单，表现就是"读不全"。旧字段名保留作兜底。
+     */
     internal fun bagPawnPropChoices(materials: JSONArray): List<PawnPropChoice> =
         (0 until materials.length()).mapNotNull { index ->
             val item = materials.optJSONObject(index) ?: return@mapNotNull null
             PawnPropChoice(
                 propId = item.opt("propId")?.toString().orEmpty().trim(),
-                name = item.optString("propName").trim(),
-                quality = item.optString("propQuality").trim(),
+                name = item.optString("name").ifBlank { item.optString("propName") }.trim(),
+                quality = item.optString("quality").ifBlank { item.optString("propQuality") }.trim(),
             )
         }
 
@@ -969,6 +979,61 @@ object CloudTaskLocalRunner {
     /** 只装图鉴的状态对象：给那些"没有别的状态要更新、但学会了新期物"的分支用。 */
     private fun pawnCatalogState(catalog: JSONObject): JSONObject =
         JSONObject().put(KEY_PAWN_PROP_CATALOG, catalog)
+
+    /** 主动刷新期物图鉴的结果：catalog 是这次学到的，error 非空表示至少有一半没拉到。 */
+    internal data class PawnCatalogFetch(val catalog: JSONObject, val error: String?)
+
+    /**
+     * 从服务端拉一次期物图鉴（当日期物 + 背包全量）。
+     *
+     * 图鉴平时靠执行任务时顺手积累，但用户第一次打开配置页时任务往往还没跑过，
+     * 所以配置页另给一个主动刷新入口，免得期物一栏永远是空的。
+     * 两个接口都失败才算失败；只失败一个时把已经拿到的那半返回，并在 error 里说明。
+     */
+    internal fun fetchPawnPropCatalog(
+        token: String,
+        baseUrl: String = REAMICRO_BASE_URL,
+        request: JSONObject = JSONObject(),
+    ): PawnCatalogFetch {
+        if (token.isBlank()) throw IllegalStateException("阅微登录凭据无效")
+        val errors = mutableListOf<String>()
+        var catalog = JSONObject()
+        runCatching {
+            val info = postReaMicro(
+                baseUrl,
+                token,
+                JSONObject(),
+                request.optString("pawnCountEndpoint").ifBlank { "rest/community/get-pawn-count" },
+            )
+            operationError(info)?.let { throw IllegalStateException(it) }
+            val data = info.optJSONObject("data") ?: info
+            catalog = mergePawnPropCatalog(
+                catalog,
+                listOf(
+                    PawnPropChoice(
+                        propId = data.opt("specialPropId")?.toString().orEmpty().trim(),
+                        // 刻意不用"期物"兜底：没有名字就说明今天没有期物，不该造一条假条目。
+                        name = data.optString("specialPropName").trim(),
+                        quality = data.optString("specialPropQuality").trim(),
+                    ),
+                ),
+            )
+        }.onFailure { errors += "当日期物：${it.message ?: "读取失败"}" }
+        runCatching {
+            val materials = postReaMicro(
+                baseUrl,
+                token,
+                JSONObject(),
+                request.optString("materialsEndpoint").ifBlank { "rest/community/get-user-materials" },
+            )
+            operationError(materials)?.let { throw IllegalStateException(it) }
+            val list = materials.optJSONObject("data")?.optJSONArray("materials")
+                ?: materials.optJSONArray("materials")
+                ?: JSONArray()
+            catalog = mergePawnPropCatalog(catalog, bagPawnPropChoices(list))
+        }.onFailure { errors += "背包：${it.message ?: "读取失败"}" }
+        return PawnCatalogFetch(catalog, errors.takeIf { it.isNotEmpty() }?.joinToString("；"))
+    }
 
     /**
      * 本次执行要跳过的期物 ID。

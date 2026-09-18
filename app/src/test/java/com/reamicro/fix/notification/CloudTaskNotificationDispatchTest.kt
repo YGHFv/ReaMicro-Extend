@@ -2,6 +2,7 @@ package com.reamicro.fix.notification
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -63,10 +64,24 @@ class CloudTaskNotificationDispatchTest {
 
     @Test
     fun `抽卡品质优先级从高到低稳定`() {
-        assertTrue(cloudTaskQualityPriority("RED") > cloudTaskQualityPriority("PURPLE"))
-        assertTrue(cloudTaskQualityPriority("PURPLE") > cloudTaskQualityPriority("BLUE"))
+        // 顺序对齐宿主 marketQualityRank：LIMIT > RED > BLUE > GREEN > GREY，GOLD 是卡面额外的一档。
+        assertTrue(cloudTaskQualityPriority("LIMIT") > cloudTaskQualityPriority("GOLD"))
+        assertTrue(cloudTaskQualityPriority("GOLD") > cloudTaskQualityPriority("RED"))
+        assertTrue(cloudTaskQualityPriority("RED") > cloudTaskQualityPriority("BLUE"))
         assertTrue(cloudTaskQualityPriority("BLUE") > cloudTaskQualityPriority("GREEN"))
         assertTrue(cloudTaskQualityPriority("GREEN") > cloudTaskQualityPriority("GREY"))
+    }
+
+    @Test
+    fun `品质配色与宿主 LoreCardKt 一致`() {
+        assertEquals(0xFFFF9800.toInt(), cloudTaskQualityColor("LIMIT"))
+        assertEquals(0xFFF44336.toInt(), cloudTaskQualityColor("RED"))
+        assertEquals(0xFF2196F3.toInt(), cloudTaskQualityColor("BLUE"))
+        assertEquals(0xFF4CAF50.toInt(), cloudTaskQualityColor("GREEN"))
+        assertEquals(0xFF9E9E9E.toInt(), cloudTaskQualityColor("GREY"))
+        // 宿主里没有的品质不该硬塞一个颜色进去。
+        assertNull(cloudTaskQualityColor(""))
+        assertNull(cloudTaskQualityColor("PURPLE"))
     }
 
     @Test

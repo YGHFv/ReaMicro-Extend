@@ -14,6 +14,7 @@ import com.reamicro.fix.cloud.local.LocalTaskRecord
 import com.reamicro.fix.cloud.local.LocalTaskStore
 import com.reamicro.fix.hook.settings.*
 import de.robv.android.xposed.XposedBridge
+import org.json.JSONObject
 
 private const val LOCAL_AUTOMATION_LOG_PREFIX = "[ReaMicroFix/LocalAutomation]"
 
@@ -410,17 +411,22 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
         }
         val merchantAutoComplete = settingsDialogSwitchRow(activity, "自动完成行商", task?.merchantAutoComplete == true, colors)
         // 禁当期物：期物清单来自执行时学到的图鉴，点一下锁定/解锁即可，不用手打 propId。
+        val pawnStore = LocalTaskStore { activity.applicationContext }
+        val toPawnOptions = { state: JSONObject ->
+            com.reamicro.fix.cloud.local.CloudTaskLocalRunner.pawnPropChoices(state).map {
+                com.reamicro.fix.ui.MultiSelectOption(
+                    it.propId,
+                    it.label,
+                    com.reamicro.fix.notification.cloudTaskQualityColor(it.quality),
+                )
+            }
+        }
         var pawnPropSelection = task?.forbiddenPawnPropIds
             ?: com.reamicro.fix.cloud.local.CloudTaskLocalRunner.PROHIBITED_PAWN_PROP_HINTS.keys
-        val pawnPropOptions = com.reamicro.fix.cloud.local.CloudTaskLocalRunner.pawnPropChoices(
-            LocalTaskStore { activity.applicationContext }.runtimeState(accountId, "pawn"),
-        ).map {
-            com.reamicro.fix.ui.MultiSelectOption(
-                it.propId,
-                it.label,
-                com.reamicro.fix.notification.cloudTaskQualityColor(it.quality),
-            )
-        }
+        var pawnPropOptions = toPawnOptions(pawnStore.runtimeState(accountId, "pawn"))
+        // 任务还没保存过时 recordState 写不进去（没有任务对象），所以刷新结果先记在这里，
+        // 等保存完再补写一次，用户"第一次配置 → 刷新 → 保存"的顺序不会白刷。
+        var refreshedPawnCatalog: JSONObject? = null
         val forbiddenPawnProps = settingsDialogButton(
             activity,
             com.reamicro.fix.ui.multiSelectSummary(pawnPropOptions, pawnPropSelection),
@@ -430,9 +436,29 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
             setOnClickListener {
                 com.reamicro.fix.ui.ModuleUiKit(activity).multiSelectDialog(
                     "禁当期物",
-                    "点一下锁定期物禁止典当；清单来自当日期物与背包里见过的期物",
+                    "点一下锁定期物禁止典当；清单来自当日期物与背包，可点「刷新期物清单」现拉一次",
                     pawnPropOptions,
                     pawnPropSelection,
+                    refresh = {
+                        // 名字与品质只在服务端，宿主的设置页同样得现拉一次才列得全。
+                        if (currentCredential.token.isBlank()) {
+                            null
+                        } else {
+                            val fetched = com.reamicro.fix.cloud.local.CloudTaskLocalRunner
+                                .fetchPawnPropCatalog(currentCredential.token)
+                            fetched.error?.let { XposedBridge.log("$LOCAL_AUTOMATION_LOG_PREFIX 期物清单部分缺失：$it") }
+                            refreshedPawnCatalog = fetched.catalog
+                            val state = JSONObject().put(
+                                com.reamicro.fix.cloud.local.CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG,
+                                fetched.catalog,
+                            )
+                            pawnStore.recordState(accountId, "pawn", state)
+                            // 按钮上的摘要按这份清单算「已锁定 n/m 项」，换清单就得跟着换。
+                            pawnPropOptions = toPawnOptions(state)
+                            pawnPropOptions
+                        }
+                    },
+                    refreshLabel = "刷新期物清单",
                 ) { confirmed ->
                     pawnPropSelection = confirmed
                     text = com.reamicro.fix.ui.multiSelectSummary(pawnPropOptions, pawnPropSelection)
@@ -541,6 +567,20 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
             )
             val store = LocalTaskStore { activity.applicationContext }
             store.saveTask(accountId, localTask, currentCredential.token)
+            // 刷新期物清单时任务对象可能还不存在（recordState 会直接跳过），保存完补写一次，
+            // 否则用户「第一次配置 → 刷新 → 保存」的刷新结果会白刷。
+            if (spec.taskType == "pawn") {
+                refreshedPawnCatalog?.let { catalog ->
+                    store.recordState(
+                        accountId,
+                        spec.taskType,
+                        JSONObject().put(
+                            com.reamicro.fix.cloud.local.CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG,
+                            catalog,
+                        ),
+                    )
+                }
+            }
             if (enabled) disableCloudAutomationTask(accountId, spec.taskType)
             dialog.dismiss()
             showToast(if (enableAfterSave == true) "已配置并启用${spec.title}" else "${spec.title}配置已保存")

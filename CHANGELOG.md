@@ -1,9 +1,17 @@
 # 更新记录
 
+## 期物清单读全与品质配色对齐游戏 - 2026-09-18
+
+- 修掉期物列表读不全的根因：背包返回的字段名是宿主 `MaterialItem` 的 `name`/`quality`，之前按 `propName`/`propQuality` 读，每条都因「名字为空」被丢掉，清单里只剩内置的 11-18 项；旧字段名保留作兜底。
+- 「禁当期物」弹窗新增「刷新期物清单」：现拉 `get-pawn-count` 与 `get-user-materials`，把当日期物与背包全量并进图鉴，第一次配置不用等任务跑过一轮。
+- 品质配色改用游戏真实值（`LoreCardKt.getQualityColor`）：GREY `#9E9E9E`、GREEN `#4CAF50`、BLUE `#2196F3`、RED `#F44336`、LIMIT `#FF9800`，GOLD 取每日轶闻卡面色 `#E0B84E`；不再自造紫/橙/黄档位，未知品质不着色。
+- 品质排序同步改成 LIMIT > GOLD > RED > BLUE > GREEN > GREY（与宿主 `marketQualityRank` 一致）。
+- 服务端「今天没有期物」时给的 `specialPropId=0` 不再被记成一行点不动的假期物。
+
 ## 期物典当改成点选锁定 - 2026-09-18
 
 - 「禁当期物」不再让用户手打 propId：配置页列出席物，点一下就锁定/解锁，锁定项在典当时跳过；一项都不锁即任何期物都典当。
-- 期物清单来自执行时学到的图鉴。客户端不存期物表，名字与品质只有服务端当天才给（`get-pawn-count` 的 `specialPropName`/`specialPropQuality`、背包的 `propName`/`propQuality`），所以每次典当都顺手记下见到的期物，并与内置清单合并——还没见过的期物也能提前锁定。
+- 期物清单来自执行时学到的图鉴。客户端不存期物表，名字与品质只有服务端当天才给（`get-pawn-count` 的 `specialPropName`/`specialPropQuality`、背包 `MaterialItem` 的 `name`/`quality`），所以每次典当都顺手记下见到的期物，并与内置清单合并——还没见过的期物也能提前锁定。
 - 清单按品质从高到低排（同品质按名字），期物名用对应品质色显示；内置清单里的期物先按「用途（名字）」取出名字，等游戏给出真名与品质后自动替换。
 
 ## 通知明细、禁当配置与 KSU 内置模块 - 2026-09-18

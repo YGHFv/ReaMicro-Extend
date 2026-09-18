@@ -87,35 +87,47 @@ private fun parseCloudTaskResultItems(itemsJson: String): List<CloudTaskResultIt
         .sortedWith(compareByDescending<CloudTaskResultItem> { qualityPriority(it.quality) }.thenBy { it.name })
 }
 
+/**
+ * 品质文案 → 游戏内部枚举。
+ *
+ * 游戏里只有这五档：GREY / GREEN / BLUE / RED / LIMIT（宿主 `LoreCardKt.getQualityColor`
+ * 与 `DailyLoreSheetKt.toDailyLoreTitleColor` 的 when 分支完全一致），
+ * `GOLD` 是每日轶闻/祈愿卡面额外用到的一档（`rememberDailyLoreChipColors`、`wangyanQualityColor`）。
+ * 服务端下发的就是这几个英文名，中文别名只是给旧数据兜底，不是另立一套档位。
+ */
 private fun normalizeQuality(quality: String): String = when (quality.trim().uppercase()) {
     "红", "红色", "绝品", "传说" -> "RED"
-    "橙", "橙色" -> "ORANGE"
+    "橙", "橙色" -> "LIMIT"
     "金", "金色" -> "GOLD"
-    "紫", "紫色", "珍品" -> "PURPLE"
     "蓝", "蓝色", "精品" -> "BLUE"
     "绿", "绿色", "良品" -> "GREEN"
     "灰", "灰色", "普通" -> "GREY"
     else -> quality.trim().uppercase()
 }
 
+/** 品质权重：数值越大品质越高，顺序与宿主 `marketQualityRank` 一致（GOLD 插在 LIMIT 与 RED 之间）。 */
 private fun qualityPriority(quality: String): Int = when (normalizeQuality(quality)) {
-    "RED" -> 70
-    "ORANGE", "GOLD" -> 65
-    "YELLOW" -> 60
-    "PURPLE" -> 50
-    "BLUE" -> 40
-    "GREEN" -> 30
-    "GREY", "GRAY" -> 20
+    "LIMIT" -> 60
+    "GOLD" -> 50
+    "RED" -> 40
+    "BLUE" -> 30
+    "GREEN" -> 20
+    "GREY", "GRAY" -> 10
     else -> 0
 }
 
+/**
+ * 品质配色：直接取宿主 `LoreCardKt.getQualityColor` 的常量，别再自己调色。
+ *
+ * 期物列表、通知里的奖励明细都按这套上色，颜色与游戏内看板/当铺/寄售里的一致。
+ */
 internal fun cloudTaskQualityColor(quality: String): Int? = when (normalizeQuality(quality)) {
-    "RED" -> 0xFFE53935.toInt()
-    "ORANGE", "GOLD", "YELLOW" -> 0xFFC77800.toInt()
-    "PURPLE" -> 0xFF8E24AA.toInt()
-    "BLUE" -> 0xFF1E88E5.toInt()
-    "GREEN" -> 0xFF2E7D32.toInt()
-    "GREY", "GRAY" -> 0xFF607D8B.toInt()
+    "LIMIT" -> 0xFFFF9800.toInt()
+    "GOLD" -> 0xFFE0B84E.toInt()
+    "RED" -> 0xFFF44336.toInt()
+    "BLUE" -> 0xFF2196F3.toInt()
+    "GREEN" -> 0xFF4CAF50.toInt()
+    "GREY", "GRAY" -> 0xFF9E9E9E.toInt()
     else -> null
 }
 

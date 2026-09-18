@@ -43,8 +43,9 @@ class LocalTaskRecordDetailsTest {
         val rendered = fields().associateBy { it.label }
         assertEquals("GREEN", rendered.getValue("轶闻").quality)
         assertEquals("BLUE", rendered.getValue("期物").quality)
-        assertEquals(0xFF2E7D32.toInt(), cloudTaskQualityColor(rendered.getValue("轶闻").quality))
-        assertEquals(0xFF1E88E5.toInt(), cloudTaskQualityColor(rendered.getValue("期物").quality))
+        // 取宿主 LoreCardKt.getQualityColor 的真实常量，别再自己调色。
+        assertEquals(0xFF4CAF50.toInt(), cloudTaskQualityColor(rendered.getValue("轶闻").quality))
+        assertEquals(0xFF2196F3.toInt(), cloudTaskQualityColor(rendered.getValue("期物").quality))
         assertEquals("", rendered.getValue("正文").quality)
         assertNull(cloudTaskQualityColor("UNKNOWN"))
     }

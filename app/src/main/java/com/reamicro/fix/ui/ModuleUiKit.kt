@@ -367,7 +367,13 @@ internal class ModuleUiKit(private val context: Context) {
         build: (
             add: (label: String, hint: String, value: String) -> Unit,
             choose: (label: String, options: List<Pair<String, String>>, value: String) -> Unit,
-            multi: (label: String, hint: String, options: List<MultiSelectOption>, selected: Set<String>) -> Unit,
+            multi: (
+                label: String,
+                hint: String,
+                options: List<MultiSelectOption>,
+                selected: Set<String>,
+                refresh: (() -> List<MultiSelectOption>?)?,
+            ) -> Unit,
         ) -> Unit,
         register: (label: String, value: () -> String) -> Unit,
         onSave: () -> Boolean,
@@ -406,14 +412,28 @@ internal class ModuleUiKit(private val context: Context) {
                 form.addView(picker)
                 register(label) { selected?.first.orEmpty() }
             },
-            { label, hint, options, selected ->
+            { label, hint, options, selected, refresh ->
                 form.addView(fieldRow(label, hint))
                 var picked = selected
-                val summary = button(multiSelectSummary(options, picked), role = Role.Neutral) {}
+                // 选项会被「刷新期物清单」换掉，摘要也要跟着按新清单算，所以这里用可变引用。
+                var shown = options
+                val summary = button(multiSelectSummary(shown, picked), role = Role.Neutral) {}
+                // 刷新成功后把新清单也记在 shown 上：摘要里的「已锁定 n/m 项」用的是它，
+                // 不跟着换就会显示成旧的分母。
+                val refreshAndTrack = refresh?.let { load ->
+                    { load()?.also { shown = it } }
+                }
                 summary.setOnClickListener {
-                    multiSelectDialog(label, hint, options, picked) { confirmed ->
+                    multiSelectDialog(
+                        label,
+                        hint,
+                        shown,
+                        picked,
+                        refresh = refreshAndTrack,
+                        refreshLabel = "刷新期物清单",
+                    ) { confirmed ->
                         picked = confirmed
-                        summary.text = multiSelectSummary(options, picked)
+                        summary.text = multiSelectSummary(shown, picked)
                     }
                 }
                 form.addView(summary)
@@ -451,12 +471,18 @@ internal class ModuleUiKit(private val context: Context) {
      *
      * 「禁当期物」这种配置天然是一组开关——让用户手打 propId 既记不住也看不见，
      * 所以直接把期物列出来点选。[onConfirm] 拿到的是确认后的取值集合，取消则原样保留。
+     *
+     * [refresh] 非空时顶部多一个刷新按钮：期物清单只能问服务端要（名字与品质不在客户端里），
+     * 用户刚装好模块、任务还没跑过时点一下就能补齐，不必等任务跑一轮。刷新在后台线程执行，
+     * 回来后原地重绘列表；返回 null 表示这次什么都没读到。
      */
     fun multiSelectDialog(
         title: String,
         hint: String,
         options: List<MultiSelectOption>,
         selected: Set<String>,
+        refresh: (() -> List<MultiSelectOption>?)? = null,
+        refreshLabel: String = "刷新清单",
         onConfirm: (Set<String>) -> Unit,
     ): Dialog {
         val dialog = Dialog(context)
@@ -471,36 +497,73 @@ internal class ModuleUiKit(private val context: Context) {
             card.addView(textView(hint, 12f, palette.body).apply { setPadding(0, px(6), 0, px(10)) })
         }
         val picked = selected.toMutableSet()
+        var shown = options
         val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        options.forEach { option ->
-            val row = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(px(12), px(10), px(12), px(10))
-            }
-            val name = textView(option.label, 14f, option.color ?: palette.title)
-            name.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            val state = textView("", 12f, palette.body)
-            row.addView(name)
-            row.addView(state)
-            // 锁定状态同时改文案、配色和底色：只改一个的话，彩色期物名会让人看不出哪行被锁了。
-            fun apply() {
-                val locked = option.value in picked
-                state.text = if (locked) "已锁定" else "可典当"
-                state.setTextColor(if (locked) palette.primaryText else palette.body)
-                row.background = rounded(if (locked) palette.primarySoft else palette.pageBackground, 8f).apply {
-                    setStroke((1.2f * dp).toInt(), palette.border)
+        // 清单可能被刷新换掉，所以画一次抽成函数，刷新回来原地重绘而不是重开弹窗。
+        fun renderRows() {
+            list.removeAllViews()
+            shown.forEach { option ->
+                val row = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(px(12), px(10), px(12), px(10))
                 }
-            }
-            apply()
-            row.isClickable = true
-            row.setOnClickListener {
-                if (!picked.add(option.value)) picked.remove(option.value)
+                val name = textView(option.label, 14f, option.color ?: palette.title)
+                name.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                val state = textView("", 12f, palette.body)
+                row.addView(name)
+                row.addView(state)
+                // 锁定状态同时改文案、配色和底色：只改一个的话，彩色期物名会让人看不出哪行被锁了。
+                fun apply() {
+                    val locked = option.value in picked
+                    state.text = if (locked) "已锁定" else "可典当"
+                    state.setTextColor(if (locked) palette.primaryText else palette.body)
+                    row.background = rounded(if (locked) palette.primarySoft else palette.pageBackground, 8f).apply {
+                        setStroke((1.2f * dp).toInt(), palette.border)
+                    }
+                }
                 apply()
+                row.isClickable = true
+                row.setOnClickListener {
+                    if (!picked.add(option.value)) picked.remove(option.value)
+                    apply()
+                }
+                list.addView(row, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = px(6) })
             }
-            list.addView(row, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = px(6) })
+        }
+        renderRows()
+        if (refresh != null) {
+            var refreshing = false
+            val refreshButton = button(refreshLabel, role = Role.Neutral) {}
+            refreshButton.setOnClickListener {
+                if (refreshing) return@setOnClickListener
+                refreshing = true
+                refreshButton.text = "正在读取…"
+                background(
+                    // 用 Result 兜住异常而不是让 background 自己 toast：那样就不会回调 then，
+                    // 按钮会永远停在"正在读取…"。
+                    work = { runCatching { refresh() } },
+                    then = { result ->
+                        refreshing = false
+                        refreshButton.text = refreshLabel
+                        val updated = result.getOrNull()
+                        if (result.isFailure) {
+                            toast(result.exceptionOrNull()?.message ?: "刷新清单失败")
+                        } else if (updated == null) {
+                            toast("没有读到清单，稍后再试")
+                        } else {
+                            shown = updated
+                            // 刻意不清掉"刷新后不在清单里"的锁定项：期物可能只是今天已经典当光或
+                            // 临时从背包里消失，用户锁它的意思还在，等它再出现时应当仍然是锁着的。
+                            renderRows()
+                            toast("清单已更新，共 ${updated.size} 项")
+                        }
+                    },
+                )
+            }
+            card.addView(refreshButton)
         }
         card.addView(
             ScrollView(context).apply {

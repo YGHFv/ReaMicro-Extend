@@ -81,6 +81,29 @@ class CloudTaskBlessingAndPawnTest {
     }
 
     @Test
+    fun `背包条目按宿主字段名读取，没名字的与占位期物不进图鉴`() {
+        // 之前这里读的是不存在的 propName/propQuality，导致背包学到的期物全被丢掉，
+        // 配置页只剩内置清单——用户看到的就是"读不全"。
+        val catalog = CloudTaskLocalRunner.mergePawnPropCatalog(
+            JSONObject(),
+            CloudTaskLocalRunner.bagPawnPropChoices(
+                JSONArray()
+                    .put(JSONObject().put("propId", 21).put("name", "青玉").put("quality", "BLUE").put("quantity", 2))
+                    // 别的材料没有名字，混进来只会变成一行点不动的空条目。
+                    .put(JSONObject().put("propId", 31).put("quantity", 3))
+                    // 老字段名只在服务端临时改回去时用得上，保底别丢。
+                    .put(JSONObject().put("propId", 24).put("propName", "残卷").put("propQuality", "RED"))
+                    // 0 是服务端"今天没有期物"的占位值。
+                    .put(JSONObject().put("propId", 0).put("name", "空期物").put("quality", "GREY")),
+            ),
+        )
+        assertEquals(2, catalog.length())
+        assertEquals("青玉", catalog.getJSONObject("21").getString("name"))
+        assertEquals("BLUE", catalog.getJSONObject("21").getString("quality"))
+        assertEquals("残卷", catalog.getJSONObject("24").getString("name"))
+    }
+
+    @Test
     fun `配置页期物清单按品质排序且不丢内置清单`() {
         val state = JSONObject().put(
             CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG,

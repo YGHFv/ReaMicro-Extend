@@ -345,15 +345,33 @@ class ModuleMainActivity : Activity() {
                 if (spec?.rewardTriggered == true) add("每日祈愿上限", "0 表示抽完彩筹", task.dailyDrawLimit.toString())
                 if (spec?.taskType == "pawn") {
                     // 期物清单来自执行时学到的图鉴：点一下就锁定，不让用户在配置里手打 propId。
-                    val pawnState = LocalTaskStore { applicationContext }.runtimeState(accountId, "pawn")
+                    val pawnStore = LocalTaskStore { applicationContext }
+                    val pawnOptions = { state: JSONObject ->
+                        CloudTaskLocalRunner.pawnPropChoices(state).map {
+                            MultiSelectOption(it.propId, it.label, cloudTaskQualityColor(it.quality))
+                        }
+                    }
                     multi(
                         "禁当期物",
                         "点一下锁定期物禁止典当；清单来自当日期物与背包里见过的期物",
-                        CloudTaskLocalRunner.pawnPropChoices(pawnState).map {
-                            MultiSelectOption(it.propId, it.label, cloudTaskQualityColor(it.quality))
-                        },
+                        pawnOptions(pawnStore.runtimeState(accountId, "pawn")),
                         task.forbiddenPawnPropIds,
-                    )
+                    ) {
+                        // 点「刷新期物清单」时现拉一次：期物的名字与品质只在服务端，
+                        // 光靠执行时攒，用户第一次配置时看到的清单会是空的。
+                        val token = pawnStore.token(accountId)
+                        if (token.isBlank()) {
+                            throw IllegalStateException("阅微登录凭据无效，请重新登录后再刷新")
+                        } else {
+                            val fetched = CloudTaskLocalRunner.fetchPawnPropCatalog(token)
+                            fetched.error?.let { reason ->
+                                runOnUiThread { ui.toast("部分期物没读到：$reason") }
+                            }
+                            val state = JSONObject().put(CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG, fetched.catalog)
+                            pawnStore.recordState(accountId, "pawn", state)
+                            pawnOptions(state)
+                        }
+                    }
                 }
                 if (spec?.merchant == true) {
                     add("城池 cityCode", "留空沿用上次", task.merchantCityCode)

@@ -447,7 +447,8 @@ class LocalTaskWorkflowTest {
         reply("get-pawn-count", JSONObject().put("remaining", 1).put("specialPropId", 21)
             .put("specialPropName", "青玉").put("specialPropQuality", "BLUE"))
         reply("get-user-materials", JSONObject().put("materials", JSONArray()
-            .put(JSONObject().put("propId", 21).put("propName", "青玉").put("propQuality", "BLUE")
+            // 字段名照抄宿主 MaterialItem：name/quality，不是 propName/propQuality。
+            .put(JSONObject().put("propId", 21).put("name", "青玉").put("quality", "BLUE")
                 .put("userPropId", 42).put("quantity", 1))
             // 没名字的条目（别的材料）不该混进期物清单。
             .put(JSONObject().put("propId", 31).put("quantity", 3))))
@@ -458,6 +459,33 @@ class LocalTaskWorkflowTest {
         assertEquals("青玉", catalog.getJSONObject("21").getString("name"))
         assertEquals("BLUE", catalog.getJSONObject("21").getString("quality"))
         assertEquals(1, catalog.length())
+    }
+
+    @Test
+    fun `主动刷新期物图鉴能一次拿到当日期物与背包全部物品`() {
+        // 配置页点「刷新期物清单」走的就是这条路径：不必等任务跑过一遍。
+        reply("get-pawn-count", JSONObject().put("remaining", 1).put("specialPropId", 12)
+            .put("specialPropName", "剡藤").put("specialPropQuality", "GREEN"))
+        reply("get-user-materials", JSONObject().put("materials", JSONArray()
+            .put(JSONObject().put("propId", 21).put("name", "青玉").put("quality", "BLUE").put("quantity", 2))
+            .put(JSONObject().put("propId", 22).put("name", "残卷").put("quality", "RED").put("quantity", 1))))
+        val fetched = CloudTaskLocalRunner.fetchPawnPropCatalog("test-token", credential.getString("baseUrl"))
+        assertEquals(null, fetched.error)
+        assertEquals("剡藤", fetched.catalog.getJSONObject("12").getString("name"))
+        assertEquals("青玉", fetched.catalog.getJSONObject("21").getString("name"))
+        assertEquals("BLUE", fetched.catalog.getJSONObject("21").getString("quality"))
+        assertEquals("RED", fetched.catalog.getJSONObject("22").getString("quality"))
+        assertEquals(3, fetched.catalog.length())
+    }
+
+    @Test
+    fun `主动刷新期物图鉴时单个接口失败仍返回另一半并说明原因`() {
+        // 只配背包不配当日期物接口：背包那半必须照常返回，失败原因走 error 交给界面提示。
+        reply("get-user-materials", JSONObject().put("materials", JSONArray()
+            .put(JSONObject().put("propId", 21).put("name", "青玉").put("quality", "BLUE").put("quantity", 2))))
+        val fetched = CloudTaskLocalRunner.fetchPawnPropCatalog("test-token", credential.getString("baseUrl"))
+        assertEquals("青玉", fetched.catalog.getJSONObject("21").getString("name"))
+        assertTrue(fetched.error.orEmpty().contains("当日期物"))
     }
 
     @Test
