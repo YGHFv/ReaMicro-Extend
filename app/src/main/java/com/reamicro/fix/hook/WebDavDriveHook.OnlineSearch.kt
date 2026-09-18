@@ -3,6 +3,7 @@ package com.reamicro.fix.hook
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Handler
 import android.os.Looper
 import android.text.TextUtils
@@ -167,6 +168,7 @@ internal fun WebDavDriveHook.createOnlineCompletionSearchRowView(
     }
     texts.addView(metaView)
     row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    applyOnlineCompletionSearchTypeface(texts)
     val path = cloudPathOf(book)
     onlineCompletionSearchRowViews[path] = WeakReference(row)
     // 详情请求可能在 AndroidView 真正创建前已经完成。登记 View 后再读取一次最新结果，
@@ -192,6 +194,21 @@ internal fun WebDavDriveHook.applyOnlineCompletionSearchRow(row: View, target: O
     (textContainer.getChildAt(2) as? TextView)?.apply {
         text = onlineCompletionSearchMetaLine(target.result)
         colors?.getOrNull(2)?.let { setTextColor(it) }
+    }
+    applyOnlineCompletionSearchTypeface(textContainer)
+}
+
+/**
+ * 在线源搜索结果行是原生 View 拼出来的，不在全局字体 hook 的 Compose / Dialog 覆盖范围内，
+ * 这里显式套用同一个全局字体；保持原有字重，等宽字体（代码/标记）不动。
+ */
+internal fun WebDavDriveHook.applyOnlineCompletionSearchTypeface(textContainer: ViewGroup) {
+    val base = globalTypefaceProvider() ?: return
+    for (index in 0 until textContainer.childCount) {
+        val textView = textContainer.getChildAt(index) as? TextView ?: continue
+        val current = textView.typeface
+        if (current === Typeface.MONOSPACE || current == Typeface.MONOSPACE) continue
+        textView.typeface = Typeface.create(base, current?.style ?: Typeface.NORMAL)
     }
 }
 

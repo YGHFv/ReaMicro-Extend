@@ -9,12 +9,18 @@ import com.reamicro.fix.logging.ModuleAndroidLog
 import com.reamicro.fix.notification.CloudTaskNotifications
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal object KsuTaskBridge {
     private const val PREFS = "reamicro_ksu_tasks"
     private const val RUNNER = "${KsuTaskRepository.MODULE_DIRECTORY}/runner.sh"
+    /** 内置模块包在 APK assets 里的目录；打包任务会放一个 `ReaMicro-Automation-KSU-*.zip`。 */
+    private const val BUNDLED_MODULE_DIRECTORY = "ksu"
+    private const val KSUD = "/data/adb/ksu/bin/ksud"
+    private const val MODULE_UPDATE_DIRECTORY = "/data/adb/modules_update/reamicro_automation"
+    private const val NO_KSUD_MARKER = "REAMICRO_NO_KSUD"
     private const val LOG_TAG = "ReaMicroKsu"
     private val queued = AtomicBoolean(false)
     private val dirty = AtomicBoolean(false)
@@ -25,15 +31,16 @@ internal object KsuTaskBridge {
     fun statusText(context: Context): String {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val mode = if (isEnabled(context)) "KSU 独立执行（实验性）" else "Android 模块执行"
-        val status = prefs.getString("status", "刷入配套 KSU 模块并授权 root 后可切换；普通 Root 看门狗只负责唤醒，不是独立执行。")
+        val status = prefs.getString("status", "点「使用 KSU」会用 APK 内置的模块包自动安装（需 root）；普通 Root 看门狗只负责唤醒，不是独立执行。")
         return "$mode\n$status"
     }
 
     @Synchronized
     fun enable(context: Context): String = LocalTaskRunner.switchExecutionMode {
         require(android.os.Process.myUid() / 100000 == 0) { "KSU 模式目前只支持主用户" }
-        val probe = RootCommandRunner.run("test -x $RUNNER && test ! -e ${KsuTaskRepository.MODULE_DIRECTORY}/disable && test ! -e ${KsuTaskRepository.MODULE_DIRECTORY}/remove")
-        check(probe.exitCode == 0) { "请先刷入并启用 ReaMicro KSU 模块，再给本应用 root 权限" }
+        // 没刷过就装 APK 里内置的那一份，用户不需要再去 GitHub 下载。
+        ensureModuleInstalled(context)?.let { hint -> error(hint) }
+        check(moduleReady()) { "配套 KSU 模块未启用，请在 KernelSU 管理器里启用模块并重启" }
         try {
             handoff(context).enable(LocalTaskStore { context }.executionPayload())
             startDaemon()
@@ -43,6 +50,54 @@ internal object KsuTaskBridge {
         }
         CloudTaskWakeScheduler.schedule(context)
         "已切换到 KSU 独立执行；不再由 Android 模块重复运行本地任务"
+    }
+
+    /** 模块脚本存在且没被停用/标记卸载（KernelSU 用 disable/remove 标记停用与待卸载）。 */
+    private fun moduleReady(): Boolean = RootCommandRunner.run(
+        "test -x $RUNNER && test ! -e ${KsuTaskRepository.MODULE_DIRECTORY}/disable && test ! -e ${KsuTaskRepository.MODULE_DIRECTORY}/remove",
+    ).exitCode == 0
+
+    /**
+     * 确保配套 KSU 模块可用：没刷过就从 APK 内置的 ZIP 装一遍。
+     *
+     * 返回 null 表示可以继续（原本就刷过，或这次装好且已生效）；返回非空字符串表示装完了但
+     * 还需要用户做点什么（KernelSU 对某些安装方式会先落到 modules_update，重启后才生效），
+     * 调用方据此提示并且**不要**切换执行模式。
+     */
+    private fun ensureModuleInstalled(context: Context): String? {
+        if (moduleReady()) return null
+        val payload = extractBundledModule(context)
+        val quoted = "'" + payload.absolutePath.replace("'", "'\\''") + "'"
+        val command = "if [ -x $KSUD ]; then $KSUD module install $quoted; " +
+            "elif command -v ksud >/dev/null 2>&1; then ksud module install $quoted; " +
+            "else echo $NO_KSUD_MARKER; exit 3; fi"
+        val result = runCatching { RootCommandRunner.run(command, timeoutSeconds = 120) }
+            .onFailure { payload.delete() }
+            .getOrThrow()
+        payload.delete()
+        if (result.output.contains(NO_KSUD_MARKER)) {
+            error("当前 Root 环境不是 KernelSU（找不到 ksud），无法自动安装配套模块；请手动刷入模块 ZIP 后重试")
+        }
+        val tail = result.output.lineSequence().lastOrNull { it.isNotBlank() }.orEmpty()
+        check(result.exitCode == 0) { "内置 KSU 模块安装失败：$tail" }
+        if (moduleReady()) return null
+        if (File(MODULE_UPDATE_DIRECTORY, "runner.sh").isFile) {
+            return "内置 KSU 模块已安装，需要重启设备后才生效；重启后请再次选择「使用 KSU」"
+        }
+        error("内置 KSU 模块安装后仍未找到 runner.sh：$tail")
+    }
+
+    /** 把内置模块包释放到应用私有缓存，交给 ksud 安装。 */
+    private fun extractBundledModule(context: Context): File {
+        val name = context.assets.list(BUNDLED_MODULE_DIRECTORY)
+            ?.firstOrNull { it.endsWith(".zip", ignoreCase = true) }
+            ?: error("APK 里没有内置 KSU 模块包，请更新模块应用")
+        val directory = File(context.cacheDir, "ksu-module").apply { mkdirs() }
+        val payload = File(directory, name)
+        context.assets.open("$BUNDLED_MODULE_DIRECTORY/$name").use { input ->
+            payload.outputStream().use { output -> input.copyTo(output) }
+        }
+        return payload
     }
 
     @Synchronized
@@ -139,7 +194,7 @@ internal object KsuTaskBridge {
             val id = item.optString("id")
             val type = item.optString("taskType")
             val intent = CloudTaskNotifications.intent("ksu_$id", LocalTaskRunner.localTaskTitle(type),
-                item.optString("message"), item.optString("result"), "")
+                item.optString("message"), item.optString("result"), item.optString("items"))
             if (CloudTaskNotifications.post(context, intent, source = "ksu-task-runner")) delivered.put(id)
         }
         if (delivered.length() > 0) runCatching { command(context, "ack", JSONObject().put("ids", delivered)) }

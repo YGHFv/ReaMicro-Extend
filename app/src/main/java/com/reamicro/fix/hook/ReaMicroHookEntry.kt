@@ -169,6 +169,7 @@ class ReaMicroHookEntry {
             classLoader = classLoader,
             activityProvider = activityProvider,
             settingsProvider = settingsProvider,
+            globalTypefaceProvider = globalFontHook::globalAndroidTypeface,
         )
         installFeature("WebDavDriveHook", webDavDriveHook::install)
         installFeature("MainActivity") {

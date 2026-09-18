@@ -24,6 +24,7 @@ internal data class ImportLocalLibraryRowContext(
 internal data class HomeSearchRenderContext(
     val sections: List<HomeSearchSection>,
     val intentReceiver: Any,
+    val generation: Long,
     var rendered: Boolean = false,
 )
 

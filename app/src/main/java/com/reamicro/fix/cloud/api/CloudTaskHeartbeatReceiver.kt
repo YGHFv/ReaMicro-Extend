@@ -4,7 +4,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import com.reamicro.fix.cloud.local.LocalTaskJobService
+import com.reamicro.fix.cloud.ksu.KsuTaskBridge
 import com.reamicro.fix.cloud.ksu.KsuTaskRepository
+import com.reamicro.fix.logging.ModuleAndroidLog
 import com.reamicro.fix.logging.ModuleLogBuffer
 
 /** 系统闹钟唤醒入口；只重排并提交后台作业，网络执行不占用广播生命周期。 */
@@ -22,6 +24,13 @@ class CloudTaskHeartbeatReceiver : BroadcastReceiver() {
         val appContext = context.applicationContext
         // 闹钟唤醒是后台路径上最早拿到 Context 的地方之一，日志落盘位置在这里绑定。
         ModuleLogBuffer.attach(appContext)
+        if (action == KsuTaskRepository.SYNC_ACTION) {
+            // KSU 守护跑完任务后主动广播过来：立刻同步一次状态并就地补发通知，
+            // 不等 JobScheduler（deadline 最长 60 秒，熄屏时更久）。这里只走后台线程，
+            // 不启动任何界面，满足"静默拉起模块发通知"。
+            runCatching { KsuTaskBridge.requestSync(appContext) }
+                .onFailure { ModuleAndroidLog.error("ReaMicroKsu", "KSU 通知同步失败：${it.message}") }
+        }
         // 开机、改时间和换时区都先重排，避免旧的 RTC 闹钟落在过去；随后立即拉取一次。
         CloudTaskWakeScheduler.schedule(appContext)
         LocalTaskJobService.enqueue(appContext, action)

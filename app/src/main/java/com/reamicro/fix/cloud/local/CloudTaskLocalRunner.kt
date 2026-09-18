@@ -1,6 +1,7 @@
 package com.reamicro.fix.cloud.local
 
 import com.reamicro.fix.association.network.HttpClient
+import com.reamicro.fix.notification.cloudTaskItemsSummary
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.LocalDate
@@ -138,7 +139,18 @@ object CloudTaskLocalRunner {
             checkpoint(state)
             message += "，已开启新行商${blessingNote(blessing, blessingType)}"
             detail.put("新行商", "预计 ${formatMerchantEpoch(nextTrip.endTimeMs)} 完成")
-            if (blessing.detail.length() > 0) detail.put("新行商运签", blessing.detail.optString("运签"))
+            val blessEffect = blessing.detail.optString("效果").trim()
+            // 新行商的结束时间和新运签的效果都写进正文：通知与任务记录不点开就能看到。
+            if (nextTrip.endTimeMs > 0L) {
+                val endText = formatMerchantEpoch(nextTrip.endTimeMs)
+                message += "，结束时间 $endText"
+                detail.put("新行商结束时间", endText)
+            }
+            if (blessEffect.isNotBlank()) message += "，运签效果：$blessEffect"
+            if (blessing.detail.length() > 0) {
+                detail.put("新行商运签", blessing.detail.optString("运签"))
+                if (blessEffect.isNotBlank()) detail.put("新行商运签效果", blessEffect)
+            }
             return Outcome("success", message, state, detail = detail)
         }
         state.put("nextRunAtOverride", now + TRAVELING_MERCHANT_POLL_MS)
@@ -248,12 +260,18 @@ object CloudTaskLocalRunner {
         checkpoint(state)
         fun checkinOutcome(result: String, message: String): Outcome {
             val nextCheck = state.optLong("nextRunAtOverride")
+            val rewards = dailyLoreRewardItems(data)
             val detail = JSONObject()
                 .put("轶闻", data.optString("title"))
                 .put("奖励", if (claimed) "已领取" else "待领取（${formatMerchantEpoch(nextCheck)} 再次检查）")
+                .put(KEY_REWARD_ITEMS, rewards)
                 .put(DAILY_LORE_DETAIL_KEY, dailyLoreSnapshot(data, claimed))
+            val summary = cloudTaskItemsSummary(rewards.toString())
+            if (summary.isNotBlank()) detail.put("获得", summary)
             addActiveBlessing(detail, blessing.detail)
-            return Outcome(result, message, state, detail = detail)
+            // 奖励明细直接写进正文：通知和任务记录都不点开就能看到领到什么。
+            val rewardNote = if (summary.isBlank()) "" else "（$summary）"
+            return Outcome(result, message + rewardNote, state, detail = detail)
         }
         val ready = if (data.has("isFinish")) data.optBoolean("isFinish") else claimDueAt in 1..now
         if (!claimed && ready) {
@@ -293,6 +311,7 @@ object CloudTaskLocalRunner {
             claimDueAt > now -> "签到完成，奖励 ${formatMerchantEpoch(claimDueAt)} 解锁"
             else -> "签到完成，奖励待领取，将于 ${formatMerchantEpoch(nextRunAt)} 再次检查"
         }
+        // blessingNote 已经在 checkinOutcome 里按需追加，这里只传基础文案。
         return checkinOutcome("success", message + blessingNote(blessing, blessingType))
     }
 
@@ -342,6 +361,7 @@ object CloudTaskLocalRunner {
         val detail = JSONObject()
             .put("本次祈愿", "$consumed 次")
             .put("获得", if (summary.isBlank()) "无" else summary)
+            .put(KEY_REWARD_ITEMS, JSONArray(items))
         return Outcome(
             "success",
             if (consumed == 0) "彩筹已用完" else if (summary.isBlank()) "抽卡完成" else summary,
@@ -564,9 +584,11 @@ object CloudTaskLocalRunner {
         if (remaining <= 0) {
             return Outcome("success", "今日可典当次数已用完（$usedToday/$maxPerDay）", JSONObject(), notify = false)
         }
-        PROHIBITED_PAWN_PROP_HINTS[propId]?.let { hint ->
+        if (propId in forbiddenPawnPropIds(request)) {
             // 跳过不是故障：今天的期物恰好是要留着的消耗品，明天再看。
-            return Outcome("success", "今日期物「$propName」是$hint，跳过典当", JSONObject(), notify = false)
+            val hint = PROHIBITED_PAWN_PROP_HINTS[propId]
+            val why = if (hint.isNullOrBlank()) "在禁当清单里" else "是$hint"
+            return Outcome("success", "今日期物「$propName」$why，跳过典当", JSONObject(), notify = false)
         }
         val materials = postReaMicro(
             baseUrl,
@@ -852,6 +874,31 @@ object CloudTaskLocalRunner {
         "18" to "传承消耗物品（欹器）",
     )
 
+    /**
+     * 本次执行要跳过的期物 ID。
+     *
+     * 请求里带了清单就用用户的配置（显式清空表示不禁止任何期物）；旧配置、旧请求没有这个
+     * 字段时回落到 [PROHIBITED_PAWN_PROP_HINTS] 的默认清单，保证老用户行为不变。
+     */
+    private fun forbiddenPawnPropIds(request: JSONObject): Set<String> =
+        request.optJSONArray("forbiddenPawnPropIds")?.let { array ->
+            (0 until array.length()).mapNotNull { index ->
+                array.optString(index).trim().takeIf { it.isNotEmpty() }
+            }.toSet()
+        } ?: PROHIBITED_PAWN_PROP_HINTS.keys
+
+    /** 解析配置页的「禁当期物」多行文本：每行 `propId` 或 `propId|备注`，`#` 起为注释。 */
+    internal fun parseForbiddenPawnPropIds(text: String): Set<String> =
+        text.lineSequence()
+            .map { it.substringBefore('#').substringBefore('|').trim() }
+            .filter { it.isNotEmpty() }
+            .toSet()
+
+    /** 把禁当集合渲染回多行文本（已知 ID 带上用途备注），供配置页预填与回显。 */
+    internal fun formatForbiddenPawnPropIds(ids: Set<String>): String =
+        ids.sortedWith(compareBy({ it.toLongOrNull() ?: Long.MAX_VALUE }, { it }))
+            .joinToString("\n") { id -> PROHIBITED_PAWN_PROP_HINTS[id]?.let { "$id|$it" } ?: id }
+
     private const val TRAVELING_MERCHANT_POLL_MS = 4L * 3_600_000L
     private const val TRAVELING_MERCHANT_ARRIVE_GRACE_MS = 60_000L
     internal const val TASK_RETRY_INTERVAL_MS = 5 * 60_000L
@@ -861,5 +908,13 @@ object CloudTaskLocalRunner {
 
     /** 已播报过结果的趟次（只管通知去重，不代表已经自动完成）。 */
     internal const val KEY_MERCHANT_NOTIFIED_TRIP = "merchantLastNotifiedTripId"
+
+    /**
+     * 任务记录 detail 里结构化奖励物品（name/quality/count）的键名。
+     *
+     * 通知着色、通知摘要和记录详情共用这一份数据；详情页正文已经逐项列出，因此渲染时要跳过它。
+     */
+    internal const val KEY_REWARD_ITEMS = "奖励物品"
+
     private val MERCHANT_TIME_FORMAT = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
 }

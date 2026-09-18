@@ -63,7 +63,9 @@ object LocalTaskRunner {
     private fun postNotification(context: Context, accountId: String, taskType: String, outcome: CloudTaskLocalRunner.Outcome) {
         val id = "local_${taskType}_${accountId}_${outcome.message.hashCode()}"
         val title = localTaskTitle(taskType) + if (outcome.result == "success") "" else "异常"
-        val intent = CloudTaskNotifications.intent(id, title, outcome.message, outcome.result, "")
+        // 结构化奖励明细交给通知着色；正文里已经写了物品名，通知会就地着色而不是拼接列表。
+        val items = outcome.detail.optJSONArray(CloudTaskLocalRunner.KEY_REWARD_ITEMS)?.toString().orEmpty()
+        val intent = CloudTaskNotifications.intent(id, title, outcome.message, outcome.result, items)
         if (!CloudTaskNotifications.post(context, intent, source = "local-task-runner")) {
             XposedBridge.log("ReaMicro local task notification failed type=$taskType")
         }

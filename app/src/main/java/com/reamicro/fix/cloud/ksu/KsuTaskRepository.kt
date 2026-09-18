@@ -107,11 +107,11 @@ internal class KsuTaskRepository(
         request
     }
 
-    fun addNotification(accountId: String, taskType: String, result: String, message: String) {
+    fun addNotification(accountId: String, taskType: String, result: String, message: String, items: String = "") {
         access(write = true) { root ->
             val pending = root.optJSONArray("notifications") ?: JSONArray()
             pending.put(JSONObject().put("id", UUID.randomUUID().toString()).put("accountId", accountId)
-                .put("taskType", taskType).put("result", result).put("message", message))
+                .put("taskType", taskType).put("result", result).put("message", message).put("items", items))
             val trimmed = JSONArray()
             for (index in (pending.length() - 100).coerceAtLeast(0) until pending.length()) trimmed.put(pending.get(index))
             root.put("notifications", trimmed)

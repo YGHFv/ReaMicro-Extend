@@ -139,9 +139,11 @@ class ReaMicroGlobalFontHook(
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val args = param.args ?: return
                         if (fontFamilyIndex >= args.size) return
-                        if (args[fontFamilyIndex] != null) return
                         if (isReaderTextScope()) return
-                        if (isFontPreviewScope() && styleHasExplicitFontFamily(args, textStyleIndex)) return
+                        if (
+                            isFontPreviewScope() &&
+                            (args[fontFamilyIndex] != null || styleHasExplicitFontFamily(args, textStyleIndex))
+                        ) return
                         val resolved = resolveGlobalUiFontCached() ?: return
                         args[fontFamilyIndex] = resolved.family
                         clearDefaultMask(args, fontFamilyIndex)
@@ -189,21 +191,10 @@ class ReaMicroGlobalFontHook(
 
     private fun applyGlobalFontToTextView(textView: TextView, baseTypeface: Typeface) {
         val current = textView.typeface
-        if (current === Typeface.MONOSPACE) return
-        if (current != null && !isStandardAndroidTypeface(current)) return
+        if (current === Typeface.MONOSPACE || current == Typeface.MONOSPACE) return
         val style = current?.style ?: Typeface.NORMAL
         textView.typeface = Typeface.create(baseTypeface, style)
     }
-
-    private fun isStandardAndroidTypeface(typeface: Typeface): Boolean =
-        typeface === Typeface.DEFAULT ||
-            typeface === Typeface.DEFAULT_BOLD ||
-            typeface === Typeface.SANS_SERIF ||
-            typeface === Typeface.SERIF ||
-            typeface == Typeface.DEFAULT ||
-            typeface == Typeface.DEFAULT_BOLD ||
-            typeface == Typeface.SANS_SERIF ||
-            typeface == Typeface.SERIF
 
     private fun clearDefaultMask(args: Array<Any?>, parameterIndex: Int) {
         if (parameterIndex !in 0..30) return
@@ -258,6 +249,15 @@ class ReaMicroGlobalFontHook(
         val typeface = resolveAndroidTypeface(selection) ?: return null
         return ResolvedAndroidTypeface(selection, typeface)
     }
+
+    /**
+     * 供宿主里那些用原生 View 自绘的界面（在线源搜索结果行、内置页面弹窗等）取用同一个全局字体。
+     *
+     * Compose 的 Text 与 Android Dialog 由本 hook 自己覆盖；普通页面里的 TextView 既不走
+     * Compose 也不在 Dialog 树里，只能由创建方显式套用。未配置全局字体（或宿主不允许字体
+     * 设置）时返回 null，调用方保持原样。
+     */
+    internal fun globalAndroidTypeface(): Typeface? = resolveGlobalAndroidTypefaceCached()?.typeface
 
     private fun resolveAndroidTypeface(selection: String): Typeface? {
         synchronized(androidTypefaceCache) {

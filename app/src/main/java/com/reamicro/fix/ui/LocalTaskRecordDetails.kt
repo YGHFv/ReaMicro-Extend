@@ -3,6 +3,7 @@ package com.reamicro.fix.ui
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
+import com.reamicro.fix.cloud.local.CloudTaskLocalRunner
 import com.reamicro.fix.cloud.local.DAILY_LORE_DETAIL_KEY
 import com.reamicro.fix.notification.cloudTaskQualityColor
 import org.json.JSONObject
@@ -41,7 +42,10 @@ internal fun localTaskRecordDetailFields(taskType: String, detail: JSONObject): 
         }
     }
     detail.keys().forEach { key ->
-        if (key != DAILY_LORE_DETAIL_KEY && (lore == null || key !in setOf("轶闻", "奖励"))) {
+        // 奖励明细是给通知着色用的结构化数组，正文里已经逐项列出，别把 JSON 原文倒进详情。
+        if (key != DAILY_LORE_DETAIL_KEY && key != CloudTaskLocalRunner.KEY_REWARD_ITEMS &&
+            (lore == null || key !in setOf("轶闻", "奖励"))
+        ) {
             val value = detail.detailValue(key)
             if (value.isNotBlank()) add(LocalTaskDetailField(key, value))
         }

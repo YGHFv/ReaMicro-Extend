@@ -409,6 +409,18 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
             setSingleLine(false)
         }
         val merchantAutoComplete = settingsDialogSwitchRow(activity, "自动完成行商", task?.merchantAutoComplete == true, colors)
+        val forbiddenPawnProps = apiServerEdit(
+            activity,
+            colors,
+            "禁当期物：每行 propId 或 propId|备注；留空 = 不禁止任何期物",
+            com.reamicro.fix.cloud.local.CloudTaskLocalRunner.formatForbiddenPawnPropIds(
+                task?.forbiddenPawnPropIds
+                    ?: com.reamicro.fix.cloud.local.CloudTaskLocalRunner.PROHIBITED_PAWN_PROP_HINTS.keys,
+            ),
+        ).apply {
+            minLines = 3
+            setSingleLine(false)
+        }
         val merchantCity = apiServerEdit(activity, colors, "新行商城池 cityCode（留空沿用上次行商）", task?.merchantCityCode.orEmpty())
         val merchantPrincipal = apiServerEdit(activity, colors, "新行商本金（铜，留空沿用上次）", (task?.merchantPrincipal?.takeIf { it > 0L })?.toString().orEmpty()).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
@@ -444,6 +456,7 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
             card.addView(books, apiServerRowParams(activity))
         }
         blessingButton?.let { card.addView(it, apiServerRowParams(activity)) }
+        if (spec.taskType == "pawn") card.addView(forbiddenPawnProps, apiServerRowParams(activity))
         if (spec.merchant) {
             card.addView(merchantAutoComplete, apiServerRowParams(activity))
             card.addView(merchantCity, apiServerRowParams(activity))
@@ -454,6 +467,7 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
             setTextColor(colors.body)
             text = when {
                 spec.merchant -> "有行商时按它的结束时间检查；完成/结算后通知事件与收益。默认只通知不自动完成；开启自动完成后，城池/本金/车马留空会沿用上次行商的配置，没有在途行商时会自动开一趟"
+                spec.taskType == "pawn" -> "按当日期物典当换铜钱；「禁当期物」里的 propId 会跳过，清空则任何期物都典当"
                 spec.rewardTriggered -> "启用后按每日上限抽卡；填写 0 会抽到彩筹用完"
                 task == null -> "保存后即完成配置"
                 else -> "保存会更新当前任务配置"
@@ -500,6 +514,11 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
                 merchantCityCode = if (spec.merchant) merchantCity.text.toString().trim() else "",
                 merchantPrincipal = if (spec.merchant) merchantPrincipal.text.toString().trim().toLongOrNull()?.coerceAtLeast(0L) ?: 0L else 0L,
                 merchantTransportId = if (spec.merchant) merchantTransport.text.toString().trim().toLongOrNull()?.coerceAtLeast(0L) ?: 0L else 0L,
+                forbiddenPawnPropIds = if (spec.taskType == "pawn") {
+                    com.reamicro.fix.cloud.local.CloudTaskLocalRunner.parseForbiddenPawnPropIds(forbiddenPawnProps.text.toString())
+                } else {
+                    task?.forbiddenPawnPropIds ?: emptySet()
+                },
                 blessingType = blessingChoice,
             )
             val store = LocalTaskStore { activity.applicationContext }

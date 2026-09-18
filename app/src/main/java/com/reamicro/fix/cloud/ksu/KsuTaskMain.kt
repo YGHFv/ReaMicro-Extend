@@ -60,7 +60,10 @@ object KsuTaskMain {
                         val taskType = request?.optString("taskType").orEmpty()
                         val key = if (accountId.isNotBlank() && taskType.isNotBlank()) LocalTaskKey(accountId, taskType) else null
                         val engine = LocalTaskEngine(repository, onCompleted = { account, task, outcome ->
-                            if (outcome.notify) repository.addNotification(account, task.taskType, outcome.result, outcome.message)
+                            if (outcome.notify) {
+                                val items = outcome.detail.optJSONArray(CloudTaskLocalRunner.KEY_REWARD_ITEMS)?.toString().orEmpty()
+                                repository.addNotification(account, task.taskType, outcome.result, outcome.message, items)
+                            }
                         })
                         val completed = engine.runDue(force = request?.optBoolean("force") == true, requested = key)
                         if (completed.isNotEmpty()) notifyModule()

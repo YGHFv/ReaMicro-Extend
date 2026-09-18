@@ -26,6 +26,13 @@ data class LocalTask(
     val merchantCityCode: String = "",
     val merchantPrincipal: Long = 0L,
     val merchantTransportId: Long = 0L,
+    /**
+     * 期物典当要跳过的 propId。空集合表示不禁止任何期物。
+     *
+     * 没保存过这个字段的旧配置由 [localTaskFromJson] 回落到
+     * [CloudTaskLocalRunner.PROHIBITED_PAWN_PROP_HINTS] 的默认清单，保证老用户行为不变。
+     */
+    val forbiddenPawnPropIds: Set<String> = emptySet(),
     /** 执行前要祈禳的道观运签签种（空 = 不祈禳）。wire 值取自游戏：LUCK/SAFETY/WEALTH。 */
     val blessingType: String = "",
     // 运行时状态
@@ -369,6 +376,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         .put(KEY_MERCHANT_CITY_CODE, task.merchantCityCode)
         .put(KEY_MERCHANT_PRINCIPAL, task.merchantPrincipal)
         .put(KEY_MERCHANT_TRANSPORT_ID, task.merchantTransportId)
+        .put(KEY_FORBIDDEN_PAWN_PROP_IDS, JSONArray(task.forbiddenPawnPropIds.sorted()))
         .put(KEY_BLESSING_TYPE, task.blessingType.trim().uppercase())
 
     private fun readAccount(accountId: String): JSONObject? {
@@ -453,6 +461,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         private const val KEY_MERCHANT_CITY_CODE = "merchantCityCode"
         private const val KEY_MERCHANT_PRINCIPAL = "merchantPrincipal"
         private const val KEY_MERCHANT_TRANSPORT_ID = "merchantTransportId"
+        internal const val KEY_FORBIDDEN_PAWN_PROP_IDS = "forbiddenPawnPropIds"
         internal const val KEY_BLESSING_TYPE = "blessingType"
         internal const val KEY_CONFIG_UPDATED_AT = "configUpdatedAt"
         private val WRITE_LOCK = Any()
@@ -490,6 +499,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         private val CONFIG_KEYS = setOf(
             KEY_ENABLED, KEY_TIME_OF_DAY, KEY_DURATION_MINUTES, KEY_DAILY_DRAW_LIMIT, KEY_BOOKS,
             KEY_MERCHANT_AUTO_COMPLETE, KEY_MERCHANT_CITY_CODE, KEY_MERCHANT_PRINCIPAL, KEY_MERCHANT_TRANSPORT_ID,
+            KEY_FORBIDDEN_PAWN_PROP_IDS,
             KEY_BLESSING_TYPE,
         )
 

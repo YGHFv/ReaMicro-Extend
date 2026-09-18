@@ -14,10 +14,45 @@ private data class CloudTaskResultItem(
 /**
  * 云任务物品通知只给物品名称着色，数量和分隔符沿用系统通知文字颜色。
  * 服务端已经排序并聚合，这里再做一次防御性处理，兼容旧缓存或代理改写后的数据。
+ *
+ * 正文（fallback）里已经写了物品名时就地着色：签到这类消息会把奖励明细写进正文，
+ * 再另起一段列表会让人以为发了两条结果。正文没提到物品时，才退回“物品列表”。
  */
 fun cloudTaskNotificationText(fallback: String, itemsJson: String): CharSequence {
     val items = parseCloudTaskResultItems(itemsJson)
     if (items.isEmpty()) return fallback
+    colorCloudTaskItemsInText(fallback, items)?.let { return it }
+    return cloudTaskItemsList(items)
+}
+
+/** 与通知着色共用同一套聚合、排序和品质别名的纯文本摘要，例如“端砚 x1、花笺 x2”。 */
+fun cloudTaskItemsSummary(itemsJson: String): String =
+    parseCloudTaskResultItems(itemsJson).joinToString("、") { "${it.name} x${it.count}" }
+
+/**
+ * 在正文里就地给物品名着色。一个物品名都没匹配上时返回 null，交给调用方退回列表渲染。
+ * 只给能识别品质的物品上色，阅历/彩筹这类没有品质的保持系统默认色。
+ */
+private fun colorCloudTaskItemsInText(text: String, items: List<CloudTaskResultItem>): SpannableString? {
+    if (text.isBlank()) return null
+    val span = SpannableString(text)
+    var matched = false
+    items.forEach { item ->
+        var from = 0
+        while (true) {
+            val at = text.indexOf(item.name, from)
+            if (at < 0) break
+            matched = true
+            cloudTaskQualityColor(item.quality)?.let { color ->
+                span.setSpan(ForegroundColorSpan(color), at, at + item.name.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            from = at + item.name.length
+        }
+    }
+    return if (matched) span else null
+}
+
+private fun cloudTaskItemsList(items: List<CloudTaskResultItem>): CharSequence {
     val text = StringBuilder()
     val spans = mutableListOf<Triple<Int, Int, Int>>()
     items.forEachIndexed { index, item ->

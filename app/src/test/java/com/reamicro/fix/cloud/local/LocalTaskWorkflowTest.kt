@@ -389,4 +389,56 @@ class LocalTaskWorkflowTest {
         assertEquals("success", result.result)
         assertEquals(0L, calls.single { it.first == "start-traveling-merchant" }.second.getLong("transportId"))
     }
+
+    @Test
+    fun `轶闻把结构化奖励写进正文并落进详情`() {
+        reply("get-daily-lore", lore(finished = true, claimed = true)
+            .put("gem", 3).put("propName", "端砚").put("propQuality", "BLUE"))
+        val result = run("yeshe_checkin")
+        assertEquals("success", result.result)
+        // 通知与任务记录都不点开就能看到领到了什么，且顺序按品质优先。
+        assertTrue(result.message.contains("（端砚 x1、彩筹 x3、阅历 x5）"))
+        val items = result.detail.getJSONArray(CloudTaskLocalRunner.KEY_REWARD_ITEMS)
+        assertEquals(3, items.length())
+        // 详情里的数组保持游戏侧顺序（阅历/彩筹/期物），只有通知摘要按品质重排。
+        assertEquals("阅历", items.getJSONObject(0).getString("name"))
+        assertEquals("", items.getJSONObject(0).getString("quality"))
+        assertEquals("端砚", items.getJSONObject(2).getString("name"))
+        assertEquals("BLUE", items.getJSONObject(2).getString("quality"))
+    }
+
+    @Test
+    fun `新开行商的消息带结束时间和运签效果`() {
+        val end = now + 6 * 3_600_000L
+        reply("get-traveling-merchant", JSONObject().put("activeTrip", trip()))
+        configureMerchantStart(end)
+        reply("get-taoist-blessing", JSONObject().put("blessing", JSONObject()
+            .put("blessingType", "WEALTH").put("name", "小利签").put("description", "商事盈利收益率提升 10%")))
+        val result = run("traveling_merchant", request = autoMerchant("WEALTH"))
+        assertEquals("success", result.result)
+        assertTrue(result.message.contains("已开启新行商"))
+        assertTrue(result.message.contains("结束时间"))
+        assertTrue(result.message.contains("运签效果：商事盈利收益率提升 10%"))
+        assertEquals("商事盈利收益率提升 10%", result.detail.getString("新行商运签效果"))
+        assertTrue(result.detail.getString("新行商结束时间").isNotBlank())
+    }
+
+    @Test
+    fun `禁当清单可配置且清空后照常典当`() {
+        reply("get-pawn-count", JSONObject().put("remaining", 1).put("specialPropId", 12).put("specialPropName", "剡藤"))
+        reply("get-user-materials", JSONObject().put("materials", JSONArray().put(JSONObject()
+            .put("propId", 12).put("userPropId", 42).put("quantity", 1))))
+        reply("pawn", JSONObject().put("success", true).put("coin", 5))
+        // 没带清单 = 旧配置，沿用默认禁当清单：剡藤要留着祈禳，这次不发典当请求。
+        val skipped = run("pawn")
+        assertEquals("success", skipped.result)
+        assertTrue(skipped.message.contains("跳过典当"))
+        assertFalse(calls.any { it.first == "pawn" })
+        calls.clear()
+        // 显式清空 = 用户明确要求不禁止任何期物，照常典当。
+        val pawned = run("pawn", request = JSONObject().put("forbiddenPawnPropIds", JSONArray()))
+        assertEquals("success", pawned.result)
+        assertTrue(pawned.message.contains("获得铜钱 5 文"))
+        assertEquals(1, calls.count { it.first == "pawn" })
+    }
 }

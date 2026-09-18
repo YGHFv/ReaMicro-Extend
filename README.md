@@ -80,8 +80,10 @@
 
 - 本地自动任务支持每日轶闻、领奖后祈愿、自动阅读、自动行商和期物典当；配置与执行进度按账号保存。
 - 模块应用「配置 → 权限与后台」可开启返回桌面后隐藏后台卡片；隐藏不等于保活或强制停止。
-- 可选 KSU 独立执行模式（实验性），需配套 APK、刷入 ZIP 和显式 root 授权；与 Android 本地模式交接状态，不同时执行。
-- 配套 APK 和 KSU ZIP 随 CI 一起打包，见 [GitHub Releases](https://github.com/YGHFv/ReaMicro-Extend/releases) 中同一条预发布的附件；也可在模式说明中点击「下载 KSU」。
+- 可选 KSU 独立执行模式（实验性），需配套 APK 和显式 root 授权；与 Android 本地模式交接状态，不同时执行。
+- 配套 KSU 模块已打进 APK：点「使用 KSU」会先用内置 ZIP 自动安装模块（需要 root），装好后自动切换到 KSU 模式。CI 也会在 [GitHub Releases](https://github.com/YGHFv/ReaMicro-Extend/releases) 的预发布附件里单独提供同一份 ZIP，方便手动刷入。
+- 期物典当的「禁当期物」可按任务配置，默认跳过祈禳/传承/夺宝要用的消耗品，清空表示不禁止。
+- 任务通知直接显示奖励明细并给物品上品质色；自动行商通知带新行商结束时间与新运签效果。
 - KSU 仍受休眠、断网、登录失效和内核策略影响，不保证绝对准点；云端任务仍由 API 服务器执行。
 - 完整链路、修复和剩余边界见 [自动任务审查](docs/automation-audit.md)，安装/回退见 [KSU 使用说明](ksu/README.md)。
 

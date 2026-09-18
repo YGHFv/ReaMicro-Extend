@@ -729,7 +729,14 @@ internal fun WebDavDriveHook.updateHomeWebDavSearchResults(
     }
 }
 
-internal fun WebDavDriveHook.addHomeWebDavSearchSection(lazyListScope: Any, type: Int, title: String, results: List<*>, intentReceiver: Any) {
+internal fun WebDavDriveHook.addHomeWebDavSearchSection(
+    lazyListScope: Any,
+    type: Int,
+    title: String,
+    results: List<*>,
+    intentReceiver: Any,
+    generation: Long,
+) {
     runCatching {
         val itemMethod = lazyListScope.javaClass.methods.firstOrNull {
             it.name == "item" && it.parameterTypes.size == 3
@@ -739,7 +746,7 @@ internal fun WebDavDriveHook.addHomeWebDavSearchSection(lazyListScope: Any, type
         itemMethod.isAccessible = true
         itemMethod.invoke(
             lazyListScope,
-            "cloud-search-$type-${title.ifBlank { type.toString() }.hashCode()}",
+            "cloud-search-$generation-$type-${title.ifBlank { type.toString() }.hashCode()}",
             type,
             functionProxy("WebDavHomeSearchItem", FUNCTION3_CLASS) { args ->
                 val item = args?.getOrNull(0) ?: return@functionProxy targetUnit()

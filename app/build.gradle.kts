@@ -45,6 +45,32 @@ val syncBundledSources by tasks.registering(Sync::class) {
     into(generatedBundledSourcesDir.map { it.dir("reamicro_sources") })
 }
 
+// 配套的 KSU 模块 ZIP 打进 APK 的 assets：用户点「使用 KSU」时由应用自己释放并用 ksud 安装，
+// 不再需要去 GitHub Releases 手动下载（CI 仍会单独产出同一份 ZIP 供手动刷入）。
+val ksuModuleSourceDir = rootProject.layout.projectDirectory.dir("ksu/reamicro-automation")
+val ksuModuleVersion: String = Regex("^version=(.+)$", RegexOption.MULTILINE)
+    .find(ksuModuleSourceDir.file("module.prop").asFile.readText(Charsets.UTF_8))
+    ?.groupValues?.get(1)?.trim()
+    .orEmpty()
+    .ifBlank { error("ksu/reamicro-automation/module.prop 缺少 version，无法生成内置 KSU 模块包") }
+val generatedKsuModuleDir = layout.buildDirectory.dir("generated/reamicroKsuModule")
+val generatedKsuModuleRoot = generatedKsuModuleDir.get().asFile
+val bundleKsuModule by tasks.registering(Zip::class) {
+    archiveFileName.set("ReaMicro-Automation-KSU-$ksuModuleVersion.zip")
+    destinationDirectory.set(generatedKsuModuleDir.map { it.dir("ksu") })
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+    // 与 tools/build-ksu-module.py 同一份清单与权限：脚本 0755、module.prop 0644。
+    from(ksuModuleSourceDir) {
+        include("*.sh")
+        filePermissions { unix("755") }
+    }
+    from(ksuModuleSourceDir) {
+        include("module.prop")
+        filePermissions { unix("644") }
+    }
+}
+
 android {
     namespace = "com.reamicro.fix"
     compileSdk = 36
@@ -96,16 +122,19 @@ android {
     }
 
     sourceSets["main"].assets.srcDir(generatedBundledSourcesRoot)
+    sourceSets["main"].assets.srcDir(generatedKsuModuleRoot)
 }
 
 tasks.matching { task ->
     task.name.startsWith("merge", ignoreCase = false) && task.name.endsWith("Assets", ignoreCase = false)
 }.configureEach {
     dependsOn(syncBundledSources)
+    dependsOn(bundleKsuModule)
 }
 
 tasks.matching { task -> task.name.contains("lint", ignoreCase = true) }.configureEach {
     dependsOn(syncBundledSources)
+    dependsOn(bundleKsuModule)
 }
 
 // detekt 只做体积/复杂度基线度量，不参与构建成败判定。

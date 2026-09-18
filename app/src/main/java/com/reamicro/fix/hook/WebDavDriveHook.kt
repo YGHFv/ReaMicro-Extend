@@ -3,6 +3,7 @@ package com.reamicro.fix.hook
 import android.app.Activity
 import android.app.Dialog
 import android.content.Context
+import android.graphics.Typeface
 import android.view.View
 import com.reamicro.fix.core.ComposeInterop
 import com.reamicro.fix.online.OnlineConcurrentRateLimiter
@@ -47,6 +48,11 @@ class WebDavDriveHook(
     internal val classLoader: ClassLoader,
     internal val activityProvider: () -> Activity?,
     internal val settingsProvider: () -> ModuleSettingsSnapshot = { ModuleSettingsSnapshot() },
+    /**
+     * 全局字体（原生 Typeface 形态）。在线源搜索结果行一类的原生 TextView 不在 Compose 与
+     * Dialog 的覆盖范围内，需要由创建方把同一个字体套上去。未配置时返回 null。
+     */
+    internal val globalTypefaceProvider: () -> Typeface? = { null },
 ) {
     // Compose 反射互操作的共用实现，避免各 hook 各存一份逐渐漂移的副本。
     internal val composeInterop = ComposeInterop(

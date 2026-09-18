@@ -1328,6 +1328,7 @@ internal fun WebDavDriveHook.hookHomeWebDavSearch() {
                 val localSeq = localLibraryHomeSearchSeq.incrementAndGet()
                 val onlineSeq = onlineCompletionHomeSearchSeq.incrementAndGet()
                 rememberHomeSearchSnapshot(emptyList(), emptyList())
+                updateHomeWebDavSearchResults(param.thisObject, emptyList(), emptyList(), emptyList())
                 if (query.isBlank()) return
                 updateHomeOnlineCompletionSearchResults(
                     param.thisObject,
@@ -1468,7 +1469,13 @@ internal fun WebDavDriveHook.hookHomeSearchResultWebDavSection() {
                 sanitizeHostCloudSearchResults(param, map)
                 if (sections.isEmpty()) return
                 val intentReceiver = param.args?.getOrNull(3) ?: return
-                homeWebDavSearchRender.set(HomeSearchRenderContext(sections, intentReceiver))
+                homeWebDavSearchRender.set(
+                    HomeSearchRenderContext(
+                        sections = sections,
+                        intentReceiver = intentReceiver,
+                        generation = webDavHomeSearchSeq.get(),
+                    ),
+                )
             }
 
             override fun afterHookedMethod(param: MethodHookParam) {
@@ -1486,7 +1493,14 @@ internal fun WebDavDriveHook.hookHomeSearchResultWebDavSection() {
                 val lazyListScope = param.args?.getOrNull(0) ?: return
                 context.rendered = true
                 context.sections.forEach { section ->
-                    addHomeWebDavSearchSection(lazyListScope, section.type, section.title, section.results, context.intentReceiver)
+                    addHomeWebDavSearchSection(
+                        lazyListScope = lazyListScope,
+                        type = section.type,
+                        title = section.title,
+                        results = section.results,
+                        intentReceiver = context.intentReceiver,
+                        generation = context.generation,
+                    )
                 }
             }
         })

@@ -1,5 +1,7 @@
 package com.reamicro.fix.cloud.local
 
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -49,5 +51,45 @@ class CloudTaskBlessingAndPawnTest {
         assertTrue(prohibited.getValue("12").contains("祈禳"))
         assertTrue(prohibited.getValue("14").contains("祈禳"))
         assertTrue(prohibited.getValue("15").contains("祈禳"))
+    }
+
+    @Test
+    fun `禁当清单文本解析与回显`() {
+        assertEquals(setOf("11", "12"), CloudTaskLocalRunner.parseForbiddenPawnPropIds("11|清酒\n12|剡藤\n"))
+        assertEquals(setOf("99"), CloudTaskLocalRunner.parseForbiddenPawnPropIds("99"))
+        assertEquals(emptySet<String>(), CloudTaskLocalRunner.parseForbiddenPawnPropIds("  \n# 只是注释\n"))
+        val formatted = CloudTaskLocalRunner.formatForbiddenPawnPropIds(setOf("12", "99", "11"))
+        assertEquals("11|传承消耗物品（清酒）\n12|祈禳消耗物品（剡藤）\n99", formatted)
+        // 回显再解析必须回到同一个集合，否则用户只是打开保存一次就会改坏配置。
+        assertEquals(setOf("11", "12", "99"), CloudTaskLocalRunner.parseForbiddenPawnPropIds(formatted))
+    }
+
+    @Test
+    fun `旧配置缺省沿默认清单，显式清空则不禁止`() {
+        val default = CloudTaskLocalRunner.PROHIBITED_PAWN_PROP_HINTS.keys
+        assertEquals(default, localTaskFromJson("pawn", JSONObject().put("taskType", "pawn")).forbiddenPawnPropIds)
+        assertTrue(localTaskFromJson("pawn", JSONObject().put("forbiddenPawnPropIds", JSONArray()))
+            .forbiddenPawnPropIds.isEmpty())
+        assertEquals(
+            setOf("11"),
+            localTaskFromJson("pawn", JSONObject().put("forbiddenPawnPropIds", JSONArray().put("11"))).forbiddenPawnPropIds,
+        )
+        assertEquals(0, localTaskRequest(localTaskFromJson("pawn", JSONObject().put("forbiddenPawnPropIds", JSONArray())))
+            .getJSONArray("forbiddenPawnPropIds").length())
+    }
+
+    @Test
+    fun `每日轶闻奖励明细与服务端形状一致`() {
+        val items = dailyLoreRewardItems(
+            JSONObject().put("exp", "4").put("gem", 3).put("propName", "端砚").put("propQuality", "蓝"),
+        )
+        assertEquals(3, items.length())
+        assertEquals("阅历", items.getJSONObject(0).getString("name"))
+        assertEquals(4, items.getJSONObject(0).getInt("count"))
+        assertEquals("", items.getJSONObject(0).getString("quality"))
+        assertEquals("端砚", items.getJSONObject(2).getString("name"))
+        assertEquals("蓝", items.getJSONObject(2).getString("quality"))
+        assertEquals(1, items.getJSONObject(2).getInt("count"))
+        assertEquals(0, dailyLoreRewardItems(JSONObject()).length())
     }
 }

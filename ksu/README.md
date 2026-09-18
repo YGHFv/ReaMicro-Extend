@@ -4,21 +4,22 @@
 
 **能降低对 Android 应用进程存活的依赖，但不能保证永不被杀或绝对准时。** 深度休眠、断网、登录失效、风控、root/SELinux 限制仍然存在。
 
-## 下载
+## 获取模块
 
-- 推荐打开 [GitHub Releases](https://github.com/YGHFv/ReaMicro-Extend/releases)，在同一条 CI 预发布的 Assets 中下载配套 APK 和 `ReaMicro-Automation-KSU-<版本号>.zip`。不要使用只筛选正式版的 `releases/latest`，CI 产物标记为预发布。
-- 模块应用「配置 → 权限与后台 → 本地任务执行模式 → 说明与切换 → 下载 KSU」也会打开该页面。旧发布只有 APK，不会自动补上 ZIP。
+- **推荐：什么都不用下载。** 配套模块 ZIP 已经打进 APK 的 assets，模块应用「配置 → 权限与后台 → 本地任务执行模式 → 说明与切换 → 使用 KSU」会自动把内置 ZIP 释放出来并用 `ksud module install` 安装，装好后自动切换到 KSU 模式。若安装后提示需要重启，重启设备后再点一次「使用 KSU」。
+- 想手动刷入时，打开 [GitHub Releases](https://github.com/YGHFv/ReaMicro-Extend/releases)，在同一条 CI 预发布的 Assets 中下载配套 APK 和 `ReaMicro-Automation-KSU-<版本号>.zip`。不要使用只筛选正式版的 `releases/latest`，CI 产物标记为预发布。
 - 也可在 [Actions → CI](https://github.com/YGHFv/ReaMicro-Extend/actions/workflows/ci.yml) 的成功构建中下载 `ReaMicro-Automation-ci-ksu` artifact（保留 14 天，需要登录 GitHub）；先解压 artifact 外层压缩包，再刷里面的模块 ZIP，不要把外层包交给 KernelSU。
 - `main` 上 APK、`ksu/` 或打包脚本变更，以及手动运行 CI，都会在校验通过后构建 APK 和模块 ZIP；ZIP 同时上传到 Actions artifact 和该次 GitHub Release。ZIP 版本号来自 `module.prop`，不跟 APK 版本号强行绑定。
 
 ## 安装和启用
 
 1. 安装包含本次 KSU 执行入口的配套 ReaMicro Extend APK；旧 APK 没有此功能。
-2. 在 KernelSU 管理器中刷入 `ReaMicro-Automation-KSU-0.1.0.zip`，保持模块启用并重启设备。
-3. 为**阅微补全计划/模块应用**（`com.reamicro.fix`）授权 root，不是只给阅微宿主授权。
-4. 打开模块应用，进入「配置 → 权限与后台 → 本地任务执行模式 → 说明与切换」，选择「使用 KSU」。
-5. 稍等片刻点击「同步状态」，确认心跳和任务状态。只刷 ZIP 不会默认接管，也不会创建或启用任何本地任务。
-6. 继续在原来的本地任务页面设置账号、任务和参数。模式对主 Android 用户的本地任务整体生效；不改变云端服务器任务。
+2. 为**阅微补全计划/模块应用**（`com.reamicro.fix`）授权 root，不是只给阅微宿主授权。
+3. 打开模块应用，进入「配置 → 权限与后台 → 本地任务执行模式 → 说明与切换」，选择「使用 KSU」。
+   应用会检查模块是否已刷入，没有就用内置 ZIP 自动安装再自动切换；提示需要重启时先重启，重启后重新点一次。
+   也可以跳过自动安装，在 KernelSU 管理器中手动刷入 `ReaMicro-Automation-KSU-0.1.0.zip` 并保持模块启用（此时通常要重启让 `service.sh` 生效）。
+4. 稍等片刻点击「同步状态」，确认心跳和任务状态。只刷 ZIP 不会默认接管，也不会创建或启用任何本地任务。
+5. 继续在原来的本地任务页面设置账号、任务和参数。模式对主 Android 用户的本地任务整体生效；不改变云端服务器任务。
 
 目前不支持 Android 次用户/工作资料。不同阅微账号仍分开保存任务与进度。
 
@@ -78,6 +79,9 @@ python tools/build-ksu-module.py
 
 - `app/build/outputs/apk/release/app-release.apk`
 - `outputs/ReaMicro-Automation-KSU-0.1.0.zip`
+
+APK 构建时还会另打一份同内容的 ZIP 塞进 `assets/ksu/`（Gradle 任务 `bundleKsuModule`），
+供应用自动安装；两份 ZIP 的文件清单与权限一致，都来自 `ksu/reamicro-automation/`。
 
 ZIP 文件名按 `ksu/reamicro-automation/module.prop` 的 `version` 生成，当前是 `0.1.0`。打包白名单只包括五个模块脚本和 `module.prop`，缺少文件或版本号不合法会中止打包，不包含账号配置、token 或测试数据。脚本统一为 UTF-8 无 BOM、LF，并带 Unix 执行权限。模块运行时加载已安装 APK，因此需要配套更新，不能删掉 APK 后单独运行 ZIP。
 

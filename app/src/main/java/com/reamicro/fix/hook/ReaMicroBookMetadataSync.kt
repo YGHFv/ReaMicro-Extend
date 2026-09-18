@@ -94,62 +94,18 @@ internal object ReaMicroBookMetadataSync {
 
     private fun copyBookWithMetadata(book: Any, patch: BookMetadataPatch): Any? =
         runCatching {
-            // 2.2.0 的 Book.copy 是 25 参，字段顺序（与 toString 一致）：
-            // id, uuid, uid, title, subtitle, author, cover, size, uri, group, created, cfiVersion,
-            // embeddedFonts, epubcfi, chapter, progress, total, finished, updated, pinnedAt, cloudId,
-            // backupType, backupId, backupCode, publisher
-            // 相较旧版（24 参）多出 pinnedAt（第 20 位，updated 与 cloudId 之间），
-            // 旧的“24 参加 embeddedFonts”写法无法适配，会 NoSuchElementException 静默失败，
-            // 覆盖导入后元数据（进度/封面/出版方）同步不过去。这里优先匹配 25 参并按正确顺序填充。
-            val copy = listOf(25, 24, 23)
-                .firstNotNullOfOrNull { size ->
-                    book.javaClass.methods.firstOrNull { it.name == "copy" && it.parameterTypes.size == size }
-                }
-                ?: error("Book.copy not found (25/24/23)")
-            copy.isAccessible = true
-            val size = copy.parameterTypes.size
-            val args = mutableListOf<Any?>(
-                longValue(book, "getId"),
-                stringValue(book, "getUuid"),
-                longValue(book, "getUid"),
-                patch.title?.takeIf { it.isNotBlank() } ?: stringValue(book, "getTitle"),
-                patch.subtitle ?: stringValue(book, "getSubtitle"),
-                patch.author ?: stringValue(book, "getAuthor"),
-                patch.cover?.takeIf { it.isNotBlank() } ?: stringValue(book, "getCover"),
-                patch.size?.takeIf { it > 0L } ?: longValue(book, "getSize"),
-                stringValue(book, "getUri"),
-                stringValue(book, "getGroup"),
-                longValue(book, "getCreated"),
-                intValue(book, "getCfiVersion"),
-            )
-            // embeddedFonts 存在于 24/25 参形态（23 参旧版无此字段）。
-            if (size >= 24) {
-                args.add(intValue(book, "getEmbeddedFonts"))
-            }
-            args.addAll(
-                listOf(
-                    stringValue(book, "getEpubcfi"),
-                    stringValue(book, "getChapter"),
-                    floatValue(book, "getProgress"),
-                    longValue(book, "getTotal"),
-                    longValue(book, "getFinished"),
-                    System.currentTimeMillis(),
+            BookCopyCompat.copy(
+                book,
+                BookCopyPatch(
+                    title = patch.title?.takeIf { it.isNotBlank() },
+                    subtitle = patch.subtitle,
+                    author = patch.author,
+                    cover = patch.cover,
+                    size = patch.size,
+                    updated = System.currentTimeMillis(),
+                    publisher = patch.publisher,
                 ),
             )
-            // pinnedAt 仅 25 参形态（2.2.0）存在，位于 updated 之后、cloudId 之前。
-            if (size >= 25) {
-                args.add(longValue(book, "getPinnedAt"))
-            }
-            args.addAll(
-                listOf(
-                    longValue(book, "getCloudId"),
-                    intValue(book, "getBackupType"),
-                    stringValue(book, "getBackupId"),
-                    stringValue(book, "getBackupCode"),
-                    patch.publisher ?: stringValue(book, "getPublisher"),
-                ),
-            )
-            copy.invoke(book, *args.toTypedArray())
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to copy book metadata: ${it.stackTraceToString()}")
         }.getOrNull()

@@ -91,6 +91,7 @@ internal fun localTaskRequest(task: LocalTask): JSONObject = JSONObject().apply 
             }
         }
         "yeshe_draw_card" -> put("dailyLimit", task.dailyDrawLimit)
+        "pawn" -> put("forbiddenPawnPropIds", JSONArray(task.forbiddenPawnPropIds.sorted()))
         "traveling_merchant" -> {
             put("merchantAutoComplete", task.merchantAutoComplete)
             if (task.merchantCityCode.isNotBlank()) put("merchantCityCode", task.merchantCityCode)

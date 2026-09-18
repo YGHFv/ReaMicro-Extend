@@ -7,7 +7,6 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.drawable.ColorDrawable
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.View
@@ -240,7 +239,7 @@ class ModuleMainActivity : Activity() {
             ),
         )
         if (tasks.isEmpty()) {
-            children += ui.card(listOf(ui.row("还没有本地任务", "在阅微的设置页里启用任务后，这里就能改配置")))
+            children += ui.card(listOf(ui.row("还没有本地任务", "在阅微的设置页里启用任务后，这里就能配置")))
         } else {
             tasks.forEach { (accountId, task) -> children += taskCard(accountId, task) }
         }
@@ -275,7 +274,7 @@ class ModuleMainActivity : Activity() {
                     actions = listOf(
                         "立即执行" to { runSingleTask(accountId, task) },
                         (if (task.enabled) "停用" else "启用") to { setTaskEnabled(accountId, task, !task.enabled) },
-                        "改配置" to { openTaskEditor(accountId, task, spec) },
+                        "配置" to { openTaskEditor(accountId, task, spec) },
                     ),
                 ),
             ),
@@ -343,6 +342,13 @@ class ModuleMainActivity : Activity() {
                     add("图书", "每行 bookId|书名，留空=最近阅读", task.books.joinToString("\n") { "${it.bookId}|${it.name}" })
                 }
                 if (spec?.rewardTriggered == true) add("每日祈愿上限", "0 表示抽完彩筹", task.dailyDrawLimit.toString())
+                if (spec?.taskType == "pawn") {
+                    add(
+                        "禁当期物",
+                        "每行 propId 或 propId|备注，清空=不禁止",
+                        CloudTaskLocalRunner.formatForbiddenPawnPropIds(task.forbiddenPawnPropIds),
+                    )
+                }
                 if (spec?.merchant == true) {
                     add("城池 cityCode", "留空沿用上次", task.merchantCityCode)
                     add("本金", "留空沿用上次", task.merchantPrincipal.takeIf { it > 0L }?.toString().orEmpty())
@@ -409,11 +415,15 @@ class ModuleMainActivity : Activity() {
         val blessing = if (spec != null && spec.blessingOptions.isNotEmpty()) {
             spec.resolveBlessingChoice(text("运签"))
         } else task.blessingType
+        val forbiddenPawnPropIds = if (spec?.taskType == "pawn") {
+            CloudTaskLocalRunner.parseForbiddenPawnPropIds(text("禁当期物"))
+        } else task.forbiddenPawnPropIds
         return task.copy(
             timeOfDay = timeOfDay,
             durationMinutes = duration,
             dailyDrawLimit = drawLimit,
             books = books,
+            forbiddenPawnPropIds = forbiddenPawnPropIds,
             blessingType = blessing,
             merchantCityCode = if (spec?.merchant == true) text("城池 cityCode") else task.merchantCityCode,
             merchantPrincipal = if (spec?.merchant == true) text("本金").toLongOrNull()?.coerceAtLeast(0L) ?: 0L else task.merchantPrincipal,
@@ -492,13 +502,9 @@ class ModuleMainActivity : Activity() {
             "Android 模式由系统闹钟与后台任务执行。KSU 模式由刷入模块的独立进程运行同一套任务逻辑，APK 被关闭也能继续。\n\n" +
                 "两种模式共用原来的本地任务设置，不需要重新配置。切换只等待本机正在执行的这一轮完成并保存进度，不会等待行商旅程结束或轶闻解锁；共用配置也不能跳过这个防重复执行的交接。\n\n" +
                 "KSU 模式为实验功能：需刷入配套 ZIP、授权本应用 root，只支持主用户。登录凭据会复制到 /data/adb/reamicro-automation 的 root 私有文件（目录 700、文件 600），普通应用不可读。切回 Android 会同步最终记录并清除该凭据副本。\n\n" +
-                "点击「下载 KSU」打开 GitHub Releases，从同一条 CI 发布下载配套 APK 和 ReaMicro-Automation-KSU-版本号.zip；旧发布可能只有 APK。\n\n" +
+                "配套 KSU 模块已内置在 APK 里：点「使用 KSU」会先检查模块是否已刷入，没有就用 ksud 自动安装，装好后自动切换到 KSU 模式。如果安装后提示需要重启，重启设备再点一次即可。\n\n" +
                 "KSU 仍可能受设备休眠、断网、模块停用、token 失效或接口风控影响，并非绝对准时。检测失败时不自动切回，避免重复消费。卸载 KSU 模块前必须先切回 Android。",
             actions = listOf(
-                "下载 KSU" to {
-                    runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/YGHFv/ReaMicro-Extend/releases"))) }
-                        .onFailure { ui.toast("无法打开浏览器，请手动访问 GitHub Releases 下载") }
-                },
                 "使用 KSU" to { rootAction { KsuTaskBridge.enable(applicationContext) } },
                 "使用 Android" to { rootAction { KsuTaskBridge.disable(applicationContext) } },
             ),

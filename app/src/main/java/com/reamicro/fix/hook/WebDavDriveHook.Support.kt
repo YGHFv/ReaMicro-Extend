@@ -360,47 +360,20 @@ internal fun copyBookWithBackupAndPublisher(
     pinnedAt: Long? = null,
     cloudId: Long? = null,
 ): Any {
-    val copyMethod = book.javaClass.methods
-        .filter { it.name == "copy" && it.parameterTypes.size in 23..25 }
-        .maxByOrNull { it.parameterTypes.size }
-        ?: error("Unsupported Book.copy signature: ${book.javaClass.name}")
-    copyMethod.isAccessible = true
-    val args = mutableListOf<Any?>(
-        book.callLong("getId"),
-        book.callString("getUuid"),
-        book.callLong("getUid"),
-        book.callString("getTitle"),
-        book.callString("getSubtitle"),
-        book.callString("getAuthor"),
-        cover?.takeIf { it.isNotBlank() } ?: book.callString("getCover"),
-        size?.takeIf { it > 0L } ?: book.callLong("getSize"),
-        book.callString("getUri"),
-        book.callString("getGroup"),
-        book.callLong("getCreated"),
-        book.callInt("getCfiVersion"),
-    )
-    if (copyMethod.parameterTypes.getOrNull(args.size) == Integer.TYPE) {
-        args.add(book.callInt("getEmbeddedFonts"))
-    }
-    args.addAll(
-        listOf(
-            book.callString("getEpubcfi"),
-            book.callString("getChapter"),
-            book.callFloat("getProgress"),
-            book.callLong("getTotal"),
-            book.callLong("getFinished"),
-            updated?.takeIf { it > 0L } ?: book.callLong("getUpdated"),
+    return BookCopyCompat.copy(
+        book,
+        BookCopyPatch(
+            cover = cover,
+            size = size,
+            updated = updated,
+            pinnedAt = pinnedAt,
+            cloudId = cloudId,
+            backupType = backupType,
+            backupId = backupId,
+            backupCode = backupCode,
+            publisher = publisher,
         ),
     )
-    if (copyMethod.parameterTypes.size - args.size == 6) {
-        args.add(pinnedAt ?: book.callLong("getPinnedAt"))
-    }
-    args.add(cloudId ?: book.callLong("getCloudId"))
-    args.addAll(listOf(backupType, backupId, backupCode, publisher))
-    check(args.size == copyMethod.parameterTypes.size) {
-        "Book.copy argument mismatch: expected=${copyMethod.parameterTypes.size} actual=${args.size}"
-    }
-    return copyMethod.invoke(book, *args.toTypedArray())
 }
 
 internal fun WebDavDriveHook.copyCloudBookWithType(book: Any, type: Int): Any {

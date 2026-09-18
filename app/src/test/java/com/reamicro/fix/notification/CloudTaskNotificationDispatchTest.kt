@@ -79,4 +79,15 @@ class CloudTaskNotificationDispatchTest {
         )
         assertEquals("com.reamicro.fix.CLOUD_TASK_HEARTBEAT", com.reamicro.fix.cloud.api.CloudTaskWakeScheduler.ACTION_WAKE)
     }
+
+    @Test
+    fun `物品摘要聚合同名物品并优先展示高价值物品`() {
+        val json = """
+            [{"name":"彩筹","quality":"","count":3},{"name":"端砚","quality":"蓝色","count":1},
+             {"name":"端砚","quality":"BLUE","count":1}]
+        """.trimIndent()
+        assertEquals("端砚 x2、彩筹 x3", cloudTaskItemsSummary(json))
+        assertEquals("", cloudTaskItemsSummary(""))
+        assertEquals("", cloudTaskItemsSummary("不是 JSON"))
+    }
 }
