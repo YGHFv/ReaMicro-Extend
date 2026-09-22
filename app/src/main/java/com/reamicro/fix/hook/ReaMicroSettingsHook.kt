@@ -107,6 +107,10 @@ class ReaMicroSettingsHook(
     // 点击"补全计划"时置 1，令 HighlightPageContent 改渲染我们的补全计划内容（同一整页跳转，不用弹窗）。
     @Volatile internal var readerHighlightScreenPlanUiState: Any? = null
     @Volatile internal var profileBackgroundVersionUiState: Any? = null
+    // 「发现」页的刷新信号。Compose 侧读取它的 value 建立依赖，后台加载完成后 bump 触发重组。
+    @Volatile internal var discoverVersionUiState: Any? = null
+    // 上一次观察到的 DiscoverState.version，用来避免每帧都写 state 造成无谓重组。
+    @Volatile internal var discoverObservedVersion: Int = -1
     @Volatile internal var pendingDeleteFontUiState: Any? = null
     @Volatile internal var lastFontImportToken: String = ""
     @Volatile internal var lastFontImportAtMs: Long = 0L
@@ -327,6 +331,45 @@ class ReaMicroSettingsHook(
 
     companion object {
         @Volatile private var activeInstance: ReaMicroSettingsHook? = null
+
+        /**
+         * 取最近一次 `install()` 的实例。
+         *
+         * 设置页那一整套反射与 Compose 互操作扩展函数都挂在 `ReaMicroSettingsHook` 这个
+         * 接收者上，而「我的」页社区卡片之类的注入点只持有 classLoader，拿不到实例。
+         * 这里放出实例供它们以 `with(hook) { ... }` 的形式复用同一套扩展，
+         * 而不是把 toolbelt 再抄一遍。未安装时为 null，调用方自行跳过。
+         */
+        internal fun activeInstanceOrNull(): ReaMicroSettingsHook? = activeInstance
+
+        /**
+         * 打开模块自绘的「发现」页。
+         *
+         * 「发现」入口挂在「我的」页社区卡片上，那里拿不到 hook 实例，只能走这个
+         * 静态入口。与设置页里的入口一致，优先用宿主导航（把 `Route.About` 推上宿主
+         * 返回栈）承载页面，返回栈由既有机制接管。
+         *
+         * 返回 false 表示宿主导航不可用（尚未捕获 NavGraphScope）——未安装时同样返回
+         * false，调用方据此只记日志，不弹错。
+         */
+        fun openDiscoverPage(): Boolean =
+            activeInstance?.let { hook ->
+                runCatching {
+                    // 「发现」入口挂在宿主「我的」页上（不是注入页），所以每次点它都必然是
+                    // 「从宿主页面进入」，固定走宿主导航即可。
+                    //
+                    // 进入前先把注入路由栈复位：上一次从这里进入后，若用户是用宿主的系统返回
+                    // 键退出的，`injectedRouteStack` 里可能残留一条 `Discover`
+                    // （宿主返回走的是 NavController.popBackStack / navigateUp，
+                    //  [consumeTopInjectedRoute] 未覆盖时不会出栈）。带着残留栈再点入口会落入
+                    // nested 分支——那个分支只改 UI 状态、不推导航，表现就是「点了没反应」。
+                    hook.injectedRouteStack = emptyList()
+                    hook.setInjectedRouteState(null)
+                    hook.openInjectedRouteViaHostNavigation(InjectedRoute.Discover)
+                }.onFailure {
+                    XposedBridge.log("$LOG_PREFIX open discover page failed: ${it.stackTraceToString()}")
+                }.getOrDefault(false)
+            } ?: false
 
         // 从阅读页原生高亮界面点击"补全计划"进入完整聚合页（复用宿主 NavHost 页面框架，遵循宿主返回）。
         fun openReaderCompletionPlanFromReader(

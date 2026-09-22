@@ -34,6 +34,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # 统一解析模块版本号，后续打包命名、Release 命名、模块仓库同步都读这里。
+      - name: Resolve module version
+        run: |
+          VERSION_NAME="$(grep -oE 'versionName[[:space:]]*=[[:space:]]*"[^"]+"' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          VERSION_CODE="$(grep -oE 'versionCode[[:space:]]*=[[:space:]]*[0-9]+' app/build.gradle.kts | head -n 1 | grep -oE '[0-9]+')"
+          if [ -z "$VERSION_NAME" ] || [ -z "$VERSION_CODE" ]; then
+            echo "无法从 app/build.gradle.kts 解析 versionName / versionCode"
+            exit 1
+          fi
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "模块版本：${VERSION_CODE} / ${VERSION_NAME}"
+
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
@@ -127,13 +140,18 @@ jobs:
           mkdir -p artifacts
           if [ "$APK_VARIANT" = "release" ]; then
             if [ -f app/build/outputs/apk/release/app-release.apk ]; then
-              cp app/build/outputs/apk/release/app-release.apk artifacts/ReaMicro-Extend-ci-release-signed.apk
+              APK_FILE="ReaMicro-Extend-${VERSION_NAME}-release.apk"
+              cp app/build/outputs/apk/release/app-release.apk "artifacts/$APK_FILE"
             else
-              cp app/build/outputs/apk/release/app-release-unsigned.apk artifacts/ReaMicro-Extend-ci-release-unsigned.apk
+              APK_FILE="ReaMicro-Extend-${VERSION_NAME}-unsigned.apk"
+              cp app/build/outputs/apk/release/app-release-unsigned.apk "artifacts/$APK_FILE"
             fi
           else
-            cp app/build/outputs/apk/debug/app-debug.apk artifacts/ReaMicro-Extend-ci-debug.apk
+            APK_FILE="ReaMicro-Extend-${VERSION_NAME}-debug.apk"
+            cp app/build/outputs/apk/debug/app-debug.apk "artifacts/$APK_FILE"
           fi
+          (cd artifacts && sha256sum "$APK_FILE" > "$APK_FILE.sha256")
+          echo "APK_FILE=$APK_FILE" >> "$GITHUB_ENV"
           ls -lah artifacts
 
       - name: Upload CI APK
@@ -157,15 +175,61 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION_NAME="$(grep -oE 'versionName[[:space:]]*=[[:space:]]*"[^"]+"' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')"
-          TAG="ci-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
-          if [ "$RELEASE_SIGNING_ENABLED" = "true" ] && ls artifacts/*signed.apk >/dev/null 2>&1; then
-            TITLE="CI ${VERSION_NAME} #${GITHUB_RUN_NUMBER} signed release"
+          # tag 保持 ci- 前缀并带上版本号：服务端 releases.py 先按 tag 解析版本，
+          # 只有 tag 不构成语义版本时才回退到标题里的版本。若把 tag 写成 "65-2.3.4"，
+          # 那里会先 split("-") 取到 "65" 当成版本号，客户端更新判断会出错。
+          TAG="ci-${VERSION_NAME}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          if [ "$APK_VARIANT" = "release" ] && [ "$RELEASE_SIGNING_ENABLED" = "true" ]; then
+            TITLE="${VERSION_NAME} · CI #${GITHUB_RUN_NUMBER} signed"
           else
-            TITLE="CI ${VERSION_NAME} #${GITHUB_RUN_NUMBER}"
+            TITLE="${VERSION_NAME} · CI #${GITHUB_RUN_NUMBER}"
           fi
-          gh release create "$TAG" artifacts/*.apk artifacts/ReaMicro-Automation-KSU-*.zip \
+          gh release create "$TAG" artifacts/*.apk artifacts/*.apk.sha256 artifacts/ReaMicro-Automation-KSU-*.zip \
             --target "$GITHUB_SHA" \
             --title "$TITLE" \
-            --notes "Automated CI build from ${GITHUB_SHA}. Includes the matching APK and experimental KSU module ZIP. Install the APK before enabling the KSU module." \
+            --notes "CI build ${VERSION_NAME} (versionCode ${VERSION_CODE}) from ${GITHUB_SHA}. Includes the matching APK and the experimental KSU module ZIP. Install the APK before enabling the KSU module." \
             --prerelease
+
+      # 把签名 APK 同步到 LSPosed 模块仓库（Xposed-Modules-Repo）并建 release，避免每次手动上传附件。
+      # secret MODULE_REPO_TOKEN 必须是「经典 PAT（classic）」：
+      #   模块仓库属于 Xposed-Modules-Repo 组织，作者只是该仓库的 outside collaborator，
+      #   而 fine-grained PAT 明确不支持 outside collaborator / 非成员组织的仓库，那边选不到这个仓库。
+      #   建法：Settings → Developer settings → Personal access tokens → Tokens (classic)，
+      #   勾 public_repo 即可（模块仓库是公开仓库）。
+      # 未配置 secret 时本步直接跳过；配置了但 token 不可写则直接失败，避免静默漏发。
+      # 只在版本号变化时发布：模块仓库已有 <versionCode>-<versionName> 这条 release 就跳过；
+      # 需要覆盖同版本时，先删掉模块仓库里那条 release（连同 tag），再重跑本 workflow。
+      - name: Publish to LSPosed module repo
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.MODULE_REPO_TOKEN }}
+          MODULE_REPO: Xposed-Modules-Repo/io.github.YGHFv.ReaMicroExtend
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "MODULE_REPO_TOKEN 未配置，跳过模块仓库同步。"
+            exit 0
+          fi
+          # token 不可写就直接失败：静默跳过会让模块仓库悄悄断更。
+          # 只要 push / maintain / admin 任一为真就认作可写（maintain 角色下 push 的取值不稳）。
+          if [ "$(gh api "repos/$MODULE_REPO" --jq '.permissions.push == true or .permissions.maintain == true or .permissions.admin == true' 2>/dev/null || echo false)" != "true" ]; then
+            echo "::error::MODULE_REPO_TOKEN 无法写 $MODULE_REPO。请改用经典 PAT（classic）并勾选 public_repo；fine-grained PAT 不支持 outside collaborator 的仓库。"
+            exit 1
+          fi
+          if [ "$APK_VARIANT" != "release" ] || ! ls artifacts/*-release.apk >/dev/null 2>&1; then
+            echo "本次没有签名 release APK，跳过模块仓库同步。"
+            exit 0
+          fi
+          TAG="${VERSION_CODE}-${VERSION_NAME}"
+          if gh release view "$TAG" --repo "$MODULE_REPO" >/dev/null 2>&1; then
+            echo "模块仓库已有 $TAG，跳过。"
+            exit 0
+          fi
+          NOTES_ARGS=(--generate-notes)
+          if [ -f "module-repo/release-${VERSION_NAME}.md" ]; then
+            NOTES_ARGS=(--notes-file "module-repo/release-${VERSION_NAME}.md")
+          fi
+          gh release create "$TAG" "artifacts/ReaMicro-Extend-${VERSION_NAME}-release.apk" \
+            --repo "$MODULE_REPO" \
+            --title "$VERSION_NAME" \
+            "${NOTES_ARGS[@]}"
+          echo "已同步到模块仓库：$TAG"

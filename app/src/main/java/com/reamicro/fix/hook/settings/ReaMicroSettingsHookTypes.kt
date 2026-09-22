@@ -243,6 +243,9 @@ internal sealed class InjectedRoute(val title: String) {
     data class FontPicker(val target: FontPickerTarget) : InjectedRoute(target.title)
     object FontLibrary : InjectedRoute(FONT_LIBRARY_TITLE)
     object AboutCompletion : InjectedRoute(ABOUT_COMPLETION_TITLE)
+    // 我的页「发现」卡片入口。仿 Legado 发现页：分类标签 + 书单列表。
+    // 与其它注入页一样复用宿主 About 路由作为容器，返回栈由 handleNestedInjectedBack 接管。
+    object Discover : InjectedRoute(DISCOVER_TITLE)
 }
 
 internal data class RotationUiState(

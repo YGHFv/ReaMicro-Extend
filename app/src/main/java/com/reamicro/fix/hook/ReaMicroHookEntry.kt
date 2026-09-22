@@ -172,6 +172,11 @@ class ReaMicroHookEntry {
             globalTypefaceProvider = globalFontHook::globalAndroidTypeface,
         )
         installFeature("WebDavDriveHook", webDavDriveHook::install)
+        // 「我的」页社区卡片：书院行改「书院 ｜ 发现」。数据侧通过 WebDavDriveHook.activeInstance
+        // 复用在线书源请求管线，故排在它之后安装。
+        installFeature("DiscoverCardHook") {
+            DiscoverCardHook(classLoader).install()
+        }
         installFeature("MainActivity") {
             hookMainActivity(
                 classLoader = classLoader,

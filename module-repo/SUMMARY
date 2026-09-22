@@ -1,0 +1,1 @@
+阅微补全计划（ReaMicro Extend）：面向阅微（app.zhendong.reamicro）的 LSPosed 扩展模块，为阅微补上在线书源、关联搜索、WebDAV 与本地书库、阅读页全文搜索与自动翻页、EPUB 文件编辑、字体管理等能力。当前版本 2.3.4，适配阅微 2.3.2（versionCode 2310）。仅供学习交流。

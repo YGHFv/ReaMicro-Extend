@@ -1659,11 +1659,20 @@ internal fun ReaMicroSettingsHook.spacedBy(value: Int): Any {
     }.invoke(arrangement, udp(value))
 }
 
+internal fun ReaMicroSettingsHook.arrangementStart(): Any =
+    staticObject(ARRANGEMENT_CLASS, "INSTANCE").method0("getStart")
+
 internal fun ReaMicroSettingsHook.arrangementTop(): Any =
     staticObject(ARRANGEMENT_CLASS, "INSTANCE").method0("getTop")
 
 internal fun ReaMicroSettingsHook.alignmentStart(): Any =
     staticObject(ALIGNMENT_CLASS, "INSTANCE").method0("getStart")
+
+internal fun ReaMicroSettingsHook.alignmentCenter(): Any =
+    staticObject(ALIGNMENT_CLASS, "INSTANCE").method0("getCenter")
+
+internal fun ReaMicroSettingsHook.alignmentCenterVertically(): Any =
+    staticObject(ALIGNMENT_CLASS, "INSTANCE").method0("getCenterVertically")
 
 internal fun ReaMicroSettingsHook.modifierInstance(): Any =
     staticObject(MODIFIER_CLASS, "INSTANCE")

@@ -81,6 +81,7 @@ import com.reamicro.fix.logging.logWebDav
 // 缩进回去与原文逐字节比对，不一致直接中止（tools/extract-hook-cluster.mjs）。
 internal fun WebDavDriveHook.install() {
     logWebDav("install start")
+    WebDavDriveHook.activeInstance = this
     OnlineOnDemandBridge.attach(::downloadOnlineCompletionOnDemandChapter)
     // 逐个登记安装结果：宿主升级导致某个 hook 装不上时，靠启动汇总即可定位，
     // 且单个 hook 失败不再中断后续 hook 的安装。

@@ -101,21 +101,40 @@ internal fun ReaMicroSettingsHook.renderNestedSettingsEntry(
     }
 }
 
-internal fun ReaMicroSettingsHook.openInjectedRouteViaHostNavigation(route: InjectedRoute, navGraphScopeOverride: Any? = null): Boolean {
-    val navGraphScope = navGraphScopeOverride ?: currentSettingsNavGraphScope ?: lastKnownNavGraphScope ?: return false
+internal fun ReaMicroSettingsHook.openInjectedRouteViaHostNavigation(
+    route: InjectedRoute,
+    navGraphScopeOverride: Any? = null,
+): Boolean {
+    // 候选顺序：显式传入 → 最近一次见到的 → 设置页记录的那个。任一能用就成。
+    //
+    // 为什么 `lastKnownNavGraphScope` 排在 `currentSettingsNavGraphScope` 前面：Activity 被系统
+    // 回收后重建时，后者可能仍指着已销毁组合里的旧实例，用它 navigate 会静默失败——用户看到的
+    // 就是「从多任务切回来之后再点『发现』点不动」。前者由 NavGraphScope 自己的
+    // navigate / composable 调用刷新（见 [hookNavGraphScope]），重建后宿主第一次重组导航图谱
+    // 就会被换成新实例，因此它一定不比那两个旧。
+    val candidates = listOfNotNull(navGraphScopeOverride, lastKnownNavGraphScope, currentSettingsNavGraphScope)
+        .distinctBy { System.identityHashCode(it) }
+    if (candidates.isEmpty()) return false
+    candidates.forEach { scope ->
+        if (navigateToInjectedRoute(scope, route)) return true
+    }
+    XposedBridge.log("$LOG_PREFIX failed to open injected route: no live NavGraphScope among ${candidates.size}")
+    return false
+}
+
+/** 在指定 scope 上推一次注入页；失败时把注入路由栈回滚成进入前的样子。 */
+private fun ReaMicroSettingsHook.navigateToInjectedRoute(navGraphScope: Any, route: InjectedRoute): Boolean {
     val previousStack = injectedRouteStack
     return runCatching {
         val aboutRoute = staticObject(ROUTE_ABOUT_CLASS, "INSTANCE")
-        currentSettingsNavGraphScope = navGraphScope
-        currentSettingsNavController = runCatching { navGraphScope.method0("getNavController") }.getOrNull()
+        val navController = runCatching { navGraphScope.method0("getNavController") }.getOrNull()
+            ?: error("NavGraphScope.getNavController returned null")
         val navigate = navGraphScope.javaClass.methods.firstOrNull {
             it.name == "navigate" && it.parameterTypes.size == 3
         } ?: error("NavGraphScope.navigate not found")
-        injectedRouteStack = if (previousStack.isEmpty()) {
-            listOf(route)
-        } else {
-            previousStack + route
-        }
+        currentSettingsNavGraphScope = navGraphScope
+        currentSettingsNavController = navController
+        injectedRouteStack = previousStack + route
         setInjectedRouteState(route)
         navigatingModuleRoute.set(true)
         try {
@@ -128,8 +147,27 @@ internal fun ReaMicroSettingsHook.openInjectedRouteViaHostNavigation(route: Inje
         injectedRouteStack = previousStack
         setInjectedRouteState(previousStack.lastOrNull())
         navigatingModuleRoute.set(false)
-        XposedBridge.log("$LOG_PREFIX failed to open injected settings route: ${it.stackTraceToString()}")
     }.getOrDefault(false)
+}
+
+/**
+ * 宿主自行返回时，把注入路由栈的顶层弹出。
+ *
+ * 注入页复用宿主 `Route.About` 承载，返回有三个来源：注入页顶栏（走
+ * [navigateBackFromInjectedRoute]）、NavGraphScope 上的 `popBackStack`、以及宿主系统
+ * 返回键走的 NavController `popBackStack` / `navigateUp`。三处都要把栈同步弹出——
+ * 只处理嵌套子路由时，**顶层注入路由**（如「发现」）会残留在栈里，使下一次进入入口
+ * 被 [openNestedInjectedRoute] 误判为「已在注入页内」（该分支只改 UI 状态、不推导航，
+ * 表现为点击无反应）。
+ */
+internal fun ReaMicroSettingsHook.consumeTopInjectedRoute(source: String) {
+    val previousSize = injectedRouteStack.size
+    val nextStack = injectedRouteStack.dropLast(1)
+    injectedRouteStack = nextStack
+    setInjectedRouteState(nextStack.lastOrNull())
+    if (nextStack.size != previousSize) {
+        XposedBridge.log("$LOG_PREFIX injected route popped by $source -> $nextStack")
+    }
 }
 
 internal fun ReaMicroSettingsHook.openNestedInjectedRoute(route: InjectedRoute): Boolean {
@@ -236,6 +274,7 @@ internal fun ReaMicroSettingsHook.renderInjectedSettingsScreen(route: InjectedRo
             is InjectedRoute.FontPicker -> renderFontPickerContent(currentRoute.target, innerPaddings, innerComposer)
             InjectedRoute.FontLibrary -> renderFontLibraryContent(innerPaddings, innerComposer)
             InjectedRoute.AboutCompletion -> renderAboutCompletionContent(innerPaddings, innerComposer)
+            InjectedRoute.Discover -> renderDiscoverContent(innerPaddings, innerComposer)
         }
         targetUnit()
     }

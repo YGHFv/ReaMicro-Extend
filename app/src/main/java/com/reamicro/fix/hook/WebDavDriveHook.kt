@@ -54,6 +54,18 @@ class WebDavDriveHook(
      */
     internal val globalTypefaceProvider: () -> Typeface? = { null },
 ) {
+    /**
+     * 当前已安装的实例。
+     *
+     * 在线书源相关的扩展函数（请求构造、结果解析）都挂在 `WebDavDriveHook` 这个接收者上，
+     * 而「发现」页之类的入口只需要读配置、发请求，拿不到也不该重建一个实例。这里保留
+     * 最近一次 `install()` 的实例供它们复用，未安装时为 null，调用方自行跳过。
+     */
+    internal companion object {
+        @Volatile
+        internal var activeInstance: WebDavDriveHook? = null
+    }
+
     // Compose 反射互操作的共用实现，避免各 hook 各存一份逐渐漂移的副本。
     internal val composeInterop = ComposeInterop(
         classLoader = classLoader,

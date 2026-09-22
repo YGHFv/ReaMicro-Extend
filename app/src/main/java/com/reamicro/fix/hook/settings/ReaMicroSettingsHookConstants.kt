@@ -25,6 +25,14 @@ internal const val COMPOSE_STATE_CLASS = HostClasses.Compose.COMPOSE_STATE
 internal const val MUTABLE_STATE_CLASS = HostClasses.Compose.MUTABLE_STATE
 internal const val LAZY_ITEM_SCOPE_CLASS = "androidx.compose.foundation.lazy.LazyItemScope"
 internal const val NAV_GRAPH_SCOPE_CLASS = HostClasses.Host.NAV_GRAPH_SCOPE
+
+/**
+ * 导航图谱 DSL 上注册页面的方法名。
+ *
+ * 宿主每次重组导航图谱都会调用它，因此是「刷新 NavGraphScope 缓存」的最佳锚点
+ * （见 `hookNavGraphScope`）。
+ */
+internal const val NAV_GRAPH_COMPOSABLE_METHOD = "composable"
 internal const val NAV_CONTROLLER_CLASS = HostClasses.AndroidX.NAV_CONTROLLER
 internal const val ROUTE_ABOUT_CLASS = "app.zhendong.reamicro.Route\$About"
 internal const val BACK_HANDLER_KT_CLASS = HostClasses.AndroidX.BACK_HANDLER_KT
@@ -48,6 +56,9 @@ internal const val WINDOW_INSETS_EXT_ANDROID_KT_CLASS = HostClasses.Host.WINDOW_
 internal const val EVA_ICONS_CLASS = "compose.icons.EvaIcons"
 internal const val EVA_OUTLINE_KT_CLASS = "compose.icons.evaicons.__OutlineKt"
 internal const val EVA_CLOSE_KT_CLASS = "compose.icons.evaicons.outline.CloseKt"
+// 宿主右侧箭头（Icons.AutoMirrored.Filled.NavigateNext）与其所在的 Icons 容器。
+internal const val NAVIGATE_NEXT_ICON_CLASS = HostClasses.Compose.NAVIGATE_NEXT_ICON
+internal const val ICONS_AUTO_MIRRORED_FILLED_CLASS = "androidx.compose.material.icons.automirrored.filled.Icons"
 
 internal const val SCAFFOLD_KT_CLASS = HostClasses.Compose.SCAFFOLD_KT
 internal const val SCAFFOLD_METHOD = "Scaffold-TvnljyQ"
@@ -57,6 +68,12 @@ internal const val LAZY_LIST_SCOPE_CLASS = HostClasses.Compose.LAZY_LIST_SCOPE
 internal const val LAZY_ITEM_DEFAULT_METHOD = "item\$default"
 internal const val COLUMN_KT_CLASS = HostClasses.Compose.COLUMN_KT
 internal const val COLUMN_METHOD = "Column"
+internal const val ROW_KT_CLASS = HostClasses.Compose.ROW_KT
+internal const val ROW_METHOD = "Row"
+internal const val BOX_KT_CLASS = HostClasses.Compose.BOX_KT
+internal const val BOX_METHOD = "Box"
+internal const val SPACER_KT_CLASS = HostClasses.Compose.SPACER_KT
+internal const val SPACER_METHOD = "Spacer"
 internal const val LIST_ITEM_KT_CLASS = HostClasses.Compose.LIST_ITEM_KT
 internal const val LIST_ITEM_METHOD = "ListItem-HXNGIdc"
 internal const val LIST_ITEM_DEFAULTS_CLASS = HostClasses.Compose.LIST_ITEM_DEFAULTS
@@ -74,9 +91,14 @@ internal const val SIZE_KT_CLASS = HostClasses.Compose.SIZE_KT
 internal const val FILL_MAX_SIZE_DEFAULT_METHOD = "fillMaxSize\$default"
 internal const val FILL_MAX_WIDTH_DEFAULT_METHOD = "fillMaxWidth\$default"
 internal const val HEIGHT_METHOD = "height-3ABfNKs"
+internal const val WIDTH_METHOD = "width-3ABfNKs"
 internal const val PADDING_KT_CLASS = HostClasses.Compose.PADDING_KT
 internal const val PADDING_VALUES_METHOD = "padding"
 internal const val PADDING_HORIZONTAL_DEFAULT_METHOD = "padding-VpY3zN4\$default"
+// 四边独立内边距（start/top/end/bottom + mask）。mask 置位表示该参数用默认值 0：
+// 按位 top=2、end=4、bottom=8，所以「只要顶部」用 14，「只要起始边」用 14 的镜像同理。
+internal const val PADDING_SIDES_DEFAULT_METHOD = "padding-qDBjuR0\$default"
+internal const val PADDING_MASK_TOP_ONLY = 14
 internal const val PADDING_ABSOLUTE_DEFAULT_METHOD = "padding-qDBjuR0\$default"
 internal const val BACKGROUND_KT_CLASS = HostClasses.Compose.BACKGROUND_KT
 internal const val BACKGROUND_DEFAULT_METHOD = "background-bw27NRU\$default"
@@ -178,6 +200,10 @@ internal const val ONLINE_DOWNLOAD_STYLE_ENTRY_ITEM_KEY = 0x524D4684
 internal const val ONLINE_DOWNLOAD_STYLE_CONTENT_ITEM_KEY = 0x524D4685
 internal const val ONLINE_EPUB_STYLE_LIST_ITEM_KEY = 0x524D4687
 internal const val ABOUT_COMPLETION_PROJECT_ITEM_KEY = 0x524D4688
+internal const val DISCOVER_SOURCE_PICKER_ITEM_KEY = 0x524D4689
+internal const val DISCOVER_KIND_ROW_ITEM_KEY = 0x524D468A
+internal const val DISCOVER_BOOK_LIST_ITEM_KEY = 0x524D468B
+internal const val DISCOVER_EMPTY_ITEM_KEY = 0x524D468C
 internal const val ACCOUNT_CREDENTIAL_DOCUMENT_REQUEST_CODE = 0x524D47
 internal const val ACCOUNT_DATA_DOCUMENT_REQUEST_CODE = 0x524D48
 /** 项目地址。既作为「关于补全」里那一行的副标题直接显示，也是点击后打开的目标。 */
@@ -217,6 +243,7 @@ internal const val MODULE_ENTRY_TITLE = "补全计划"
 internal const val ABOUT_COMPLETION_TITLE = "关于补全"
 internal const val FONT_SETTINGS_TITLE = "字体设置"
 internal const val FONT_LIBRARY_TITLE = "字体库"
+internal const val DISCOVER_TITLE = "发现"
 internal const val FONT_DOCUMENT_REQUEST_CODE = 0x524D46
 internal const val FONT_IMPORT_DEDUPE_WINDOW_MS = 2_500L
 internal const val ONLINE_SOURCE_IMPORT_DEDUPE_WINDOW_MS = 2_500L

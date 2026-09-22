@@ -37,9 +37,17 @@ data class OnlineSourceEntry(
     val variableComment: String = "",
     val packageId: String = "",
     val aliases: Set<String> = emptySet(),
+    /** Legado 协议里的发现页地址（`exploreUrl`），供「发现」页拉取分类书单。 */
+    val exploreUrl: String = "",
+    /** 发现页分类条目的展示规则 JSON（`ruleExplore`），键与 Legado 一致。 */
+    val ruleExplore: String = "",
 ) {
     val hasLoginConfig: Boolean
         get() = loginUrl.isNotBlank() || loginUi.isNotBlank() || loginCheckJs.isNotBlank()
+
+    /** 是否具备可展示的发现页配置。 */
+    val hasExplore: Boolean
+        get() = exploreUrl.isNotBlank()
 
     val webLoginUrl: String
         get() = loginUrl.takeIf {
@@ -323,6 +331,8 @@ object OnlineSourceStore {
         val ruleContent = rawJsonString(json, "ruleContent")
         val jsLib = rawJsonString(json, "jsLib")
         val variableComment = firstString(json, "variableComment", "sourceVariableComment")
+        val exploreUrl = firstString(json, "exploreUrl", "exploreURL", "discoverUrl")
+        val ruleExplore = rawJsonString(json, "ruleExplore").ifBlank { rawJsonString(json, "exploreRule") }
         val chapterBatchEndpoint = firstString(json, "reamicroChapterBatchEndpoint")
         val chapterBatchSize = firstString(json, "reamicroChapterBatchSize")
             .toIntOrNull()
@@ -365,6 +375,8 @@ object OnlineSourceStore {
             variableComment = variableComment,
             packageId = firstString(json, "reamicroPackageId"),
             aliases = aliases,
+            exploreUrl = exploreUrl,
+            ruleExplore = ruleExplore,
         )
     }
 

@@ -93,6 +93,7 @@ object HostClasses {
         const val RECTANGLE_SHAPE_KT = "androidx.compose.ui.graphics.RectangleShapeKt"
         const val ROW_KT = "androidx.compose.foundation.layout.RowKt"
         const val ROW_SCOPE = "androidx.compose.foundation.layout.RowScope"
+        const val ROW_SCOPE_INSTANCE = "androidx.compose.foundation.layout.RowScopeInstance"
         const val SCAFFOLD_KT = "androidx.compose.material3.ScaffoldKt"
         const val SCALE_KT = "androidx.compose.ui.draw.ScaleKt"
         const val SCROLL_KT = "androidx.compose.foundation.ScrollKt"
@@ -196,6 +197,9 @@ object HostClasses {
         const val POST_USER_BOOK_REQ = "app.zhendong.reamicro.data.res.book.PostUserBookReq"
         const val PREF_KEYS = "app.zhendong.reamicro.constants.PrefKeys"
         const val PROFILE_SCREEN = "app.zhendong.reamicro.ui.profile.ProfileScreenKt"
+        // 「我的」页社区卡片（里程碑/笔记/同步/书院/同好/野社），「发现」按钮注入点。
+        const val PROFILE_COMMUNITY = "app.zhendong.reamicro.ui.profile.components.CommunityKt"
+        const val PROFILE_DIVIDER = "app.zhendong.reamicro.arch.components.DividerKt"
         const val READER_BOTTOM_BAR = "app.zhendong.reamicro.ui.reader.components.ReaderBottomBarKt"
         const val READER_CATALOG = "app.zhendong.reamicro.ui.reader.compose.ReaderCatalogKt"
         const val READER_FAMILY_BUILD_IN = "app.zhendong.reamicro.ui.reader.compose.ReaderFamilyBuildInKt"

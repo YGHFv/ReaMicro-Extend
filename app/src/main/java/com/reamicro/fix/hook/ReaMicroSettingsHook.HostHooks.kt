@@ -31,6 +31,22 @@ internal fun ReaMicroSettingsHook.hookStringResource() {
 internal fun ReaMicroSettingsHook.hookNavGraphScope() {
     runCatching {
         val navGraphScopeClass = cls(NAV_GRAPH_SCOPE_CLASS)
+        // 导航图谱每次重组都会调用 composable(...) 注册页面。借它把「最近见到的 NavGraphScope」
+        // 刷新到最新实例——Activity 被系统回收后重建时，旧实例还留在缓存里，用它 navigate 会
+        // 静默失败（用户现象：从多任务切回来之后再点「发现」点不动）。
+        // 只刷新 lastKnown 这一个字段：它本来就是「最近见到的」，语义不变；
+        // currentSettingsNavGraphScope 仍由设置页列表构建处维护，避免多 NavHost 时互相覆盖。
+        navGraphScopeClass.declaredMethods
+            .filter { it.name == NAV_GRAPH_COMPOSABLE_METHOD }
+            .forEach { candidate ->
+                runCatching {
+                    XposedBridge.hookMethod(candidate, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            param.thisObject?.let { lastKnownNavGraphScope = it }
+                        }
+                    })
+                }
+            }
         XposedBridge.hookAllMethods(navGraphScopeClass, "navigate", object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 // 缓存 NavGraphScope 单例，供阅读页高亮页导航兜底使用。
@@ -52,9 +68,7 @@ internal fun ReaMicroSettingsHook.hookNavGraphScope() {
                     param.result = true
                     return
                 }
-                val nextStack = injectedRouteStack.dropLast(1)
-                injectedRouteStack = nextStack
-                setInjectedRouteState(nextStack.lastOrNull())
+                consumeTopInjectedRoute("navGraphScope.popBackStack")
             }
         })
         XposedBridge.hookAllMethods(cls(NAV_CONTROLLER_CLASS), "popBackStack", object : XC_MethodHook() {
@@ -63,7 +77,12 @@ internal fun ReaMicroSettingsHook.hookNavGraphScope() {
                 if (!isCurrentSettingsNavController(param.thisObject)) return
                 if (handleNestedInjectedBack()) {
                     param.result = true
+                    return
                 }
+                // 宿主系统返回键走的是 NavController 而非 NavGraphScope；此前这里只处理
+                // 嵌套子路由，顶层注入路由（如「发现」）不会出栈，进而在下次进入入口时
+                // 让 [openNestedInjectedRoute] 误判为「已在注入页内」。两处统一出栈。
+                consumeTopInjectedRoute("navController.popBackStack")
             }
         })
         XposedBridge.hookAllMethods(cls(NAV_CONTROLLER_CLASS), "navigateUp", object : XC_MethodHook() {
@@ -72,7 +91,9 @@ internal fun ReaMicroSettingsHook.hookNavGraphScope() {
                 if (!isCurrentSettingsNavController(param.thisObject)) return
                 if (handleNestedInjectedBack()) {
                     param.result = true
+                    return
                 }
+                consumeTopInjectedRoute("navController.navigateUp")
             }
         })
     }.onFailure {
@@ -85,7 +106,8 @@ internal fun ReaMicroSettingsHook.hookAboutScreen() {
         val aboutScreen = method(ABOUT_SCREEN_CLASS, ABOUT_SCREEN_METHOD, 2)
         XposedBridge.hookMethod(aboutScreen, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                val route = activeInjectedRoute() ?: return
+                val route = activeInjectedRoute()
+                if (route == null) return
                 val composer = param.args?.getOrNull(0) ?: return
                 runCatching {
                     renderInjectedSettingsScreen(route, composer)

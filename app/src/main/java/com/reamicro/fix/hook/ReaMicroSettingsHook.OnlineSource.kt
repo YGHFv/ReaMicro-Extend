@@ -987,3 +987,58 @@ internal fun ReaMicroSettingsHook.bumpOnlineSourceVersion() {
         .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
         ?.invoke(state, value + 1)
 }
+
+/** [discoverVersionValue] 是否已经把「后台状态变化 → 推一次重组」的钩子挂到 DiscoverState 上。 */
+@Volatile
+private var discoverRefreshRegistered = false
+
+// 「发现」页的刷新信号。数据在 com.reamicro.fix.discover.DiscoverState 里（后台线程加载），
+// 这里只负责把它推给 Compose：读取该 state 的 value 建立依赖，值变化即触发重组。
+internal fun ReaMicroSettingsHook.discoverVersionState(): Any {
+    discoverVersionUiState?.let { return it }
+    return mutableState(0).also { discoverVersionUiState = it }
+}
+
+/**
+ * 把 DiscoverState.version 同步到 Compose state，并返回当前值。
+ *
+ * 只在版本真的变了才写 setValue —— 每次写入都会让读它的页面重组，无脑写会造成
+ * 每秒数十次无效重组。写入发生在 composition 期间，读值与比较都在同一帧内完成，
+ * 因此不会出现「写完立刻又要重渲」的抖动。
+ */
+internal fun ReaMicroSettingsHook.discoverVersionValue(): Int {
+    val state = discoverVersionState()
+
+    // ★ 注册「后台状态变化 → 推一次重组」的钩子（只注册一次）。
+    //
+    // DiscoverState.version 是普通 @Volatile 字段，Compose 追踪不到；只靠组合期间比对版本号，
+    // 后台加载完成后再没有任何东西会触发下一次组合 —— 页面会永远停在第一帧的「正在加载…」，
+    // 切标签也毫无反应（实测就是这两个现象）。
+    // 这里把 Compose 的 MutableState 交给 DiscoverState：它每次 bump 都回调过来，
+    // 我们在主线程把该 State 的值 +1，写值即触发重组，UI 再去读最新的 sources/state。
+    if (!discoverRefreshRegistered) {
+        discoverRefreshRegistered = true
+        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        com.reamicro.fix.discover.DiscoverState.onChanged = {
+            mainHandler.post {
+                runCatching {
+                    val current = (state.method0("getValue") as? Number)?.toInt() ?: 0
+                    state.javaClass.methods
+                        .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+                        ?.invoke(state, current + 1)
+                }
+            }
+        }
+    }
+
+    val composeValue = (state.method0("getValue") as? Number)?.toInt() ?: 0
+    val actual = com.reamicro.fix.discover.DiscoverState.version
+    if (actual != discoverObservedVersion) {
+        discoverObservedVersion = actual
+        state.javaClass.methods
+            .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+            ?.invoke(state, composeValue + 1)
+        return composeValue + 1
+    }
+    return composeValue
+}
