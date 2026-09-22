@@ -10,6 +10,7 @@ import com.reamicro.fix.online.search.onlineJsonRuleValues
 import com.reamicro.fix.online.search.onlineCompletionStatusText
 import com.reamicro.fix.online.search.resolveOnlineUrlCompat
 import com.reamicro.fix.online.search.sourceBaseUrl
+import java.net.URLEncoder
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -45,10 +46,11 @@ internal object DiscoverRepository {
     /**
      * 拉取某个分类的书单。
      *
+     * `page` 填进分类地址里的 `{{page}}` 模板（Legado 惯例）；发现页的「加载更多」靠它翻页。
      * 分类地址可能挂多条（`urls`），逐条尝试，第一条有结果的就算命中；全部为空时返回
      * [DiscoverLoadState.Loaded] 包一个空列表，让 UI 显示「暂无内容」而不是报错。
      */
-    fun loadBooks(source: OnlineSourceEntry, kind: DiscoverKind): DiscoverLoadState {
+    fun loadBooks(source: OnlineSourceEntry, kind: DiscoverKind, page: Int = 1): DiscoverLoadState {
         val hook = WebDavDriveHook.activeInstance
             ?: return DiscoverLoadState.Failed("在线书源模块未就绪")
         val base = sourceBaseUrl(source)
@@ -56,7 +58,7 @@ internal object DiscoverRepository {
         val rule = runCatching { JSONObject(source.ruleExplore) }.getOrNull()
         var lastError = ""
         kind.urls.forEach { rawUrl ->
-            val resolved = resolveKindUrl(source, rawUrl)
+            val resolved = resolveKindUrl(source, rawUrl, page)
             if (resolved.isBlank()) return@forEach
             val response = runCatching {
                 hook.requestOnlineSearch(source, resolved)
@@ -78,8 +80,8 @@ internal object DiscoverRepository {
         }
     }
 
-    /** 把分类地址展开成可请求的 URL：套模板 → 拼 baseUrl。 */
-    private fun resolveKindUrl(source: OnlineSourceEntry, rawUrl: String): String {
+    /** 把分类地址展开成可请求的 URL：套模板（含页码）→ 拼 baseUrl。 */
+    private fun resolveKindUrl(source: OnlineSourceEntry, rawUrl: String, page: Int): String {
         val hook = WebDavDriveHook.activeInstance ?: return ""
         val text = rawUrl.trim()
         if (text.isBlank()) return ""
@@ -94,7 +96,7 @@ internal object DiscoverRepository {
                     node = null,
                     baseUrl = base,
                     query = null,
-                    page = 1,
+                    page = page,
                     source = source,
                 )
             }.getOrDefault(text)
@@ -306,18 +308,83 @@ internal object DiscoverRepository {
 // ── exploreUrl 解析（顶层函数，便于单测直接调用） ─────────────────────────────
 
 /** 分类名过长时截断，防止标签行换行。 */
-private const val MAX_KIND_TITLE = 12
+private const val MAX_KIND_TITLE = 20
 
 /**
- * 解析 `exploreUrl` 里的分类列表，兼容 JSON 数组与 Legado 逐行两种写法。
+ * 解析 Legado「JS 发现页」的静态形态。
  *
- * 先试 JSON；JSON 解析失败（或解析出来一条都没有）再按逐行解析。这样既能吃下
+ * 部分聚合源（晚风里等）的 `exploreUrl` 是一段 `@js:` 脚本：先定义一个 `var groups=[...]` 的
+ * **纯 JSON 数组**（`[分组名, [条目名, 查询参数], 列数]`），再用 `search(params)` 把查询对象
+ * 拼成相对地址。Legado 靠执行脚本生成可点分类，模块不执行任意 JS——但这一形态的关键字面量
+ * 都是静态的，可以直接提取：
+ *
+ * 1. `var groups=[...];` → `JSONArray` 原样解析；
+ * 2. `search()` 的地址前缀与固定追加参数 → 各用一条正则抓字面量
+ *    （`return '<前缀>'+parts.join('<连接符>')` 与 `parts.push('<字面量>')`）；
+ * 3. 每个条目的查询对象按 JSON 键序拼 `k=enc(v)`（与 JS `for...in` 的插入顺序一致），空值跳过
+ *    ——与脚本里 `params[key]!==''` 的判断语义一致。
+ *
+ * 不追求完整 JS 语义：脚本输出的选择行（`type:'select'`）依赖 `source.getVariable()` 的用户
+ * 状态，模块没有对应交互，天然跳过；空地址的标题行也被 `params` 为空挡掉。
+ */
+internal fun parseExploreKindsScript(raw: String): List<DiscoverKind> {
+    val script = raw.trim().removePrefix("@js:").trim()
+    val groupsText = Regex("""var\s+groups\s*=\s*(\[[\s\S]*?\])\s*;""")
+        .find(script)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?: return emptyList()
+
+    val prefix = Regex("""return\s*'([^']*)'\s*\+\s*parts\.join\('([^']*)'\)""")
+        .find(script)
+        ?.groupValues
+        ?.getOrNull(1)
+        .orEmpty()
+    if (prefix.isBlank()) return emptyList()
+    val extras = Regex("""parts\.push\('([^']*)'\)""")
+        .findAll(script)
+        .mapNotNull { it.groupValues.getOrNull(1) }
+        .filter { it.isNotBlank() }
+        .toList()
+
+    // 条目与查询参数都从原始文本里按出现顺序抓：`org.json.JSONObject` 内部是 HashMap，
+    // 键序会乱，而 JS 的 `for...in`（也就是真实请求的参数顺序）跟的是插入序。
+    val entryRegex = Regex("\"([^\"]+)\"\\s*,\\s*\\{([^{}]*)\\}")
+    val pairRegex = Regex("\"([^\"]+)\"\\s*:\\s*\"([^\"]*)\"")
+    val kinds = mutableListOf<DiscoverKind>()
+    for (entry in entryRegex.findAll(groupsText)) {
+        val title = entry.groupValues[1].trim()
+        if (title.isBlank()) continue
+        val parts = pairRegex.findAll(entry.groupValues[2]).mapNotNull { pair ->
+            val key = pair.groupValues[1]
+            val value = pair.groupValues[2]
+            if (key.isBlank() || value.isBlank()) null else "$key=${discoverUrlEncode(value)}"
+        }.toMutableList()
+        parts += extras
+        if (parts.isEmpty()) continue
+        val url = prefix + parts.joinToString("&")
+        kinds += DiscoverKind(title = title.take(MAX_KIND_TITLE), url = url, urls = listOf(url))
+    }
+    return kinds.distinctBy { it.key }
+}
+
+/** 与 JS `encodeURIComponent` 对齐：`URLEncoder` 会把空格编成 `+`，这里换回 `%20`。 */
+private fun discoverUrlEncode(value: String): String =
+    URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+
+/**
+ * 解析 `exploreUrl` 里的分类列表，兼容 JSON 数组、Legado 逐行与 `@js:` 脚本三种写法。
+ *
+ * 先试 JSON；再对脚本形态做静态提取；都不行再按逐行解析。这样既能吃下
  * 书旗那类 `[{title,url},...]` 的写法，也不影响 Legado 原生的 `分类名::地址` 文本。
  */
 internal fun parseExploreKinds(rawExploreUrl: String): List<DiscoverKind> {
     val raw = rawExploreUrl.trim()
     if (raw.isBlank()) return emptyList()
     parseExploreKindsJson(raw)?.takeIf { it.isNotEmpty() }?.let { return it }
+    if (raw.startsWith("@js:", ignoreCase = true) || raw.startsWith("<js>", ignoreCase = true)) {
+        parseExploreKindsScript(raw).takeIf { it.isNotEmpty() }?.let { return it }
+    }
     return parseExploreKindsLines(raw)
 }
 

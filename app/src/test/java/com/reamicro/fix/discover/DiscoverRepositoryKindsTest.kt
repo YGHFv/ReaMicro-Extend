@@ -107,7 +107,7 @@ class DiscoverRepositoryKindsTest {
         val kinds = parseExploreKinds(raw)
 
         assertEquals(1, kinds.size)
-        assertTrue(kinds[0].title.length <= 12)
+        assertTrue(kinds[0].title.length <= 20)
     }
 
     @Test
@@ -117,5 +117,38 @@ class DiscoverRepositoryKindsTest {
         val kinds = parseExploreKinds(raw)
         assertEquals(1, kinds.size)
         assertEquals("玄幻", kinds[0].title)
+    }
+
+    @Test
+    fun `parses js explore url with grouped literals`() {
+        // 晚风里聚合源的形态：@js: 脚本里 groups 是纯 JSON 数组，search() 把查询对象拼成相对地址。
+        val raw = """
+            @js:
+            var groups=[["排序",[["最近更新",{"sort":"updated_desc"}],["缓存最多",{"sort":"cache_desc"}]],2],
+            ["分类",[["言情",{"category":"言情","sort":"cache_desc"}],["都市",{"category":"都市","sort":"cache_desc"}]],3]];
+            function search(params){var parts=[];for(var key in params){if(params[key]!=='')parts.push(key+'='+encodeURIComponent(String(params[key])));}parts.push('cache_min=1');parts.push('page={{page}}');parts.push('limit=20');return '/reader-api/search?'+parts.join('&');}
+        """.trimIndent()
+
+        val kinds = parseExploreKinds(raw)
+
+        assertEquals(4, kinds.size)
+        assertEquals("最近更新", kinds[0].title)
+        assertEquals(
+            "/reader-api/search?sort=updated_desc&cache_min=1&page={{page}}&limit=20",
+            kinds[0].urls.single(),
+        )
+        assertEquals("言情", kinds[2].title)
+        assertEquals(
+            "/reader-api/search?category=" + java.net.URLEncoder.encode("言情", "UTF-8") +
+                "&sort=cache_desc&cache_min=1&page={{page}}&limit=20",
+            kinds[2].urls.single(),
+        )
+    }
+
+    @Test
+    fun `js explore url without search template yields nothing`() {
+        val raw = "@js:\nvar groups=[[\"排序\",[[\"最近更新\",{\"sort\":\"updated_desc\"}]],2]];"
+
+        assertTrue(parseExploreKinds(raw).isEmpty())
     }
 }

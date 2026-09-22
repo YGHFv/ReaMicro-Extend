@@ -57,7 +57,23 @@ internal object DiscoverState {
         private set
 
     /** 已加载书单的缓存，键是「源 id + 分类 key」，避免来回切标签重复请求。 */
-    private val cache = ConcurrentHashMap<String, DiscoverLoadState>()
+    private val cache = ConcurrentHashMap<String, CachedBooks>()
+
+    /** 单个分类的已加载结果：书单 + 翻到第几页 + 还有没有下一页。 */
+    private class CachedBooks(val state: DiscoverLoadState.Loaded, val page: Int, val hasMore: Boolean)
+
+    /** 当前分类是否还有下一页（仅 Loaded 态有意义）。 */
+    @Volatile
+    var hasMore: Boolean = false
+        private set
+
+    /** 是否正在加载下一页。 */
+    @Volatile
+    var loadingMore: Boolean = false
+        private set
+
+    /** 每个分类已翻到的页码。 */
+    private val loadedPages = ConcurrentHashMap<String, Int>()
 
     /** 防止过期请求的结果覆盖新选择：每次选择递增，回调时比对。 */
     private val requestToken = AtomicInteger(0)
@@ -105,7 +121,8 @@ internal object DiscoverState {
         val changed = current != selection
         selection = current
         val cached = cache[selectionKey(current)]
-        state = cached ?: DiscoverLoadState.Idle
+        state = cached?.state ?: DiscoverLoadState.Idle
+        hasMore = cached?.hasMore ?: false
         bump()
         // 首次进入（或选中的分类刚被自动收敛到别的项）时，主动拉一次书单，
         // 否则页面停在 Idle 只会一直显示「正在加载…」。
@@ -120,7 +137,8 @@ internal object DiscoverState {
         selection = next
         val cached = cache[selectionKey(next)]
         if (cached != null) {
-            state = cached
+            state = cached.state
+            hasMore = cached.hasMore
             bump()
             return
         }
@@ -186,17 +204,68 @@ internal object DiscoverState {
     private fun load(target: DiscoverSelection, context: Context?) {
         val source = sources.firstOrNull { it.source.id == target.sourceId } ?: return
         val kind = source.kinds.firstOrNull { it.title == target.kindTitle } ?: return
+        val key = selectionKey(target)
         val token = requestToken.incrementAndGet()
         state = DiscoverLoadState.Loading
+        hasMore = false
+        loadingMore = false
+        loadedPages.remove(key)
         bump()
         executor.execute {
-            val result = runCatching { DiscoverRepository.loadBooks(source.source, kind) }
+            val result = runCatching { DiscoverRepository.loadBooks(source.source, kind, page = 1) }
                 .getOrElse { DiscoverLoadState.Failed(it.message.orEmpty().ifBlank { it.javaClass.simpleName }) }
             if (token != requestToken.get()) return@execute
-            cache[selectionKey(target)] = result
+            val loaded = result as? DiscoverLoadState.Loaded
+            if (loaded != null) {
+                // 返回非空就默认还有下一页；真翻到空页时「加载更多」会把 hasMore 收掉。
+                cache[key] = CachedBooks(loaded, 1, loaded.books.isNotEmpty())
+                loadedPages[key] = 1
+            }
             // 用户可能已经切走了，只在选择未变时把结果吐给 UI；缓存照旧留着。
             if (selection == target) {
                 state = result
+                hasMore = loaded != null && loaded.books.isNotEmpty()
+                bump()
+            }
+        }
+    }
+
+    /**
+     * 加载当前分类的下一页并追加到书单。
+     *
+     * Legado 的发现页是滚动到底自动翻页，那需要 LazyListState（反射拿不到），所以翻页入口
+     * 做成书单末尾的「加载更多」行。失败时保持已加载内容不变，用户可以再点。
+     */
+    fun loadMore(context: Context?) {
+        val target = selection
+        if (target == DiscoverSelection.NONE || loadingMore || !hasMore) return
+        val loaded = state as? DiscoverLoadState.Loaded ?: return
+        val source = sources.firstOrNull { it.source.id == target.sourceId } ?: return
+        val kind = source.kinds.firstOrNull { it.title == target.kindTitle } ?: return
+        val key = selectionKey(target)
+        val nextPage = (loadedPages[key] ?: 1) + 1
+        val token = requestToken.incrementAndGet()
+        loadingMore = true
+        bump()
+        executor.execute {
+            val more = runCatching { DiscoverRepository.loadBooks(source.source, kind, page = nextPage) }
+                .getOrElse { DiscoverLoadState.Failed(it.message.orEmpty().ifBlank { it.javaClass.simpleName }) }
+            loadingMore = false
+            val fresh = more as? DiscoverLoadState.Loaded
+            if (fresh != null && fresh.books.isNotEmpty()) {
+                val merged = DiscoverLoadState.Loaded((loaded.books + fresh.books).distinctBy { it.key })
+                cache[key] = CachedBooks(merged, nextPage, true)
+                loadedPages[key] = nextPage
+                if (token == requestToken.get() && selection == target) {
+                    state = merged
+                    hasMore = true
+                    bump()
+                }
+                return@execute
+            }
+            // 空页或失败：空页把入口收掉；失败保持 hasMore，用户可再点重试。
+            if (fresh != null && token == requestToken.get() && selection == target) {
+                hasMore = false
                 bump()
             }
         }

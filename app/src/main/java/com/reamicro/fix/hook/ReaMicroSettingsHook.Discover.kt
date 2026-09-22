@@ -21,6 +21,8 @@ import com.reamicro.fix.hook.discover.DiscoverUiIcons
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.webdav.ANDROID_VIEW_KT_CLASS
 import com.reamicro.fix.hook.webdav.ANDROID_VIEW_METHOD
+import com.reamicro.fix.hook.webdav.TEXT_OVERFLOW_CLASS
+import com.reamicro.fix.hook.webdav.TEXT_SECONDARY_SINGLE_LINE_MASK
 import com.reamicro.fix.hook.webdav.dp
 import com.reamicro.fix.hook.webdav.normalizedAssociationPlatformName
 import com.reamicro.fix.online.OnlineSourceAuth
@@ -60,9 +62,9 @@ import java.lang.reflect.Method
 // `renderHostTrailingText` 之间本来就是自由变量（三者的差异正好只有这三处），因此
 // `TEXT_DEFAULT_MASK` 的语义保持成立。
 //
-// 代价是**拿不到 `modifier` 与 `maxLines`**（掩码让它们走默认值）。所以：
-//   - 内边距与尺寸一律加在外层容器上，不挂文字；
-//   - 单行省略靠在数据侧截断（见 [fitText]），不依赖 `TextOverflow`。
+// 代价是**拿不到 `modifier` 形参**（掩码让它走默认值）。所以内边距与尺寸一律加在外层
+// 容器上，不挂文字。单行省略后来改传 `TextOverflow.Ellipsis`（见 [renderDiscoverText]），
+// 不再依赖数据侧截断。
 
 /** 页面入口：书源行 + 标签行 + 书单三段。 */
 internal fun ReaMicroSettingsHook.renderDiscoverContent(innerPaddings: Any, composer: Any) {
@@ -147,6 +149,8 @@ private fun ReaMicroSettingsHook.renderDiscoverSourceRow(source: DiscoverSource?
     }
     // Row 的 content 是 `@Composable RowScope.() -> Unit`：必须 composableLambda + 取 args[1]。
     // 源名最多占内容宽的 70%，右侧要给布局按钮和「▾」留位置。
+    // 这里仍需数据侧截断：名字节点拿不到 `modifier`（掩码吃掉），没法用 weight 约束宽度，
+    // 长名字会把布局按钮顶出屏幕。70% 预算本身带了余量，测量偏差可接受。
     val sourceNameWidthPx = pageContentWidthPx() * DISCOVER_SOURCE_NAME_WIDTH_RATIO
     val sourceLabel = fitText(
         source?.name.orEmpty().ifBlank { DISCOVER_NO_SOURCE_LABEL },
@@ -405,12 +409,39 @@ private fun ReaMicroSettingsHook.renderDiscoverBooks(
                     }
                 }
             }
+            if (DiscoverState.hasMore) {
+                addLazyItem(lazyListScope, DISCOVER_LOAD_MORE_ITEM_KEY) { itemComposer ->
+                    renderDiscoverLoadMore(itemComposer)
+                }
+            }
         }
     }
 }
 
-/** 加载 / 失败 / 空的统一卡片，整块可点表示重试。 */
-private fun ReaMicroSettingsHook.renderDiscoverStatusCard(
+/**
+ * 书单末尾的「加载更多」行。
+ *
+ * Legado 的发现页是滚动到底自动翻页，那需要 LazyListState（反射拿不到），所以翻页入口
+ * 做成显式按钮；加载中同一行变成状态文案，空页后由 `hasMore=false` 收起整行。
+ */
+private fun ReaMicroSettingsHook.renderDiscoverLoadMore(composer: Any) {
+    val count = (DiscoverState.state as? DiscoverLoadState.Loaded)?.books?.size ?: 0
+    val loading = DiscoverState.loadingMore
+    val activity = activityProvider()
+    renderHostActionCard(
+        listOf(
+            ActionRow(
+                key = "discover_load_more",
+                title = if (loading) "正在加载更多…" else "加载更多",
+                subtitle = "已加载 $count 本",
+                onClick = { if (!DiscoverState.loadingMore) DiscoverState.loadMore(activity?.applicationContext) },
+            ),
+        ),
+        composer,
+    )
+}
+
+/** 加载 / 失败 / 空的统一卡片，整块可点表示重试。 */private fun ReaMicroSettingsHook.renderDiscoverStatusCard(
     title: String,
     subtitle: String?,
     onRetry: (() -> Unit)?,
@@ -429,7 +460,7 @@ private fun ReaMicroSettingsHook.renderDiscoverStatusCard(
     )
 }
 
-/** 列表模式的一本书：封面 +（书名 / 作者 / 标签串）。 */
+/** 列表模式的一本书：封面 +（书名 / 作者·最新 / 状态·字数·平台 / 分类标签）。 */
 private fun ReaMicroSettingsHook.renderDiscoverListRow(
     source: DiscoverSource,
     book: DiscoverBook,
@@ -437,16 +468,17 @@ private fun ReaMicroSettingsHook.renderDiscoverListRow(
 ) {
     val titleColor = colorScheme(composer).longMethod("getOnBackground")
     val metaColor = schemeColor(composer, "getOnSurfaceVariant", "getOnBackground")
-    // 先把文本收敛到可用宽度再渲染：本项目拿不到 `TextOverflow`，单行溢出是硬裁切，
-    // 会切掉半个字。按宽度预量既不会误伤短书名，也不会裁到字形中间。
-    val textWidthPx = listTextWidthPx()
-    val title = fitText(book.name, textWidthPx, DISCOVER_LIST_TITLE_SP)
-    val author = fitText(book.author, textWidthPx, DISCOVER_LIST_AUTHOR_SP)
-    val tagLine = fitText(
-        discoverTagLine(book, source),
-        textWidthPx,
-        DISCOVER_LIST_AUTHOR_SP,
-    )
+    val info = discoverTagInfo(book, source)
+    val titleStyle = textStyle(composer, "getTitleSmall", "getBodyMedium")
+    val bodyStyle = textStyle(composer, "getBodySmall", "getBodyMedium")
+    val labelStyle = textStyle(composer, "getLabelSmall", "getBodySmall")
+    // 单行省略交给 Compose 自己做（[renderDiscoverText] 传了 TextOverflow.Ellipsis）。
+    // 不要再用 Paint 预截断：测量字号/字体与真实渲染存在设备级偏差，预截断会让省略号
+    // 提前好几十 dp 落地，而且 Compose 看到的是已带 `…` 的短串，不会再补省略。
+    val title = book.name
+    val latestLine = book.latestLine()
+    val coreLine = discoverCoreTagLine(book, source)
+    val tagLine = info.kindText
 
     val rowContent = composableLambda(DISCOVER_LIST_ROW_KEY + book.key.hashCode(), FUNCTION3_CLASS) { args ->
         val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
@@ -456,14 +488,18 @@ private fun ReaMicroSettingsHook.renderDiscoverListRow(
         }
         val textContent = composableLambda(DISCOVER_LIST_TEXT_KEY + book.key.hashCode(), FUNCTION3_CLASS) { colArgs ->
             val colInner = colArgs?.getOrNull(1) ?: return@composableLambda targetUnit()
-            renderDiscoverText(title, titleColor, textStyle(colInner, "getTitleSmall", "getBodyMedium"), colInner)
-            if (author.isNotBlank()) {
-                renderDiscoverSpacer(colInner, DISCOVER_LIST_LINE_GAP_DP)
-                renderDiscoverText(author, metaColor, textStyle(colInner, "getBodySmall", "getBodyMedium"), colInner)
+            renderDiscoverText(title, titleColor, titleStyle, colInner)
+            if (latestLine.isNotBlank()) {
+                renderDiscoverVGap(colInner, DISCOVER_LIST_LINE_GAP_DP)
+                renderDiscoverText(latestLine, metaColor, bodyStyle, colInner)
+            }
+            if (coreLine.isNotBlank()) {
+                renderDiscoverVGap(colInner, DISCOVER_LIST_TAG_GAP_DP)
+                renderDiscoverText(coreLine, metaColor, bodyStyle, colInner)
             }
             if (tagLine.isNotBlank()) {
-                renderDiscoverSpacer(colInner, DISCOVER_LIST_TAG_GAP_DP)
-                renderDiscoverText(tagLine, metaColor, textStyle(colInner, "getBodySmall", "getBodyMedium"), colInner)
+                renderDiscoverVGap(colInner, DISCOVER_LIST_TAG_GAP_DP)
+                renderDiscoverText(tagLine, metaColor, labelStyle, colInner)
             }
             targetUnit()
         }
@@ -522,7 +558,6 @@ private fun ReaMicroSettingsHook.renderDiscoverGridRow(
     val titleColor = colorScheme(composer).longMethod("getOnBackground")
     val metaColor = schemeColor(composer, "getOnSurfaceVariant", "getOnBackground")
     val coverHeightDp = discoverGridCoverHeightDp()
-    val cellWidthPx = gridCellWidthPx()
 
     val content = composableLambda(DISCOVER_GRID_ROW_KEY, FUNCTION3_CLASS) { args ->
         val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
@@ -530,17 +565,17 @@ private fun ReaMicroSettingsHook.renderDiscoverGridRow(
             val cellContent = composableLambda(DISCOVER_GRID_CELL_KEY + book.key.hashCode(), FUNCTION3_CLASS) { cellArgs ->
                 val cellInner = cellArgs?.getOrNull(1) ?: return@composableLambda targetUnit()
                 renderDiscoverCover(source, book, null, coverHeightDp, cellInner)
-                renderDiscoverSpacer(cellInner, DISCOVER_GRID_TITLE_GAP_DP)
+                renderDiscoverVGap(cellInner, DISCOVER_GRID_TITLE_GAP_DP)
                 renderDiscoverText(
-                    fitText(book.name, cellWidthPx, DISCOVER_GRID_TITLE_SP),
+                    book.name,
                     titleColor,
                     textStyle(cellInner, "getBodyMedium", "getBodySmall"),
                     cellInner,
                 )
                 if (book.author.isNotBlank()) {
-                    renderDiscoverSpacer(cellInner, DISCOVER_GRID_AUTHOR_GAP_DP)
+                    renderDiscoverVGap(cellInner, DISCOVER_GRID_AUTHOR_GAP_DP)
                     renderDiscoverText(
-                        fitText(book.author, cellWidthPx, DISCOVER_GRID_AUTHOR_SP),
+                        book.author,
                         metaColor,
                         textStyle(cellInner, "getLabelSmall", "getBodySmall"),
                         cellInner,
@@ -589,18 +624,22 @@ private fun ReaMicroSettingsHook.renderDiscoverGridRow(
 // ── 通用小件 ────────────────────────────────────────────────────────────────
 
 /**
- * 通用文字：实参序列逐字复制自 `renderHostText`，只放开 `text` / `color` / `style` / 单行开关。
+ * 通用文字：实参序列逐字复制自宿主 `Text-Nvy7gAk`，只放开 `text` / `color` / `style`。
  *
  * 22 个实参一个都不能少也不能错位（掩码假定其余形参走默认值）。
  *
- * ## 单行为什么要动掩码
+ * ## 单行为什么带 `TextOverflow.Ellipsis`
  *
- * `TEXT_DEFAULT_MASK` 让 `maxLines` / `minLines` 走默认值（即不限制行数），所以默认渲染出来
- * 的书名会自己折行、把网格撑得参差不齐。单行只能靠**显式传 `maxLines=1, minLines=1` 两位
- * 并把掩码换成 `TEXT_SINGLE_LINE_MASK`**——这正是 `renderHostSupportingText(singleLine = true)`
- * 在设置页跑通的组合（同样的实参位、同样的掩码），因此照抄即可。
+ * 曾用 `fitText`（Paint 预量宽度）做数据侧截断，但测量画笔的字号/字体与实际渲染存在
+ * 设备级偏差（宿主可在组合里覆盖 Density 的 fontScale，声明 12sp 实渲 10sp 左右），
+ * 截断点会提前百分之十几——同一份书单在测试机上正好顶到行末、在窄屏机上却大片提前收尾。
  *
- * 注意单行模式下溢出是**裁切**而不是省略号，所以调用方必须先把文本截断（见 [fitText]）。
+ * 现在**单行省略交给 Compose 自己做**：照抄在线补全搜索结果行
+ * （`renderOnlineCompletionSecondaryText`）已验证的实参组合——
+ * `overflow=Ellipsis`(index 12)、`softWrap=false`、`maxLines=1`(index 14)、
+ * `changed=(0, 24960)`、`TEXT_SECONDARY_SINGLE_LINE_MASK`(110586)。
+ * 掩码 bit12 清零表示 overflow 形参走显式值；Compose 用真实字体度量截断，
+ * 任何设备上省略号都精确落在行末。
  */
 private fun ReaMicroSettingsHook.renderDiscoverText(
     text: String,
@@ -609,7 +648,34 @@ private fun ReaMicroSettingsHook.renderDiscoverText(
     composer: Any,
     singleLine: Boolean = true,
 ) {
-    val lineFlag = if (singleLine) 1 else 0
+    if (!singleLine) {
+        method(TEXT_KT_CLASS, TEXT_METHOD, DISCOVER_TEXT_PARAMETER_COUNT).invoke(
+            null,
+            text,
+            null,
+            color,
+            null,
+            0L,
+            null,
+            null,
+            null,
+            0L,
+            null,
+            null,
+            0L,
+            0,
+            false,
+            0,
+            0,
+            null,
+            style,
+            composer,
+            0,
+            0,
+            TEXT_DEFAULT_MASK,
+        )
+        return
+    }
     method(TEXT_KT_CLASS, TEXT_METHOD, DISCOVER_TEXT_PARAMETER_COUNT).invoke(
         null,
         text,
@@ -624,23 +690,41 @@ private fun ReaMicroSettingsHook.renderDiscoverText(
         null,
         null,
         0L,
-        0,
+        // index 12：`TextOverflow` 是 Int inline class（0=Clip / 1=Ellipsis）。
+        discoverTextOverflowEllipsis(),
         false,
-        lineFlag,
-        lineFlag,
+        1,
+        0,
         null,
         style,
         composer,
         0,
-        0,
-        if (singleLine) TEXT_SINGLE_LINE_MASK else TEXT_DEFAULT_MASK,
+        DISCOVER_TEXT_ELLIPSIS_CHANGED,
+        TEXT_SECONDARY_SINGLE_LINE_MASK,
     )
 }
+
+/** `TextOverflow.Ellipsis` 的 Int 形态（inline class 装箱后就是 Int）。 */
+private fun ReaMicroSettingsHook.discoverTextOverflowEllipsis(): Int =
+    staticObject(TEXT_OVERFLOW_CLASS, "INSTANCE").method0("getEllipsis") as Int
 
 /** 固定宽度的占位。宿主没有导出 `Spacer` 的宽度工厂，用 `width` 修饰符撑开。 */
 private fun ReaMicroSettingsHook.renderDiscoverSpacer(composer: Any, widthDp: Int) {
     val modifier = method(SIZE_KT_CLASS, WIDTH_METHOD, DISCOVER_SIZE_PARAMETER_COUNT)
         .invoke(null, modifierInstance(), udp(widthDp))
+    method(SPACER_KT_CLASS, SPACER_METHOD, DISCOVER_SPACER_PARAMETER_COUNT).invoke(null, modifier, composer, 0)
+}
+
+/**
+ * 纵向占位：给 `height` 修饰符。
+ *
+ * [renderDiscoverSpacer] 挂的是 `width`——在 Row（横向主轴）里正确，但放进 Column
+ * （纵向主轴）后高度恒为 0，**间距整个消失**。网格封面和书名贴死、列表四行挤成一片，
+ * 都是它造成的。纵向间距一律用这个函数。
+ */
+private fun ReaMicroSettingsHook.renderDiscoverVGap(composer: Any, heightDp: Int) {
+    val modifier = method(SIZE_KT_CLASS, HEIGHT_METHOD, DISCOVER_SIZE_PARAMETER_COUNT)
+        .invoke(null, modifierInstance(), udp(heightDp))
     method(SPACER_KT_CLASS, SPACER_METHOD, DISCOVER_SPACER_PARAMETER_COUNT).invoke(null, modifier, composer, 0)
 }
 
@@ -851,7 +935,7 @@ private fun ReaMicroSettingsHook.discoverGridCoverHeightDp(): Int {
  *
  * 顺序与在线补全搜索结果的元信息列一致：
  * **状态 → 字数 → 章节数 → 平台 → 更新时间 → 其余（分类等）**。
- * 取不到的整段跳过，不占位。**不在这里按字数截断**——整串交给 [fitText] 按可用宽度收敛。
+ * 取不到的整段跳过，不占位。**不在这里截断**——单行省略由 [renderDiscoverText] 交给 Compose 处理。
  *
  * 结果按「源 + 书」缓存：滚动时每一帧都要重算，而里面的平台识别要跑正则与映射表。
  */
@@ -940,49 +1024,54 @@ private fun ReaMicroSettingsHook.pageContentWidthPx(): Float {
     return metrics.widthPixels - DISCOVER_PAGE_HORIZONTAL_PADDING_DP * 2 * metrics.density
 }
 
-/** 列表行里文字列的可用宽度：内容宽 - 行内边距 - 封面宽 - 封面与文字间距。 */
-private fun ReaMicroSettingsHook.listTextWidthPx(): Float {
-    val metrics = activityProvider()?.resources?.displayMetrics ?: return 0f
-    val fixed = (DISCOVER_LIST_ROW_HORIZONTAL_PADDING_DP * 2 +
-        DISCOVER_LIST_COVER_WIDTH_DP + DISCOVER_LIST_COVER_GAP_DP) * metrics.density
-    return (pageContentWidthPx() - fixed).coerceAtLeast(0f)
-}
+/** 第二行：作者 · 最新：<最新章节>。缺哪个就只显示另一个。 */
+private fun DiscoverBook.latestLine(): String = buildList {
+    if (author.isNotBlank()) add(author)
+    if (lastChapter.isNotBlank()) add("最新：$lastChapter")
+}.joinToString(" \u00b7 ")
 
-/** 网格一个格子的宽度（px）：内容宽扣掉列间距后三等分，与封面高度反算用的是同一个值。 */
-private fun ReaMicroSettingsHook.gridCellWidthPx(): Float {
-    val metrics = activityProvider()?.resources?.displayMetrics ?: return 0f
-    val gaps = DISCOVER_GRID_GAP_DP * (DISCOVER_GRID_COLUMNS - 1) * metrics.density
-    return ((pageContentWidthPx() - gaps) / DISCOVER_GRID_COLUMNS).coerceAtLeast(0f)
+/**
+ * 第三行：状态 / 字数 / 平台。
+ *
+ * 更新时间与分类不再混在这一行——第四行（分类标签）与「最新章节」已经把新鲜度交代清楚。
+ */
+internal fun ReaMicroSettingsHook.discoverCoreTagLine(book: DiscoverBook, source: DiscoverSource): String {
+    val info = discoverTagInfo(book, source)
+    return buildList {
+        book.status.takeIf { it.isNotBlank() }?.let { add(it) }
+        formatOnlineWordCount(book.wordCount)
+            .takeIf { it.isNotBlank() && !it.startsWith("-") }
+            ?.let { add(it) }
+        info.platformName.takeIf { it.isNotBlank() }?.let { add(it) }
+    }.joinToString(DISCOVER_TAG_SEPARATOR)
 }
 
 /**
  * 把文本收敛到指定宽度：**放得下就原样返回**，放不下才截断加省略号。
  *
- * 为什么不用 `TextOverflow.Ellipsis`：那需要给 `Text` 传 `overflow` 形参，而
- * [renderDiscoverText] 的实参掩码让排版参数全走默认值，单行溢出是**硬裁切**——表现为书名
- * 被切开半个字。早先按固定字数（`take(7)`）截断更糟：短书名明明放得下也被砍掉尾巴。
- * 所以改成按真实可用宽度预量。
+ * 现在只剩「源名」一个调用方——它拿不到 `modifier` 没法被 weight 约束，必须先量。
+ * 书单正文一律走 Compose 原生省略（[renderDiscoverText]），不要再经过这里：
+ * 画笔测量与真实渲染存在设备级偏差（见 [renderDiscoverText] 的说明）。
  */
 private fun ReaMicroSettingsHook.fitText(text: String, maxWidthPx: Float, sizeSp: Float): String {
     val trimmed = text.trim()
     if (trimmed.isEmpty() || maxWidthPx <= 0f) return trimmed
     val paint = discoverMeasurePaint(sizeSp)
     if (paint.measureText(trimmed) <= maxWidthPx) return trimmed
-    val reserve = paint.measureText(DISCOVER_ELLIPSIS)
+    val ellipsis = discoverTextEllipsis()
+    val reserve = paint.measureText(ellipsis)
     var end = trimmed.length
     while (end > 0 && paint.measureText(trimmed, 0, end) + reserve > maxWidthPx) end--
-    return if (end <= 0) DISCOVER_ELLIPSIS else trimmed.substring(0, end) + DISCOVER_ELLIPSIS
+    return if (end <= 0) ellipsis else trimmed.substring(0, end) + ellipsis
 }
+
+private fun discoverTextEllipsis(): String = "\u2026"
 
 /**
  * 测量画笔：一个实例按需换字号，字体取模块的全局字体。
  *
- * 不设字体会按系统默认字体量宽，与屏幕上渲染的字体不一致，截断位置就会偏——所以两处
- * （标签行溢出判断、文本自适应截断）共用这一支。
- *
- * `letterSpacing` 也要补上（单位是 em）：Compose 的 `TextStyle` 自带字间距（正文系约
- * 0.4sp），`Paint` 默认 0——不算进去的话测量偏窄，截断位置会压到字形上，表现为
- * 「明明还差一点到行末就被砍了」。
+ * 只服务分类标签行的溢出预测量（源名 fitText 同用）。与真实渲染仍可能存在设备级偏差，
+ * 所以文字本身的省略一律交给 Compose（[renderDiscoverText]），不要再用画笔结果截断正文。
  */
 private fun ReaMicroSettingsHook.discoverMeasurePaint(sizeSp: Float): Paint {
     val scaledDensity = activityProvider()?.resources?.displayMetrics?.scaledDensity ?: 1f
@@ -1150,9 +1239,9 @@ private const val DISCOVER_LIST_COVER_HEIGHT_DP = 62
 
 private const val DISCOVER_LIST_COVER_GAP_DP = 12
 
-private const val DISCOVER_LIST_ROW_HORIZONTAL_PADDING_DP = 16
+private const val DISCOVER_LIST_ROW_HORIZONTAL_PADDING_DP = 8
 
-private const val DISCOVER_LIST_ROW_VERTICAL_PADDING_DP = 12
+private const val DISCOVER_LIST_ROW_VERTICAL_PADDING_DP = 6
 
 private const val DISCOVER_LIST_LINE_GAP_DP = 4
 
@@ -1187,22 +1276,14 @@ private const val DISCOVER_SOURCE_NAME_SP = 16f
 /** 源名最多占内容宽的比例——右侧要给布局切换按钮留位置。 */
 private const val DISCOVER_SOURCE_NAME_WIDTH_RATIO = 0.7f
 
-/** 列表书名 / 作者的字号，与渲染时的 `titleSmall`(14) / `bodySmall`(12) 对齐，用于预量宽度。 */
-private const val DISCOVER_LIST_TITLE_SP = 14f
-private const val DISCOVER_LIST_AUTHOR_SP = 12f
-
-/** 网格书名 / 作者的字号，对应 `bodyMedium`(14) / `labelSmall`(11)。 */
-private const val DISCOVER_GRID_TITLE_SP = 14f
-private const val DISCOVER_GRID_AUTHOR_SP = 11f
-
-/** 截断用的省略号。 */
-private const val DISCOVER_ELLIPSIS = "…"
-
 /** 标签串的分隔符，与在线补全搜索结果的元信息行一致。 */
 private const val DISCOVER_TAG_SEPARATOR = " / "
 
 /** 平台名（这里取书源名）在标签串里的最大字数。 */
 private const val DISCOVER_TEXT_PARAMETER_COUNT = 22
+
+/** 单行省略组合的第二个 changed 槽位（照抄在线搜索结果行的实证值）。 */
+private const val DISCOVER_TEXT_ELLIPSIS_CHANGED = 24960
 
 private const val DISCOVER_SIZE_PARAMETER_COUNT = 2
 
@@ -1261,6 +1342,8 @@ private const val DISCOVER_LIST_TAG_KEY = 0x524D4697
 private const val DISCOVER_GRID_ROW_KEY = 0x524D4698
 
 private const val DISCOVER_GRID_CELL_KEY = 0x524D4699
+
+private const val DISCOVER_LOAD_MORE_ITEM_KEY = 0x524D469A
 
 private const val DISCOVER_LIST_ROW_ITEM_KEY_BASE = 0x524E0000
 
