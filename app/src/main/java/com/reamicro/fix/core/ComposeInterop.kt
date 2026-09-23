@@ -28,6 +28,10 @@ class ComposeInterop(
      *
      * [name] 只用于出错时的日志定位；回调内抛出的异常会被记录并降级为 Unit，
      * 避免异常穿透到宿主的 Compose 渲染栈里导致整页崩溃。
+     *
+     * 日志必须走 `XposedBridge.logAlways`：组合期异常被吞掉后，composer 组栈可能已经
+     * 失衡，真正的 fault 会以很久之后 `insertBottomUp` 越界的形式爆出来——普通 `log()`
+     * 的 INFO 级输出会被「简洁日志」整条吞掉，那就彻底无迹可循了。
      */
     fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any {
         val functionClass = resolveClass(functionClassName)
@@ -35,7 +39,7 @@ class ComposeInterop(
             when (method.name) {
                 "invoke" -> runCatching { block(args) }
                     .onFailure {
-                        XposedBridge.log("$logPrefix failed in $name callback: ${it.stackTraceToString()}")
+                        XposedBridge.logAlways("$logPrefix failed in $name callback: ${it.stackTraceToString()}")
                     }
                     .getOrElse { unitInstance() }
                 "toString" -> "ReaMicro$name"

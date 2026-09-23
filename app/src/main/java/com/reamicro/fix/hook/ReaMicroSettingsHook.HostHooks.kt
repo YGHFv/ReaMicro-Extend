@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
+import de.robv.android.xposed.XposedHelpers
 import com.reamicro.fix.hook.settings.*
 
 // ReaMicroSettingsHook 的宿主 hook 安装簇。
@@ -12,6 +13,179 @@ import com.reamicro.fix.hook.settings.*
 //
 // 从 ReaMicroSettingsHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的
 // 结果重新缩进回去与原文逐字节比对，不一致直接中止（tools/extract-hook-cluster.mjs）。
+/**
+ * 组合期「插入下标越界」诊断（发现页 `insertBottomUp` → `MutableVector.add` 越界闪退专用）。
+ *
+ * 崩溃栈里完全没有业务帧，静态分析无法确定是哪个容器在被错位插入。这里给插入链路上的
+ * **三层**都挂探针：`UiApplier.insertBottomUp` → `LayoutNode.insertAt$ui` →
+ * `MutableVector.add(int, T)`。每层各有三条日志：
+ * - **alive**（一次性）：证明这一层的 hook 真的会被调用。
+ * - **size-unreadable**（一次性量级）：尺寸反射读不到且下标不小，说明漏报现场就在这里。
+ * - **ILLEGAL**（条件触发）：`index > 当前子节点数`，即下一行数组拷贝必炸时，打出
+ *   父容器身份 + 现有子节点清单 + 两级父链 + 待插入节点——**这是本探针最有价值的一条**。
+ *
+ * ## 它抓到了什么（本探针的实际战果）
+ *
+ * 发现页宫格「加载更多」两次连点闪退，靠这条 ILLEGAL 定位到根因：
+ * ```
+ * ILLEGAL insert: idx=4 size=2 parent=RowMeasurePolicy 1124x626
+ *   children=[Column 354x626, Column 355x0] child=Column 0x0
+ * ```
+ * 父 Row 只有 2 个孩子却要插到下标 4。根因是同一 Row 内子节点**种类切换**
+ * （末行从「2 本书 + 1 个 Spacer 占位」变成「3 本书 + 0 个 Spacer」），
+ * gapbuffer 的 `PostInsertNodeFixup` 按槽位下标而非 applier 孩子下标调 insert，
+ * 于是下标溢出。修复见 `ReaMicroSettingsHook.Discover.kt` 的 `renderDiscoverGridRow`
+ * （每行固定产出同构格子，不再用 Spacer 补位）。
+ *
+ * ⚠ 历史坑：探针一度「三层 alive 都打出来、ILLEGAL 一条都没有」，原因不是 ART 内联，
+ * 而是 [layoutNodeChildrenSize] 读错了字段名（`_children` 实为 `_foldedChildren`），
+ * `runCatching` 把 NoSuchFieldException 静默吞掉，越界判定因此永远不成立。
+ */
+internal fun ReaMicroSettingsHook.hookLayoutNodeInsertDiagnostics() {
+    hookInsertProbe(
+        className = "androidx.compose.ui.node.UiApplier",
+        methodName = "insertBottomUp",
+        label = "UiApplier.insertBottomUp",
+        parentOf = { param ->
+            runCatching { XposedHelpers.getObjectField(param.thisObject, "current") }.getOrNull()
+                ?: runCatching { XposedHelpers.callMethod(param.thisObject, "getCurrent") }.getOrNull()
+        },
+    )
+    hookInsertProbe(
+        className = "androidx.compose.ui.node.LayoutNode",
+        methodName = "insertAt",
+        label = "LayoutNode.insertAt",
+        parentOf = { param -> param.thisObject },
+    )
+    hookInsertProbe(
+        className = "androidx.compose.runtime.collection.MutableVector",
+        methodName = "add",
+        label = "MutableVector.add",
+        parentOf = { param -> param.thisObject },
+        sizeOf = { vector ->
+            runCatching { XposedHelpers.callMethod(vector, "getSize") as? Int }.getOrNull()
+        },
+        describeNode = { "itself=${it?.javaClass?.simpleName}@${Integer.toHexString(System.identityHashCode(it))}" },
+    )
+}
+
+/**
+ * 给单个插入点挂 alive/ILLEGAL 双探针。
+ *
+ * ## 形参形状
+ *
+ * 三层目标的签名各不相同，统一按「首个形参是 int 下标」来找（`MutableVector.add(T)` 是
+ * 一元的追加版、**没有**下标形参，不是我们要盯的那个）：
+ * - `UiApplier.insertBottomUp(int, Object)` —— 崩溃栈里那一帧
+ * - `LayoutNode.insertAt(int, LayoutNode)`（`insertAt$ui` 编译后的名）
+ * - `MutableVector.add(int, Object)` —— 真正抛越界的 gapbuffer 写入
+ *
+ * 找不到就报 FAILED，不静默降级——形参过滤放宽过一次（上一轮按「名字 + 两个形参」取，
+ * 结果 `MutableVector` 被 1 元的 `add` 挤掉、拿错了方法），这类错误必须炸在明面上。
+ */
+private fun ReaMicroSettingsHook.hookInsertProbe(
+    className: String,
+    methodName: String,
+    label: String,
+    parentOf: (XC_MethodHook.MethodHookParam) -> Any?,
+    sizeOf: (Any) -> Int? = { layoutNodeChildrenSize(it) },
+    describeNode: (Any?) -> String = { describeLayoutNode(it) },
+) {
+    runCatching {
+        val targetClass = cls(className)
+        val method = targetClass.declaredMethods.firstOrNull {
+            it.name.startsWith(methodName) && it.parameterTypes.size == 2 &&
+                it.parameterTypes[0] == Integer.TYPE
+        } ?: error("$className.$methodName(int,…) not found")
+        method.isAccessible = true
+        var aliveLogged = false
+        XposedBridge.hookMethod(method, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                val index = param.args.getOrNull(0) as? Int ?: return
+                if (!aliveLogged) {
+                    aliveLogged = true
+                    XposedBridge.logAlways("[ReaMicro] insert probe alive: $label")
+                }
+                val parent = runCatching { parentOf(param) }.getOrNull() ?: return
+                val size = runCatching { sizeOf(parent) }.getOrNull()
+                if (size == null) {
+                    // 尺寸读不到且下标不小，极可能就是漏报现场——也打一条（一次性由 alive 保证量级）。
+                    if (index >= 4) {
+                        XposedBridge.logAlways(
+                            "[ReaMicro] insert probe size-unreadable: $label idx=$index " +
+                                "parent=${parent.javaClass.name}",
+                        )
+                    }
+                    return
+                }
+                if (index <= size) return
+                XposedBridge.logAlways(
+                    "[ReaMicro] ILLEGAL insert: $label idx=$index size=$size " +
+                        "parent=${describeNode(parent)} " +
+                        "children=${describeChildren(parent)} " +
+                        "grandparent=${describeLayoutNode(layoutNodeParent(parent))} " +
+                        "child=${describeLayoutNode(param.args.getOrNull(1))}",
+                )
+            }
+        })
+        XposedBridge.log("$LOG_PREFIX insert probe installed: $label")
+    }.onFailure {
+        XposedBridge.logAlways("$LOG_PREFIX insert probe FAILED: $label ${it.javaClass.simpleName}: ${it.message}")
+    }
+}
+
+/**
+ * 读 LayoutNode 当前子节点数。
+ *
+ * **字段名是 `_foldedChildren`，不是 `_children`**——上一轮探针「一条日志都没有」的真正原因
+ * 就在这里：`getObjectField(node, "_children")` 每次都抛 NoSuchFieldException，被
+ * `runCatching` 静默吞掉，于是 size 恒为 null、越界判定永远不成立。
+ * 已用 MT 反编译核对（宿主 2.3.2 beta）：`LayoutNode._foldedChildren:
+ * MutableVectorWithMutationTracking`（另有 `_unfoldedChildren` / `_zSortedChildren` 两个
+ * 裸 `MutableVector`，但插入链路读写的是 folded 那个），包装类暴露 `getSize()`。
+ */
+private fun layoutNodeChildrenSize(node: Any): Int? = runCatching {
+    val children = XposedHelpers.getObjectField(node, FOLDED_CHILDREN_FIELD) ?: return@runCatching null
+    (XposedHelpers.callMethod(children, "getSize") as? Int)
+        ?: runCatching {
+            XposedHelpers.callMethod(XposedHelpers.getObjectField(children, "vector"), "getSize") as? Int
+        }.getOrNull()
+}.getOrNull()
+
+/** `LayoutNode` 持有子节点向量的字段名（宿主 2.3.2 beta 实测）。 */
+private const val FOLDED_CHILDREN_FIELD = "_foldedChildren"
+
+private fun layoutNodeParent(node: Any): Any? =
+    runCatching { XposedHelpers.callMethod(node, "getParent") }.getOrNull()
+
+/** 容器身份速写：measurePolicy 类名（Row/Column/Box/LazyList 各不相同）+ 实测尺寸 + 身份哈希。 */
+private fun describeLayoutNode(node: Any?): String {
+    if (node == null) return "null"
+    val policy = runCatching { XposedHelpers.callMethod(node, "getMeasurePolicy") }.getOrNull()
+    val width = runCatching { XposedHelpers.callMethod(node, "getWidth") as? Int }.getOrNull()
+    val height = runCatching { XposedHelpers.callMethod(node, "getHeight") as? Int }.getOrNull()
+    return "${policy?.javaClass?.simpleName}@${Integer.toHexString(System.identityHashCode(node))} ${width}x$height"
+}
+
+/**
+ * 越界现场把父容器**已经存在**的子节点逐个列出来（类型 + 尺寸 + 身份）。
+ *
+ * 只打 `size=N` 不够——真正要回答的是「这个 Row 里现在是哪两个节点，正被插入的又是第几个」。
+ * `_foldedChildren` 是 `MutableVectorWithMutationTracking`，其 `vector` 字段是裸
+ * `MutableVector`，`content` 数组 + `size` 才是真实数据源。
+ */
+private fun describeChildren(node: Any): String = runCatching {
+    val folded = XposedHelpers.getObjectField(node, FOLDED_CHILDREN_FIELD) ?: return@runCatching "?"
+    val vector = runCatching { XposedHelpers.getObjectField(folded, "vector") }.getOrNull() ?: folded
+    val size = runCatching { XposedHelpers.callMethod(vector, "getSize") as? Int }.getOrNull()
+        ?: return@runCatching "?"
+    val content = runCatching { XposedHelpers.getObjectField(vector, "content") }.getOrNull() as? Array<*>
+        ?: return@runCatching "size=$size content=?"
+    (0 until minOf(size, 12)).joinToString(prefix = "[", postfix = "]", separator = ",") { i ->
+        describeLayoutNode(content.getOrNull(i))
+    }
+}.getOrDefault("?")
+
 internal fun ReaMicroSettingsHook.hookStringResource() {
     runCatching {
         val stringResourcesClass = cls(STRING_RESOURCES_CLASS)

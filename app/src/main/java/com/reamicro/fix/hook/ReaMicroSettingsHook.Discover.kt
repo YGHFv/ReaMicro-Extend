@@ -347,13 +347,13 @@ private fun ReaMicroSettingsHook.renderDiscoverBooks(
 ) {
     when (val state = DiscoverState.state) {
         DiscoverLoadState.Idle, DiscoverLoadState.Loading -> {
-            addLazyItem(lazyListScope, DISCOVER_BOOK_STATUS_ITEM_KEY) { itemComposer ->
+            addLazyItem(lazyListScope, DISCOVER_BOOK_STATUS_ITEM_KEY, DISCOVER_STATUS_ITEM_ID) { itemComposer ->
                 renderDiscoverStatusCard("正在加载…", selection.kindTitle, null, itemComposer)
             }
         }
 
         is DiscoverLoadState.Failed -> {
-            addLazyItem(lazyListScope, DISCOVER_BOOK_STATUS_ITEM_KEY) { itemComposer ->
+            addLazyItem(lazyListScope, DISCOVER_BOOK_STATUS_ITEM_KEY, DISCOVER_STATUS_ITEM_ID) { itemComposer ->
                 renderDiscoverStatusCard("加载失败", state.message, {
                     DiscoverState.reload(activityProvider()?.applicationContext)
                 }, itemComposer)
@@ -362,7 +362,7 @@ private fun ReaMicroSettingsHook.renderDiscoverBooks(
 
         is DiscoverLoadState.Loaded -> {
             if (state.books.isEmpty()) {
-                addLazyItem(lazyListScope, DISCOVER_BOOK_STATUS_ITEM_KEY) { itemComposer ->
+                addLazyItem(lazyListScope, DISCOVER_BOOK_STATUS_ITEM_KEY, DISCOVER_STATUS_ITEM_ID) { itemComposer ->
                     renderDiscoverStatusCard("暂无内容", selection.kindTitle, {
                         DiscoverState.reload(activityProvider()?.applicationContext)
                     }, itemComposer)
@@ -370,9 +370,16 @@ private fun ReaMicroSettingsHook.renderDiscoverBooks(
                 return
             }
             if (source == null) return
+            // LazyList item key 必须全局唯一：首屏数据没走 loadMore 的 distinctBy，
+            // 源里混进重复书目时重复 key 会直接崩，渲染侧再兜一次。
+            val books = state.books.distinctBy { it.key }
             if (DiscoverState.layout == DiscoverLayout.GRID) {
-                state.books.chunked(DISCOVER_GRID_COLUMNS).forEachIndexed { rowIndex, rowBooks ->
-                    addLazyItem(lazyListScope, DISCOVER_GRID_ROW_ITEM_KEY_BASE + rowIndex) { itemComposer ->
+                books.chunked(DISCOVER_GRID_COLUMNS).forEachIndexed { rowIndex, rowBooks ->
+                    addLazyItem(
+                        lazyListScope,
+                        DISCOVER_GRID_ROW_ITEM_KEY_BASE + rowIndex,
+                        "discover_grid_row_${rowBooks.first().key}",
+                    ) { itemComposer ->
                         renderDiscoverGridRow(source, rowBooks, itemComposer)
                     }
                 }
@@ -381,17 +388,25 @@ private fun ReaMicroSettingsHook.renderDiscoverBooks(
                 //
                 // 曾经为了去掉「每 6 本一条空白带」改成整张卡片单 item，结果一次性往 LazyColumn
                 // 里插入几百个节点，触发了 Compose 的 `UiApplier.insertBottomUp` →
-                // `MutableVector.add` 越界崩溃（`srcPos=5 dstPos=6 length=-3`）。
+                // `MutableVector.add` 越界崩溃（`src.length=16 srcPos=5 dstPos=6 length=-3`，
+                // 与网格模式那次同族：gapbuffer 原地插入的下标与实际孩子数不一致）。
                 // 逐行 item 每次只插入十来个节点，且封面天然懒加载（进入页面不再同时发起几十个请求），
                 // 代价是失去卡片背景——与宿主自己的搜索结果页一致，行距也回到页面的统一节奏。
-                state.books.forEachIndexed { index, book ->
-                    addLazyItem(lazyListScope, DISCOVER_LIST_ROW_ITEM_KEY_BASE + index) { itemComposer ->
+                //
+                // 注意：列表模式下每个 item 的结构天然恒定（封面 + 固定数量的文字行），
+                // 不像网格行那样会因「本行书数变化」而切换子节点种类，因此不受该崩溃影响。
+                books.forEachIndexed { index, book ->
+                    addLazyItem(
+                        lazyListScope,
+                        DISCOVER_LIST_ROW_ITEM_KEY_BASE + index,
+                        "discover_list_${book.key}",
+                    ) { itemComposer ->
                         renderDiscoverListRow(source, book, itemComposer)
                     }
                 }
             }
             if (DiscoverState.hasMore) {
-                addLazyItem(lazyListScope, DISCOVER_LOAD_MORE_ITEM_KEY) { itemComposer ->
+                addLazyItem(lazyListScope, DISCOVER_LOAD_MORE_ITEM_KEY, DISCOVER_LOAD_MORE_ITEM_ID) { itemComposer ->
                     renderDiscoverLoadMore(itemComposer)
                 }
             }
@@ -526,10 +541,31 @@ private fun ReaMicroSettingsHook.renderDiscoverListRow(
 }
 
 /**
- * 网格模式的一行（最多三本）。
+ * 网格模式的一行。
  *
- * 每格 `weight(1f)` 等分，封面宽度由格子宽度决定，所以封面高度必须按可用宽度**反算**
- * ——见 [discoverGridCoverHeightDp]。
+ * 每格 `weight(1f)` 等分；封面宽度吃格子的实测宽度，封面高度由 `aspectRatio(3:4)`
+ * **在布局期**从那个宽度推导——不传任何屏幕尺寸常量（为什么见 [renderDiscoverCover]）。
+ *
+ * ## 每行固定产出 [DISCOVER_GRID_COLUMNS] 个同构格子（**不要用 Spacer 补位**）
+ *
+ * 这是 `加载更多` 两次连点闪退（`ArrayIndexOutOfBoundsException: … length=-2/-3`）的真正修复点。
+ *
+ * 宿主 `LazyList` 的 item 按 key 复用：追加数据后，原来的「末行」（例如 2 本 → 2 格 + 1 个
+ * Spacer 占位）会原地变成「3 本 → 3 格」。孩子**数量**没变（都是 3），但位置 2 上的节点**种类**
+ * 从 `Spacer` 变成了格子的 `Column`。宿主这套 gapbuffer 运行时（`PostInsertNodeFixup`）
+ * 在种类切换时会按**槽位下标**而不是 applier 的孩子下标去调 `insertBottomUp`，算出来的
+ * 下标比真实孩子数大，`MutableVector.add` 的 `arraycopy` 长度变成负数直接闪退。
+ *
+ * 实机取证（`children=` 是探针打印的父 Row 现有子节点）：
+ * ```
+ * ILLEGAL insert: idx=4 size=2 parent=RowMeasurePolicy 1124x626
+ *   children=[Column 354x626, Column 355x0] child=Column 0x0
+ * ```
+ * 只有 2 个孩子却要插到下标 4。
+ *
+ * 修法：把「缺书的槽位」也做成**同一个格子代码路径**产出的空 Column，而不是 Spacer。
+ * 这样每行的孩子种类与数量恒为 [DISCOVER_GRID_COLUMNS] 个 `Column`，孩子下标与格子下标
+ * 一一对应，追加数据时不再发生种类切换。
  */
 private fun ReaMicroSettingsHook.renderDiscoverGridRow(
     source: DiscoverSource,
@@ -538,38 +574,65 @@ private fun ReaMicroSettingsHook.renderDiscoverGridRow(
 ) {
     val titleColor = colorScheme(composer).longMethod("getOnBackground")
     val metaColor = schemeColor(composer, "getOnSurfaceVariant", "getOnBackground")
-    val coverHeightDp = discoverGridCoverHeightDp()
-
-    val content = composableLambda(DISCOVER_GRID_ROW_KEY, FUNCTION3_CLASS) { args ->
+    // 内容 lambda 的 key 按行区分（首书 key）：所有行共用一个常量 key 时，
+    // 重组后不同行的组身份无法区分，结构不同的两行可能互相复用槽位。
+    val content = composableLambda(DISCOVER_GRID_ROW_KEY + books.first().key.hashCode(), FUNCTION3_CLASS) { args ->
         val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
-        books.forEach { book ->
-            val cellContent = composableLambda(DISCOVER_GRID_CELL_KEY + book.key.hashCode(), FUNCTION3_CLASS) { cellArgs ->
+        // 每行固定产出 [DISCOVER_GRID_COLUMNS] 个子节点，且**全部由同一个格子代码路径**生成
+        // （同一 composableLambda key + 同一个 Column）。缺书的槽位用「空格子」补齐。
+        //
+        // 为什么不能用 Spacer 补位（曾经的写法）：
+        // 宿主这套 gapbuffer 运行时在「同一 Row 内子节点种类发生变化」时会把
+        // `PostInsertNodeFixup` 的下标算成**槽位下标**而不是 applier 的孩子下标。
+        // 末行从「2 本书 → 加 2 个 Spacer」变成「3 本书 → 0 个 Spacer」时，位置 2 上
+        // Spacer 的组被换成格子的 λ 组，插入下标按槽位算出来是 4、而真实孩子数只有 2，
+        // `MutableVector.add` 的数组拷贝 length = size - idx = -2 → 直接闪退
+        // （实机取证：`children=[Column 354x626, Column 355x0]` 却要插到 idx=4）。
+        // 全部用同构格子后，孩子下标与格子下标一一对应，不再有种类切换。
+        repeat(DISCOVER_GRID_COLUMNS) { columnIndex ->
+            val book = books.getOrNull(columnIndex)
+            val cellContent = composableLambda(DISCOVER_GRID_CELL_KEY + columnIndex, FUNCTION3_CLASS) { cellArgs ->
                 val cellInner = cellArgs?.getOrNull(1) ?: return@composableLambda targetUnit()
-                renderDiscoverCover(source, book, null, coverHeightDp, cellInner)
-                renderDiscoverVGap(cellInner, DISCOVER_GRID_TITLE_GAP_DP)
-                renderDiscoverText(
-                    book.name,
-                    titleColor,
-                    textStyle(cellInner, "getBodyMedium", "getBodySmall"),
-                    cellInner,
-                )
-                if (book.author.isNotBlank()) {
-                    renderDiscoverVGap(cellInner, DISCOVER_GRID_AUTHOR_GAP_DP)
+                if (book != null) {
+                    // 封面自带宽下边距（书名间距），不再另插一个 Spacer——见 [renderDiscoverCover]。
+                    renderDiscoverCover(source, book, null, null, cellInner, bottomGapDp = DISCOVER_GRID_TITLE_GAP_DP)
+                    val titleStyle = textStyle(cellInner, "getBodyMedium", "getBodySmall")
+                    val overflow = book.cellTextOverflowLines(titleStyle)
                     renderDiscoverText(
-                        book.author,
-                        metaColor,
-                        textStyle(cellInner, "getLabelSmall", "getBodySmall"),
+                        book.name,
+                        titleColor,
+                        titleStyle,
                         cellInner,
+                        singleLine = false,
+                        maxLines = GRID_TITLE_MAX_LINES,
+                        overflow = overflow,
                     )
+                    // 作者行永远占位：作者为空时留一个等高空位，**不省略节点**。
+                    //
+                    // 理由同上：格子内子节点数量必须恒定，追加数据时不能出现节点的增删。
+                    // （`cellTextOverflowLines` 把书名压在固定行数、`maxLines` 固定 2 行，
+                    // 都是同一个不变量的一部分。）
+                    renderDiscoverVGap(cellInner, DISCOVER_GRID_AUTHOR_GAP_DP)
+                    if (book.author.isNotBlank()) {
+                        renderDiscoverText(
+                            book.author,
+                            metaColor,
+                            textStyle(cellInner, "getLabelSmall", "getBodySmall"),
+                            cellInner,
+                        )
+                    }
                 }
                 targetUnit()
             }
-            val cellModifier = clickableModifier(
-                method(DISCOVER_ROW_SCOPE_INSTANCE_CLASS, DISCOVER_ROW_WEIGHT_METHOD, DISCOVER_ROW_WEIGHT_PARAMETER_COUNT)
-                    .invoke(rowScopeInstance(), modifierInstance(), 1f, true),
-                "DiscoverGridBook${book.key.hashCode()}",
-            ) {
-                openDiscoverBook(source, book)
+            val baseModifier = method(
+                DISCOVER_ROW_SCOPE_INSTANCE_CLASS, DISCOVER_ROW_WEIGHT_METHOD, DISCOVER_ROW_WEIGHT_PARAMETER_COUNT,
+            ).invoke(rowScopeInstance(), modifierInstance(), 1f, true)
+            val cellModifier = if (book != null) {
+                clickableModifier(baseModifier, "DiscoverGridBook${book.key.hashCode()}") {
+                    openDiscoverBook(source, book)
+                }
+            } else {
+                baseModifier
             }
             method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
                 null,
@@ -581,12 +644,6 @@ private fun ReaMicroSettingsHook.renderDiscoverGridRow(
                 0,
                 0,
             )
-        }
-        // 末行不满三格时补等宽占位，否则前面几格会因为 weight 摊分而变宽、与上一行错位。
-        repeat(DISCOVER_GRID_COLUMNS - books.size) {
-            val filler = method(DISCOVER_ROW_SCOPE_INSTANCE_CLASS, DISCOVER_ROW_WEIGHT_METHOD, DISCOVER_ROW_WEIGHT_PARAMETER_COUNT)
-                .invoke(rowScopeInstance(), modifierInstance(), 1f, true)
-            method(SPACER_KT_CLASS, SPACER_METHOD, DISCOVER_SPACER_PARAMETER_COUNT).invoke(null, filler, inner, 0)
         }
         targetUnit()
     }
@@ -615,12 +672,21 @@ private fun ReaMicroSettingsHook.renderDiscoverGridRow(
  * 设备级偏差（宿主可在组合里覆盖 Density 的 fontScale，声明 12sp 实渲 10sp 左右），
  * 截断点会提前百分之十几——同一份书单在测试机上正好顶到行末、在窄屏机上却大片提前收尾。
  *
- * 现在**单行省略交给 Compose 自己做**：照抄在线补全搜索结果行
+ * 现在**省略交给 Compose 自己做**：照抄在线补全搜索结果行
  * （`renderOnlineCompletionSecondaryText`）已验证的实参组合——
  * `overflow=Ellipsis`(index 12)、`softWrap=false`、`maxLines=1`(index 14)、
  * `changed=(0, 24960)`、`TEXT_SECONDARY_SINGLE_LINE_MASK`(110586)。
  * 掩码 bit12 清零表示 overflow 形参走显式值；Compose 用真实字体度量截断，
  * 任何设备上省略号都精确落在行末。
+ *
+ * ## 多行（网格书名）
+ *
+ * 网格书名限 [GRID_TITLE_MAX_LINES] 行。多行版把 `softWrap` 从「走默认」改成**显式 true**，
+ * 即把掩码里 softWrap 那一位（bit13）清掉：110586 → 102394（`DISCOVER_TEXT_MULTILINE_MASK`）。
+ * 其余位不动，`maxLines` 与 `minLines` 本来就都是显式值。
+ *
+ * [maxLines] 传 0 表示沿用调用方给的层数（[singleLine] 决定）；只有 [singleLine] 为 false
+ * 且 [maxLines] > 0 时才走多行路径。
  */
 private fun ReaMicroSettingsHook.renderDiscoverText(
     text: String,
@@ -628,6 +694,8 @@ private fun ReaMicroSettingsHook.renderDiscoverText(
     style: Any,
     composer: Any,
     singleLine: Boolean = true,
+    maxLines: Int = 0,
+    overflow: Int = DISCOVER_TEXT_OVERFLOW_ELLIPSIS,
 ) {
     if (!singleLine) {
         method(TEXT_KT_CLASS, TEXT_METHOD, DISCOVER_TEXT_PARAMETER_COUNT).invoke(
@@ -657,6 +725,12 @@ private fun ReaMicroSettingsHook.renderDiscoverText(
         )
         return
     }
+    val lines = if (singleLine) 1 else maxLines
+    // `softWrap`：单行必须显式 false（否则长书名会折行，`maxLines=1` 只是封顶）；
+    // 多行要显式 true 才能真正折到 maxLines 行。
+    val softWrap = !singleLine
+    // 掩码里 softWrap（bit13）走默认 ⇔ 单行；多行换成清掉该位的 `DISCOVER_TEXT_MULTILINE_MASK`。
+    val mask = if (singleLine) TEXT_SECONDARY_SINGLE_LINE_MASK else DISCOVER_TEXT_MULTILINE_MASK
     method(TEXT_KT_CLASS, TEXT_METHOD, DISCOVER_TEXT_PARAMETER_COUNT).invoke(
         null,
         text,
@@ -672,16 +746,16 @@ private fun ReaMicroSettingsHook.renderDiscoverText(
         null,
         0L,
         // index 12：`TextOverflow` 是 Int inline class（0=Clip / 1=Ellipsis）。
-        discoverTextOverflowEllipsis(),
-        false,
-        1,
+        overflow,
+        softWrap,
+        lines,
         0,
         null,
         style,
         composer,
         0,
         DISCOVER_TEXT_ELLIPSIS_CHANGED,
-        TEXT_SECONDARY_SINGLE_LINE_MASK,
+        mask,
     )
 }
 
@@ -732,14 +806,24 @@ private fun ReaMicroSettingsHook.renderDiscoverIcon(icon: Any?, tint: Long, comp
  * （`WebDavDriveHook.loadOnlineCompletionSearchCover`，带书源 header / 登录态 / 明文放行），
  * 这里用 `AndroidView` 把 ImageView 塞进 Compose，直接复用那条链路。
  *
- * 尺寸由调用方给：`widthDp` 为 null 表示占满可用宽度（网格用），否则固定尺寸（列表用）。
+ * ## 尺寸（`widthDp` / `heightDp` 都可空）
+ *
+ * - 列表行：`widthDp=46, heightDp=62`，固定尺寸。
+ * - 网格格：两个都传 **null** —— 宽度 `fillMaxWidth()` 吃格子的 `weight` 结果，
+ *   高度挂 `aspectRatio(3:4)` 由**布局期实测宽度**算。
+ *
+ * 网格封面**不能**再传「用屏幕宽度反算出来的绝对高度」（原因见本文件「已废弃：网格封面高度的
+ * 屏幕反算」一节）：绝对高度 + 绝对宽度叠在宿主 `LazyColumn` 的 item 约束上，会出现测量结果与约束
+ * 互相打架的退化解（实测 957x589px 的正方形），随后宿主 gapbuffer 追加节点时就越界闪退。
+ * `aspectRatio` 是约束驱动的，不依赖任何设备常量，是唯一能跟宿主约束共存的写法。
  */
 private fun ReaMicroSettingsHook.renderDiscoverCover(
     source: DiscoverSource,
     book: DiscoverBook,
     widthDp: Int?,
-    heightDp: Int,
+    heightDp: Int?,
     composer: Any,
+    bottomGapDp: Int = 0,
 ) {
     val factory = functionProxy("DiscoverCoverFactory", FUNCTION1_CLASS) { args ->
         val context = args?.getOrNull(0) as? Context ?: activityProvider()
@@ -759,15 +843,26 @@ private fun ReaMicroSettingsHook.renderDiscoverCover(
         }
         targetUnit()
     }
-    val base = if (widthDp == null) {
+    var modifier = if (widthDp == null) {
         discoverFillMaxWidth(modifierInstance())
     } else {
         method(SIZE_KT_CLASS, WIDTH_METHOD, DISCOVER_SIZE_PARAMETER_COUNT)
             .invoke(null, modifierInstance(), udp(widthDp))
     }
-    val sized = method(SIZE_KT_CLASS, HEIGHT_METHOD, DISCOVER_SIZE_PARAMETER_COUNT)
-        .invoke(null, base, udp(heightDp))
-    androidViewMethod().invoke(null, factory, sized, update, composer, 0, 0)
+    if (heightDp == null) {
+        // 高度交给 3:4 的宽高比：aspectRatio 在布局期用「实测宽度」反推高度，
+        // 所以既不会写死设备常量，也不会跟父约束冲突。
+        modifier = discoverAspectRatio(modifier, DISCOVER_COVER_ASPECT_WIDTH / DISCOVER_COVER_ASPECT_HEIGHT.toFloat())
+    } else {
+        modifier = method(SIZE_KT_CLASS, HEIGHT_METHOD, DISCOVER_SIZE_PARAMETER_COUNT)
+            .invoke(null, modifier, udp(heightDp))
+    }
+    if (bottomGapDp > 0) {
+        // 间距内联进封面自己的 padding，而不是再插一个 Spacer 节点：少一个子节点，
+        // 就少一次 gapbuffer 原地插入的机会（见网格格子里作者行的同款注释）。
+        modifier = paddingSides(modifier, start = 0, top = 0, end = 0, bottom = bottomGapDp)
+    }
+    androidViewMethod().invoke(null, factory, modifier, update, composer, 0, 0)
 }
 
 // ── 封面加载（缓存 + 并发闸门 + 降采样） ─────────────────────────────────────
@@ -1016,18 +1111,20 @@ private fun ReaMicroSettingsHook.visibleKindCount(kinds: List<DiscoverKind>): In
     return kinds.size
 }
 
-/** 网格封面高度：按可用宽度反算，保持 3:4 的封面比例。 */
-private fun ReaMicroSettingsHook.discoverGridCoverHeightDp(): Int {
-    val activity = activityProvider() ?: return DISCOVER_GRID_COVER_FALLBACK_HEIGHT_DP
-    val metrics = activity.resources.displayMetrics
-    val density = metrics.density
-    if (density <= 0f || metrics.widthPixels <= 0) return DISCOVER_GRID_COVER_FALLBACK_HEIGHT_DP
-    val contentDp = metrics.widthPixels / density - DISCOVER_PAGE_HORIZONTAL_PADDING_DP * 2
-    val cellDp = (contentDp - DISCOVER_GRID_GAP_DP * (DISCOVER_GRID_COLUMNS - 1)) / DISCOVER_GRID_COLUMNS
-    return (cellDp * DISCOVER_COVER_ASPECT_HEIGHT / DISCOVER_COVER_ASPECT_WIDTH)
-        .toInt()
-        .coerceIn(DISCOVER_GRID_COVER_MIN_HEIGHT_DP, DISCOVER_GRID_COVER_MAX_HEIGHT_DP)
-}
+// ── 已废弃：网格封面高度的屏幕反算 ────────────────────────────────────────────
+//
+// 这里曾有一个 `discoverGridCoverHeightDp()`：用 `displayMetrics.widthPixels / density`
+// 减掉页面左右内边距，除以 3 列，再乘 4/3 得到封面高度（绝对值，单位 dp）。
+//
+// 它**已被移除，不要恢复**。原因（2026-09-23 实机复现 + 探针取证）：
+// 网格格子的封面同时带上「绝对宽度」与「绝对高度」后，宿主的 `LazyColumn` item 约束
+// 与这两个绝对值会互相打架——`loadMore` 追加第二批数据时，新行的 `Row` 被测量成
+// 957x589px（≈319x196dp，一个正方形），封面实测被压到 299px 而不是正常的 355px。
+// 随后宿主 gapbuffer 往这个已绑定固定 child-slot 数的 `Row` 里追加节点，
+// `PostInsertNodeFixup` 算错下标 → `MutableVector.add` 数组拷贝 `length=-3` → 闪退。
+//
+// 现在封面高度一律由 `aspectRatio(3:4)` **在布局期**从实测宽度推导
+// （见 [renderDiscoverCover]），不再依赖任何设备常量，也就不存在这个冲突。
 
 /**
  * 书单行的标签串。
@@ -1068,6 +1165,77 @@ private class DiscoverTagInfo(val platformName: String, val kindText: String)
 private val discoverTagInfoCache = java.util.concurrent.ConcurrentHashMap<String, DiscoverTagInfo>()
 
 private val discoverTagLineCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+/** 网格书名的换行测量结果缓存（key = 书名 + 格子宽度 px）。 */
+private val discoverCellLinesCache = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+/**
+ * 网格书名是否放得下 [GRID_TITLE_MAX_LINES] 行；放不下返回 1（只显示一行 + 省略号）。
+ *
+ * 为什么需要它：网格格子里「作者行」**永远占位**（作者为空时留一个等高空隙），
+ * 否则同一格在不同数据下子节点数会变——而宿主这套 gapbuffer 运行时一旦遇到
+ * item 内节点数从 N 涨到 M 的原地插入，就会算错下标（`PostInsertNodeFixup` →
+ * `MutableVector.add` 数组拷贝 length 为负）直接闪退。
+ *
+ * 既然格子高度固定，书名区域也必须固定成 [GRID_TITLE_MAX_LINES] 行，放不下的收成一行。
+ * 这里**只用真实 `TextPaint` 度量做行数选择**，不逐像素裁字——所以历史笔记里那条
+ * 「测量字号与实渲有设备级偏差、不要用 Paint 预截断」的教训在此不适用
+ * （那条针对的是把正文提前砍掉几十 dp，这里只决定折一行还是两行）。
+ */
+private fun DiscoverBook.cellTextOverflowLines(titleStyle: Any): Int {
+    val name = name.trim()
+    if (name.isEmpty()) return 0
+    if (name.length <= GRID_TITLE_MEASURE_SKIP_CHARS) return 0
+    val widthPx = gridCellWidthPx() ?: return 0
+    val cacheKey = "$widthPx|$name"
+    discoverCellLinesCache[cacheKey]?.let { return it }
+    val lines = runCatching { measureGridTitleLines(name, titleStyle, widthPx) }.getOrDefault(0)
+    discoverCellLinesCache.putBounded(cacheKey, lines)
+    return lines
+}
+
+/** 网格格子宽度（px）：屏幕宽度减页面内边距与列间距再三等分。 */
+private fun gridCellWidthPx(): Int? {
+    val metrics = ReaMicroSettingsHook.activeInstanceOrNull()?.activityProvider?.invoke()?.resources?.displayMetrics ?: return null
+    if (metrics.density <= 0f || metrics.widthPixels <= 0) return null
+    val pagePad = DISCOVER_PAGE_HORIZONTAL_PADDING_DP * metrics.density
+    val gap = DISCOVER_GRID_GAP_DP * metrics.density
+    val cell = (metrics.widthPixels - pagePad * 2 - gap * (DISCOVER_GRID_COLUMNS - 1)) /
+        DISCOVER_GRID_COLUMNS
+    return cell.toInt().takeIf { it > 0 }
+}
+
+/** 测量用的 `TextPaint` 复用同一个实例，避免每本书都新建。 */
+@Volatile
+private var cachedGridTitlePaint: android.text.TextPaint? = null
+
+private fun cachedGridTitlePaint(): android.text.TextPaint = cachedGridTitlePaint
+    ?: android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).also { cachedGridTitlePaint = it }
+
+/**
+ * 放得下两行返回 0，只放得下一行返回 1。
+ *
+ * 判据：整串宽度 > 单行可用宽 → 需要换行；此时若整串 ≤ 两行可用宽就让它折两行，
+ * 否则收成一行（`maxLines=1` + Ellipsis）。
+ */
+private fun measureGridTitleLines(text: String, style: Any, widthPx: Int): Int {
+    val paint = cachedGridTitlePaint()
+    val sizeSp = runCatching { style.method0("getFontSize") }.getOrNull().toSpValueOrDefault()
+    val scaledDensity = ReaMicroSettingsHook.activeInstanceOrNull()
+        ?.activityProvider?.invoke()?.resources?.displayMetrics?.scaledDensity ?: return 0
+    paint.textSize = sizeSp * scaledDensity
+    val maxWidth = widthPx * GRID_TITLE_MEASURE_WIDTH_RATIO
+    val total = paint.measureText(text)
+    if (total <= maxWidth) return 0
+    return if (total <= maxWidth * GRID_TITLE_MAX_LINES) 0 else 1
+}
+
+/** `TextUnit` 是 inline class（装箱后是 long，「sp」类型值在低 32 位）。 */
+private fun Any?.toSpValueOrDefault(): Float {
+    val raw = this as? Long ?: return GRID_TITLE_FALLBACK_SP
+    val value = raw.toInt() and 0x3FFFFFFF
+    return if (value > 0) value.toFloat() else GRID_TITLE_FALLBACK_SP
+}
 
 private fun discoverCacheKey(book: DiscoverBook, source: DiscoverSource): String =
     "${source.source.id}|${book.key}"
@@ -1194,6 +1362,16 @@ private fun ReaMicroSettingsHook.textStyle(composer: Any, name: String, fallback
 private fun ReaMicroSettingsHook.discoverFillMaxWidth(base: Any): Any =
     method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, DISCOVER_FILL_MAX_WIDTH_PARAMETER_COUNT)
         .invoke(null, base, 0f, DISCOVER_FILL_MAX_WIDTH_DEFAULT_MASK, null)
+
+/**
+ * `AspectRatioKt.aspectRatio(Modifier, ratio, matchHeightConstraintsFirst)`。
+ *
+ * 三参签名（宿主 2.3.2 beta 实证：`aspectRatio(Landroidx/compose/ui/Modifier;FZ)`），
+ * 不是 `$default` 版——这里三个形参都显式给。
+ */
+private fun ReaMicroSettingsHook.discoverAspectRatio(base: Any, ratio: Float): Any =
+    method(DISCOVER_ASPECT_RATIO_CLASS, DISCOVER_ASPECT_RATIO_METHOD, DISCOVER_ASPECT_RATIO_PARAMETER_COUNT)
+        .invoke(null, base, ratio, false)
 
 private fun ReaMicroSettingsHook.paddingSides(base: Any, start: Int, top: Int, end: Int, bottom: Int): Any =
     method(PADDING_KT_CLASS, DISCOVER_PADDING_SIDES_METHOD, DISCOVER_PADDING_SIDES_PARAMETER_COUNT)
@@ -1349,12 +1527,6 @@ private const val DISCOVER_COVER_ASPECT_WIDTH = 3
 
 private const val DISCOVER_COVER_ASPECT_HEIGHT = 4
 
-private const val DISCOVER_GRID_COVER_FALLBACK_HEIGHT_DP = 150
-
-private const val DISCOVER_GRID_COVER_MIN_HEIGHT_DP = 90
-
-private const val DISCOVER_GRID_COVER_MAX_HEIGHT_DP = 260
-
 private const val DISCOVER_COVER_CORNER_DP = 4
 
 /** 封面占位底色，与在线搜索结果的封面占位同色。 */
@@ -1387,7 +1559,30 @@ private const val DISCOVER_ANDROID_VIEW_PARAMETER_COUNT = 6
 
 private const val DISCOVER_FILL_MAX_WIDTH_PARAMETER_COUNT = 4
 
+private const val DISCOVER_TEXT_MULTILINE_MASK = 102394
+
+/** `TextOverflow.Ellipsis` 的 Int（inline class 装箱值）。 */
+private const val DISCOVER_TEXT_OVERFLOW_ELLIPSIS = 1
+
+/** 网格书名最多占几行（与作者行的固定占位一起保证格子高度恒定）。 */
+private const val GRID_TITLE_MAX_LINES = 2
+
+/** 书名短于这个字符数就不必测量——两行一定能放下。 */
+private const val GRID_TITLE_MEASURE_SKIP_CHARS = 16
+
+/** 测量时按格子宽度的这个比例算可用宽（留一点余量，避免刚好卡边）。 */
+private const val GRID_TITLE_MEASURE_WIDTH_RATIO = 0.96f
+
+private const val GRID_TITLE_FALLBACK_SP = 14f
+
 private const val DISCOVER_FILL_MAX_WIDTH_DEFAULT_MASK = 1
+
+/** `AspectRatioKt.aspectRatio(Modifier, Float, Boolean)` —— 网格封面高度由宽度推导。 */
+private const val DISCOVER_ASPECT_RATIO_CLASS = "androidx.compose.foundation.layout.AspectRatioKt"
+
+private const val DISCOVER_ASPECT_RATIO_METHOD = "aspectRatio"
+
+private const val DISCOVER_ASPECT_RATIO_PARAMETER_COUNT = 3
 
 private const val DISCOVER_ROW_SCOPE_INSTANCE_CLASS = "androidx.compose.foundation.layout.RowScopeInstance"
 
@@ -1431,6 +1626,11 @@ private const val DISCOVER_GRID_ROW_KEY = 0x524D4698
 private const val DISCOVER_GRID_CELL_KEY = 0x524D4699
 
 private const val DISCOVER_LOAD_MORE_ITEM_KEY = 0x524D469A
+
+/** LazyList item 的真实 key（字符串）：让追加/切换变成按键插入而不是原位整组替换。 */
+private const val DISCOVER_STATUS_ITEM_ID = "discover_status"
+
+private const val DISCOVER_LOAD_MORE_ITEM_ID = "discover_load_more"
 
 private const val DISCOVER_LIST_ROW_ITEM_KEY_BASE = 0x524E0000
 

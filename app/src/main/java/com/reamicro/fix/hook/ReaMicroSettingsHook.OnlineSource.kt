@@ -1002,9 +1002,22 @@ internal fun ReaMicroSettingsHook.discoverVersionState(): Any {
 /**
  * 把 DiscoverState.version 同步到 Compose state，并返回当前值。
  *
- * 只在版本真的变了才写 setValue —— 每次写入都会让读它的页面重组，无脑写会造成
- * 每秒数十次无效重组。写入发生在 composition 期间，读值与比较都在同一帧内完成，
- * 因此不会出现「写完立刻又要重渲」的抖动。
+ * ## 为什么**只读不写**
+ *
+ * 这里曾经在组合期间补写 `setValue`（「读的时候发现 version 变了就顺手推进」）。
+ * 组合期间写状态本身就会排入一次额外的 apply，在 LazyList 子组合进行到一半时更危险；
+ * 改成「只在帧间（主线程 post）推进」之后行为更可预测。
+ *
+ * ⚠ 但这**不是**发现页 `加载更多` 两次连点闪退的根因。那个崩溃的真正原因已在
+ * [ReaMicroSettingsHook.Discover.kt] 的 `renderDiscoverGridRow` 上查实并修复：
+ * 同一 Row 内子节点种类从 `Spacer` 变成格子的 `Column`，导致宿主 gapbuffer 的
+ * `PostInsertNodeFixup` 用「槽位下标」去调 `insertBottomUp`，而真实孩子数更少 →
+ * `MutableVector.add` 数组拷贝长度变负（实机取证 `idx=4 size=2`，
+ * 父 Row 只有 `[Column 354x626, Column 355x0]` 两个孩子）。
+ *
+ * 推进重组由 [DiscoverState.onChanged] → 主线程 post `setValue` 负责（帧间执行）；
+ * 本函数只负责读值建立依赖 + 同步观测版本。哪怕 post 还没到、本次组合读到旧值，
+ * post 落地后会再推一次重组收敛，不会停帧。
  */
 internal fun ReaMicroSettingsHook.discoverVersionValue(): Int {
     val state = discoverVersionState()
@@ -1020,25 +1033,36 @@ internal fun ReaMicroSettingsHook.discoverVersionValue(): Int {
         discoverRefreshRegistered = true
         val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
         com.reamicro.fix.discover.DiscoverState.onChanged = {
-            mainHandler.post {
-                runCatching {
-                    val current = (state.method0("getValue") as? Number)?.toInt() ?: 0
-                    state.javaClass.methods
-                        .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
-                        ?.invoke(state, current + 1)
-                }
-            }
+            mainHandler.post { runCatching { signalDiscoverRefresh() } }
         }
     }
 
     val composeValue = (state.method0("getValue") as? Number)?.toInt() ?: 0
-    val actual = com.reamicro.fix.discover.DiscoverState.version
-    if (actual != discoverObservedVersion) {
-        discoverObservedVersion = actual
+    // 只同步观测版本，绝不在这里 setValue（原因见函数头注释）。
+    discoverObservedVersion = com.reamicro.fix.discover.DiscoverState.version
+    return composeValue
+}
+
+/**
+ * 在主线程推一次发现页重组（写 `discoverVersionState` 的 value）。
+ *
+ * 唯一的写入口：[DiscoverState.onChanged] 的主线程 post，以及自证探针延迟到帧间后的调用。
+ * 组合期间一律不写：把写状态排进 LazyList 的子组合中间会让 apply 顺序更难推理。
+ *
+ * 判据用 `Looper.getMainLooper() == Looper.myLooper()`：本模块跑在 LSPosed 进程内，
+ * 直接读 `Looper.myLooper()` 可能触发未初始化的 sThreadLocal 而抛 `RuntimeException`。
+ */
+internal fun ReaMicroSettingsHook.signalDiscoverRefresh() {
+    val mainLooper = runCatching { android.os.Looper.getMainLooper() }.getOrNull() ?: return
+    @Suppress("DEPRECATION")
+    if (android.os.Looper.myLooper() != mainLooper) return
+    runCatching {
+        val state = discoverVersionState()
+        val current = (state.method0("getValue") as? Number)?.toInt() ?: 0
         state.javaClass.methods
             .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
-            ?.invoke(state, composeValue + 1)
-        return composeValue + 1
+            ?.invoke(state, current + 1)
+    }.onFailure {
+        XposedBridge.logAlways("[ReaMicro] discover refresh failed: ${it.javaClass.simpleName}: ${it.message}")
     }
-    return composeValue
 }

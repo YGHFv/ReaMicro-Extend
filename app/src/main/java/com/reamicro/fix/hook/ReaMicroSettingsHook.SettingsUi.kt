@@ -1924,14 +1924,46 @@ internal fun ReaMicroSettingsHook.renderHostDivider(composer: Any) {
     )
 }
 
-internal fun ReaMicroSettingsHook.addLazyItem(lazyListScope: Any, key: Int, block: (Any) -> Unit) {
+internal fun ReaMicroSettingsHook.addLazyItem(lazyListScope: Any, key: Int, itemKey: Any? = null, block: (Any) -> Unit) {
     val content = composableLambda(key, FUNCTION3_CLASS) { args ->
         val composer = args?.getOrNull(1) ?: return@composableLambda targetUnit()
         block(composer)
         targetUnit()
     }
     val itemMethod = lazyItemDefaultMethod ?: method(LAZY_LIST_SCOPE_CLASS, LAZY_ITEM_DEFAULT_METHOD, 6)
-    itemMethod.invoke(null, lazyListScope, null, null, content, 3, null)
+    // `item$default` 掩码 bit0=key、bit1=contentType：传了真实 itemKey 就只默认 contentType（掩码 2），
+    // 都不传时维持旧行为（掩码 3，全默认）。
+    //
+    // 真实 itemKey 的价值：无 key 的 LazyList 只按下标认 item，往前插新行时原位 item 会被
+    // 「整组替换」（旧组合子树删除 + 新子树插入，走 gapbuffer 的 InsertSlotsWithFixups →
+    // PostInsertNodeFixup），子树重建成本高、滚动位置也容易跳。
+    // ⚠ 但它**不是**发现页「加载更多」两次连点闪退的解药——那个崩溃的根因是网格行内
+    // 子节点种类切换（Spacer→Column），已在 `renderDiscoverGridRow` 修复。
+    itemMethod.invoke(null, lazyListScope, itemKey, null, content, if (itemKey == null) 3 else 2, null)
+}
+
+/**
+ * 主线程断言：成立时执行 [block]，否则只记一条日志。
+ *
+ * `showSettingsDialog`、`Dialog.show()` 这类调用必须落在主线程，否则会抛
+ * `CalledFromWrongThreadException: Only the original thread that created a view hierarchy
+ * can touch its views`——异常会被 `functionProxy` 吞掉，用户看到的只是一次静默失败。
+ *
+ * 判据用 `Looper.getMainLooper() == Looper.myLooper()`：本模块跑在 LSPosed 进程内，
+ * 直接读 `Looper.myLooper()` 可能触发未初始化的 sThreadLocal 而抛 `RuntimeException`，
+ * 用 `Looper.getMainLooper()` 取主线程判据可以完全绕开这个坑。
+ */
+internal fun ReaMicroSettingsHook.runOnMainThreadOrLog(name: String, block: () -> Unit) {
+    val mainLooper = runCatching { android.os.Looper.getMainLooper() }.getOrNull()
+    @Suppress("DEPRECATION")
+    val current = runCatching { android.os.Looper.myLooper() }.getOrNull()
+    if (mainLooper != null && current == mainLooper) {
+        block()
+        return
+    }
+    XposedBridge.logAlways(
+        "[ReaMicro] $name skipped: not on main thread (main=${mainLooper != null} current=${current != null})",
+    )
 }
 
 internal fun ReaMicroSettingsHook.settingsCardModifier(composer: Any): Any {
