@@ -887,7 +887,27 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandBook(
             OnlineConcurrentRateLimiter.withLimitBlocking(target.source) {
                 downloadOnlineBytes(target.source, coverUrl)
             }
+        }.onFailure { error ->
+            // 封面失败会被静默降级成「无封面 EPUB」，这里必须留可见痕迹（简洁日志会吞 INFO）。
+            de.robv.android.xposed.XposedBridge.logAlways(
+                "[ReaMicro] online completion on-demand cover failed url=${coverUrl.take(160)} " +
+                    "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
+            )
         }.getOrNull()
+            // 番茄官网兜底（与发现页封面同款）：AI 封面 / novel-pic-r 命名空间被 CDN 整体拒绝，
+            // 官网 /page/<bookId> 的 og 封面才是可取的 novel-pic id。
+            ?: run {
+                if (!isFanqieCoverUrl(coverUrl)) return@run null
+                runCatching { downloadDiscoverCoverViaWebPage(this, target.result.detailUrl) }
+                    .onFailure { error ->
+                        de.robv.android.xposed.XposedBridge.logAlways(
+                            "[ReaMicro] online completion cover web fallback failed " +
+                                "detail=${target.result.detailUrl.take(160)} " +
+                                "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
+                        )
+                    }
+                    .getOrNull()?.second
+            }
     }
     val chapterHrefs = defaultOnlineChapterHrefs(chapters.size)
     val metadata = OnlineOnDemandMetadata(
@@ -984,7 +1004,26 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
                 "online completion cover failed url=${coverUrl.take(160)} " +
                     "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
             )
+            // 「简洁日志」默认吞掉 INFO 级 log()，封面直接决定书架有没有封面，这里再落一条可见日志。
+            de.robv.android.xposed.XposedBridge.logAlways(
+                "[ReaMicro] online completion cover failed url=${coverUrl.take(160)} " +
+                    "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
+            )
         }.getOrNull()
+            // 番茄官网兜底（与发现页封面同款）：AI 封面 / novel-pic-r 命名空间被 CDN 整体拒绝，
+            // 官网 /page/<bookId> 的 og 封面才是可取的 novel-pic id。
+            ?: run {
+                if (!isFanqieCoverUrl(coverUrl)) return@run null
+                runCatching { downloadDiscoverCoverViaWebPage(this, target.result.detailUrl) }
+                    .onFailure { error ->
+                        de.robv.android.xposed.XposedBridge.logAlways(
+                            "[ReaMicro] online completion cover web fallback failed " +
+                                "detail=${target.result.detailUrl.take(160)} " +
+                                "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
+                        )
+                    }
+                    .getOrNull()?.second
+            }
     }
     val shouldImportFirstBatch = chapters.size > ONLINE_COMPLETION_PARTIAL_IMPORT_THRESHOLD
     var firstBatchImported = false

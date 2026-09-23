@@ -8,6 +8,7 @@ import android.graphics.Paint
 import android.os.Handler
 import android.os.Looper
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 import android.widget.ImageView
 import com.reamicro.fix.discover.DiscoverBook
@@ -21,6 +22,7 @@ import com.reamicro.fix.hook.discover.DiscoverUiIcons
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.webdav.ANDROID_VIEW_KT_CLASS
 import com.reamicro.fix.hook.webdav.ANDROID_VIEW_METHOD
+import com.reamicro.fix.hook.webdav.OnlineBinaryPayload
 import com.reamicro.fix.hook.webdav.TEXT_OVERFLOW_CLASS
 import com.reamicro.fix.hook.webdav.TEXT_SECONDARY_SINGLE_LINE_MASK
 import com.reamicro.fix.hook.webdav.dp
@@ -753,7 +755,7 @@ private fun ReaMicroSettingsHook.renderDiscoverCover(
     val update = functionProxy("DiscoverCoverUpdate", FUNCTION1_CLASS) { args ->
         val view = args?.getOrNull(0) as? ImageView
         if (view != null && book.coverUrl.isNotBlank()) {
-            loadDiscoverCover(view, source.source, book.coverUrl)
+            loadDiscoverCover(view, source.source, book.coverUrl, book.detailUrl)
         }
         targetUnit()
     }
@@ -790,9 +792,15 @@ private val discoverCoverPool = java.util.concurrent.Executors.newFixedThreadPoo
  *    行滚出视口被回收，滚回来又是全新 View、全新请求。命中缓存后回滚是零开销的。
  * 2. **按显示尺寸降采样**——列表封面只有 46×62dp，原图常是几百像素宽，全尺寸解码既慢又占内存。
  */
-private fun loadDiscoverCover(imageView: ImageView, source: OnlineSourceEntry, coverUrl: String) {
+private fun loadDiscoverCover(imageView: ImageView, source: OnlineSourceEntry, coverUrl: String, detailUrl: String) {
     val hook = WebDavDriveHook.activeInstance ?: return
     val url = runCatching { hook.normalizeOnlineCoverUrl(source, sourceBaseUrl(source), coverUrl) }
+        .onFailure {
+            XposedBridge.logAlways(
+                "[ReaMicro] discover cover normalize failed raw=${coverUrl.take(200)} " +
+                    "error=${it.javaClass.simpleName}: ${it.message.orEmpty()}",
+            )
+        }
         .getOrNull()
         .orEmpty()
         .trim()
@@ -804,12 +812,96 @@ private fun loadDiscoverCover(imageView: ImageView, source: OnlineSourceEntry, c
         return
     }
     discoverCoverPool.execute {
-        val bitmap = runCatching { downloadDiscoverCover(hook, source, url) }.getOrNull() ?: return@execute
-        discoverCoverCache.put(url, bitmap)
+        var cacheKey = url
+        val bitmap = runCatching { downloadDiscoverCover(hook, source, url) }
+            .onFailure {
+                // downloadDiscoverCover 内部只兜住响应阶段；连接构造等更早的异常会漏到这里，
+                // 而「简洁日志」会吞掉 INFO 级输出，灰块会完全无迹可循——必须 logAlways。
+                XposedBridge.logAlways(
+                    "[ReaMicro] discover cover task failed url=${url.take(200)} " +
+                        "error=${it.javaClass.simpleName}: ${it.message.orEmpty()}",
+                )
+            }
+            .getOrNull()
+            ?: run {
+                // 番茄部分书目的封面 id 落在被 CDN 整体拒绝的命名空间（novel-pic-r / ai），
+                // 官网 /page/<bookId> 的 og 封面才是可取的 novel-pic id——直连失败时走这条兜底。
+                if (!isFanqieCoverUrl(url)) return@run null
+                runCatching { downloadDiscoverCoverViaWebPage(hook, detailUrl) }
+                    .onFailure {
+                        XposedBridge.logAlways(
+                            "[ReaMicro] discover cover web fallback failed detail=${detailUrl.take(160)} " +
+                                "error=${it.javaClass.simpleName}: ${it.message.orEmpty()}",
+                        )
+                    }
+                    .getOrNull()
+                    ?.also { cacheKey = it.first }
+                    ?.second?.bytes?.let(::decodeDiscoverCoverBytes)
+            }
+            ?: return@execute
+        discoverCoverCache.put(cacheKey, bitmap)
         Handler(Looper.getMainLooper()).post {
             // View 可能已被 LazyColumn 回收并复用给别人，比对 tag 再贴图，避免串图。
             if (imageView.tag == url) imageView.setImageBitmap(bitmap)
         }
+    }
+}
+
+/** 只有番茄系 CDN 的封面才值得走官网兜底，其它源直接跳过，避免错拿同号封面。 */
+internal fun isFanqieCoverUrl(url: String): Boolean =
+    url.contains("byteimg.com", ignoreCase = true) ||
+        url.contains("fqnovel.com", ignoreCase = true) ||
+        url.contains("fanqienovel.com", ignoreCase = true)
+
+/**
+ * 官网兜底：从 detailUrl 里取番茄 bookId，抓 `fanqienovel.com/page/<id>` 的 HTML，
+ * 取第一个 `novel-pic/<id>`（即书籍封面，实测书页首个该命名空间图片就是封面），
+ * 重写成 `p6-novel.byteimg.com/origin/novel-pic/<id>` 免签名直连（实测 200 image/jpeg）。
+ * 返回（缓存键, OnlineBinaryPayload）：缓存键用重写后的 URL，同一本书再触发兜底零网络开销；
+ * 字节载荷同时供下载链路（EPUB 封面）复用。
+ */
+internal fun downloadDiscoverCoverViaWebPage(hook: WebDavDriveHook, detailUrl: String): Pair<String, OnlineBinaryPayload>? {
+    val bookId = DISCOVER_FANQIE_BOOK_ID_REGEX.find(detailUrl)?.value.orEmpty()
+    if (bookId.isBlank()) return null
+    val html = hook.withOnlineCleartextAllowed(DISCOVER_FANQIE_WEB_BASE) {
+        val connection = URL("$DISCOVER_FANQIE_WEB_BASE/page/$bookId").openConnection() as HttpURLConnection
+        try {
+            connection.requestMethod = "GET"
+            connection.connectTimeout = DISCOVER_COVER_CONNECT_TIMEOUT_MS
+            connection.readTimeout = DISCOVER_COVER_READ_TIMEOUT_MS
+            connection.setRequestProperty("User-Agent", DISCOVER_COVER_BROWSER_UA)
+            connection.setRequestProperty("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+            if (connection.responseCode !in 200..299) return@withOnlineCleartextAllowed null
+            connection.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
+        } finally {
+            connection.disconnect()
+        }
+    } ?: return null
+    val picId = DISCOVER_FANQIE_PIC_HASH_REGEX.find(html)?.groupValues?.getOrNull(1).orEmpty()
+    if (picId.isBlank()) return null
+    val originUrl = "https://p6-novel.byteimg.com/origin/novel-pic/$picId"
+    val connection = URL(originUrl).openConnection() as HttpURLConnection
+    try {
+        connection.requestMethod = "GET"
+        connection.connectTimeout = DISCOVER_COVER_CONNECT_TIMEOUT_MS
+        connection.readTimeout = DISCOVER_COVER_READ_TIMEOUT_MS
+        connection.setRequestProperty("User-Agent", DISCOVER_COVER_BROWSER_UA)
+        connection.setRequestProperty("Accept", "image/*,*/*;q=0.8")
+        if (connection.responseCode !in 200..299) {
+            XposedBridge.logAlways(
+                "[ReaMicro] discover cover web fallback http ${connection.responseCode} url=${originUrl.take(200)}",
+            )
+            return null
+        }
+        val bytes = connection.inputStream.use { it.readBytes() }
+        if (bytes.isEmpty()) return null
+        return originUrl to OnlineBinaryPayload(
+            bytes = bytes,
+            mimeType = connection.contentType.orEmpty().substringBefore(';'),
+            url = originUrl,
+        )
+    } finally {
+        connection.disconnect()
     }
 }
 
@@ -822,16 +914,51 @@ private fun downloadDiscoverCover(hook: WebDavDriveHook, source: OnlineSourceEnt
             readTimeout = DISCOVER_COVER_READ_TIMEOUT_MS
             setRequestProperty("User-Agent", "Mozilla/5.0 ReaMicro-Extend/online-source")
             setRequestProperty("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
-            hook.parseOnlineHeaders(source.header).forEach { (name, value) ->
+            val sourceHeaders = hook.parseOnlineHeaders(source.header)
+            sourceHeaders.forEach { (name, value) ->
                 if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
             }
-            OnlineSourceAuth.requestHeaders(currentApplicationContext(), source, url).forEach { (name, value) ->
+            val authHeaders = OnlineSourceAuth.requestHeaders(currentApplicationContext(), source, url)
+            authHeaders.forEach { (name, value) ->
                 if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
+            }
+            // 防盗链兜底：搜索封面能亮而发现页封面黑的源，多半是封面 CDN 校验 Referer。
+            // 书源 header / 登录头都没显式给 Referer 时，补图片自身的 origin——
+            // 与浏览器地址栏直接打开图片时自动携带的 Referer 一致，已配置的源不受影响。
+            val hasReferer = (sourceHeaders.keys + authHeaders.keys)
+                .any { it.equals("Referer", ignoreCase = true) }
+            if (!hasReferer) {
+                runCatching {
+                    val uri = URI(url)
+                    if (!uri.scheme.isNullOrBlank() && !uri.host.isNullOrBlank()) {
+                        setRequestProperty("Referer", "${uri.scheme}://${uri.host}/")
+                    }
+                }
             }
         }
     }
     return try {
-        connection.inputStream.use { decodeDiscoverCoverBytes(it.readBytes()) }
+        val code = connection.responseCode
+        if (code !in 200..299) {
+            // 「简洁日志」默认会吞掉 XposedBridge.log 的 INFO 级输出，诊断一律走 logAlways。
+            XposedBridge.logAlways("[ReaMicro] discover cover http $code url=${url.take(200)}")
+            null
+        } else {
+            val bytes = connection.inputStream.use { it.readBytes() }
+            decodeDiscoverCoverBytes(bytes) ?: run {
+                XposedBridge.logAlways(
+                    "[ReaMicro] discover cover decode failed bytes=${bytes.size} " +
+                        "head=${bytes.take(12).joinToString(" ") { "%02x".format(it) }} url=${url.take(200)}",
+                )
+                null
+            }
+        }
+    } catch (t: Throwable) {
+        XposedBridge.logAlways(
+            "[ReaMicro] discover cover failed url=${url.take(200)} " +
+                "error=${t.javaClass.simpleName}: ${t.message.orEmpty()}",
+        )
+        null
     } finally {
         connection.disconnect()
     }
@@ -1140,6 +1267,22 @@ private const val DISCOVER_COVER_CACHE_SIZE_KB = 12 * 1024
 private const val DISCOVER_COVER_THREADS = 4
 
 private const val DISCOVER_COVER_CONNECT_TIMEOUT_MS = 4_000
+
+// ── 番茄官网封面兜底 ────────────────────────────────────────────────────────
+
+/** 番茄官网书籍页基地址。 */
+private const val DISCOVER_FANQIE_WEB_BASE = "https://fanqienovel.com"
+
+/** 官网页面对非浏览器 UA 有 WAF，兜底请求带完整浏览器 UA。 */
+private const val DISCOVER_COVER_BROWSER_UA =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+        "Chrome/126.0.0.0 Safari/537.36"
+
+/** 番茄 bookId 是 15~21 位纯数字（书页 URL / API 参数里都是它）。 */
+private val DISCOVER_FANQIE_BOOK_ID_REGEX = Regex("""\d{15,21}""")
+
+/** 官网 HTML 里首个 `novel-pic/<hash>` 即书籍封面（签名 URL 里的 hash 与签名无关，可直接复用）。 */
+private val DISCOVER_FANQIE_PIC_HASH_REGEX = Regex("""(?i)novel-pic/([0-9a-z]{16,64})""")
 
 private const val DISCOVER_COVER_READ_TIMEOUT_MS = 6_000
 

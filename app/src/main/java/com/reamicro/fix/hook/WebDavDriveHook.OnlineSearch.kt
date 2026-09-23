@@ -966,6 +966,23 @@ internal fun WebDavDriveHook.normalizeOnlineCoverUrl(source: OnlineSourceEntry, 
         replaceFanqieCover(raw).takeIf { it.isNotBlank() }?.let { return it }
     }
     val resolved = resolveOnlineUrl(baseUrl.ifBlank { sourceBaseUrl(source) }, value)
+    // 字节跳动图片 CDN 的绝对 URL：bookmall 长路径（/origin/reading/bookapi/.../novel-pic/<hash>）
+    // 在 /origin/ 下会 403，同一 hash 挂 novel-pic/ 短路径可取（实测 200）。发现页拿到的
+    // 常是这种绝对 URL，这里直接重写成短路径；已是 novel-pic/ 短路径的重写幂等，不受影响。
+    // 番茄系 API 域名（fqnovel/fanqienovel）偶尔也会直接吐 novel-pic 图片路径，一并归一化。
+    runCatching {
+        val uri = URI(resolved)
+        val host = uri.host.orEmpty()
+        if (host.endsWith("byteimg.com", ignoreCase = true) ||
+            host.endsWith("fqnovel.com", ignoreCase = true) ||
+            host.endsWith("fanqienovel.com", ignoreCase = true)
+        ) {
+            uri.rawPath.orEmpty()
+                .substringAfterLast("/novel-pic/", "")
+                .takeIf { it.isNotBlank() }
+                ?.let { replaceFanqieCover("novel-pic/$it").takeIf { u -> u.isNotBlank() }?.let { u -> return u } }
+        }
+    }
     if (!resolved.startsWith("http://", ignoreCase = true)) {
         // 已被错误拼到 API 域名下的番茄图片路径，纠正为字节跳动图片源。
         val misrouted = runCatching { URI(resolved) }.getOrNull()

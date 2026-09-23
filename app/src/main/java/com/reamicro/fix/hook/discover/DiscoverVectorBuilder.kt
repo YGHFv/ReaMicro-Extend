@@ -30,6 +30,8 @@ import java.lang.reflect.Method
  *
  * 宿主 `addPathNodes` 能吃多子路径的 pathData，但本项目只验证过「单 M 子路径」的图元
  * （见 [DiscoverIcon] 注释里那条自我约束）。需要多个形状时按图层叠加，而不是拼一个长 path。
+ * 例外：`evenOddFill = true` 时允许**同层**内外两圈子路径——even-odd 填充会自动抠出
+ * 透明空腔（[DiscoverIcon] 的罗盘环与轴孔就是这么做的），这是唯一验证过的多子路径用法。
  */
 internal object DiscoverVectorBuilder {
 
@@ -73,9 +75,13 @@ internal object DiscoverVectorBuilder {
         name: String,
         layers: List<Pair<Long, String>>,
         sizeDp: Int = DEFAULT_ICON_SIZE_DP,
+        evenOddFill: Boolean = false,
     ): Any? = runCatching {
         val members = resolve(classLoader)
         val size = udp(classLoader, sizeDp)
+        // evenOddFill：同层多子路径抠空腔用（外圈 + 内圈反向叠出透明内腔）。
+        // PathFillType 是 inline class，JVM 侧就是 Int：NonZero=0、EvenOdd=1。
+        val fillType = if (evenOddFill) PATH_FILL_TYPE_EVEN_ODD else members.defaults[0]
         val builder = members.ctor.newInstance(
             name, size, size, VIEWPORT, VIEWPORT,
             0L, 0, false, BUILDER_CTOR_MASK, null,
@@ -88,7 +94,7 @@ internal object DiscoverVectorBuilder {
                 null,
                 builder,               // 1 $this
                 nodes,                 // 2 pathData
-                members.defaults[0],   // 3 pathFillType
+                fillType,              // 3 pathFillType
                 "",                    // 4 name
                 brush,                 // 5 fill
                 1f,                    // 6 fillAlpha
@@ -218,6 +224,9 @@ internal object DiscoverVectorBuilder {
 
     /** `addPath-oIyEayM$default` 的 `$mask`。注意它在**倒数第二位**，不是第二位。 */
     private const val ADD_PATH_MASK = 0x3800
+
+    /** `PathFillType.EvenOdd` 的 Int 值（NonZero=0）；even-odd 下同层内外两圈自动抠出透明空腔。 */
+    private const val PATH_FILL_TYPE_EVEN_ODD = 1
 
     private const val BUILDER_CTOR_PARAMETER_COUNT = 10
     private const val ADD_PATH_DEFAULT_PARAMETER_COUNT = 17

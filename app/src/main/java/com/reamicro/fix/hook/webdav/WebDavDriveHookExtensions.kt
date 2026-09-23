@@ -42,6 +42,25 @@ internal fun String.cleanOnlineText(): String =
         .replace(Regex("\\s+"), " ")
         .trim()
 
+/**
+ * 简介等需要保留作者分段的多行文本：清洗标签与实体，但**保留换行**。
+ *
+ * `cleanOnlineText` 会把 `\s+`（含换行）整体压成空格，简介里的分段就全糊成一行里
+ * 零散的空格——下载确认弹窗里简介「不能正常换行」的根因。这里区别对待：
+ * 行内空白（Tab/回车/连续空格）压成一个空格，换行保留（`<br>` 先转成换行再剥标签），
+ * 三连以上换行压成一个空行。
+ */
+internal fun String.cleanOnlineMultilineText(): String =
+    replace(Regex("(?is)<script[\\s\\S]*?</script>"), " ")
+        .replace(Regex("(?is)<style[\\s\\S]*?</style>"), " ")
+        .replace(Regex("(?is)<br\\s*/?>"), "\n")
+        .replace(Regex("(?is)<[^>]+>"), " ")
+        .decodeOnlineHtmlEntities()
+        .replace(Regex("[\\t\\x0B\\f\\r ]+"), " ")
+        .replace(Regex(" *\n *"), "\n")
+        .replace(Regex("\n{3,}"), "\n\n")
+        .trim()
+
 internal fun ByteArray.toLowerHexString(): String =
     joinToString("") { "%02x".format(it.toInt() and 0xff) }
 

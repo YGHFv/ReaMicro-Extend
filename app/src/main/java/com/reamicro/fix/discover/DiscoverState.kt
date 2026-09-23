@@ -83,6 +83,19 @@ internal object DiscoverState {
     private var layoutRestored = false
 
     /**
+     * 持久化的「源 + 分类」选择（每次 [select] 时落盘）。
+     *
+     * 只在进程首次刷新源列表时参与收敛：用户切了书源却每次进页都回落第一个源，
+     * 就是漏了这条持久化。
+     */
+    @Volatile
+    private var storedSelection: DiscoverSelection? = null
+
+    /** 选择偏好是否已经从磁盘读过；读盘只做一次。 */
+    @Volatile
+    private var selectionRestored = false
+
+    /**
      * 组合筛选生成的合成分类（当前源）。
      *
      * 用户在配置弹窗里「打开当前筛选结果」后生成：以普通分类的身份排在标签行最前、
@@ -131,6 +144,7 @@ internal object DiscoverState {
     fun refreshSources(context: Context?) {
         restoreLayout(context)
         restoreFilters(context)
+        restoreSelection(context)
         val resolved = OnlineSourceStore.list(context)
             .map { source ->
                 DiscoverSource(
@@ -141,8 +155,11 @@ internal object DiscoverState {
             }
             .filter { it.hasKinds }
         sources = resolved
-        // 之前选中的源/分类可能已经不在了，重新收敛一次。
-        val current = resolveSelection(selection, resolved)
+        // 之前选中的源/分类可能已经不在了，重新收敛一次；本会话还没选过时用持久化的选择。
+        val current = resolveSelection(
+            selection.takeIf { it != DiscoverSelection.NONE } ?: storedSelection ?: selection,
+            resolved,
+        )
         val changed = current != selection
         selection = current
         filterKind = buildFilterKind(current.sourceId)
@@ -157,10 +174,11 @@ internal object DiscoverState {
         }
     }
 
-    /** 选中某个分类；已有缓存就直接用，否则发起加载。 */
+    /** 选中某个分类；已有缓存就直接用，否则发起加载。每次选择都持久化。 */
     fun select(sourceId: String, kindTitle: String, context: Context?) {
         val next = DiscoverSelection(sourceId, kindTitle)
         selection = next
+        persistSelection(context)
         val cached = cache[selectionKey(next)]
         if (cached != null) {
             state = cached.state
@@ -341,7 +359,7 @@ internal object DiscoverState {
         return next
     }
 
-    /** 只在首次拿到 Context 时读一次偏好；之后由内存值主导，避免每次进页面都读盘。 */
+    /** 首次拿到 Context 时读一次偏好；之后由内存值主导，避免每次进页面都读盘。 */
     private fun restoreLayout(context: Context?) {
         if (layoutRestored) return
         val app = context?.applicationContext ?: return
@@ -351,6 +369,31 @@ internal object DiscoverState {
                 app.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_LAYOUT, null)
             }.getOrNull(),
         )
+    }
+
+    /** 首次拿到 Context 时读一次持久化的「源 + 分类」选择。 */
+    private fun restoreSelection(context: Context?) {
+        if (selectionRestored) return
+        val app = context?.applicationContext ?: return
+        selectionRestored = true
+        val prefs = runCatching { app.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }.getOrNull() ?: return
+        val sourceId = runCatching { prefs.getString(KEY_SELECTION_SOURCE, null) }.getOrNull().orEmpty()
+        val kindTitle = runCatching { prefs.getString(KEY_SELECTION_KIND, null) }.getOrNull().orEmpty()
+        if (sourceId.isNotBlank() && kindTitle.isNotBlank()) {
+            storedSelection = DiscoverSelection(sourceId, kindTitle)
+        }
+    }
+
+    /** 把当前选择落到偏好，下次进发现页直接回到这个源 + 分类。 */
+    private fun persistSelection(context: Context?) {
+        val app = context?.applicationContext ?: return
+        runCatching {
+            app.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_SELECTION_SOURCE, selection.sourceId)
+                .putString(KEY_SELECTION_KIND, selection.kindTitle)
+                .apply()
+        }
     }
 
     private fun load(target: DiscoverSelection, context: Context?) {
@@ -434,6 +477,9 @@ internal object DiscoverState {
             if (matched.kinds.any { it.title == current.kindTitle }) return current
             // 当前选中的是合成分类：源还在、筛选选择还在就仍然有效。
             if (buildFilterKind(matched.source.id)?.title == current.kindTitle) return current
+            // 源还在、分类没了（含恢复持久化选择时合成分类失效）：留在该源回落第一个分类，
+            // 不能跳回第一个源——否则换过的源看起来「记不住」。
+            return DiscoverSelection(matched.source.id, matched.kinds.first().title)
         }
         val first = available.first()
         return DiscoverSelection(first.source.id, first.kinds.first().title)
@@ -451,6 +497,11 @@ internal object DiscoverState {
     private const val PREFS_NAME = "reamicro_discover"
 
     private const val KEY_LAYOUT = "book_layout"
+
+    /** 「源 + 分类」选择的持久化 key：进页恢复上次选的书源与分类。 */
+    private const val KEY_SELECTION_SOURCE = "selection_source"
+
+    private const val KEY_SELECTION_KIND = "selection_kind"
 
     /** 组合筛选选择的持久化 key：JSON `{源 id: {组名: 选项标题}}`。 */
     private const val KEY_FILTERS = "filter_selections_v1"

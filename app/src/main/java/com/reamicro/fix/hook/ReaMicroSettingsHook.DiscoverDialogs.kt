@@ -7,8 +7,10 @@ import android.graphics.Color
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 import com.reamicro.fix.hook.settings.SettingsDialogButtonRole
@@ -241,9 +243,12 @@ private fun DiscoverSource.matchesSourceFilter(keyword: String): Boolean {
         source.aliases.any { it.lowercase().contains(needle) }
 }
 
-/** 括号里的标识：`api` 说明这个源要走登录态拿数据，其余是**短**书写别名。 */
+/**
+ * 括号里的标识：**短**书写别名，用来区分同名源。
+ * 曾经还带 `api` 标识（源配置了登录项就显示），但主流书源基本都带登录配置，
+ * 弹窗里三个源全挂「（api）」反而是噪音，已移除。
+ */
 private fun DiscoverSource.sourceBadge(): String = buildList {
-    if (source.hasLoginConfig) add(DISCOVER_SOURCE_BADGE_API)
     source.aliases.forEach { alias ->
         // 别名里混着 `online_<16 位哈希>` 这类内部标识，既长又对用户无意义，直接滤掉。
         val short = alias.trim().removePrefix(DISCOVER_SOURCE_ALIAS_PREFIX)
@@ -263,8 +268,6 @@ private const val DISCOVER_SOURCE_CHECKED_MARK = "✓ "
 
 /** 未选中时用等宽空白占位，让两行文案左边缘对齐。 */
 private const val DISCOVER_SOURCE_UNCHECKED_MARK = "\u2003\u2003"
-
-private const val DISCOVER_SOURCE_BADGE_API = "api"
 
 /** 书写别名里 `online_` 是导入时写入的内部前缀，展示前剥掉。 */
 private const val DISCOVER_SOURCE_ALIAS_PREFIX = "online_"
@@ -559,7 +562,7 @@ private fun ReaMicroSettingsHook.openDiscoverFilterOptionDialog(
     }
 }
 
-private const val DISCOVER_CONFIG_DIALOG_TITLE = "发现配置"
+private const val DISCOVER_CONFIG_DIALOG_TITLE = "配置"
 
 private const val DISCOVER_CONFIG_FILTER_SECTION = "● 发现筛选 ●"
 
@@ -622,7 +625,8 @@ internal fun ReaMicroSettingsHook.openDiscoverDownloadDialog(
             if (tagLine.isNotBlank()) {
                 card.addView(settingsDialogHint(context, tagLine, colors))
             }
-            // 简介：弹窗里能看个大概再决定下不下；书源给的简介动辄几百字，截到概要即可。
+            // 简介：弹窗里能看全貌再决定下不下。全文展示（作者分段换行保留），
+            // 限高 + 内层滚动——超长简介在框里滑，不再用省略号截断。
             if (book.intro.isNotBlank()) {
                 val intro = book.intro.trim()
                 val text = if (intro.length > DISCOVER_INTRO_MAX_CHARS) {
@@ -630,7 +634,7 @@ internal fun ReaMicroSettingsHook.openDiscoverDownloadDialog(
                 } else {
                     intro
                 }
-                card.addView(settingsDialogHint(context, text, colors))
+                card.addView(discoverDownloadIntro(context, text, colors))
             }
             card.addView(settingsDialogButtonRow(context, listOf(fullButton, onDemandButton, cancelButton)))
 
@@ -667,8 +671,56 @@ private fun discoverDownloadTarget(source: DiscoverSource, book: DiscoverBook): 
 
 private const val DISCOVER_DOWNLOAD_TITLE = "下载"
 
-/** 弹窗里简介的截断长度（字符）。 */
-private const val DISCOVER_INTRO_MAX_CHARS = 150
+/**
+ * 下载弹窗的简介区：全文 + 限高内滚。
+ *
+ * 曾经只给 `settingsDialogHint` 一行普通 TextView：书源简介动辄几百字，150 字往后
+ * 直接省略号截断，用户看不到全貌。现在全文放进内层 `ScrollView`：
+ * - 内容矮于上限时按内容高度走，弹窗不会凭空多出一截空白；
+ * - 超过上限就固定在 220dp 里滚动（外层弹窗 ScrollView 会抢滚动事件，触摸时按住 disallow）。
+ * 只有 `ScrollView` 的 WRAP_CONTENT 是按内容全高度量的，限高必须在 `onMeasure` 里钳。
+ */
+private fun ReaMicroSettingsHook.discoverDownloadIntro(
+    context: Context,
+    text: String,
+    colors: SettingsDialogColors,
+): View =
+    object : ScrollView(context) {
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            super.onMeasure(widthMeasureSpec, View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+            val cap = settingsDp(context, DISCOVER_INTRO_MAX_HEIGHT_DP)
+            if (measuredHeight > cap) setMeasuredDimension(measuredWidth, cap)
+        }
+    }.apply {
+        isVerticalFadingEdgeEnabled = true
+        setFadingEdgeLength(settingsDp(context, 18))
+        isVerticalScrollBarEnabled = true
+        setOnTouchListener { v, event ->
+            // 内层滚动时阻止外层弹窗 ScrollView 抢走触摸，否则简介滚不动。
+            v.parent?.requestDisallowInterceptTouchEvent(true)
+            false
+        }
+        addView(
+            TextView(context).apply {
+                this.text = text
+                textSize = 13f
+                setTextColor(colors.body)
+                setLineSpacing(0f, 1.18f)
+            },
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        )
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { bottomMargin = settingsDp(context, 10) }
+    }
+
+/** 弹窗里简介的保险截断长度（字符）——只防病态超长简介，正常简介全文展示。 */
+private const val DISCOVER_INTRO_MAX_CHARS = 1000
+
+/** 简介滚动区的高度上限（dp）。 */
+private const val DISCOVER_INTRO_MAX_HEIGHT_DP = 220
 
 private const val DISCOVER_INTRO_ELLIPSIS = "…"
 

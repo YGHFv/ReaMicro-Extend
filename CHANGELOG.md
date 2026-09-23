@@ -2,6 +2,25 @@
 
 ## 2026-09-23
 
+### 发现页：封面修复与弹窗体验
+
+- **番茄系封面 403 修正**：探索规则首选的 `thumb_uri` 指向 `novel-pic-r` 命名空间、
+  bookmall 长路径与 `/origin/ai/`（AI 封面）均被字节 CDN 整体拒绝（与请求头无关）。
+  同节点的 `thumb_url` 才是可直连的 `novel-pic` id——发现页解析层命中受限命名空间时
+  换用 `thumb_url`，`normalizeOnlineCoverUrl` 对 byteimg/fqnovel/fanqienovel 绝对地址
+  统一重写成 `origin/novel-pic/<id>` 短路径。
+- **官网封面兜底**：新增 `downloadDiscoverCoverViaWebPage`——取 detailUrl 里的 bookId
+  抓 `fanqienovel.com/page/<id>`，提取 og 封面的 novel-pic hash 后免签名直连（实测 200）。
+  发现页显示与下载链路（EPUB 封面）共用同一条兜底，字节载荷双消费；此前下载进书架
+  封面静默失败全是灰块。所有封面失败改为 `logAlways` 可见日志（「简洁日志」吞不掉）。
+- **书源选择持久化**：切换的发现源/分类落 SharedPreferences，重启回到上次选择，
+  不再每次回退到第一个源；配置弹窗标题改为「配置」。
+- **书源弹窗移除「（api）」徽标**：主流源全带登录配置，徽标成了纯噪音；括号里只留短书写别名。
+- **下载弹窗简介**：简介换行改用保留分段的清洗（`cleanOnlineMultilineText`，
+  修复简介被压成一行零散空格）；150 字截断改为全文 + 限高 220dp 内层滚动（渐隐边提示）。
+- **发现罗盘图标**：白色实心内盘改 even-odd 多子路径（环带 + 针），白色部分全部透底，
+  深色主题不再刺眼。
+
 ### 发现页：跨设备排版修复
 
 - **单行省略改由 Compose 处理**：`renderDiscoverText` 单行组合改传 `TextOverflow.Ellipsis`

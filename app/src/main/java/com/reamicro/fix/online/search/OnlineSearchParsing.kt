@@ -368,11 +368,18 @@ internal fun replaceFanqieCover(raw: String): String {
         .trimStart('/')
     val imagePath = when {
         path.isBlank() -> return ""
-        path.startsWith("novel-pic/", ignoreCase = true) -> path
-        path.startsWith("novel-images/", ignoreCase = true) -> path
-        path.startsWith("novel-static/", ignoreCase = true) -> path
-        path.contains('/') -> path
-        else -> "novel-pic/$path"
+        // bookmall 长路径（reading/bookapi/bookmall/cell/change/v1/novel-pic/<hash>）在
+        // /origin/ 下会 403，同一 hash 挂 novel-pic/ 短路径可取（实测 200）——
+        // 统一截到最后一段 novel-pic/ 再拼。
+        else -> path.substringAfterLast("novel-pic/", path).ifBlank { path }.let { normalized ->
+            when {
+                normalized.startsWith("novel-pic/", ignoreCase = true) -> normalized
+                normalized.startsWith("novel-images/", ignoreCase = true) -> normalized
+                normalized.startsWith("novel-static/", ignoreCase = true) -> normalized
+                normalized.contains('/') -> normalized
+                else -> "novel-pic/$normalized"
+            }
+        }
     }
     return "https://p6-novel.byteimg.com/origin/$imagePath"
 }

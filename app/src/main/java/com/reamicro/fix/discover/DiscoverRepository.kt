@@ -2,7 +2,9 @@ package com.reamicro.fix.discover
 
 import com.reamicro.fix.hook.WebDavDriveHook
 import com.reamicro.fix.hook.applyOnlineTemplate
+import com.reamicro.fix.hook.normalizeOnlineCoverUrl
 import com.reamicro.fix.hook.requestOnlineSearch
+import com.reamicro.fix.hook.webdav.cleanOnlineMultilineText
 import com.reamicro.fix.hook.webdav.cleanOnlineText
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.search.onlineJsonPrimitive
@@ -204,12 +206,31 @@ internal object DiscoverRepository {
         // 提示文本、node 上的 creation_status / tomato_book_status / is_finish 等字段，最后还会从
         // 「最新章节」标题推断（「第 259 章（完）」这种），只产出「完结 / 连载 / 断更 / 下架」或空串。
         val statusHint = value("status", "bookStatus", "serializeStatus", "serializeStatusName")
+        val coverChosen = resolveOnlineUrlCompat(baseUrl, value("coverUrl", "cover", "img", "image"))
+        // 番茄 bookmall 的 ruleExplore.coverUrl 首选 `$.thumb_uri`，它指向 `novel-pic-r` 命名空间，
+        // 字节系 CDN 对这个命名空间整体拒绝（各主机 origin/img 全部 403 fail to get resource，
+        // 与请求头无关，连书源自己拼的 legado 形态也取不到）。同一节点的 `thumb_url` 才是可取的
+        // `novel-pic` id——搜索封面（ruleSearch 的 replaceCover(thumb_url)）用的就是它，实测可加载。
+        // 所以规则取出的封面命中 novel-pic-r 时换 thumb_url，再走统一归一化（origin 短路径）。
+        val coverUrl = if (coverChosen.contains("novel-pic-r", ignoreCase = true)) {
+            val thumb = runCatching {
+                WebDavDriveHook.activeInstance?.normalizeOnlineCoverUrl(
+                    source,
+                    baseUrl,
+                    firstJsonString(node, "thumb_url", "thumbUrl"),
+                )
+            }.getOrNull().orEmpty()
+            thumb.ifBlank { coverChosen }
+        } else {
+            coverChosen
+        }
         return DiscoverBook(
             name = name,
             author = value("author", "writer", "authorName", "bookAuthor").cleanOnlineText(),
-            coverUrl = resolveOnlineUrlCompat(baseUrl, value("coverUrl", "cover", "img", "image")),
+            coverUrl = coverUrl,
             detailUrl = resolveOnlineUrlCompat(baseUrl, detail),
-            intro = value("intro", "description", "desc", "summary").cleanOnlineText(),
+            // 简介要保留作者分段（换行），其余字段都是单行短语，继续用 cleanOnlineText。
+            intro = value("intro", "description", "desc", "summary").cleanOnlineMultilineText(),
             kind = value("kind", "category", "categoryName", "class").cleanOnlineText(),
             lastChapter = value("lastChapter", "latestChapter", "lastChapterTitle").cleanOnlineText(),
             updateTime = value("updateTime", "lastUpdateTime", "update").cleanOnlineText(),
