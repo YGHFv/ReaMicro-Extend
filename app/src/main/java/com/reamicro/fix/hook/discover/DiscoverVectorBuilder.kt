@@ -264,6 +264,9 @@ internal object DiscoverUiIcons {
     @Volatile
     private var layoutGridValue: Any? = null
 
+    @Volatile
+    private var settingsGearValue: Any? = null
+
     /** 标签行尾部的展开箭头（▾）。 */
     fun chevronDown(classLoader: ClassLoader): Any? {
         ensure(classLoader)
@@ -282,6 +285,12 @@ internal object DiscoverUiIcons {
         return layoutGridValue
     }
 
+    /** 「配置」齿轮图标：实心圆 + 八颗辐射齿（发现页顶栏）。 */
+    fun settingsGear(classLoader: ClassLoader): Any? {
+        ensure(classLoader)
+        return settingsGearValue
+    }
+
     private fun ensure(classLoader: ClassLoader) {
         if (loadedClassLoader === classLoader) return
         synchronized(lock) {
@@ -289,6 +298,7 @@ internal object DiscoverUiIcons {
             chevronDownValue = DiscoverVectorBuilder.build(classLoader, "ReaMicro.ChevronDown", CHEVRON_DOWN)
             layoutListValue = DiscoverVectorBuilder.build(classLoader, "ReaMicro.LayoutList", LAYOUT_LIST)
             layoutGridValue = DiscoverVectorBuilder.build(classLoader, "ReaMicro.LayoutGrid", LAYOUT_GRID)
+            settingsGearValue = DiscoverVectorBuilder.build(classLoader, "ReaMicro.SettingsGear", SETTINGS_GEAR)
             loadedClassLoader = classLoader
         }
     }
@@ -328,5 +338,25 @@ internal object DiscoverUiIcons {
         WHITE to "M534,150 L874,150 L874,490 L534,490 Z",
         WHITE to "M150,534 L490,534 L490,874 L150,874 Z",
         WHITE to "M534,534 L874,534 L874,874 L534,874 Z",
+    )
+
+    /**
+     * 齿轮图标：中心实心圆（r=260）+ 八颗 45° 均布的粗短齿（r 240→365，半宽 80）。
+     *
+     * 不做镂空内孔——`Icon` 的 tint 会把所有图层刷成同一颜色，白色抠环也会被盖住。
+     * 齿必须**短而粗**：第一版是 r=210 细盘 + 细长齿（180→340），渲染出来是「米字形」
+     * 星芒而不是齿轮；加大圆盘、把齿改成盘边的凸起后才读得出「齿轮」。齿全部是单子路径
+     * 多边形，与本族其它图标同规则。
+     */
+    private val SETTINGS_GEAR = listOf(
+        WHITE to "M512,252 A260,260 0 1,1 512,772 A260,260 0 1,1 512,252 Z",
+        WHITE to "M752,432 L752,592 L877,592 L877,432 Z",
+        WHITE to "M625.1,738.3 L738.3,625.1 L826.7,713.5 L713.5,826.7 Z",
+        WHITE to "M432,752 L592,752 L592,877 L432,877 Z",
+        WHITE to "M285.7,625.1 L398.9,738.3 L310.5,826.7 L197.3,713.5 Z",
+        WHITE to "M272,432 L272,592 L147,592 L147,432 Z",
+        WHITE to "M398.9,285.7 L285.7,398.9 L197.3,310.5 L310.5,197.3 Z",
+        WHITE to "M432,272 L592,272 L592,147 L432,147 Z",
+        WHITE to "M738.3,398.9 L625.1,285.7 L713.5,197.3 L826.7,310.5 Z",
     )
 }

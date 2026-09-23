@@ -46,6 +46,25 @@ class AppTopBarArgumentsTest {
         Integer.TYPE,
     )
 
+    /**
+     * 2.3.2 beta：11 参，导航图标旁多了自定义内容槽 → **两个 Function3**
+     * （`AppTopBar-1YH7lEI`）。smali 实证首个 Function3 渲染在返回键旁（左侧），
+     * 末位才是内层 Material TopAppBar 的 actions（右侧）。
+     */
+    private val signature232 = arrayOf<Class<*>>(
+        String::class.java,
+        Function2::class.java,
+        FakeWindowInsets::class.java,
+        FakeImageVector::class.java,
+        Function0::class.java,
+        java.lang.Long.TYPE,
+        Function3::class.java,
+        Function3::class.java,
+        FakeComposer::class.java,
+        Integer.TYPE,
+        Integer.TYPE,
+    )
+
     /** 2.2.0：8 参，insets/navIcon 在前、Function0 在第 4 位、尾随槽是 Function2。 */
     private val signature220 = arrayOf<Class<*>>(
         String::class.java,
@@ -102,6 +121,46 @@ class AppTopBarArgumentsTest {
         assertNull(args[2])
         assertNull(args[3])
         assertNull(args[6])
+    }
+
+    @Test
+    fun `2_3_1 发现页提供 actions 后落到 Function3 槽并清掉默认位`() {
+        val actions = Any()
+        val args = AppTopBarArguments.plan(
+            parameterTypes = signature231,
+            composer = composer,
+            title = TITLE,
+            onBack = onBack,
+            actions = actions,
+            function0ClassName = Function0::class.java.name,
+            function3ClassName = Function3::class.java.name,
+            imageVectorClassName = FakeImageVector::class.java.name,
+            windowInsetsClassName = FakeWindowInsets::class.java.name,
+        )
+        assertSame(actions, args[6])
+        // titleContent(2) | insets(4) | navIcon(8) | contentColor(32)——actions(64) 不再置位。
+        assertEquals(2 or 4 or 8 or 32, args[9])
+    }
+
+    @Test
+    fun `2_3_2 双 Function3 签名下 actions 落末位而不是首个`() {
+        val actions = Any()
+        val args = AppTopBarArguments.plan(
+            parameterTypes = signature232,
+            composer = composer,
+            title = TITLE,
+            onBack = onBack,
+            actions = actions,
+            function0ClassName = Function0::class.java.name,
+            function3ClassName = Function3::class.java.name,
+            imageVectorClassName = FakeImageVector::class.java.name,
+            windowInsetsClassName = FakeWindowInsets::class.java.name,
+        )
+        // 首个 Function3（导航图标旁的左槽）保持宿主默认，末位（右侧 actions）才被覆盖。
+        assertNull(args[6])
+        assertSame(actions, args[7])
+        // titleContent(2) | insets(4) | navIcon(8) | contentColor(32) | 左槽 Function3(64)
+        assertEquals(2 or 4 or 8 or 32 or 64, args[10])
     }
 
     @Test

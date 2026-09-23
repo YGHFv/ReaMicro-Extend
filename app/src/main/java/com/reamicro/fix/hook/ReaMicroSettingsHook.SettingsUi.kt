@@ -233,7 +233,12 @@ internal fun ReaMicroSettingsHook.renderInjectedSettingsScreen(route: InjectedRo
     val topBar = composableLambda(MODULE_TOP_BAR_KEY, FUNCTION2_CLASS) { args ->
         val innerComposer = args?.getOrNull(0) ?: return@composableLambda targetUnit()
         val currentRoute = routeStateValue(routeState) ?: route
-        renderHostTopBar(currentRoute.title, innerComposer)
+        // 发现页的标题行右侧多两颗按钮（配置 / 切换布局），走宿主 AppTopBar 的 actions 槽。
+        if (currentRoute == InjectedRoute.Discover) {
+            renderDiscoverTopBar(currentRoute.title, innerComposer)
+        } else {
+            renderHostTopBar(currentRoute.title, innerComposer)
+        }
         targetUnit()
     }
     val content = composableLambda(MODULE_CONTENT_KEY, FUNCTION3_CLASS) { args ->
@@ -353,6 +358,7 @@ internal fun ReaMicroSettingsHook.invokeAppTopBar(
     onBack: (() -> Unit)?,
     navIcon: Any? = null,
     windowInsets: Any? = null,
+    actions: Any? = null,
 ) {
     val m = appTopBarMethod()
     val backProxy = onBack?.let { cb ->
@@ -368,7 +374,9 @@ internal fun ReaMicroSettingsHook.invokeAppTopBar(
         onBack = backProxy,
         navIcon = navIcon,
         windowInsets = windowInsets,
+        actions = actions,
         function0ClassName = FUNCTION0_CLASS,
+        function3ClassName = FUNCTION3_CLASS,
         imageVectorClassName = IMAGE_VECTOR_CLASS,
         windowInsetsClassName = WINDOW_INSETS_CLASS,
     )

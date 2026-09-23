@@ -44,6 +44,15 @@ internal object DiscoverRepository {
         parseExploreKinds(source.exploreUrl)
 
     /**
+     * 解析源的「多重标签筛选」配置；源不是 `@js:` 聚合形态、或不足两个维度时返回 null。
+     *
+     * 与 [parseKinds] 互不干扰：平铺分类照旧全量解析（页面标签行不变），这里只额外提取
+     * 「按维度组合」的筛选模型，供配置弹窗使用。
+     */
+    fun parseFilter(source: OnlineSourceEntry): DiscoverFilter? =
+        parseExploreFilter(source.exploreUrl)
+
+    /**
      * 拉取某个分类的书单。
      *
      * `page` 填进分类地址里的 `{{page}}` 模板（Legado 惯例）；发现页的「加载更多」靠它翻页。
@@ -371,6 +380,126 @@ internal fun parseExploreKindsScript(raw: String): List<DiscoverKind> {
 /** 与 JS `encodeURIComponent` 对齐：`URLEncoder` 会把空格编成 `+`，这里换回 `%20`。 */
 private fun discoverUrlEncode(value: String): String =
     URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+
+// ── 多重标签筛选解析（@js: 聚合源） ────────────────────────────────────────────
+
+/**
+ * 从 `@js:` 发现脚本提取「多重标签筛选」模型。
+ *
+ * 以晚风里聚合源为蓝本（配置弹窗的参考图就是它的原生面板）：
+ *
+ * - `var groups=[["排序",[[条目,{params}],…],列数],["平台",…],["分类",…],["标签",…]]`：
+ *   每个条目一组查询参数。条目里普遍附带 `sort=cache_desc` 之类的默认值——那是平铺标签行
+ *   的语义，组合筛选时**每组只取自己的维度键**（平台组取 `platform`、标签组取 `tag`），
+ *   维度键取该组条目里除 `sort` 外出现最多的那个；
+ * - `var sorts=[{label:'更新时间',value:'updated_desc'},…]`（可缺席）：源自己的筛选面板里
+ *   「排序」维度用的是这张表而不是 groups[0]，照此处理——有 sorts 时排序组用它、groups[0]
+ *   不再重复进筛选（它仍以平铺分类的身份留在页面标签行）；
+ * - 非排序组前面补一个「全部」（空参数），对应脚本 `choices()` 的 `{label:'全部',value:''}`；
+ * - `search(params)` 的地址前缀与固定追加参数沿用 [parseExploreKindsScript] 的同款正则。
+ *
+ * 不足两个维度时不算多重筛选，返回 null（单维度与平铺分类没有区别）。
+ */
+internal fun parseExploreFilter(rawExploreUrl: String): DiscoverFilter? {
+    val raw = rawExploreUrl.trim()
+    if (!raw.startsWith("@js:", ignoreCase = true) && !raw.startsWith("<js>", ignoreCase = true)) {
+        return null
+    }
+    val script = raw.removePrefix("@js:").removePrefix("<js>").trim()
+    val groupsText = Regex("""var\s+groups\s*=\s*(\[[\s\S]*?\])\s*;""")
+        .find(script)?.groupValues?.getOrNull(1) ?: return null
+    val prefix = Regex("""return\s*'([^']*)'\s*\+\s*parts\.join\('([^']*)'\)""")
+        .find(script)?.groupValues?.getOrNull(1).orEmpty()
+    if (prefix.isBlank()) return null
+    val extras = Regex("""parts\.push\('([^']*)'\)""")
+        .findAll(script)
+        .mapNotNull { it.groupValues.getOrNull(1) }
+        .filter { it.isNotBlank() }
+        .toList()
+
+    // 组结构：`["组名",[["条目",{...}],…],列数]`。条目自身只有一层方括号（`["条目",{…}]`），
+    // 所以组体按「一层括号段或非括号字符」展开；列数是裸数字。
+    val rawGroups = Regex("""\["([^"]+)"\s*,\s*\[((?:\[[^\[\]]*\]|[^\[\]])*)\]\s*,\s*\d+\]""")
+        .findAll(groupsText)
+        .mapNotNull { match ->
+            val name = match.groupValues[1].trim()
+            val options = parseFilterGroupEntries(match.groupValues[2])
+            if (name.isBlank() || options.isEmpty()) null else name to options
+        }
+        .toList()
+    if (rawGroups.isEmpty()) return null
+
+    // 排序维表：`var sorts=[{label:'更新时间',value:'updated_desc'},…]`（单双引号都收）。
+    val sorts = Regex("""var\s+sorts\s*=\s*\[([\s\S]*?)\]\s*;""")
+        .find(script)?.groupValues?.getOrNull(1)
+        ?.let { body ->
+            Regex("""\{\s*label\s*:\s*['"]([^'"]+)['"]\s*,\s*value\s*:\s*['"]([^'"]*)['"]\s*\}""")
+                .findAll(body)
+                .map { DiscoverFilterOption(it.groupValues[1].trim(), listOf("sort" to it.groupValues[2])) }
+                .filter { it.title.isNotBlank() }
+                .toList()
+        }
+        .orEmpty()
+
+    val filterGroups = mutableListOf<DiscoverFilterGroup>()
+    rawGroups.forEachIndexed { index, (name, entries) ->
+        if (index == 0 && sorts.isNotEmpty()) {
+            // 源自己的面板里「排序」走 sorts 表；groups[0] 留在页面标签行当快捷排序。
+            filterGroups += DiscoverFilterGroup(name, sorts)
+            return@forEachIndexed
+        }
+        val dimensionKey = filterDimensionKey(entries)
+        val options = mutableListOf(DiscoverFilterOption(FILTER_ALL_TITLE, emptyList()))
+        entries.forEach { entry ->
+            val params = entry.second
+            val value = params.firstOrNull { it.first == dimensionKey }?.second
+            options += if (dimensionKey.isNotBlank() && value != null) {
+                DiscoverFilterOption(entry.first, listOf(dimensionKey to value))
+            } else {
+                // 找不到统一维度键的组（混排参数）退回整条目参数，语义与平铺标签一致。
+                DiscoverFilterOption(entry.first, params)
+            }
+        }
+        filterGroups += DiscoverFilterGroup(name, options)
+    }
+    if (filterGroups.size < 2) return null
+    return DiscoverFilter(prefix = prefix, extras = extras, groups = filterGroups)
+}
+
+/** 「全部」选项的显示名，与源脚本 `choices()` 的措辞一致。 */
+private const val FILTER_ALL_TITLE = "全部"
+
+/** 解析一组的 `[["条目",{params}],…]` 条目体；参数保持原文（不编码），组合时才编码。 */
+private fun parseFilterGroupEntries(body: String): List<Pair<String, List<Pair<String, String>>>> {
+    val entryRegex = Regex("""\["([^"]+)"\s*,\s*\{([^{}]*)\}\]""")
+    val pairRegex = Regex(""""([^"]+)"\s*:\s*"([^"]*)"""")
+    return entryRegex.findAll(body).mapNotNull { entry ->
+        val title = entry.groupValues[1].trim()
+        if (title.isBlank()) return@mapNotNull null
+        val params = pairRegex.findAll(entry.groupValues[2]).mapNotNull { pair ->
+            val key = pair.groupValues[1]
+            val value = pair.groupValues[2]
+            if (key.isBlank() || value.isBlank()) null else key to value
+        }.toList()
+        title to params
+    }.toList()
+}
+
+/**
+ * 一组条目的「维度键」：除 `sort` 外出现次数最多的参数键。
+ *
+ * 组内条目普遍是 `{维度键: 值, sort: cache_desc}` 的二元形态；没有统一维度键时返回空串，
+ * 调用方退回「整条目参数」的语义。
+ */
+private fun filterDimensionKey(entries: List<Pair<String, List<Pair<String, String>>>>): String {
+    val counts = LinkedHashMap<String, Int>()
+    entries.forEach { (_, params) ->
+        params.map { it.first }.distinct().filter { it != "sort" }.forEach { key ->
+            counts[key] = (counts[key] ?: 0) + 1
+        }
+    }
+    return counts.maxByOrNull { it.value }?.takeIf { it.value * 2 >= entries.size }?.key.orEmpty()
+}
 
 /**
  * 解析 `exploreUrl` 里的分类列表，兼容 JSON 数组、Legado 逐行与 `@js:` 脚本三种写法。

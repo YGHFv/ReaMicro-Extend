@@ -14,9 +14,14 @@ package com.reamicro.fix.core
  * - **2.3.1 beta**：在 `onNavigationBack` 之后新增 `contentColor: Color` →
  *   10 参，且因 `Color` 是 inline value class（运行时 `long`），JVM 方法名被 mangling 成
  *   `AppTopBar-cd68TDI`。
+ * - **2.3.2 beta**：导航图标旁多了一个自定义内容槽 → **两个 Function3**
+ *   （11 参，方法名 `AppTopBar-1YH7lEI`）。smali 实证：第一个 Function3 被导航图标包装
+ *   lambda 捕获（渲染在**左侧**返回键旁），第二个才传给内层 Material `TopAppBar` 的
+ *   `actions`（渲染在**右侧**）。
  *
  * 所以这里**不认下标、只认类型**：title 填首个 `String`，onBack/navIcon/windowInsets 按类型
- * 首次匹配，其余业务参数一律交给宿主默认值（在 `$default` 掩码里置位）。末三参固定是
+ * 首次匹配；actions 按类型取**最后一个** Function3（2.3.1 只有一个，2.3.2 有两个时末位才是
+ * 右侧 actions）。其余业务参数一律交给宿主默认值（在 `$default` 掩码里置位）。末三参固定是
  * Compose 编译器追加的 `Composer`/`$changed`/`$default`。
  *
  * 抽出到 `core` 是因为它在 `hook/` 里没法写单测：这是全模块最脆的一处下标映射，
@@ -39,7 +44,9 @@ internal object AppTopBarArguments {
         onBack: Any? = null,
         navIcon: Any? = null,
         windowInsets: Any? = null,
+        actions: Any? = null,
         function0ClassName: String = HostClasses.Kotlin.FUNCTION0,
+        function3ClassName: String = HostClasses.Kotlin.FUNCTION3,
         imageVectorClassName: String = HostClasses.Compose.IMAGE_VECTOR,
         windowInsetsClassName: String = HostClasses.Compose.WINDOW_INSETS,
     ): Array<Any?> {
@@ -50,6 +57,13 @@ internal object AppTopBarArguments {
         var backUsed = false
         var navUsed = false
         var insetsUsed = false
+        // actions 必须落**最后一个** Function3 槽：2.3.2 起有两个，首个渲染在返回键旁（左侧），
+        // 末位才是内层 Material TopAppBar 的 actions（右侧）。只认首个会把按钮画到标题左边。
+        val actionsIndex = if (actions != null) {
+            (0 until composerIndex).lastOrNull { parameterTypes[it].name == function3ClassName } ?: -1
+        } else {
+            -1
+        }
         for (i in 0 until composerIndex) {
             val type = parameterTypes[i]
             when {
@@ -66,6 +80,7 @@ internal object AppTopBarArguments {
                     args[i] = windowInsets
                     insetsUsed = true
                 }
+                i == actionsIndex -> args[i] = actions
                 else -> {
                     // 置位后宿主会自己算默认值并忽略实参，但 Method.invoke 仍要过一遍形参类型校验：
                     // 给基元形参传 null 会直接抛 IllegalArgumentException（2.3.1 的 contentColor 就是

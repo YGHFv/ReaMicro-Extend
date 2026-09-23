@@ -38,11 +38,19 @@ import java.lang.reflect.Method
 // ## 版式（自上而下）
 //
 // ```
-// [宿主 AppTopBar: ← 发现]                      ← renderInjectedSettingsScreen 统一给
-// [书源名 ▾]                         [布局按钮]  ← 本文件：点名字开书源弹窗、点按钮切网格/列表
-// [标签][标签][标签]…[▾]                        ← 永远一行，放不下时尾部换成「展开」按钮
+// [宿主 AppTopBar: ← 发现           ⚙ ⊞]  ← 本文件：actions 槽挂「配置 / 切换布局」两颗按钮
+// [标签][标签][标签]…[▾]                  ← 永远一行，放不下时尾部换成「展开」按钮
 // [书单：列表（封面 + 书名 + 作者 + 标签）/ 网格（三列）]
 // ```
+//
+// 书源切换与组合筛选不在页面上占行：都收进顶栏 ⚙ 打开的配置弹窗
+// （见 `ReaMicroSettingsHook.DiscoverDialogs.kt` 的 [openDiscoverConfigDialog]）。
+//
+// ## 顶栏 actions 怎么挂
+//
+// 宿主 `AppTopBar` 自 2.3.0 beta 起有 `@Composable RowScope.() -> Unit` 的尾随 actions 槽，
+// [renderDiscoverTopBar] 把两颗图标按钮做成 composableLambda 填进去。actions 的内容在
+// RowScope 里组合，与内容区自建 Row/Column 是同一套规则（见下）。
 //
 // ## 为什么可以自建容器
 //
@@ -66,7 +74,7 @@ import java.lang.reflect.Method
 // 容器上，不挂文字。单行省略后来改传 `TextOverflow.Ellipsis`（见 [renderDiscoverText]），
 // 不再依赖数据侧截断。
 
-/** 页面入口：书源行 + 标签行 + 书单三段。 */
+/** 页面入口：标签行 + 书单两段（书源切换/布局切换/组合筛选都在顶栏与配置弹窗里）。 */
 internal fun ReaMicroSettingsHook.renderDiscoverContent(innerPaddings: Any, composer: Any) {
     val appContext = activityProvider()?.applicationContext
     val listContent = functionProxy("DiscoverList", FUNCTION1_CLASS) { args ->
@@ -86,23 +94,67 @@ internal fun ReaMicroSettingsHook.renderDiscoverContent(innerPaddings: Any, comp
         val selection = DiscoverState.selection
         val current = sources.firstOrNull { it.source.id == selection.sourceId }
 
-        // 段 1：书源行（名称可点开书源弹窗，右侧是布局切换）。
-        addLazyItem(lazyListScope, DISCOVER_SOURCE_ROW_ITEM_KEY) { itemComposer ->
-            renderDiscoverSourceRow(current, itemComposer)
-        }
-
-        // 段 2：分类标签。只有一行——放不下时尾部换成「展开」，点开是分类弹窗。
+        // 段 1：分类标签（含组合筛选生成的合成分类）。只有一行——放不下时尾部换成「展开」。
         if (current != null && current.kinds.isNotEmpty()) {
             addLazyItem(lazyListScope, DISCOVER_KIND_ROW_ITEM_KEY) { itemComposer ->
                 renderDiscoverKindRow(current, selection, itemComposer)
             }
         }
 
-        // 段 3：书单。
+        // 段 2：书单。
         renderDiscoverBooks(lazyListScope, current, selection)
         targetUnit()
     }
     renderHostLazyColumn(innerPaddings, listContent, composer)
+}
+
+// ── 顶栏（标题行右侧的「配置 / 切换布局」按钮） ────────────────────────────────
+
+/**
+ * 发现页专用顶栏：标题 + 返回照旧交给宿主 `AppTopBar`，右侧 actions 槽挂两颗图标按钮。
+ *
+ * actions 槽的 content 是 `@Composable RowScope.() -> Unit`，与本页其它容器同规则。
+ * 读 [discoverVersionValue] 建立重组依赖：切换布局后图标要翻面、应用筛选后标签行刷新，
+ * 都由同一个版本号驱动。
+ */
+internal fun ReaMicroSettingsHook.renderDiscoverTopBar(title: String, composer: Any) {
+    val actions = composableLambda(DISCOVER_TOP_BAR_ACTIONS_KEY, FUNCTION3_CLASS) { args ->
+        val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
+        discoverVersionValue()
+        val tint = schemeColor(inner, "getOnSurfaceVariant", "getOnBackground")
+        renderDiscoverConfigButton(tint, inner)
+        renderDiscoverLayoutToggle(tint, inner)
+        targetUnit()
+    }
+    invokeAppTopBar(
+        title = title,
+        composer = composer,
+        onBack = { navigateBackFromInjectedRoute() },
+        actions = actions,
+    )
+}
+
+/** 「配置」按钮（齿轮）：点开配置弹窗（书源切换 + 组合筛选）。 */
+private fun ReaMicroSettingsHook.renderDiscoverConfigButton(tint: Long, composer: Any) {
+    val activity = activityProvider()
+    val content = composableLambda(DISCOVER_CONFIG_BUTTON_KEY, FUNCTION3_CLASS) { args ->
+        val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
+        renderDiscoverIcon(DiscoverUiIcons.settingsGear(classLoader), tint, inner)
+        targetUnit()
+    }
+    val modifier = clickableModifier(
+        paddingSides(
+            modifierInstance(),
+            start = DISCOVER_LAYOUT_TOGGLE_PADDING_DP,
+            top = DISCOVER_ROW_VERTICAL_PADDING_DP,
+            end = 0,
+            bottom = DISCOVER_ROW_VERTICAL_PADDING_DP,
+        ),
+        "DiscoverConfig",
+    ) {
+        if (activity != null) openDiscoverConfigDialog(activity)
+    }
+    method(BOX_KT_CLASS, BOX_METHOD, 7).invoke(null, modifier, alignmentCenter(), false, content, composer, 0, 0)
 }
 
 /** 没有任何带 `exploreUrl` 的书源时的兜底提示。 */
@@ -121,87 +173,10 @@ private fun ReaMicroSettingsHook.renderDiscoverEmptyState(lazyListScope: Any) {
     }
 }
 
-// ── 段 1：书源行 ────────────────────────────────────────────────────────────
+// ── 顶栏按钮：布局切换 ────────────────────────────────────────────────────────
 
 /**
- * 书源行：左边「书源名 + ▾」整块可点（开书源弹窗），右边一个布局切换按钮。
- *
- * 两个可点区域都做成**独立的 `Row` 容器**而不是给文字挂 clickable——原因见文件头：
- * 文字节点的 `modifier` 形参被 `$default` 掩码吃掉，挂上去点不到。容器自带 padding，
- * 热区因此比文字本身大一圈，也与宿主自己的行（`Modifier.clickable{…}.padding(…)`）同构。
- */
-private fun ReaMicroSettingsHook.renderDiscoverSourceRow(source: DiscoverSource?, composer: Any) {
-    val activity = activityProvider()
-    val titleColor = colorScheme(composer).longMethod("getOnBackground")
-    val iconTint = schemeColor(composer, "getOnSurfaceVariant", "getOnBackground")
-
-    val nameRowModifier = clickableModifier(
-        paddingSides(
-            modifierInstance(),
-            start = 0,
-            top = DISCOVER_ROW_VERTICAL_PADDING_DP,
-            end = DISCOVER_CHEVRON_GAP_DP,
-            bottom = DISCOVER_ROW_VERTICAL_PADDING_DP,
-        ),
-        "DiscoverSourceName",
-    ) {
-        if (activity != null && source != null) openDiscoverSourceDialog(activity)
-    }
-    // Row 的 content 是 `@Composable RowScope.() -> Unit`：必须 composableLambda + 取 args[1]。
-    // 源名最多占内容宽的 70%，右侧要给布局按钮和「▾」留位置。
-    // 这里仍需数据侧截断：名字节点拿不到 `modifier`（掩码吃掉），没法用 weight 约束宽度，
-    // 长名字会把布局按钮顶出屏幕。70% 预算本身带了余量，测量偏差可接受。
-    val sourceNameWidthPx = pageContentWidthPx() * DISCOVER_SOURCE_NAME_WIDTH_RATIO
-    val sourceLabel = fitText(
-        source?.name.orEmpty().ifBlank { DISCOVER_NO_SOURCE_LABEL },
-        sourceNameWidthPx,
-        DISCOVER_SOURCE_NAME_SP,
-    )
-    val nameContent = composableLambda(DISCOVER_SOURCE_NAME_KEY, FUNCTION3_CLASS) { args ->
-        val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
-        renderDiscoverText(
-            text = sourceLabel,
-            color = titleColor,
-            style = textStyle(inner, "getTitleMedium", "getTitleSmall"),
-            composer = inner,
-        )
-        if (source != null && source.kinds.isNotEmpty()) {
-            renderDiscoverSpacer(inner, DISCOVER_CHEVRON_GAP_DP)
-            renderDiscoverIcon(DiscoverUiIcons.chevronDown(classLoader), iconTint, inner)
-        }
-        targetUnit()
-    }
-
-    val rowContent = composableLambda(DISCOVER_SOURCE_ROW_KEY, FUNCTION3_CLASS) { args ->
-        val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
-        method(ROW_KT_CLASS, ROW_METHOD, 7).invoke(
-            null,
-            nameRowModifier,
-            arrangementStart(),
-            alignmentCenterVertically(),
-            nameContent,
-            inner,
-            0,
-            0,
-        )
-        renderDiscoverWeightSpacer(inner)
-        renderDiscoverLayoutToggle(iconTint, inner)
-        targetUnit()
-    }
-    method(ROW_KT_CLASS, ROW_METHOD, 7).invoke(
-        null,
-        discoverFillMaxWidth(modifierInstance()),
-        arrangementStart(),
-        alignmentCenterVertically(),
-        rowContent,
-        composer,
-        0,
-        0,
-    )
-}
-
-/**
- * 行尾的布局切换按钮。
+ * 布局切换按钮（顶栏 actions 槽右数第一颗）。
  *
  * 图标语义是「点它会变成什么」：当前网格态显示列表图标，反之显示网格图标——与宿主自己的
  * 切换按钮一致，也比「显示当前状态」少一次心智换算。
@@ -218,12 +193,14 @@ private fun ReaMicroSettingsHook.renderDiscoverLayoutToggle(tint: Long, composer
         renderDiscoverIcon(icon, tint, inner)
         targetUnit()
     }
+    // end 留出与左上角返回键一致的屏幕边距（实测返回键图形距左缘约 18dp，
+    // actions 槽自身带约 4dp 内缩，这里再补 10dp 后左右图形边距对齐）。
     val modifier = clickableModifier(
         paddingSides(
             modifierInstance(),
             start = DISCOVER_LAYOUT_TOGGLE_PADDING_DP,
             top = DISCOVER_ROW_VERTICAL_PADDING_DP,
-            end = 0,
+            end = DISCOVER_TOP_BAR_END_PADDING_DP,
             bottom = DISCOVER_ROW_VERTICAL_PADDING_DP,
         ),
         "DiscoverLayoutToggle",
@@ -233,12 +210,14 @@ private fun ReaMicroSettingsHook.renderDiscoverLayoutToggle(tint: Long, composer
     method(BOX_KT_CLASS, BOX_METHOD, 7).invoke(null, modifier, alignmentCenter(), false, content, composer, 0, 0)
 }
 
-// ── 段 2：分类标签行 ────────────────────────────────────────────────────────
+// ── 段 1：分类标签行 ────────────────────────────────────────────────────────
 
 /**
  * 分类标签行——**永远一行**。
  *
  * 放得下就全放；放不下就把尾部换成一颗「▾」展开按钮，点开是分类弹窗。
+ * 标签列表走 [DiscoverState.kindsFor]：平铺分类之外，当前源应用过组合筛选时
+ * 末尾多一颗合成分类（如「字数最多·起点」），选中态与普通标签一致。
  *
  * ## 为什么用预测量而不是等布局结束再判断
  *
@@ -253,7 +232,7 @@ private fun ReaMicroSettingsHook.renderDiscoverKindRow(
     selection: DiscoverSelection,
     composer: Any,
 ) {
-    val kinds = source.kinds
+    val kinds = DiscoverState.kindsFor(source)
     val visibleCount = visibleKindCount(kinds)
     val overflow = visibleCount < kinds.size
 
@@ -728,13 +707,6 @@ private fun ReaMicroSettingsHook.renderDiscoverVGap(composer: Any, heightDp: Int
     method(SPACER_KT_CLASS, SPACER_METHOD, DISCOVER_SPACER_PARAMETER_COUNT).invoke(null, modifier, composer, 0)
 }
 
-/** 撑开行内剩余宽度。`weight` 是 parent-data，必须挂在 Spacer 自己身上。 */
-private fun ReaMicroSettingsHook.renderDiscoverWeightSpacer(composer: Any) {
-    val weighted = method(DISCOVER_ROW_SCOPE_INSTANCE_CLASS, DISCOVER_ROW_WEIGHT_METHOD, DISCOVER_ROW_WEIGHT_PARAMETER_COUNT)
-        .invoke(rowScopeInstance(), modifierInstance(), 1f, true)
-    method(SPACER_KT_CLASS, SPACER_METHOD, DISCOVER_SPACER_PARAMETER_COUNT).invoke(null, weighted, composer, 0)
-}
-
 /** 图标：走宿主 `Icon`，颜色由 tint 决定（矢量自身的填充色会被 `ColorFilter.tint` 覆盖）。 */
 private fun ReaMicroSettingsHook.renderDiscoverIcon(icon: Any?, tint: Long, composer: Any) {
     if (icon == null) return
@@ -1018,12 +990,6 @@ private fun resolveDiscoverTagInfo(book: DiscoverBook, source: DiscoverSource): 
     return DiscoverTagInfo("", book.kind)
 }
 
-/** 页面内容宽度（px）：整页宽减去左右各 16dp（`pageModifier` 里写死的）。 */
-private fun ReaMicroSettingsHook.pageContentWidthPx(): Float {
-    val metrics = activityProvider()?.resources?.displayMetrics ?: return 0f
-    return metrics.widthPixels - DISCOVER_PAGE_HORIZONTAL_PADDING_DP * 2 * metrics.density
-}
-
 /** 第二行：作者 · 最新：<最新章节>。缺哪个就只显示另一个。 */
 private fun DiscoverBook.latestLine(): String = buildList {
     if (author.isNotBlank()) add(author)
@@ -1047,30 +1013,9 @@ internal fun ReaMicroSettingsHook.discoverCoreTagLine(book: DiscoverBook, source
 }
 
 /**
- * 把文本收敛到指定宽度：**放得下就原样返回**，放不下才截断加省略号。
- *
- * 现在只剩「源名」一个调用方——它拿不到 `modifier` 没法被 weight 约束，必须先量。
- * 书单正文一律走 Compose 原生省略（[renderDiscoverText]），不要再经过这里：
- * 画笔测量与真实渲染存在设备级偏差（见 [renderDiscoverText] 的说明）。
- */
-private fun ReaMicroSettingsHook.fitText(text: String, maxWidthPx: Float, sizeSp: Float): String {
-    val trimmed = text.trim()
-    if (trimmed.isEmpty() || maxWidthPx <= 0f) return trimmed
-    val paint = discoverMeasurePaint(sizeSp)
-    if (paint.measureText(trimmed) <= maxWidthPx) return trimmed
-    val ellipsis = discoverTextEllipsis()
-    val reserve = paint.measureText(ellipsis)
-    var end = trimmed.length
-    while (end > 0 && paint.measureText(trimmed, 0, end) + reserve > maxWidthPx) end--
-    return if (end <= 0) ellipsis else trimmed.substring(0, end) + ellipsis
-}
-
-private fun discoverTextEllipsis(): String = "\u2026"
-
-/**
  * 测量画笔：一个实例按需换字号，字体取模块的全局字体。
  *
- * 只服务分类标签行的溢出预测量（源名 fitText 同用）。与真实渲染仍可能存在设备级偏差，
+ * 只服务分类标签行的溢出预测量。与真实渲染仍可能存在设备级偏差，
  * 所以文字本身的省略一律交给 Compose（[renderDiscoverText]），不要再用画笔结果截断正文。
  */
 private fun ReaMicroSettingsHook.discoverMeasurePaint(sizeSp: Float): Paint {
@@ -1209,13 +1154,14 @@ private const val DISCOVER_TEXT_LETTER_SPACING_EM = 0.033f
 /** 页面左右内边距（`pageModifier` 里写的就是 16dp），用于预估标签行与网格的可用宽度。 */
 private const val DISCOVER_PAGE_HORIZONTAL_PADDING_DP = 16
 
-private const val DISCOVER_NO_SOURCE_LABEL = "未选择书源"
 
 private const val DISCOVER_ROW_VERTICAL_PADDING_DP = 10
 
-private const val DISCOVER_CHEVRON_GAP_DP = 4
 
 private const val DISCOVER_LAYOUT_TOGGLE_PADDING_DP = 12
+
+/** 顶栏最右按钮的额外右边距：与左上角返回键距屏幕左缘的观感对齐（见调用处注释）。 */
+private const val DISCOVER_TOP_BAR_END_PADDING_DP = 10
 
 private const val DISCOVER_KIND_ROW_TOP_GAP_DP = 6
 
@@ -1241,7 +1187,8 @@ private const val DISCOVER_LIST_COVER_GAP_DP = 12
 
 private const val DISCOVER_LIST_ROW_HORIZONTAL_PADDING_DP = 8
 
-private const val DISCOVER_LIST_ROW_VERTICAL_PADDING_DP = 6
+/** 列表行上下内边距：6dp 偏松、3dp 又太挤（用户实测反馈），取中间值。 */
+private const val DISCOVER_LIST_ROW_VERTICAL_PADDING_DP = 4
 
 private const val DISCOVER_LIST_LINE_GAP_DP = 4
 
@@ -1270,11 +1217,7 @@ private const val DISCOVER_COVER_CORNER_DP = 4
 /** 封面占位底色，与在线搜索结果的封面占位同色。 */
 private const val DISCOVER_COVER_PLACEHOLDER_COLOR = 0xFFE8E8E8.toInt()
 
-/** 源名文字字号（`titleMedium`），仅用于宽度预量。 */
-private const val DISCOVER_SOURCE_NAME_SP = 16f
 
-/** 源名最多占内容宽的比例——右侧要给布局切换按钮留位置。 */
-private const val DISCOVER_SOURCE_NAME_WIDTH_RATIO = 0.7f
 
 /** 标签串的分隔符，与在线补全搜索结果的元信息行一致。 */
 private const val DISCOVER_TAG_SEPARATOR = " / "
@@ -1319,13 +1262,14 @@ private const val DISCOVER_ICON_CHANGED_MASK = 0x30
 /** 必须 0：宿主箭头那次用的 0x4 会让 Compose 丢掉我们传进去的 modifier。 */
 private const val DISCOVER_ICON_DEFAULT_MASK = 0x0
 
-private const val DISCOVER_SOURCE_ROW_ITEM_KEY = 0x524D468D
 
-private const val DISCOVER_SOURCE_ROW_KEY = 0x524D468E
 
-private const val DISCOVER_SOURCE_NAME_KEY = 0x524D468F
 
 private const val DISCOVER_LAYOUT_TOGGLE_KEY = 0x524D4690
+
+private const val DISCOVER_TOP_BAR_ACTIONS_KEY = 0x524D46A0
+
+private const val DISCOVER_CONFIG_BUTTON_KEY = 0x524D46A1
 
 private const val DISCOVER_KIND_ROW_KEY = 0x524D4691
 
