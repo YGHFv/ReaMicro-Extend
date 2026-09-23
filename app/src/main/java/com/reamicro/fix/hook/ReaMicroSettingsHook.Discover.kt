@@ -347,13 +347,13 @@ private fun ReaMicroSettingsHook.renderDiscoverBooks(
 ) {
     when (val state = DiscoverState.state) {
         DiscoverLoadState.Idle, DiscoverLoadState.Loading -> {
-            addLazyItem(lazyListScope, DISCOVER_BOOK_STATUS_ITEM_KEY) { itemComposer ->
+            addLazyItem(lazyListScope, DISCOVER_BOOK_STATUS_ITEM_KEY, DISCOVER_STATUS_ITEM_ID) { itemComposer ->
                 renderDiscoverStatusCard("正在加载…", selection.kindTitle, null, itemComposer)
             }
         }
 
         is DiscoverLoadState.Failed -> {
-            addLazyItem(lazyListScope, DISCOVER_BOOK_STATUS_ITEM_KEY) { itemComposer ->
+            addLazyItem(lazyListScope, DISCOVER_BOOK_STATUS_ITEM_KEY, DISCOVER_STATUS_ITEM_ID) { itemComposer ->
                 renderDiscoverStatusCard("加载失败", state.message, {
                     DiscoverState.reload(activityProvider()?.applicationContext)
                 }, itemComposer)
@@ -362,7 +362,7 @@ private fun ReaMicroSettingsHook.renderDiscoverBooks(
 
         is DiscoverLoadState.Loaded -> {
             if (state.books.isEmpty()) {
-                addLazyItem(lazyListScope, DISCOVER_BOOK_STATUS_ITEM_KEY) { itemComposer ->
+                addLazyItem(lazyListScope, DISCOVER_BOOK_STATUS_ITEM_KEY, DISCOVER_STATUS_ITEM_ID) { itemComposer ->
                     renderDiscoverStatusCard("暂无内容", selection.kindTitle, {
                         DiscoverState.reload(activityProvider()?.applicationContext)
                     }, itemComposer)
@@ -370,9 +370,16 @@ private fun ReaMicroSettingsHook.renderDiscoverBooks(
                 return
             }
             if (source == null) return
+            // LazyList item key 必须全局唯一：首屏数据没走 loadMore 的 distinctBy，
+            // 源里混进重复书目时重复 key 会直接崩，渲染侧再兜一次。
+            val books = state.books.distinctBy { it.key }
             if (DiscoverState.layout == DiscoverLayout.GRID) {
-                state.books.chunked(DISCOVER_GRID_COLUMNS).forEachIndexed { rowIndex, rowBooks ->
-                    addLazyItem(lazyListScope, DISCOVER_GRID_ROW_ITEM_KEY_BASE + rowIndex) { itemComposer ->
+                books.chunked(DISCOVER_GRID_COLUMNS).forEachIndexed { rowIndex, rowBooks ->
+                    addLazyItem(
+                        lazyListScope,
+                        DISCOVER_GRID_ROW_ITEM_KEY_BASE + rowIndex,
+                        "discover_grid_row_${rowBooks.first().key}",
+                    ) { itemComposer ->
                         renderDiscoverGridRow(source, rowBooks, itemComposer)
                     }
                 }
@@ -384,14 +391,18 @@ private fun ReaMicroSettingsHook.renderDiscoverBooks(
                 // `MutableVector.add` 越界崩溃（`srcPos=5 dstPos=6 length=-3`）。
                 // 逐行 item 每次只插入十来个节点，且封面天然懒加载（进入页面不再同时发起几十个请求），
                 // 代价是失去卡片背景——与宿主自己的搜索结果页一致，行距也回到页面的统一节奏。
-                state.books.forEachIndexed { index, book ->
-                    addLazyItem(lazyListScope, DISCOVER_LIST_ROW_ITEM_KEY_BASE + index) { itemComposer ->
+                books.forEachIndexed { index, book ->
+                    addLazyItem(
+                        lazyListScope,
+                        DISCOVER_LIST_ROW_ITEM_KEY_BASE + index,
+                        "discover_list_${book.key}",
+                    ) { itemComposer ->
                         renderDiscoverListRow(source, book, itemComposer)
                     }
                 }
             }
             if (DiscoverState.hasMore) {
-                addLazyItem(lazyListScope, DISCOVER_LOAD_MORE_ITEM_KEY) { itemComposer ->
+                addLazyItem(lazyListScope, DISCOVER_LOAD_MORE_ITEM_KEY, DISCOVER_LOAD_MORE_ITEM_ID) { itemComposer ->
                     renderDiscoverLoadMore(itemComposer)
                 }
             }
@@ -540,7 +551,9 @@ private fun ReaMicroSettingsHook.renderDiscoverGridRow(
     val metaColor = schemeColor(composer, "getOnSurfaceVariant", "getOnBackground")
     val coverHeightDp = discoverGridCoverHeightDp()
 
-    val content = composableLambda(DISCOVER_GRID_ROW_KEY, FUNCTION3_CLASS) { args ->
+    // 内容 lambda 的 key 按行区分（首书 key）：所有行共用一个常量 key 时，
+    // 重组后不同行的组身份无法区分，结构不同的两行可能互相复用槽位。
+    val content = composableLambda(DISCOVER_GRID_ROW_KEY + books.first().key.hashCode(), FUNCTION3_CLASS) { args ->
         val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
         books.forEach { book ->
             val cellContent = composableLambda(DISCOVER_GRID_CELL_KEY + book.key.hashCode(), FUNCTION3_CLASS) { cellArgs ->
@@ -1431,6 +1444,11 @@ private const val DISCOVER_GRID_ROW_KEY = 0x524D4698
 private const val DISCOVER_GRID_CELL_KEY = 0x524D4699
 
 private const val DISCOVER_LOAD_MORE_ITEM_KEY = 0x524D469A
+
+/** LazyList item 的真实 key（字符串）：让追加/切换变成按键插入而不是原位整组替换。 */
+private const val DISCOVER_STATUS_ITEM_ID = "discover_status"
+
+private const val DISCOVER_LOAD_MORE_ITEM_ID = "discover_load_more"
 
 private const val DISCOVER_LIST_ROW_ITEM_KEY_BASE = 0x524E0000
 

@@ -1002,9 +1002,18 @@ internal fun ReaMicroSettingsHook.discoverVersionState(): Any {
 /**
  * 把 DiscoverState.version 同步到 Compose state，并返回当前值。
  *
- * 只在版本真的变了才写 setValue —— 每次写入都会让读它的页面重组，无脑写会造成
- * 每秒数十次无效重组。写入发生在 composition 期间，读值与比较都在同一帧内完成，
- * 因此不会出现「写完立刻又要重渲」的抖动。
+ * ## 为什么**只读不写**
+ *
+ * 这里曾经在组合期间补写 `setValue`（「读的时候发现 version 变了就顺手推进」）——
+ * 这会在 LazyList（SubcomposeLayout）子组合进行到一半时发生一次快照写，宿主这套
+ * gapbuffer 运行时在「子组合 + 组合中写状态」的交错下会把 apply 队列弄乱，
+ * 最终以 `UiApplier.insertBottomUp` → `MutableVector.add` 越界（`length=-3`）的形式
+ * 闪退。用户实锤：发现页连续两次「加载更多」必现，且只有网络时延真实的设备能复现
+ * （时序窗），分批 reveal、LazyList item key 都不能根治。
+ *
+ * 推进重组由 [DiscoverState.onChanged] → 主线程 post `setValue` 负责（帧间执行，安全）；
+ * 本函数只负责读值建立依赖 + 同步观测版本。哪怕 post 还没到、本次组合读到旧值，
+ * post 落地后会再推一次重组收敛，不会停帧。
  */
 internal fun ReaMicroSettingsHook.discoverVersionValue(): Int {
     val state = discoverVersionState()
@@ -1032,13 +1041,7 @@ internal fun ReaMicroSettingsHook.discoverVersionValue(): Int {
     }
 
     val composeValue = (state.method0("getValue") as? Number)?.toInt() ?: 0
-    val actual = com.reamicro.fix.discover.DiscoverState.version
-    if (actual != discoverObservedVersion) {
-        discoverObservedVersion = actual
-        state.javaClass.methods
-            .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
-            ?.invoke(state, composeValue + 1)
-        return composeValue + 1
-    }
+    // 只同步观测版本，绝不在这里 setValue（原因见函数头注释）。
+    discoverObservedVersion = com.reamicro.fix.discover.DiscoverState.version
     return composeValue
 }

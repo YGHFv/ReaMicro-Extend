@@ -150,6 +150,7 @@ class ReaMicroSettingsHook(
                 "aboutScreen" to ::hookAboutScreen,
                 "settingsListBuilder" to ::hookSettingsListBuilder,
                 "lazyListItem" to ::hookLazyListItem,
+                "layoutNodeInsertDiagnostics" to ::hookLayoutNodeInsertDiagnostics,
                 "fontDocumentPickerResult" to ::hookFontDocumentPickerResult,
                 "externalSourceImportIntent" to ::hookExternalSourceImportIntent,
                 "hostAccountSignOut" to ::hookHostAccountSignOut,

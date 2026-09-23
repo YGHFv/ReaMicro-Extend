@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
+import de.robv.android.xposed.XposedHelpers
 import com.reamicro.fix.hook.settings.*
 
 // ReaMicroSettingsHook 的宿主 hook 安装簇。
@@ -12,6 +13,119 @@ import com.reamicro.fix.hook.settings.*
 //
 // 从 ReaMicroSettingsHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的
 // 结果重新缩进回去与原文逐字节比对，不一致直接中止（tools/extract-hook-cluster.mjs）。
+/**
+ * 组合期「插入下标越界」诊断（发现页 `insertBottomUp` → `MutableVector.add` 越界闪退专用）。
+ *
+ * 崩溃栈里完全没有业务帧，连崩三次都是同一个签名（`srcPos=5 dstPos=6 length=-3`），
+ * 静态分析无法确定是哪个容器在被错位插入。这里给插入链路上的**三层**都挂探针：
+ * `UiApplier.insertBottomUp` → `LayoutNode.insertAt$ui` → `MutableVector.add(int, T)`。
+ * 每层各有两条日志：
+ * - **alive**（一次性）：证明这一层的 hook 真的会被调用——栈帧在崩溃栈里出现不代表
+ *   Xposed 能拦到（ART 内联/AOT 都可能让 hook 哑火），上一轮就是三层全哑、一无所获。
+ * - **ILLEGAL**（条件触发）：`index > 当前子节点数`，即下一行数组拷贝必炸时，
+ *   打出父容器/子节点 measurePolicy 类名 + 实测尺寸 + 两级父链，定位出错容器。
+ * 平时零输出、零开销。
+ */
+internal fun ReaMicroSettingsHook.hookLayoutNodeInsertDiagnostics() {
+    hookInsertProbe(
+        className = "androidx.compose.ui.node.UiApplier",
+        methodName = "insertBottomUp",
+        label = "UiApplier.insertBottomUp",
+        parentOf = { param ->
+            runCatching { XposedHelpers.getObjectField(param.thisObject, "current") }.getOrNull()
+                ?: runCatching { XposedHelpers.callMethod(param.thisObject, "getCurrent") }.getOrNull()
+        },
+    )
+    hookInsertProbe(
+        className = "androidx.compose.ui.node.LayoutNode",
+        methodName = "insertAt",
+        label = "LayoutNode.insertAt",
+        parentOf = { param -> param.thisObject },
+    )
+    hookInsertProbe(
+        className = "androidx.compose.runtime.collection.MutableVector",
+        methodName = "add",
+        label = "MutableVector.add",
+        parentOf = { param -> param.thisObject },
+        sizeOf = { vector ->
+            runCatching { XposedHelpers.callMethod(vector, "getSize") as? Int }.getOrNull()
+        },
+        describeNode = { "itself=${it?.javaClass?.simpleName}@${Integer.toHexString(System.identityHashCode(it))}" },
+    )
+}
+
+/** 给单个插入点挂 alive/ILLEGAL 双探针。[sizeOf] 缺省走 LayoutNode 的 `_children` 读取。 */
+private fun ReaMicroSettingsHook.hookInsertProbe(
+    className: String,
+    methodName: String,
+    label: String,
+    parentOf: (XC_MethodHook.MethodHookParam) -> Any?,
+    sizeOf: (Any) -> Int? = { layoutNodeChildrenSize(it) },
+    describeNode: (Any?) -> String = { describeLayoutNode(it) },
+) {
+    runCatching {
+        val targetClass = cls(className)
+        val method = targetClass.declaredMethods.firstOrNull {
+            it.name.startsWith(methodName) && it.parameterTypes.size == 2 &&
+                it.parameterTypes[0] == Integer.TYPE
+        } ?: error("$className.$methodName(int,…) not found")
+        method.isAccessible = true
+        var aliveLogged = false
+        XposedBridge.hookMethod(method, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if (!aliveLogged) {
+                    aliveLogged = true
+                    XposedBridge.logAlways("[ReaMicro] insert probe alive: $label")
+                }
+                val index = param.args.getOrNull(0) as? Int ?: return
+                val parent = runCatching { parentOf(param) }.getOrNull() ?: return
+                val size = runCatching { sizeOf(parent) }.getOrNull()
+                if (size == null) {
+                    // 尺寸读不到且下标不小，极可能就是漏报现场——也打一条（一次性由 alive 保证量级）。
+                    if (index >= 4) {
+                        XposedBridge.logAlways(
+                            "[ReaMicro] insert probe size-unreadable: $label idx=$index " +
+                                "parent=${parent.javaClass.name}",
+                        )
+                    }
+                    return
+                }
+                if (index <= size) return
+                XposedBridge.logAlways(
+                    "[ReaMicro] ILLEGAL insert: $label idx=$index size=$size " +
+                        "parent=${describeNode(parent)} " +
+                        "grandparent=${describeLayoutNode(layoutNodeParent(parent))} " +
+                        "child=${describeLayoutNode(param.args.getOrNull(1))}",
+                )
+            }
+        })
+        XposedBridge.log("$LOG_PREFIX insert probe installed: $label")
+    }.onFailure {
+        XposedBridge.logAlways("$LOG_PREFIX insert probe FAILED: $label ${it.javaClass.simpleName}: ${it.message}")
+    }
+}
+
+/** 读 LayoutNode 当前子节点数；`_children` 是 MutableVectorWithMutationTracking，读不到再钻一层。 */
+private fun layoutNodeChildrenSize(node: Any): Int? = runCatching {
+    val children = XposedHelpers.getObjectField(node, "_children") ?: return@runCatching null
+    (XposedHelpers.callMethod(children, "getSize") as? Int)
+        ?: runCatching {
+            XposedHelpers.callMethod(XposedHelpers.getObjectField(children, "vector"), "getSize") as? Int
+        }.getOrNull()
+}.getOrNull()
+
+private fun layoutNodeParent(node: Any): Any? =
+    runCatching { XposedHelpers.callMethod(node, "getParent") }.getOrNull()
+
+/** 容器身份速写：measurePolicy 类名（Row/Column/Box/LazyList 各不相同）+ 实测尺寸 + 身份哈希。 */
+private fun describeLayoutNode(node: Any?): String {
+    if (node == null) return "null"
+    val policy = runCatching { XposedHelpers.callMethod(node, "getMeasurePolicy") }.getOrNull()
+    val width = runCatching { XposedHelpers.callMethod(node, "getWidth") as? Int }.getOrNull()
+    val height = runCatching { XposedHelpers.callMethod(node, "getHeight") as? Int }.getOrNull()
+    return "${policy?.javaClass?.simpleName}@${Integer.toHexString(System.identityHashCode(node))} ${width}x$height"
+}
+
 internal fun ReaMicroSettingsHook.hookStringResource() {
     runCatching {
         val stringResourcesClass = cls(STRING_RESOURCES_CLASS)
