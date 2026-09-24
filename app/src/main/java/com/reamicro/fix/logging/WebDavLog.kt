@@ -1,7 +1,7 @@
 package com.reamicro.fix.logging
 
 import com.reamicro.fix.hook.webdav.LOG_PREFIX
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 
 // WebDAV 与在线补全共用的日志入口。
 //

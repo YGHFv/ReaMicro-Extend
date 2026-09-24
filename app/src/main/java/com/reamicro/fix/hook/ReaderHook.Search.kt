@@ -28,9 +28,9 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.reamicro.fix.reader.SearchHighlightPlanner
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
+import com.reamicro.fix.xposed.XC_MethodHook
+import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedHelpers
 import java.lang.reflect.Method
 import java.io.File
 import java.lang.ref.WeakReference

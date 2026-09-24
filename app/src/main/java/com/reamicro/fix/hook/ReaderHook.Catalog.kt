@@ -4,8 +4,8 @@ import android.content.Context
 import android.widget.Toast
 import com.reamicro.fix.online.OnlineReaderContextBridge
 import com.reamicro.fix.settings.ReaderHighlightBookContext
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
+import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedHelpers
 import java.io.File
 import com.reamicro.fix.hook.reader.*
 

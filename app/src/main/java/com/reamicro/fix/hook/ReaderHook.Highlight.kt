@@ -9,7 +9,7 @@ import android.text.style.StyleSpan
 import android.widget.Toast
 import com.reamicro.fix.reader.SearchHighlightPlanner
 import com.reamicro.fix.settings.ReaderHighlightBookContext
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.hook.reader.*
 
 // 阅读页高亮簇。

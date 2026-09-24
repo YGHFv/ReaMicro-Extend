@@ -9,7 +9,7 @@ import com.reamicro.fix.tts.TtsSourceEntry
 import com.reamicro.fix.tts.TtsSourceStore
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 

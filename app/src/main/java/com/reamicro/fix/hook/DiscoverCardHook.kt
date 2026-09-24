@@ -9,9 +9,9 @@ import com.reamicro.fix.hook.settings.SPACER_KT_CLASS
 import com.reamicro.fix.hook.settings.SPACER_METHOD
 import com.reamicro.fix.hook.settings.TEXT_KT_CLASS
 import com.reamicro.fix.hook.settings.TEXT_METHOD
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
+import com.reamicro.fix.xposed.XC_MethodHook
+import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedHelpers
 import java.lang.reflect.Method
 
 /**

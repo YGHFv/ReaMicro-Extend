@@ -2,9 +2,9 @@ package com.reamicro.fix.hook
 
 import android.app.Activity
 import android.content.Intent
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
+import com.reamicro.fix.xposed.XC_MethodHook
+import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedHelpers
 import com.reamicro.fix.hook.settings.*
 
 // ReaMicroSettingsHook 的宿主 hook 安装簇。

@@ -24,7 +24,7 @@ import com.reamicro.fix.online.OnlineSourceDownloadPolicyStore
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.OnlineSourceStore
 import com.reamicro.fix.online.OnlineSourceTrxsCompat
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 

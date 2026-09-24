@@ -3,7 +3,7 @@ package com.reamicro.fix.hook
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 
 object RotationOrientationController {
     fun apply(activity: Activity, snapshot: ModuleSettingsSnapshot) {

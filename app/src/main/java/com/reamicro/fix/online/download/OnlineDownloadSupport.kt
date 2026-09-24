@@ -56,7 +56,7 @@ import com.reamicro.fix.online.download.OnlineChapterContentValidator
 import com.reamicro.fix.online.download.OnlineChapterUpdatePlanner
 import com.reamicro.fix.online.download.RemoteOnlineChapter
 import com.reamicro.fix.online.download.StoredOnlineChapter
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.io.BufferedInputStream
 import java.io.File
 import java.lang.reflect.Method

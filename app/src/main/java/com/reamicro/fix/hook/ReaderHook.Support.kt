@@ -17,8 +17,8 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.reamicro.fix.online.OnlineReaderContextBridge
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
+import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedHelpers
 import java.io.ByteArrayOutputStream
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method

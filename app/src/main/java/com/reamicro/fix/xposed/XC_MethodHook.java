@@ -1,6 +1,6 @@
-package de.robv.android.xposed;
+package com.reamicro.fix.xposed;
 
-import de.robv.android.xposed.callbacks.XCallback;
+import com.reamicro.fix.xposed.callbacks.XCallback;
 import java.lang.reflect.Executable;
 import java.util.HashMap;
 import java.util.Map;

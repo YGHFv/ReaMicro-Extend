@@ -11,7 +11,7 @@ import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
 import com.reamicro.fix.notification.CloudTaskNotifications
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean

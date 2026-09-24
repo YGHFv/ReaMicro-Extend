@@ -6,9 +6,9 @@ import android.widget.Toast
 import com.reamicro.fix.online.download.OnlineOnDemandBridge
 import com.reamicro.fix.online.download.OnlineOnDemandChapterRequest
 import com.reamicro.fix.online.download.OnlineOnDemandPrefetchPlanner
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
+import com.reamicro.fix.xposed.XC_MethodHook
+import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedHelpers
 import java.lang.reflect.Method
 import java.io.File
 import com.reamicro.fix.hook.reader.*

@@ -15,7 +15,7 @@ import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.ai.AiImagePresetTarget
 import com.reamicro.fix.core.ComposeInterop
 import com.reamicro.fix.settings.XposedModuleSettings
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.io.File
 import java.lang.ref.WeakReference
 import java.lang.reflect.Method

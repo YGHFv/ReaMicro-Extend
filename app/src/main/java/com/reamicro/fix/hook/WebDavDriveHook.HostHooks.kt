@@ -11,10 +11,10 @@ import com.reamicro.fix.cloud.webdav.HomeSearchSection
 import com.reamicro.fix.cloud.webdav.ImportLocalLibraryRowContext
 import com.reamicro.fix.cloud.webdav.ImportUnauthRenderContext
 import com.reamicro.fix.cloud.webdav.SyncAuthCardRenderContext
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.callbacks.XCallback
+import com.reamicro.fix.xposed.XC_MethodHook
+import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedHelpers
+import com.reamicro.fix.xposed.callbacks.XCallback
 import java.lang.ref.WeakReference
 import java.net.URL
 import java.util.UUID

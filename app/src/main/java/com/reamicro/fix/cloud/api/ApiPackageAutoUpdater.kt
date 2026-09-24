@@ -2,7 +2,7 @@ package com.reamicro.fix.cloud.api
 
 import android.content.Context
 import com.reamicro.fix.settings.XposedModuleSettings
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.util.concurrent.atomic.AtomicBoolean
 
 object ApiPackageAutoUpdater {

@@ -2,9 +2,9 @@ package com.reamicro.fix.hook
 
 import com.reamicro.fix.online.OnlineReaderContextBridge
 import com.reamicro.fix.settings.ReaderHighlightBookContext
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
+import com.reamicro.fix.xposed.XC_MethodHook
+import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedHelpers
 import java.lang.ref.WeakReference
 import com.reamicro.fix.hook.reader.*
 

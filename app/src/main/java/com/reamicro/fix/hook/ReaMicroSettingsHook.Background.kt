@@ -16,7 +16,7 @@ import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.Toast
 import com.reamicro.fix.settings.ModuleSettings
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.io.File
 import java.util.Locale
 import com.reamicro.fix.hook.settings.*

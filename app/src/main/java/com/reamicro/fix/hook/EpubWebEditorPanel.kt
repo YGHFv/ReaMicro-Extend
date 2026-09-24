@@ -32,7 +32,7 @@ import android.widget.TextView
 import android.widget.Toast
 import com.reamicro.fix.settings.FontSettingsSnapshot
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream

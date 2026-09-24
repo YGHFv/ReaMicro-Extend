@@ -2,7 +2,7 @@ package com.reamicro.fix.association.provider
 
 import android.content.Context
 import dalvik.system.DexClassLoader
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.io.File
 import java.io.FileOutputStream
 import java.util.zip.CRC32

@@ -28,7 +28,7 @@ import com.reamicro.fix.ai.AiDictionaryPreset
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.ai.AiImagePreset
 import com.reamicro.fix.ai.AiImagePresetTarget
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 

@@ -1,7 +1,7 @@
 package com.reamicro.fix.hook
 
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XC_MethodHook
+import com.reamicro.fix.xposed.XposedBridge
 import java.lang.reflect.Method
 import java.time.Instant
 import java.time.ZoneId

@@ -2,7 +2,7 @@ package com.reamicro.fix.hook
 
 import com.reamicro.fix.hook.discover.DiscoverIcon
 import com.reamicro.fix.hook.settings.*
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.lang.reflect.Method
 
 // 把「书院」那一行改造成「书院 ｜ 发现」——**结构与下一行「同好 ｜ 野社」严格对齐**。

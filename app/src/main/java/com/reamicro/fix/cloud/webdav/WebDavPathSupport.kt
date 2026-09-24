@@ -33,7 +33,7 @@ import com.reamicro.fix.cloud.webdav.WebDavBackupSnapshot
 import com.reamicro.fix.cloud.webdav.WebDavCredentials
 import com.reamicro.fix.cloud.webdav.WebDavHttpException
 import com.reamicro.fix.cloud.webdav.WebDavImportSource
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.lang.ref.WeakReference

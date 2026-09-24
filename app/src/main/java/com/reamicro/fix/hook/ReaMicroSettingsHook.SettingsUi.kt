@@ -9,7 +9,7 @@ import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.ai.AiImagePresetTarget
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.OnlineEpubStyleKind
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.lang.reflect.Method
 import com.reamicro.fix.hook.settings.*
 

@@ -31,9 +31,9 @@ import com.reamicro.fix.ai.AiApiConfig
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.ai.AiImagePresetTarget
 import com.reamicro.fix.core.HostClasses
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
+import com.reamicro.fix.xposed.XC_MethodHook
+import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedHelpers
 import java.io.File
 import java.io.InputStream
 import java.lang.reflect.Proxy

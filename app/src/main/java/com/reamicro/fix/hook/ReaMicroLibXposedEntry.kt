@@ -1,7 +1,7 @@
 package com.reamicro.fix.hook
 
 import com.reamicro.fix.association.provider.ExternalSourceLoader
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 
@@ -15,7 +15,7 @@ class ReaMicroLibXposedEntry : XposedModule() {
         ReaderHighlightImageAssets.configure(moduleApkPath)
         ReaderBackgroundAssets.configure(moduleApkPath)
         XposedBridge.log(
-            "ReaMicro API101 entry ready: package=${param.packageName}, " +
+            "ReaMicro API102 entry ready: package=${param.packageName}, " +
                 "api=${getApiVersion()}, framework=$frameworkName $frameworkVersion($frameworkVersionCode)",
         )
         hookEntry.handleLoadedPackage(param.packageName, param.classLoader)

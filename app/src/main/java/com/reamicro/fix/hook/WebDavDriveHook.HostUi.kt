@@ -12,7 +12,7 @@ import android.view.View
 import android.widget.Toast
 import com.reamicro.fix.R
 import com.reamicro.fix.online.OnlineSourceEntry
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import com.reamicro.fix.hook.webdav.*

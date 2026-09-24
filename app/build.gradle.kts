@@ -177,7 +177,7 @@ dependencies {
     // 用 miuix 官方 blur 库（KernelSU 管理器同款），与 miuix-ui 同版本、同一家发布，不引入第三套图形栈。
     implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.4")
 
-    compileOnly("io.github.libxposed:api:101.0.1")
+    compileOnly("io.github.libxposed:api:102.0.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

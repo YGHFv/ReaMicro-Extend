@@ -1,6 +1,6 @@
 package com.reamicro.fix.hook.discover
 
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 
 /**
  * 「发现」入口图标（罗盘）。

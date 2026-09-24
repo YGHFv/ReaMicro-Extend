@@ -1,4 +1,4 @@
-package de.robv.android.xposed
+package com.reamicro.fix.xposed
 
 import android.util.Log
 import com.reamicro.fix.logging.ModuleLogBuffer

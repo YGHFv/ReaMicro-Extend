@@ -1,6 +1,6 @@
 package com.reamicro.fix.core
 
-import de.robv.android.xposed.XposedHelpers
+import com.reamicro.fix.xposed.XposedHelpers
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 

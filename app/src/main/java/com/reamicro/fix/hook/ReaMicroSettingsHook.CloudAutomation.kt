@@ -11,7 +11,7 @@ import com.reamicro.fix.cloud.api.ReaMicroCredential
 import com.reamicro.fix.cloud.api.mirrorToModule
 import com.reamicro.fix.cloud.local.CloudTaskLocalRunner
 import com.reamicro.fix.hook.settings.*
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat

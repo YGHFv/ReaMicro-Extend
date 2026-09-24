@@ -26,7 +26,7 @@ import com.reamicro.fix.settings.OnlineEpubStyleSettings
 import com.reamicro.fix.settings.OnlineEpubStyleStore
 import com.reamicro.fix.online.epub.OnlineEpubStylePreview
 import com.reamicro.fix.online.epub.OnlineHeaderImageComposer
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date

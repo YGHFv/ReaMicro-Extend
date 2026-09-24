@@ -9,7 +9,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteStatement
 import android.util.Base64
 import com.reamicro.fix.core.HostClasses
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File

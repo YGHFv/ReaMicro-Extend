@@ -23,7 +23,7 @@ import com.reamicro.fix.settings.ReaderHighlightRule
 import com.reamicro.fix.settings.ReaderHighlightRuleType
 import com.reamicro.fix.settings.ReaderHighlightStyle
 import com.reamicro.fix.settings.READER_HIGHLIGHT_SELECTABLE_TYPES
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.io.File
 import java.util.zip.GZIPInputStream
 import java.lang.ref.WeakReference

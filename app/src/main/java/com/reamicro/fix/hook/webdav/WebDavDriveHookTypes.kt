@@ -14,7 +14,7 @@ import android.webkit.JavascriptInterface
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.epub.OnlineBodyMarkup
 import com.reamicro.fix.settings.OnlineEpubHeaderScope
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.io.File
 import com.reamicro.fix.hook.webdav.*
 

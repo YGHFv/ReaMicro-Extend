@@ -32,7 +32,7 @@ import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.search.formatOnlineUpdateTime
 import com.reamicro.fix.online.search.sourceBaseUrl
 import com.reamicro.fix.online.search.formatOnlineWordCount
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.lang.reflect.Method
 
 // 「发现」页：接在线书源 `exploreUrl` 的分类书单，形态对齐宿主的搜索/筛选页。

@@ -8,9 +8,9 @@ import android.view.ViewGroup
 import android.widget.TextView
 import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.settings.XposedModuleSettings
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
+import com.reamicro.fix.xposed.XC_MethodHook
+import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedHelpers
 import java.io.File
 import java.lang.reflect.Method
 

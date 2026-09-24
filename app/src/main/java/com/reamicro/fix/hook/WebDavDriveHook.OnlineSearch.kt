@@ -35,8 +35,8 @@ import com.reamicro.fix.online.download.OnlineSourceHttpException
 import com.reamicro.fix.online.search.parseOnlineUrlRequestCompat
 import com.reamicro.fix.online.search.resolveOnlineChapterListRuleCompat
 import com.reamicro.fix.online.search.resolveOnlineUrlCompat
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XC_MethodHook
+import com.reamicro.fix.xposed.XposedBridge
 import java.lang.ref.WeakReference
 import java.lang.reflect.Method
 import java.net.HttpURLConnection

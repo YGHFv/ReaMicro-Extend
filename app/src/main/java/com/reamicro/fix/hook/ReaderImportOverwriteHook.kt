@@ -13,10 +13,10 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.callbacks.XCallback
+import com.reamicro.fix.xposed.XC_MethodHook
+import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedHelpers
+import com.reamicro.fix.xposed.callbacks.XCallback
 import java.io.File
 import java.lang.ref.WeakReference
 import java.lang.reflect.InvocationTargetException

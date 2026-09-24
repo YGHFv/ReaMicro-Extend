@@ -1,6 +1,6 @@
 package com.reamicro.fix.hook
 
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.io.File
 import java.util.zip.ZipFile
 

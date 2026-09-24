@@ -457,7 +457,7 @@ internal object DiscoverState {
                     bump()
                     // 定位日志：发现页「加载更多」若再闪退，看 logcat 里本行与崩溃的先后，
                     // 能区分死在状态写入前还是随后的组合/应用阶段。logAlways 防「简洁日志」吞掉。
-                    de.robv.android.xposed.XposedBridge.logAlways(
+                    com.reamicro.fix.xposed.XposedBridge.logAlways(
                         "[ReaMicro] discover loadMore applied page=$nextPage total=${merged.books.size}",
                     )
                 }

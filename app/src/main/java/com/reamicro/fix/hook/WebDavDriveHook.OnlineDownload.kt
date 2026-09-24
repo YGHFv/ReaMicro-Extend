@@ -59,7 +59,7 @@ import com.reamicro.fix.online.download.OnlineChapterContentValidator
 import com.reamicro.fix.online.download.OnlineChapterUpdatePlanner
 import com.reamicro.fix.online.download.RemoteOnlineChapter
 import com.reamicro.fix.online.download.StoredOnlineChapter
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.io.BufferedInputStream
 import java.io.File
 import java.lang.reflect.Method
@@ -889,7 +889,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandBook(
             }
         }.onFailure { error ->
             // 封面失败会被静默降级成「无封面 EPUB」，这里必须留可见痕迹（简洁日志会吞 INFO）。
-            de.robv.android.xposed.XposedBridge.logAlways(
+            com.reamicro.fix.xposed.XposedBridge.logAlways(
                 "[ReaMicro] online completion on-demand cover failed url=${coverUrl.take(160)} " +
                     "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
             )
@@ -900,7 +900,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandBook(
                 if (!isFanqieCoverUrl(coverUrl)) return@run null
                 runCatching { downloadDiscoverCoverViaWebPage(this, target.result.detailUrl) }
                     .onFailure { error ->
-                        de.robv.android.xposed.XposedBridge.logAlways(
+                        com.reamicro.fix.xposed.XposedBridge.logAlways(
                             "[ReaMicro] online completion cover web fallback failed " +
                                 "detail=${target.result.detailUrl.take(160)} " +
                                 "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
@@ -1005,7 +1005,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
                     "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
             )
             // 「简洁日志」默认吞掉 INFO 级 log()，封面直接决定书架有没有封面，这里再落一条可见日志。
-            de.robv.android.xposed.XposedBridge.logAlways(
+            com.reamicro.fix.xposed.XposedBridge.logAlways(
                 "[ReaMicro] online completion cover failed url=${coverUrl.take(160)} " +
                     "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
             )
@@ -1016,7 +1016,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
                 if (!isFanqieCoverUrl(coverUrl)) return@run null
                 runCatching { downloadDiscoverCoverViaWebPage(this, target.result.detailUrl) }
                     .onFailure { error ->
-                        de.robv.android.xposed.XposedBridge.logAlways(
+                        com.reamicro.fix.xposed.XposedBridge.logAlways(
                             "[ReaMicro] online completion cover web fallback failed " +
                                 "detail=${target.result.detailUrl.take(160)} " +
                                 "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",

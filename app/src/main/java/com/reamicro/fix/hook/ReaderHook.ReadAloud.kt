@@ -17,7 +17,7 @@ import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.tts.ReadAloudIntents
 import com.reamicro.fix.tts.TtsSourceEntry
 import com.reamicro.fix.tts.TtsSourceStore
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.io.File
 import java.lang.ref.WeakReference
 import com.reamicro.fix.hook.reader.*

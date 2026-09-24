@@ -1,6 +1,6 @@
 package com.reamicro.fix.hook
 
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.util.concurrent.ConcurrentHashMap
 
 /** 取消记忆的存活时长。 */
@@ -96,7 +96,7 @@ internal fun importCancellationKeys(
  * 系统包名下。前移到模块自己的入口，是为了**在导入开始前就把用户的决定问出来**：选「取消导入」时
  * 把决定存成 pre-decision，整条链按"独立副本 + 导完删除"落地，用户只看到一次弹窗。
  *
- * Hook 实例由 [de.robv.android.xposed.XposedBridge] 加载模块时挂上来；没挂上（或解析不出身份）
+ * Hook 实例由 [com.reamicro.fix.xposed.XposedBridge] 加载模块时挂上来；没挂上（或解析不出身份）
  * 时一律放行，交回原有流程处理。
  */
 internal object ModuleImportPrecheck {

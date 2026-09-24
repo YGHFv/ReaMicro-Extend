@@ -2,7 +2,7 @@ package com.reamicro.fix.cloud.api
 
 import android.content.Context
 import android.content.Intent
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import org.json.JSONObject
 
 /**

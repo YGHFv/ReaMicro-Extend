@@ -3,7 +3,7 @@ package com.reamicro.fix.cloud.api
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 
 /**
  * 模块进程侧：接收宿主下发的 API 服务器配置。

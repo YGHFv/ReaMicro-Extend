@@ -50,8 +50,8 @@ import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.settings.OnlineEpubStyleKind
 import com.reamicro.fix.settings.ReaderHighlightBookContext
 import com.reamicro.fix.settings.readerHighlightBookIdentityMatches
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
+import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedHelpers
 import java.io.File
 import java.lang.reflect.Method
 import java.security.MessageDigest

@@ -4,7 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import com.reamicro.fix.cloud.api.ApiServerSettingsBridgeProvider
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import org.json.JSONObject
 
 /**

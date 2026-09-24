@@ -1,7 +1,7 @@
 package com.reamicro.fix.hook.discover
 
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
+import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedHelpers
 import java.lang.reflect.Constructor
 import java.lang.reflect.Method
 

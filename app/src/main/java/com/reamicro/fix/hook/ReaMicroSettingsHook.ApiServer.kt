@@ -31,7 +31,7 @@ import com.reamicro.fix.cloud.api.normalizeApiBaseUrl
 import com.reamicro.fix.cloud.api.mirrorToModule
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 import com.reamicro.fix.hook.settings.*
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.io.File
 
 internal fun ReaMicroSettingsHook.apiServerSettingsSubtitle(): String {

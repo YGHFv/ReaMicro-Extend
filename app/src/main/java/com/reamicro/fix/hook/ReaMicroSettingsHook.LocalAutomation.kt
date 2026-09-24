@@ -13,7 +13,7 @@ import com.reamicro.fix.cloud.local.LocalTaskMirror
 import com.reamicro.fix.cloud.local.LocalTaskRecord
 import com.reamicro.fix.cloud.local.LocalTaskStore
 import com.reamicro.fix.hook.settings.*
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import org.json.JSONObject
 
 private const val LOCAL_AUTOMATION_LOG_PREFIX = "[ReaMicroFix/LocalAutomation]"

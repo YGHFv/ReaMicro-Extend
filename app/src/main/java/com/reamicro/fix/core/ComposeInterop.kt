@@ -1,6 +1,6 @@
 package com.reamicro.fix.core
 
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 

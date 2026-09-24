@@ -1,4 +1,4 @@
-package de.robv.android.xposed
+package com.reamicro.fix.xposed
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame

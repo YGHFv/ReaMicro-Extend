@@ -5,7 +5,7 @@ import android.content.Context
 import android.content.Intent
 import com.reamicro.fix.cloud.api.CloudTaskWakeScheduler
 import com.reamicro.fix.logging.ModuleLogBuffer
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import org.json.JSONObject
 
 /**

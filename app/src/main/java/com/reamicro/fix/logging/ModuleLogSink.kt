@@ -3,7 +3,7 @@ package com.reamicro.fix.logging
 /**
  * 模块日志出口。
  *
- * 存在的意义是把「往 libxposed 框架打日志」这件事和 [de.robv.android.xposed.XposedBridge] 解耦：
+ * 存在的意义是把「往 libxposed 框架打日志」这件事和 [com.reamicro.fix.xposed.XposedBridge] 解耦：
  * `libxposed` 是 `compileOnly` 依赖，只存在于被注入的宿主进程里，模块**自己的进程**（接收器、
  * 闹钟唤醒、主界面）加载不到 `XposedInterface`。只要 `XposedBridge.log` 的字节码里出现对该类的
  * 引用，模块进程一执行日志就 `NoClassDefFoundError` 崩溃（实测：打开阅微时模块进程崩溃）。

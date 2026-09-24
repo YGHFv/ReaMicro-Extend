@@ -3,7 +3,7 @@ package com.reamicro.fix.settings
 import android.content.Context
 import android.content.SharedPreferences
 import com.reamicro.fix.logging.ModuleLogState
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.io.File
 import java.security.MessageDigest
 import org.json.JSONArray

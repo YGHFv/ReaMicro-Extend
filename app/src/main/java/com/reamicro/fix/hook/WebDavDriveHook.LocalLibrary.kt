@@ -16,7 +16,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.reamicro.fix.R
 import com.reamicro.fix.cloud.webdav.ImportLocalLibraryRowContext
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.Locale

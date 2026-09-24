@@ -2,7 +2,7 @@ package com.reamicro.fix.cloud.webdav
 
 import android.util.Base64
 import com.reamicro.fix.core.HostClasses
-import de.robv.android.xposed.XposedHelpers
+import com.reamicro.fix.xposed.XposedHelpers
 import java.io.File
 import java.net.URI
 import java.net.URL

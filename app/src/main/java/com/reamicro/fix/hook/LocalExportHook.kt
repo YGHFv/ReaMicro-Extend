@@ -8,9 +8,9 @@ import android.provider.DocumentsContract
 import android.widget.Toast
 import com.reamicro.fix.core.ComposeInterop
 import com.reamicro.fix.core.HostClasses
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
+import com.reamicro.fix.xposed.XC_MethodHook
+import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedHelpers
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream

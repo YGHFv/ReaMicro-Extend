@@ -18,7 +18,7 @@ import com.reamicro.fix.discover.DiscoverBook
 import com.reamicro.fix.online.download.OnlineBookDownloadMode
 import com.reamicro.fix.hook.webdav.OnlineBookSearchResult
 import com.reamicro.fix.hook.webdav.OnlineDownloadTarget
-import de.robv.android.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.discover.DiscoverKind
 import com.reamicro.fix.discover.DiscoverSource
 import com.reamicro.fix.discover.DiscoverState
