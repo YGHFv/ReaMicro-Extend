@@ -98,6 +98,10 @@ internal const val PADDING_HORIZONTAL_DEFAULT_METHOD = "padding-VpY3zN4\$default
 // 四边独立内边距（start/top/end/bottom + mask）。mask 置位表示该参数用默认值 0：
 // 按位 top=2、end=4、bottom=8，所以「只要顶部」用 14，「只要起始边」用 14 的镜像同理。
 internal const val PADDING_SIDES_DEFAULT_METHOD = "padding-qDBjuR0\$default"
+// 四边独立内边距的**非** $default 版（4 个 Dp 全部显式给）。真沉浸页要「只消费顶部、
+// 底部保留 0」，用这个比凑 $default 掩码更直观。
+internal const val PADDING_SIDES_METHOD = "padding-qDBjuR0"
+internal const val PADDING_SIDES_PARAMETER_COUNT = 5
 internal const val PADDING_MASK_TOP_ONLY = 14
 internal const val PADDING_ABSOLUTE_DEFAULT_METHOD = "padding-qDBjuR0\$default"
 internal const val BACKGROUND_KT_CLASS = HostClasses.Compose.BACKGROUND_KT

@@ -107,7 +107,8 @@ internal fun ReaMicroSettingsHook.renderDiscoverContent(innerPaddings: Any, comp
         renderDiscoverBooks(lazyListScope, current, selection)
         targetUnit()
     }
-    renderHostLazyColumn(innerPaddings, listContent, composer)
+    // 真沉浸：底部不消费 navigationBars inset，书单一直铺到屏幕最底，小白条浮在封面之上。
+    renderHostLazyColumn(innerPaddings, listContent, composer, extendBottom = true)
 }
 
 // ── 顶栏（标题行右侧的「配置 / 切换布局」按钮） ────────────────────────────────
@@ -409,6 +410,15 @@ private fun ReaMicroSettingsHook.renderDiscoverBooks(
                 addLazyItem(lazyListScope, DISCOVER_LOAD_MORE_ITEM_KEY, DISCOVER_LOAD_MORE_ITEM_ID) { itemComposer ->
                     renderDiscoverLoadMore(itemComposer)
                 }
+            }
+            // 页尾留白。发现页开了真沉浸（`extendBottom = true`，content 一直画到屏幕最底），
+            // 最后一张卡片会贴死屏幕底边、被系统手势条压住；固定补一段空白，
+            // 让「加载更多」完整浮在小白条上方，滚到底时视觉上也收得住。
+            //
+            // 恒定的独立 item（永远存在、永远是同一个 Spacer 节点），
+            // 不参与网格行内「同构子节点」的约束，因此没有种类切换风险。
+            addLazyItem(lazyListScope, DISCOVER_TAIL_GAP_ITEM_KEY, DISCOVER_TAIL_GAP_ITEM_ID) { itemComposer ->
+                renderDiscoverVGap(itemComposer, DISCOVER_TAIL_GAP_DP)
             }
         }
     }
@@ -1631,6 +1641,14 @@ private const val DISCOVER_LOAD_MORE_ITEM_KEY = 0x524D469A
 private const val DISCOVER_STATUS_ITEM_ID = "discover_status"
 
 private const val DISCOVER_LOAD_MORE_ITEM_ID = "discover_load_more"
+
+/** 页尾留白 item（独立于网格行，恒定存在）。 */
+private const val DISCOVER_TAIL_GAP_ITEM_KEY = 0x524D469B
+
+private const val DISCOVER_TAIL_GAP_ITEM_ID = "discover_tail_gap"
+
+/** 页尾留白高度：32dp ≈ 96px（本机 3.0x），足够让末张卡片避开 47px 的手势条。 */
+private const val DISCOVER_TAIL_GAP_DP = 32
 
 private const val DISCOVER_LIST_ROW_ITEM_KEY_BASE = 0x524E0000
 

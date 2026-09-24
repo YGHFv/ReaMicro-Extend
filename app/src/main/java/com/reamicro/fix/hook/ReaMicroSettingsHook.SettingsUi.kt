@@ -1574,10 +1574,21 @@ internal fun ReaMicroSettingsHook.renderImageSettingsContent(innerPaddings: Any,
     renderHostLazyColumn(innerPaddings, listContent, composer)
 }
 
-internal fun ReaMicroSettingsHook.renderHostLazyColumn(innerPaddings: Any, listContent: Any, composer: Any) {
+/**
+ * 注入页统一的 `LazyColumn` 骨架。
+ *
+ * [extendBottom] 打开「真沉浸」：底部不留系统导航栏白，内容铺到屏幕最底、手势条浮在上面。
+ * 逐页开启（见 `renderDiscoverContent`），默认关闭保持原「颜色沉浸」行为。
+ */
+internal fun ReaMicroSettingsHook.renderHostLazyColumn(
+    innerPaddings: Any,
+    listContent: Any,
+    composer: Any,
+    extendBottom: Boolean = false,
+) {
     method(LAZY_DSL_KT_CLASS, LAZY_COLUMN_METHOD, 13).invoke(
         null,
-        pageModifier(innerPaddings),
+        pageModifier(innerPaddings, extendBottom),
         null,
         null,
         false,

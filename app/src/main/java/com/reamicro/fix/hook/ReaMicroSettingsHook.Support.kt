@@ -1376,7 +1376,33 @@ internal fun ReaMicroSettingsHook.queryDisplayName(activity: Activity, uri: Uri)
             if (cursor.moveToFirst()) cursor.getString(0) else null
         }
 
-internal fun ReaMicroSettingsHook.pageModifier(innerPaddings: Any): Any {
+/**
+ * 读取宿主 `PaddingValues` 单边的 dp 值。
+ *
+ * `Dp` 是 inline class，Kotlin 编译后**返回 `Dp` 的函数名会带 `-hash` 后缀**
+ * （如 `calculateTopPadding-D9Ej5fM`），因此按前缀匹配而不是全名相等。
+ */
+@Volatile
+private var pageInsetsLogged = false
+
+private fun paddingValuesSideDp(paddings: Any, prefix: String): Double? =
+    runCatching {
+        paddings.javaClass.methods
+            .firstOrNull { it.parameterCount == 0 && it.name.startsWith(prefix) }
+            ?.apply { isAccessible = true }
+            ?.invoke(paddings)
+            ?.let { it as? Float }
+            ?.toDouble()
+    }.getOrNull()
+
+/**
+ * 注入页统一容器 modifier：`fillMaxSize` + 内边距 + 水平 16dp。
+ *
+ * [extendBottom] 打开「真沉浸」：底部**不再消费**系统导航栏 inset，内容一直铺到屏幕最底，
+ * 系统手势条（小白条）半透明浮在内容上——与宿主阅读页一致。关闭时按宿主 Scaffold 给的
+ * `innerPaddings` 全量留白，内容在导航栏上缘被裁断、底部露出一条容器底色（即「颜色沉浸」）。
+ */
+internal fun ReaMicroSettingsHook.pageModifier(innerPaddings: Any, extendBottom: Boolean = false): Any {
     val filled = method(SIZE_KT_CLASS, FILL_MAX_SIZE_DEFAULT_METHOD, 4).invoke(
         null,
         modifierInstance(),
@@ -1384,7 +1410,26 @@ internal fun ReaMicroSettingsHook.pageModifier(innerPaddings: Any): Any {
         1,
         null,
     )
-    val padded = method(PADDING_KT_CLASS, PADDING_VALUES_METHOD, 2).invoke(null, filled, innerPaddings)
+    val padded = if (extendBottom) {
+        // 只保留顶部（状态栏 + 宿主顶栏）内边距，底部交给系统手势条浮在内容上。
+        val topDp = paddingValuesSideDp(innerPaddings, "calculateTopPadding")
+        if (!pageInsetsLogged) {
+            pageInsetsLogged = true
+            XposedBridge.logAlways(
+                "$LOG_PREFIX page insets: top=${topDp ?: -1.0} bottom=${paddingValuesSideDp(innerPaddings, "calculateBottomPadding")}",
+            )
+        }
+        method(PADDING_KT_CLASS, PADDING_SIDES_METHOD, PADDING_SIDES_PARAMETER_COUNT).invoke(
+            null,
+            filled,
+            udp(0.0),
+            udp(topDp ?: 0.0),
+            udp(0.0),
+            udp(0.0),
+        )
+    } else {
+        method(PADDING_KT_CLASS, PADDING_VALUES_METHOD, 2).invoke(null, filled, innerPaddings)
+    }
     return method(PADDING_KT_CLASS, PADDING_HORIZONTAL_DEFAULT_METHOD, 5).invoke(
         null,
         padded,

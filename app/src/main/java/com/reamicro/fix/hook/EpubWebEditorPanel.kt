@@ -19,6 +19,7 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.webkit.JavascriptInterface
@@ -72,6 +73,17 @@ internal class EpubWebEditorPanel(
     private var lastCoverResultSignature: String = ""
     private var lastCoverResultAtMs: Long = 0L
     @Volatile private var metadataChanged: Boolean = false
+
+    /**
+     * 底部安全区高度，单位是 **Web 页面的 CSS px**（本机 1 CSS px = 1dp = 3 物理像素）。
+     *
+     * ⚠ 两个必须守住的点，否则底部留白会爆：
+     *  1. 只能取**导航栏**高度，绝不能用 `systemWindowInsetBottom`——键盘弹出时它等于键盘高度
+     *     （实测 ~500px），灌进 `.editor` 的 `padding-bottom` 会把网格第三行（查找替换面板）
+     *     整个顶到屏幕上方；
+     *  2. 必须把物理 px 除以 density 才是 CSS px，直接下发会让留白变成 3 倍。
+     */
+    @Volatile private var safeAreaBottomCssPx: Int = 0
     private val globalUiFontFile: File? by lazy { resolveGlobalUiFontFile() }
 
     fun show() {
@@ -82,7 +94,11 @@ internal class EpubWebEditorPanel(
             alpha = 0f
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
-                    activity.runOnUiThread { hideLoadingOverlay() }
+                    activity.runOnUiThread {
+                        hideLoadingOverlay()
+                        // 页面刚加载完会重置 <html> 上的内联样式，安全区变量要在每次加载后重设。
+                        applySafeAreaToPage()
+                    }
                 }
             }
             settings.javaScriptEnabled = true
@@ -116,8 +132,20 @@ internal class EpubWebEditorPanel(
             ))
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) {
+            // 真沉浸外观 + 内容安全区：
+            //   * 原生容器只消费**顶部**（状态栏）inset，WebView 因此铺到屏幕最底，
+            //     导航栏透明（见 configureWindow），手势条半透明浮在内容上；
+            //   * 底部 inset 不丢，转交给页面自身的 CSS 变量 `--safe-bottom`，
+            //     由 .app / .editor / .sheet 在内容侧留白——编辑器底部操作条、
+            //     文件树最后一项仍然完整可见、可点，不会被小白条压住。
+            //     注意取值只认导航栏（见 navigationBarBottomCssPx），键盘不影响它。
             container.setOnApplyWindowInsetsListener { view, insets ->
-                view.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom)
+                view.setPadding(0, insets.systemWindowInsetTop, 0, 0)
+                val bottom = navigationBarBottomCssPx(insets)
+                if (bottom != safeAreaBottomCssPx) {
+                    safeAreaBottomCssPx = bottom
+                    applySafeAreaToPage()
+                }
                 insets
             }
         }
@@ -176,7 +204,10 @@ internal class EpubWebEditorPanel(
                 clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION)
                 addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
                 statusBarColor = bg
-                navigationBarColor = bg
+                // 导航栏不铺系统底色（配合 isNavigationBarContrastEnforced=false）：
+                // WebView 铺到屏幕底，底部那条留白改由页面自己负责
+                // （见 show() 的 insets 监听 + applySafeAreaToPage 的 --safe-bottom）。
+                navigationBarColor = Color.TRANSPARENT
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 navigationBarDividerColor = Color.TRANSPARENT
@@ -209,12 +240,62 @@ internal class EpubWebEditorPanel(
                 decorView.setBackgroundColor(bg)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                     statusBarColor = bg
-                    navigationBarColor = bg
+                    // 与 configureWindow 一致：导航栏保持透明，由容器底色兜底。
+                    navigationBarColor = Color.TRANSPARENT
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                     decorView.systemUiVisibility = systemUiFlags(dark)
                 }
                 applySystemBarAppearance(this, dark)
+            }
+        }
+    }
+
+    /**
+     * 底部导航栏（手势条）高度，换算成页面 CSS px。
+     *
+     * 页面 `<meta name="viewport" content="width=device-width,initial-scale=1">`，所以
+     * 1 CSS px = 1dp = `density` 个物理像素；`Insets` 给的是物理 px，必须除 density。
+     *
+     * API 30+ 用 `WindowInsets.Type.navigationBars()`：它**不含 IME**，键盘弹出/收起都不会
+     * 改变 SafeArea，底部留白因此恒定；低版本没有类型分组，退化成系统资源里的导航栏高度，
+     * 也好过把键盘高度当安全区。
+     */
+    private fun navigationBarBottomCssPx(insets: WindowInsets): Int {
+        val px = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            insets.getInsets(WindowInsets.Type.navigationBars()).bottom
+        } else {
+            val res = activity.resources
+            val id = res.getIdentifier("navigation_bar_height", "dimen", "android")
+            if (id > 0) res.getDimensionPixelSize(id) else 0
+        }
+        val density = activity.resources.displayMetrics.density.takeIf { it > 0f } ?: 1f
+        // 上限 48 CSS px（三键导航的典型高度），防止异常 insets 再次把底部撑爆。
+        return (px / density).toInt().coerceIn(0, MAX_SAFE_BOTTOM_CSS_PX)
+    }
+
+    /**
+     * 把底部安全区高度下发给 Web 页面（CSS 变量 `--safe-bottom`，单位 CSS px）。
+     *
+     * 页面侧写成 `var(--safe-bottom)`，`<style>` 里给了 16px 兜底值；不再回落到
+     * `env(safe-area-inset-bottom)`——本机 WebView 把它按**物理像素**回报（≈47），
+     * 当 CSS px 用会得到 3 倍留白，正是「编辑器底部留白过大」的来源。
+     *
+     * 页面侧四处底部留白（`.app` / `.editor` / `.sheet` / `.confirm-card`）都读这个变量，
+     * 原生容器则完全不消费底部 inset，这样既有「内容铺到屏幕底」的沉浸外观，
+     * 又保证编辑器底部操作条、文件树最后一项不被小白条压住。
+     */
+    private fun applySafeAreaToPage() {
+        if (!::webView.isInitialized) return
+        val px = safeAreaBottomCssPx
+        activity.runOnUiThread {
+            runCatching {
+                webView.evaluateJavascript(
+                    "document.documentElement.style.setProperty('--safe-bottom','${px}px')",
+                    null,
+                )
+            }.onFailure {
+                XposedBridge.log("$LOG_PREFIX file editor safe area injection failed: ${it.message}")
             }
         }
     }
@@ -1448,7 +1529,7 @@ internal class EpubWebEditorPanel(
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>EPUB元数据</title>
 <style>
-:root{--bg:#f2f3f8;--paper:#fff;--text:#191c24;--muted:#9a9ca6;--line:#e4e5ea;--blue:#2096ff;--shadow:0 1px 0 rgba(0,0,0,.04);${editorThemeCssVars()}}
+:root{--bg:#f2f3f8;--safe-bottom:16px;--paper:#fff;--text:#191c24;--muted:#9a9ca6;--line:#e4e5ea;--blue:#2096ff;--shadow:0 1px 0 rgba(0,0,0,.04);${editorThemeCssVars()}}
 ${globalUiFontCss()}
 html[data-theme="dark"]{--bg:#111318;--paper:#191c20;--text:#e5e6eb;--muted:#9397a1;--line:#282c33}
 @media (prefers-color-scheme:dark){html{--bg:#111318;--paper:#191c20;--text:#e5e6eb;--muted:#9397a1;--line:#282c33}}
@@ -1456,7 +1537,7 @@ html[data-theme="dark"]{--bg:#111318;--paper:#191c20;--text:#e5e6eb;--muted:#939
 html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--ui-font-family,sans-serif)}
 button,input,textarea,select{font:inherit}
 button{border:0;background:transparent;color:inherit;padding:0}
-.app{min-height:100dvh;background:var(--bg);padding:0 0 max(8px,env(safe-area-inset-bottom));overflow:hidden}
+.app{min-height:100dvh;background:var(--bg);padding:0 0 max(8px,var(--safe-bottom));overflow:hidden}
 .app.tree-mode{overflow:auto}
 .app.editing{overflow:hidden;height:100dvh}
 .topbar{height:52px;display:grid;grid-template-columns:44px minmax(0,1fr) 38px;align-items:center;padding:0 12px;background:var(--bg);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
@@ -1495,9 +1576,9 @@ button{border:0;background:transparent;color:inherit;padding:0}
 .more{height:100%;font-size:22px;color:#85878f;display:grid;place-items:center;padding-right:8px}
 .empty{margin:40px;text-align:center;color:var(--muted);font-size:16px}
 .sheet-mask{position:fixed;inset:0;background:rgba(0,0,0,.24);z-index:19}
-.sheet{position:fixed;left:0;right:0;bottom:0;background:#fff;border-radius:18px 18px 0 0;padding:18px 18px max(18px,env(safe-area-inset-bottom));z-index:20;box-shadow:0 -12px 40px rgba(0,0,0,.14)}
+.sheet{position:fixed;left:0;right:0;bottom:0;background:#fff;border-radius:18px 18px 0 0;padding:18px 18px max(18px,var(--safe-bottom));z-index:20;box-shadow:0 -12px 40px rgba(0,0,0,.14)}
 .sheet h3{margin:0 0 4px;font-size:18px}.sheet p{margin:0 0 12px;color:var(--muted);font-size:13px;word-break:break-all}.sheet button{width:100%;height:48px;border-radius:8px;text-align:center;font-weight:800}.sheet .primary{background:var(--accent);color:#fff}.sheet .plain{background:#f1f2f5;margin-top:8px}.sheet .danger{color:#d9362b;background:#fff0ee;margin-top:8px}.field{width:100%;height:44px;border:1px solid var(--line);border-radius:8px;padding:0 12px;margin:10px 0;background:#fff;color:var(--text)}
-.editor{position:fixed;inset:0;background:var(--bg);z-index:10;display:none;grid-template-rows:64px minmax(0,1fr) auto;padding-bottom:max(8px,env(safe-area-inset-bottom))}
+.editor{position:fixed;inset:0;background:var(--bg);z-index:10;display:none;grid-template-rows:64px minmax(0,1fr) auto;padding-bottom:max(8px,var(--safe-bottom))}
 .app.editing .editor{display:grid}.editor-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;padding:8px 14px 6px;border-bottom:1px solid rgba(228,229,234,.82);background:var(--bg);backdrop-filter:blur(14px)}
 .editor-title{min-width:0;padding-left:0}.editor-title strong{display:block;font-size:15px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.editor-title small{display:block;margin-top:2px;color:#8e94a3;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .editor-actions{display:grid;grid-auto-flow:column;grid-auto-columns:36px;gap:8px;align-items:center;justify-content:end}
@@ -1541,7 +1622,7 @@ button{border:0;background:transparent;color:inherit;padding:0}
 .scope-btn.active{background:#fff;color:#1d2430;box-shadow:0 1px 3px rgba(15,23,42,.08)}
 .check{width:18px;height:18px}
 .confirm-mask{position:fixed;inset:0;background:rgba(15,23,42,.26);backdrop-filter:blur(10px);z-index:40}
-.confirm-card{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(calc(100vw - 32px),460px);background:#fff;border-radius:28px;padding:26px 22px calc(20px + env(safe-area-inset-bottom));box-shadow:0 22px 60px rgba(15,23,42,.18);z-index:41}
+.confirm-card{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(calc(100vw - 32px),460px);background:#fff;border-radius:28px;padding:26px 22px calc(20px + var(--safe-bottom));box-shadow:0 22px 60px rgba(15,23,42,.18);z-index:41}
 .confirm-card h3{margin:0 0 12px;font-size:20px;font-weight:900}
 .confirm-card p{margin:0;color:#667085;font-size:14px;line-height:1.7}
 .confirm-card p strong{color:#344054}
@@ -1707,6 +1788,9 @@ window.FileEditorNative={refresh,openFile,closeEditor,closeOrBack,handleBack,tog
         const val REQUEST_COVER_IMAGE = 0x524D46E2.toInt()
         private const val MAX_TEXT_BYTES = 5L * 1024L * 1024L
         private const val MAX_THUMB_BYTES = 2L * 1024L * 1024L
+
+        /** 底部安全区上限（CSS px）：三键导航约 48dp，超过这个值一定是 insets 异常，直接夹住。 */
+        private const val MAX_SAFE_BOTTOM_CSS_PX = 48
         private const val THUMB_MAX_DIMENSION = 320
         private const val PREVIEW_MAX_DIMENSION = 2048
         private const val GLOBAL_FONT_SYSTEM = "system"
