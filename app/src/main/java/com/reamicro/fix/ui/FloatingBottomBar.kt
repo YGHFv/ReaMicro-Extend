@@ -155,6 +155,7 @@ private fun rememberGravityRotatedHighlight(
     }
 }
 
+@Composable
 fun RowScope.FloatingBottomBarItem(
     selected: Boolean,
     onClick: () -> Unit,
