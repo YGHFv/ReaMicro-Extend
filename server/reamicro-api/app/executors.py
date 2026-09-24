@@ -703,6 +703,9 @@ PROHIBITED_PAWN_PROP_HINTS = {
     "16": "备选消耗物品（端砚）",
     "17": "夺宝消耗物品（琬琰）",
     "18": "传承消耗物品（欹器）",
+    # 青圭的 propId 静态拿不到（背包 materials 里没有，宿主只存 qinggui 计数），
+    # 用 name: 前缀键占位，执行时除 propId 外再按当日期物名字兜底匹配。
+    "name:青圭": "招募消耗物品（青圭）",
 }
 
 
@@ -736,6 +739,11 @@ def execute_pawn_task(task: dict[str, Any]) -> tuple[str, str]:
         return "success", f"今日可典当次数已用完（{used_today}/{max_per_day}）"
     if prop_id in PROHIBITED_PAWN_PROP_HINTS:
         return "success", f"今日期物「{prop_name}」是{PROHIBITED_PAWN_PROP_HINTS[prop_id]}，跳过典当"
+    if f"name:{prop_name}" in PROHIBITED_PAWN_PROP_HINTS:
+        return "success", f"今日期物「{prop_name}」是{PROHIBITED_PAWN_PROP_HINTS[f'name:{prop_name}']}，跳过典当"
+    # 红色品质一律不自动典当：RED 档全是青圭这类另有用途的稀有消耗品。
+    if str(data.get("specialPropQuality") or "").strip().upper() == "RED":
+        return "success", f"今日期物「{prop_name}」是红色品质，不自动典当"
     status, body, raw = json_http_request(
         base_url, token, {}, str(request.get("materialsEndpoint") or "rest/community/get-user-materials"),
     )

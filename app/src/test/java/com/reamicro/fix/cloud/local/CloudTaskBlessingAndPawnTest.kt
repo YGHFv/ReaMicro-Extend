@@ -43,14 +43,17 @@ class CloudTaskBlessingAndPawnTest {
     }
 
     @Test
-    fun `禁当期物清单覆盖脚本里的 11 到 18`() {
+    fun `禁当期物清单覆盖脚本里的 11 到 18 加按名禁当的青圭`() {
         val prohibited = CloudTaskLocalRunner.PROHIBITED_PAWN_PROP_HINTS
-        assertEquals((11..18).map(Int::toString).toSet(), prohibited.keys)
+        // 青圭的 propId 静态拿不到（背包 materials 里没有），用 name: 前缀键占位，
+        // 执行时按当日期物名字兜底匹配。
+        assertEquals(((11..18).map(Int::toString) + "name:青圭").toSet(), prohibited.keys)
         assertTrue(prohibited.values.all { it.isNotBlank() })
         // 12/14/15 是祈禳消耗品：典当掉就没法祈禳了，这条最容易踩。
         assertTrue(prohibited.getValue("12").contains("祈禳"))
         assertTrue(prohibited.getValue("14").contains("祈禳"))
         assertTrue(prohibited.getValue("15").contains("祈禳"))
+        assertTrue(prohibited.getValue("name:青圭").contains("招募"))
     }
 
     @Test

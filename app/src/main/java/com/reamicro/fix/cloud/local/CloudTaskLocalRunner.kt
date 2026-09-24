@@ -598,6 +598,18 @@ object CloudTaskLocalRunner {
             val why = if (hint.isNullOrBlank()) "在禁当清单里" else "是$hint"
             return Outcome("success", "今日期物「$propName」$why，跳过典当", pawnCatalogState(catalog), notify = false)
         }
+        val forbidden = forbiddenPawnPropIds(request)
+        // 青圭这类特殊消耗品的 propId 静态拿不到（见 PROHIBITED_PAWN_PROP_HINTS 注释），
+        // 除 propId 外再按当日期物的名字兜底匹配一次默认清单里的 name: 键。
+        if ("name:$propName" in forbidden) {
+            val hint = PROHIBITED_PAWN_PROP_HINTS["name:$propName"]
+            return Outcome("success", "今日期物「$propName」是$hint，跳过典当", pawnCatalogState(catalog), notify = false)
+        }
+        // 红色品质一律不自动典当：RED 档全是青圭这类另有用途的稀有消耗品，
+        // 典当收益远低于缺料的代价，这条是硬规则、不受禁当清单配置影响。
+        if (data.optString("specialPropQuality").trim().equals("RED", ignoreCase = true)) {
+            return Outcome("success", "今日期物「$propName」是红色品质，不自动典当", pawnCatalogState(catalog), notify = false)
+        }
         val materials = postReaMicro(
             baseUrl,
             token,
@@ -873,6 +885,10 @@ object CloudTaskLocalRunner {
     /**
      * 禁当期物：这些消耗品另有用途（祈禳/传承/夺宝需要），典当掉会让对应玩法缺料。
      * 与参考脚本的 PAWN_PROHIBITED 一致。
+     *
+     * 青圭（门客招募消耗品）比较特殊：背包 materials 里没有它，宿主也只把持有数存成
+     * `qinggui` 计数字段，propId 静态拿不到——所以用 `name:` 前缀的键占位，执行侧
+     * 除了按 propId 匹配，再按当日期物的名字兜底匹配一次这些键。
      */
     internal val PROHIBITED_PAWN_PROP_HINTS = mapOf(
         "11" to "传承消耗物品（清酒）",
@@ -883,6 +899,15 @@ object CloudTaskLocalRunner {
         "16" to "备选消耗物品（端砚）",
         "17" to "夺宝消耗物品（琬琰）",
         "18" to "传承消耗物品（欹器）",
+        "name:青圭" to "招募消耗物品（青圭）",
+    )
+
+    /**
+     * 内置清单里能确定品质的条目：背包材料表之外的消耗品（青圭）不出现在
+     * get-user-materials 响应里，品质只能按游戏内的档位静态写死，配置页才有着色。
+     */
+    private val PROHIBITED_PAWN_PROP_QUALITIES = mapOf(
+        "name:青圭" to "RED",
     )
 
     /**
@@ -953,15 +978,25 @@ object CloudTaskLocalRunner {
      */
     internal fun pawnPropChoices(state: JSONObject): List<PawnPropChoice> {
         val catalog = pawnPropCatalog(state)
+        val nameKeyedDefaults = PROHIBITED_PAWN_PROP_HINTS.keys
+            .filter { it.startsWith("name:") }
+            .map { it.removePrefix("name:") }
+            .toSet()
         val entries = LinkedHashMap<String, PawnPropChoice>()
-        for ((propId, hint) in PROHIBITED_PAWN_PROP_HINTS) {
-            // 内置清单只写得出用途（"传承消耗物品（清酒）"），期物名在括号里。
-            entries[propId] = PawnPropChoice(propId, hint.substringAfter('（', hint).substringBefore('）'), "", hint.substringBefore('（'))
+        for ((key, hint) in PROHIBITED_PAWN_PROP_HINTS) {
+            // 内置清单只写得出用途（"传承消耗物品（清酒）"），期物名在括号里；
+            // 青圭这类背包里见不到的条目品质静态写死（见 PROHIBITED_PAWN_PROP_QUALITIES）。
+            entries[key] = PawnPropChoice(
+                propId = key,
+                name = hint.substringAfter('（', hint).substringBefore('）'),
+                quality = PROHIBITED_PAWN_PROP_QUALITIES[key].orEmpty(),
+                hint = hint.substringBefore('（'),
+            )
         }
         catalog.keys().forEach { propId ->
             val item = catalog.optJSONObject(propId) ?: return@forEach
             val name = item.optString("name").trim()
-            if (name.isEmpty()) return@forEach
+            if (name.isEmpty() || name in nameKeyedDefaults) return@forEach
             entries[propId] = PawnPropChoice(
                 propId = propId,
                 name = name,
@@ -1033,6 +1068,89 @@ object CloudTaskLocalRunner {
             catalog = mergePawnPropCatalog(catalog, bagPawnPropChoices(list))
         }.onFailure { errors += "背包：${it.message ?: "读取失败"}" }
         return PawnCatalogFetch(catalog, errors.takeIf { it.isNotEmpty() }?.joinToString("；"))
+    }
+
+    /** 行商城池选项：code 是落库值，requiredTransportType 决定哪些车马能去（与车马互斥）。 */
+    internal data class MerchantCityOption(
+        val code: String,
+        val label: String,
+        val requiredTransportType: String,
+        /** 不打车马加成的基础耗时（分钟）——宿主 TravelingMerchantCity 同名字段。 */
+        val baseDurationMinutes: Long,
+    )
+
+    /**
+     * 行商车马选项：transportType 与城池的 requiredTransportType 配对（宿主行商准备页
+     * 就是拿这两个字段筛车马，如只有船能去蓬莱）；carryingCapacity 给本金做上限校验，
+     * speedPercent 是宿主「速度 +x%」文案里的那个 x。
+     */
+    internal data class MerchantTransportOption(
+        val id: String,
+        val label: String,
+        val owned: Boolean,
+        val transportType: String,
+        val carryingCapacity: Long,
+        val speedPercent: Long,
+    )
+
+    /** 拉行商可选项的结果；error 非空表示整次请求失败。active* 是当前这趟在用的城池/车马。 */
+    internal data class MerchantOptionsFetch(
+        val cities: List<MerchantCityOption>,
+        val transports: List<MerchantTransportOption>,
+        val activeCityCode: String,
+        val activeTransportId: Long,
+        val error: String?,
+    )
+
+    /**
+     * 拉当前账号的行商可选项：城池与车马清单、当前这趟实际在用的城市/车马。
+     *
+     * 数据源就是任务轮询已经在用的 `get-traveling-merchant`——它的 `cities`/`transports`
+     * 正是阅微行商准备弹层里那两份下拉（字段名照抄宿主 `TravelingMerchantCity/Transport`：
+     * code/name/requiredTransportType、id/name/owned/transportType/carryingCapacity/speedPercent），
+     * 不用另找接口。
+     */
+    internal fun fetchMerchantOptions(
+        token: String,
+        baseUrl: String = REAMICRO_BASE_URL,
+    ): MerchantOptionsFetch {
+        if (token.isBlank()) throw IllegalStateException("阅微登录凭据无效")
+        val info = postReaMicro(baseUrl, token, JSONObject(), "rest/community/get-traveling-merchant")
+        operationError(info)?.let { throw IllegalStateException(it) }
+        val data = info.optJSONObject("data") ?: info
+        val cities = data.optJSONArray("cities") ?: JSONArray()
+        val transports = data.optJSONArray("transports") ?: JSONArray()
+        val trip = data.optJSONObject("activeTrip")
+        return MerchantOptionsFetch(
+            cities = (0 until cities.length()).mapNotNull { index ->
+                cities.optJSONObject(index)?.let { city ->
+                    val code = city.optString("code").trim()
+                    // code 是落库值，没 code 的条目没法回填，丢掉。
+                    MerchantCityOption(
+                        code = code,
+                        label = city.optString("name").trim().ifBlank { code },
+                        requiredTransportType = city.optString("requiredTransportType").trim(),
+                        baseDurationMinutes = city.optLong("baseDurationMinutes", 0L),
+                    )
+                }
+            },
+            transports = (0 until transports.length()).mapNotNull { index ->
+                transports.optJSONObject(index)?.let { transport ->
+                    val id = transport.opt("id")?.toString().orEmpty().trim()
+                    MerchantTransportOption(
+                        id = id,
+                        label = transport.optString("name").trim().ifBlank { id },
+                        owned = transport.optBoolean("owned", false),
+                        transportType = transport.optString("transportType").trim(),
+                        carryingCapacity = transport.optLong("carryingCapacity", 0L),
+                        speedPercent = transport.optLong("speedPercent", 0L),
+                    )
+                }
+            },
+            activeCityCode = trip?.optString("cityCode").orEmpty().trim(),
+            activeTransportId = trip?.optLong("transportId", 0L) ?: 0L,
+            error = null,
+        )
     }
 
     /**
