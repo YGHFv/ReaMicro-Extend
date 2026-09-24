@@ -54,6 +54,7 @@ internal fun ReaderHook.hookReaderViewModel() {
                 onDemandRefreshInFlight.clear()
                 lastHandledReaderStatisticsKey = ""
                 lastOnDemandPrefetchSpineKey = ""
+                onDemandNormalizedHrefsCache = null
                 resetFullTextSearchState("ReaderViewModel cleared", removeOverlays = true)
             }
         })
@@ -84,6 +85,9 @@ internal fun ReaderHook.hookReaderViewModel() {
                 val pageSignature = epubPageSignature(page)
                 currentVisiblePageSignature = pageSignature
                 currentVisiblePageNumber = epubPageNumber(page)
+                // 搜索跳转落错页时，被拒记录通常已先于此产生（渲染先于上报）；
+                // 可见页签名一更新就能查出方向，立即纠错，不等定时梯。
+                triggerSearchJumpCorrectionIfReady()
                 // getVirtualPage 会批量预布局相邻甚至远端章节，不能据此判断真正可见页。
                 // 仅使用 Statistics 上报的当前页触发逐章下载和分页刷新，避免异步纠正跳到其他章节。
                 scheduleOnDemandVisiblePageRefresh(param.thisObject, page)
@@ -695,6 +699,7 @@ internal fun ReaderHook.hookCurrentEpub() {
                             currentVisiblePageNumber = null
                             lastHandledReaderStatisticsKey = ""
                             lastOnDemandPrefetchSpineKey = ""
+                            onDemandNormalizedHrefsCache = null
                             if (
                                 previousDirectory.isBlank() ||
                                 nextDirectory.isBlank() ||

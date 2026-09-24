@@ -139,8 +139,13 @@ internal const val READ_ALOUD_PROGRESS_MAX_AGE_MS = 7L * 24L * 60L * 60L * 1000L
 internal const val EPUB_PAGE_CONTENT = 0
 internal const val SEARCH_NAVIGATION_READER_BOTTOM_MARGIN_DP = 8
 internal const val SEARCH_NAVIGATION_MENU_BOTTOM_MARGIN_DP = 190
-internal const val SEARCH_JUMP_SINGLE_CORRECTION_DELAY_MS = 760L
-internal const val SEARCH_JUMP_SINGLE_CORRECTION_FALLBACK_DELAY_MS = 1250L
+// 跳转纠错的两档检查时机。实测宿主跳到未排版章节要走 1→2→3 页渐进布局（~2.8s），
+// 760/1250ms 都在目标页渲染出来之前，纠错只能拿到「目标未知」；
+// 方向提示（可见页渲染被拒时记录）也要等可见页渲染完才存在，故窗口拉长到 1.4s/3s。
+internal const val SEARCH_JUMP_SINGLE_CORRECTION_DELAY_MS = 1_400L
+internal const val SEARCH_JUMP_SINGLE_CORRECTION_FALLBACK_DELAY_MS = 3_000L
+// 可见页被拒/上报后触发即时纠错的短延迟（给渲染与签名同步留一点余量）
+internal const val SEARCH_JUMP_TRIGGER_CHECK_DELAY_MS = 120L
 internal const val SEARCH_HIGHLIGHT_OFFSET_TOLERANCE = 8
 internal const val SEARCH_ORIGIN_PREFS = "reamicro_search_origin"
 internal const val SEARCH_ORIGIN_KEY_TIMESTAMP = "timestamp"

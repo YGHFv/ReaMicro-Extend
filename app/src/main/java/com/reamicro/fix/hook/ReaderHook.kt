@@ -111,6 +111,9 @@ class ReaderHook(
     // 避免在主线程重复反射、预取和日志写入而导致翻页卡顿。
     @Volatile internal var lastHandledReaderStatisticsKey: String = ""
     @Volatile internal var lastOnDemandPrefetchSpineKey: String = ""
+    // onDemandPageLocation 每次翻页都要对全章节 href 做归一化（逐章图书几千条字符串处理，
+    // 发生在主线程）。元数据文件未变时结果恒定，按「文件指纹 + 章数」做单条目缓存。
+    @Volatile internal var onDemandNormalizedHrefsCache: Pair<String, List<String>>? = null
     @Volatile internal var searchIndexState: SearchIndexState? = null
     @Volatile internal var searchIndexBuildingKey: String? = null
     @Volatile internal var searchStateGeneration: Long = 0L
@@ -126,6 +129,11 @@ class ReaderHook(
     @Volatile internal var activeSearchHighlightVisibleId: Long? = null
     @Volatile internal var activeSearchHighlightPageSignature: String? = null
     @Volatile internal var activeSearchHighlightPageNumber: Int? = null
+    // 高亮在某页渲染被拒时按页签名记录方向（true=目标在该页之后）。
+    // 渲染先于 Statistics 上报，不能用「渲染页==当前可见页」判定（签名时序错位），
+    // 所以按页签名存，纠错时拿当前可见页签名来查。
+    // 由 createSearchHighlightContentOverlay 写入，每次 apply/clear 高亮时清空。
+    internal val activeSearchHighlightRejections = ConcurrentHashMap<String, Boolean>()
     @Volatile internal var activeSearchHighlightRenderLogId: Long? = null
     @Volatile internal var activeSearchHighlightRenderLogCount: Int = 0
     @Volatile internal var pendingSearchOriginRestore: Boolean = false

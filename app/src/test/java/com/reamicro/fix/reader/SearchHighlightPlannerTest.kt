@@ -71,7 +71,8 @@ class SearchHighlightPlannerTest {
         assertEquals(false, SearchHighlightPlanner.correctionDirection(3, 4, "same", "same", true))
         assertNull(SearchHighlightPlanner.correctionDirection(4, 4, "target", "current", false))
         assertEquals(true, SearchHighlightPlanner.correctionDirection(null, null, "target", "current", true))
-        assertEquals(true, SearchHighlightPlanner.correctionDirection(null, null, null, null, false))
+        // 目标页完全未知时不猜方向（盲翻一页正是搜索结果落点偏移的成因）
+        assertNull(SearchHighlightPlanner.correctionDirection(null, null, null, null, false))
     }
 
     @Test

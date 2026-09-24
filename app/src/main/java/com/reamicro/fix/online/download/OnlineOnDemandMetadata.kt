@@ -162,10 +162,35 @@ internal object OnlineOnDemandMetadataStore {
 
     private val locks = ConcurrentHashMap<String, Any>()
 
+    // 翻页路径每次 Statistics 都会 read：几千章的 JSON 全量读盘+解析发生在主线程上，
+    // 是逐章加载图书翻页卡顿的主因。这里按「路径 + mtime + 长度」做读缓存，
+    // 命中时一次 stat 系统调用即返回；本进程内的写/更新在 writeUnlocked 里失效缓存，
+    // 进程外改写（几乎没有）靠 mtime/长度变化兜底。
+    private data class ReadCacheEntry(
+        val lastModified: Long,
+        val length: Long,
+        val metadata: OnlineOnDemandMetadata,
+    )
+
+    private val readCache = ConcurrentHashMap<String, ReadCacheEntry>()
+
     fun file(bookDir: File): File = File(bookDir, "OEBPS/$FILE_NAME")
 
     fun read(bookDir: File): OnlineOnDemandMetadata? = synchronized(lockFor(bookDir)) {
-        readUnlocked(bookDir)
+        val target = file(bookDir)
+        if (!target.isFile) {
+            readCache.remove(cacheKey(bookDir))
+            return@synchronized null
+        }
+        val key = cacheKey(bookDir)
+        val lastModified = target.lastModified()
+        val length = target.length()
+        readCache[key]
+            ?.takeIf { it.lastModified == lastModified && it.length == length }
+            ?.metadata
+            ?: readUnlocked(bookDir)?.also { metadata ->
+                readCache[key] = ReadCacheEntry(lastModified, length, metadata)
+            }
     }
 
     fun write(bookDir: File, metadata: OnlineOnDemandMetadata) {
@@ -206,8 +231,12 @@ internal object OnlineOnDemandMetadataStore {
             temp.copyTo(target, overwrite = true)
             temp.delete()
         }
+        readCache.remove(cacheKey(bookDir))
     }
 
     private fun lockFor(bookDir: File): Any =
         locks.computeIfAbsent(bookDir.canonicalFile.absolutePath) { Any() }
+
+    private fun cacheKey(bookDir: File): String =
+        bookDir.canonicalFile.absolutePath
 }

@@ -408,7 +408,7 @@ internal fun ReaderHook.onDemandPageLocation(
     val metadata = knownMetadata ?: runCatching {
         com.reamicro.fix.online.download.OnlineOnDemandMetadataStore.read(bookDir)
     }.getOrNull() ?: return null
-    val normalizedHrefs = metadata.chapters.map { normalizeOnDemandHref(it.href) }
+    val normalizedHrefs = onDemandNormalizedHrefs(bookDir, metadata)
     val directIndex = readAloudPageHrefCandidates(page)
         .asSequence()
         .map(::normalizeOnDemandHref)
@@ -432,6 +432,19 @@ internal fun ReaderHook.normalizeOnDemandHref(value: String): String =
         .replace('\\', '/')
         .removePrefix("OEBPS/")
         .removePrefix("./")
+
+// 全章节 href 归一化的结果只随元数据文件内容变化；命中时零字符串处理。
+// 指纹与 OnlineOnDemandMetadataStore 读缓存同一判据（mtime + 长度），另附章数防同长改写。
+private fun ReaderHook.onDemandNormalizedHrefs(
+    bookDir: File,
+    metadata: com.reamicro.fix.online.download.OnlineOnDemandMetadata,
+): List<String> {
+    val target = com.reamicro.fix.online.download.OnlineOnDemandMetadataStore.file(bookDir)
+    val key = "${bookDir.absolutePath}|${target.lastModified()}|${target.length()}|${metadata.chapters.size}"
+    onDemandNormalizedHrefsCache?.takeIf { it.first == key }?.let { return it.second }
+    return metadata.chapters.map { normalizeOnDemandHref(it.href) }
+        .also { onDemandNormalizedHrefsCache = key to it }
+}
 
 internal fun ReaderHook.rebuildOnDemandVirtualWindow(
     viewModel: Any,

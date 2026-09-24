@@ -1378,6 +1378,7 @@ internal fun ReaderHook.applySearchResultHighlight(viewModel: Any?, mark: Any) {
     activeSearchHighlightVisibleId = null
     activeSearchHighlightPageSignature = null
     activeSearchHighlightPageNumber = null
+    activeSearchHighlightRejections.clear()
     activeSearchHighlightRenderLogId = null
     activeSearchHighlightRenderLogCount = 0
     XposedBridge.log("$LOG_PREFIX full-text search highlight active ${describeSearchHighlightMark(mark)}")
@@ -1420,6 +1421,7 @@ internal fun ReaderHook.clearSearchResultHighlight(viewModel: Any? = currentView
     activeSearchHighlightVisibleId = null
     activeSearchHighlightPageSignature = null
     activeSearchHighlightPageNumber = null
+    activeSearchHighlightRejections.clear()
     activeSearchHighlightRenderLogId = null
     activeSearchHighlightRenderLogCount = 0
     return updateSearchMarks(viewModel, "clear") { marks ->
@@ -1571,20 +1573,8 @@ internal fun ReaderHook.scheduleSearchJumpVisibilityCorrection(receiver: Any?, v
     val id = searchResultHighlightMarkId(mark) ?: return
     var corrected = false
     val block = correctionBlock@{
-        if (corrected || activeSearchHighlightId != id || isSearchHighlightOnCurrentVisiblePage(id)) {
-            return@correctionBlock
-        }
-        val correction = searchHighlightCorrectionDirection()
-        if (correction != null) {
-            corrected = true
-            XposedBridge.log(
-                "$LOG_PREFIX full-text search single page correction id=$id next=$correction " +
-                    "current=${currentVisiblePageNumber ?: -1}/${currentVisiblePageSignature.orEmpty()} " +
-                    "target=${activeSearchHighlightPageNumber ?: -1}/${activeSearchHighlightPageSignature.orEmpty()}",
-            )
-            dispatchTapDirection(receiver, viewModel, next = correction)
-            scheduleSearchResultHighlightRefresh(viewModel ?: currentViewModelRef?.get(), mark, id, 250L)
-        }
+        if (corrected) return@correctionBlock
+        corrected = attemptSearchJumpCorrection(receiver, viewModel, mark, id)
     }
     val view = activityProvider()?.window?.decorView
     if (view != null) {
@@ -1604,6 +1594,44 @@ internal fun ReaderHook.scheduleSearchJumpVisibilityCorrection(receiver: Any?, v
             start()
         }
     }
+}
+
+// 单次纠错尝试：目标页已知按目标页纠，未知时查「可见页渲染被拒」记录的方向。
+// 三个触发口共用：定时梯（1400/3000ms）、Statistics 上报可见页、可见页被拒的瞬间，
+// 后两个让纠正在证据就绪时立刻发生，不用干等定时器。
+internal fun ReaderHook.attemptSearchJumpCorrection(receiver: Any?, viewModel: Any?, mark: Any, id: Long): Boolean {
+    if (activeSearchHighlightId != id || isSearchHighlightOnCurrentVisiblePage(id)) return false
+    val correction = searchHighlightCorrectionDirection()
+        ?: currentVisiblePageSignature?.let(activeSearchHighlightRejections::get)
+        ?: return false
+    currentVisiblePageSignature?.let(activeSearchHighlightRejections::remove)
+    XposedBridge.log(
+        "$LOG_PREFIX full-text search single page correction id=$id next=$correction " +
+            "current=${currentVisiblePageNumber ?: -1}/${currentVisiblePageSignature.orEmpty()} " +
+            "target=${activeSearchHighlightPageNumber ?: -1}/${activeSearchHighlightPageSignature.orEmpty()}",
+    )
+    dispatchTapDirection(receiver, viewModel, next = correction)
+    scheduleSearchResultHighlightRefresh(viewModel ?: currentViewModelRef?.get(), mark, id, 250L)
+    return true
+}
+
+// 可见页变化或被拒记录产生时调用：证据齐了（当前可见页恰好在被拒列表里）就立刻纠。
+internal fun ReaderHook.triggerSearchJumpCorrectionIfReady() {
+    val id = activeSearchHighlightId ?: return
+    val mark = activeSearchHighlightMark ?: return
+    val signature = currentVisiblePageSignature ?: return
+    if (!activeSearchHighlightRejections.containsKey(signature)) return
+    activityProvider()?.window?.decorView?.postDelayed(
+        {
+            attemptSearchJumpCorrection(
+                receiver = lastCatalogContext?.intentReceiver,
+                viewModel = currentViewModelRef?.get(),
+                mark = mark,
+                id = id,
+            )
+        },
+        SEARCH_JUMP_TRIGGER_CHECK_DELAY_MS,
+    )
 }
 
 internal fun ReaderHook.isSearchHighlightOnCurrentVisiblePage(id: Long): Boolean {
@@ -1650,8 +1678,29 @@ internal fun ReaderHook.createResolvedSearchHighlightMark(mark: Any): Any? =
         } ?: return@runCatching null
         val start = create.invoke(cfiObject, callString(mark, "getStartCfi")) ?: return@runCatching null
         val end = create.invoke(cfiObject, callString(mark, "getEndCfi")) ?: return@runCatching null
+        val id = (callNoArg(mark, "getId") as? Number)?.toLong() ?: return@runCatching null
+        val kind = (callNoArg(mark, "getKind") as? Number)?.toInt() ?: MARK_KIND_HIGHLIGHT
+        val style = (callNoArg(mark, "getStyle") as? Number)?.toInt() ?: MARK_STYLE_FILL
+        val color = callString(mark, "getColor")
+        val note = callString(mark, "getNote")
         val resolvedClass = classLoader.loadClass("org.epub.ui.ResolvedMark")
-        resolvedClass.getDeclaredConstructor(
+        // 宿主 2.3.2 起主构造是 9 参（尾部追加 quote + createdAt）；旧版是 7 参。
+        // 按参数个数挑构造器，别再写死签名被宿主升级打断（已踩过一次：
+        // 创建失败 → 高亮永不渲染 → 跳转可见性纠错误判歪一页）。
+        resolvedClass.declaredConstructors.firstOrNull { it.parameterTypes.size == 9 }?.let { ctor ->
+            ctor.isAccessible = true
+            return@let ctor.newInstance(
+                id,
+                kind,
+                start,
+                end,
+                style,
+                color,
+                note,
+                callString(mark, "getQuote"),
+                (callNoArg(mark, "getCreatedAt") as? Number)?.toLong() ?: System.currentTimeMillis(),
+            )
+        } ?: resolvedClass.getDeclaredConstructor(
             Long::class.javaPrimitiveType,
             Int::class.javaPrimitiveType,
             cfiClass,
@@ -1659,18 +1708,16 @@ internal fun ReaderHook.createResolvedSearchHighlightMark(mark: Any): Any? =
             Int::class.javaPrimitiveType,
             String::class.java,
             String::class.java,
-        ).newInstance(
-            (callNoArg(mark, "getId") as? Number)?.toLong() ?: return@runCatching null,
-            (callNoArg(mark, "getKind") as? Number)?.toInt() ?: MARK_KIND_HIGHLIGHT,
-            start,
-            end,
-            (callNoArg(mark, "getStyle") as? Number)?.toInt() ?: MARK_STYLE_FILL,
-            callString(mark, "getColor"),
-            callString(mark, "getNote"),
-        )
+        ).newInstance(id, kind, start, end, style, color, note)
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX create resolved search highlight failed: ${it.stackTraceToString()}")
     }.getOrNull()
+
+// epubcfi 的 spine 前缀（epubcfi(/6/46 前两段数字），跨文档守卫用它判断
+// mark 与渲染页是否同属一个 spine 文档。
+private val epubCfiSpinePrefixRegex = Regex("""^epubcfi\(/\d+/\d+""")
+
+internal fun epubCfiSpinePrefix(cfi: String): String? = epubCfiSpinePrefixRegex.find(cfi)?.value
 
 internal fun ReaderHook.createSearchHighlightContentOverlay(
     contentDom: Any?,
@@ -1681,17 +1728,66 @@ internal fun ReaderHook.createSearchHighlightContentOverlay(
     runCatching {
         if (renderedTextLength <= 0) return@runCatching null
         val quote = callString(mark, "getQuote").takeIf { it.isNotBlank() } ?: return@runCatching null
-        val content = contentDomPlainText(contentDom).takeIf { it.isNotBlank() } ?: return@runCatching null
+        // 跨文档守卫：mark 的 spine 前缀与正在渲染的页不一致时直接跳过——
+        // 在别的章节的 contentDom 上算窗口/偏移没有意义，还会写下错的方向记录
+        // （实测：跳转中新旧章节页面交替渲染，旧章节的页把新 mark 拒了一遍）。
+        val renderingPage = renderingEpubPage.get()
+        val markCfiPrefix = epubCfiSpinePrefix(callString(mark, "getStartCfi"))
+        val pageCfiPrefix = renderingPage
+            ?.let { callNoArg(it, "getStart")?.toString() }
+            ?.let(::epubCfiSpinePrefix)
+        if (markCfiPrefix != null && pageCfiPrefix != null && markCfiPrefix != pageCfiPrefix) {
+            return@runCatching null
+        }
         val location = callNoArg(contentDom, "getLocation")
         val baseOffset = ((callNoArg(callNoArg(location, "getOffset"), "getOffset") as? Number)?.toInt() ?: 0)
         val visibleStart = ((callNoArg(visibleWindow, "getStart") as? Number)?.toInt() ?: baseOffset)
         val visibleEnd = ((callNoArg(visibleWindow, "getEndExclusive") as? Number)?.toInt()
+            ?: (baseOffset + Int.MAX_VALUE))
+        // 前置拒绝：cfi 可定位且目标不在这个可见窗口附近时直接放弃。
+        // 每页渲染都会走到这里，此前错页也要先做全章纯文本提取（搜索后全局卡顿的主因），
+        // 且 expectedLocalStart 为 null 时 quoteStart 会退化成窗口内无约束匹配——
+        // 单字 quote（如「龙」）在任何一页都能匹配上，高亮被渲染到错页，
+        // 进而把 activeSearchHighlightPageSignature 写成错页、可见性纠错再翻一页。
+        val cfiOffset = SearchHighlightPlanner.cfiCharacterOffset(callString(mark, "getStartCfi"))
+        if (cfiOffset != null) {
+            val tolerance = SEARCH_HIGHLIGHT_OFFSET_TOLERANCE
+            if (cfiOffset + tolerance < visibleStart || cfiOffset - tolerance > visibleEnd) {
+                return@runCatching null
+            }
+        }
+        val content = contentDomPlainText(contentDom).takeIf { it.isNotBlank() } ?: return@runCatching null
+        val realVisibleEnd = ((callNoArg(visibleWindow, "getEndExclusive") as? Number)?.toInt()
             ?: (baseOffset + content.length))
         val windowStart = (visibleStart - baseOffset).coerceIn(0, content.length)
-        val windowEnd = (visibleEnd - baseOffset).coerceIn(windowStart, content.length)
-        val expectedLocalStart = SearchHighlightPlanner.cfiCharacterOffset(callString(mark, "getStartCfi"))
+        val windowEnd = (realVisibleEnd - baseOffset).coerceIn(windowStart, content.length)
+        val expectedLocalStart = cfiOffset
             ?.let { it - baseOffset }
             ?.takeIf { it in 0..content.length }
+        // cfi 可定位但换算后超出本文档范围 = 这个 contentDom 不是目标文档，拒绝而不是无约束匹配。
+        if (cfiOffset != null && expectedLocalStart == null) return@runCatching null
+        // 高亮在某页窗口外被拒时按页签名记录方向（文档字符偏移空间，与宿主分页同源、可靠）：
+        // 目标在窗口之后 → 该往前翻；之前 → 该往回翻。渲染先于 Statistics 上报，
+        // 不知道哪页是「当前可见页」，所以按渲染页签名存起来，纠错时按可见页签名查。
+        // 这是页边界落点偏差（结果在下一页第一行却落在前一页）的兜底。
+        if (expectedLocalStart != null &&
+            (expectedLocalStart < windowStart || expectedLocalStart + quote.length > windowEnd)
+        ) {
+            val rejectionPageSignature = epubPageSignature(renderingPage)
+            if (!rejectionPageSignature.isNullOrBlank()) {
+                activeSearchHighlightRejections[rejectionPageSignature] =
+                    expectedLocalStart + quote.length > windowEnd
+                XposedBridge.log(
+                    "$LOG_PREFIX full-text search highlight page rejected " +
+                        "next=${expectedLocalStart + quote.length > windowEnd} " +
+                        "expected=$expectedLocalStart window=[$windowStart,$windowEnd] " +
+                        "page=$rejectionPageSignature",
+                )
+                // 被拒的正是当前可见页 → 证据齐了，立刻纠（不等 1400ms 定时器）
+                triggerSearchJumpCorrectionIfReady()
+            }
+            return@runCatching null
+        }
         val matchStart = SearchHighlightPlanner.quoteStart(
             content = content,
             quote = quote,
