@@ -4,6 +4,7 @@ import java.util.Properties
 
 plugins {
     id("com.android.application")
+    id("org.jetbrains.kotlin.plugin.compose")
     id("io.gitlab.arturbosch.detekt")
 }
 
@@ -73,7 +74,8 @@ val bundleKsuModule by tasks.registering(Zip::class) {
 
 android {
     namespace = "com.reamicro.fix"
-    compileSdk = 36
+    // miuix 0.9.4 → Compose 1.12.0 要求 compileSdk 37（允许高于 targetSdk，不影响运行时行为）。
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.reamicro.fix"
@@ -90,6 +92,9 @@ android {
 
     buildFeatures {
         buildConfig = true
+        // 模块自己的主界面（ModuleMainActivity）用 miuix（Compose Multiplatform 库）绘制；
+        // 注入宿主的界面仍走反射，不参与 Compose。
+        compose = true
     }
 
     buildTypes.configureEach {
@@ -161,6 +166,12 @@ tasks.withType<io.gitlab.arturbosch.detekt.Detekt>().configureEach {
 
 dependencies {
     implementation("io.github.proify.lyricon:provider:0.1.70")
+
+    // 模块主界面：miuix（HyperOS 风格 Compose UI 库）+ activity-compose 提供的 setContent。
+    implementation("androidx.activity:activity-compose:1.13.0")
+    implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.4")
+    implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.4")
+    implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.4")
 
     compileOnly("io.github.libxposed:api:101.0.1")
 

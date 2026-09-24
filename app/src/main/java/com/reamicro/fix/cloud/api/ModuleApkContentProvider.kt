@@ -28,7 +28,7 @@ class ModuleApkContentProvider : android.content.ContentProvider() {
         val file = apkFile(uri)
         val columns = projection ?: arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)
         return MatrixCursor(columns).apply {
-            addRow(columns.map { column ->
+            addRow(columns.map<String, Any?> { column ->
                 when (column) {
                     OpenableColumns.DISPLAY_NAME -> file.name
                     OpenableColumns.SIZE -> file.length()
