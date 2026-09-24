@@ -32,7 +32,6 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -44,8 +43,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
@@ -64,10 +61,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.dropShadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.graphics.shadow.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.boundsInWindow
@@ -580,100 +575,40 @@ class ModuleMainActivity : ComponentActivity() {
                 },
                 bottomBar = {
                     if (floating) {
-                        // KSU 风格悬浮胶囊：图标在上、页签名在下，选中项主色 + 圆角高亮块。
-                        // 三档外观——液态玻璃开：vibrancy + 小半径模糊 + 边缘折射（LiquidGlass.kt，
-                        // 与 KernelSU 底栏同配方）；只开模糊：与顶栏同款的大半径毛玻璃；
-                        // 都不开：不透明 surfaceContainer。
-                        val capsuleShape = RoundedCornerShape(FLOAT_BAR_CORNER)
-                        val capsuleBackground = when {
-                            liquid -> Modifier
-                                // 折射需要向外多采 40dp（liquidCapsuleEffects 里的 padding），
-                                // 但那圈「效果区」不该被看见——尤其下拉越界时它录的是未拉伸的
-                                // 旧内容，会在胶囊外圈露出一圈灰色残影。裁到胶囊形内：取样照旧
-                                // （读的是背景层纹理，不受画布裁剪影响），光晕消失。
-                                .clip(capsuleShape)
-                                .drawBackdrop(
-                                    backdrop = backdrop,
-                                    shape = { capsuleShape },
-                                    effects = { liquidCapsuleEffects() },
-                                    highlight = { LiquidCapsuleHighlight },
-                                    onDrawSurface = { drawRect(surface.copy(alpha = LIQUID_SURFACE_ALPHA)) },
-                                )
-                            blurred -> Modifier.drawBackdrop(
-                                backdrop = backdrop,
-                                shape = { capsuleShape },
-                                effects = {
-                                    blur(BAR_BLUR_RADIUS)
-                                    blendColors(barBlurColors)
-                                },
-                            )
-                            else -> Modifier.background(MiuixTheme.colorScheme.surfaceContainer, capsuleShape)
-                        }
                         val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 28.dp)
-                                // KSU 的底部留白：有手势条时贴条上 8dp，三大金刚键时抬 28dp。
                                 .padding(bottom = if (navInset > 0.dp) 8.dp + navInset else 28.dp),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .dropShadow(
-                                        shape = capsuleShape,
-                                        shadow = Shadow(
-                                            radius = 10.dp,
-                                            color = Color.Black,
-                                            alpha = if (isSystemInDarkTheme()) 0.2f else 0.1f,
-                                        ),
-                                    )
-                                    .then(capsuleBackground)
-                                    .height(64.dp)
-                                    .selectableGroup()
-                                    .padding(4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
+                            FloatingBottomBar(
+                                selectedIndex = tab.intValue,
+                                onSelected = { tab.intValue = it },
+                                backdrop = backdrop,
+                                tabsCount = TAB_ICONS.size,
+                                isBlurEnabled = liquid,
+                            ) { activateTab ->
                                 TAB_ICONS.forEachIndexed { index, icon ->
-                                    val selected = tab.intValue == index
-                                    // 选中态：主色内容 + 一层主色淡底圆块（Material 导航指示器的写法）。
-                                    val itemColor = if (selected) {
-                                        MiuixTheme.colorScheme.primary
-                                    } else {
-                                        MiuixTheme.colorScheme.onSurfaceVariantActions
-                                    }
-                                    Column(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .fillMaxHeight()
-                                            .background(
-                                                if (selected) MiuixTheme.colorScheme.primary.copy(alpha = 0.12f)
-                                                else Color.Transparent,
-                                                CircleShape,
-                                            )
-                                            .selectable(
-                                                selected = selected,
-                                                interactionSource = remember { MutableInteractionSource() },
-                                                indication = null,
-                                                role = Role.Tab,
-                                                onClick = { tab.intValue = index },
-                                            ),
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        verticalArrangement = Arrangement.Center,
+                                    FloatingBottomBarItem(
+                                        selected = tab.intValue == index,
+                                        onClick = { activateTab(index) },
                                     ) {
                                         Icon(
                                             imageVector = icon,
                                             contentDescription = TAB_TITLES[index],
-                                            tint = itemColor,
+                                            tint = top.yukonga.miuix.kmp.theme.LocalContentColor.current,
                                             modifier = Modifier.size(24.dp),
                                         )
                                         Text(
                                             text = TAB_TITLES[index],
-                                            color = itemColor,
+                                            color = top.yukonga.miuix.kmp.theme.LocalContentColor.current,
                                             fontSize = 11.sp,
                                             lineHeight = 14.sp,
                                             maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Visible,
                                         )
                                     }
                                 }
@@ -716,7 +651,7 @@ class ModuleMainActivity : ComponentActivity() {
                             .nestedScroll(scrollBehavior.nestedScrollConnection)
                             // 内容即玻璃的取样源；没有任何玻璃消费者时不登记，省掉一次全屏图层录制。
                             .then(
-                                if (blurred || liquid) {
+                                if (blurred || floating) {
                                     Modifier.layerBackdrop(backdrop)
                                 } else {
                                     Modifier
