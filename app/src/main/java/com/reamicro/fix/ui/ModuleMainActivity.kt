@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.drawable.ColorDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowInsetsController
@@ -15,6 +16,9 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateIntAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
@@ -26,21 +30,32 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -48,15 +63,25 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.dropShadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.shadow.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.reamicro.fix.BuildConfig
 import com.reamicro.fix.cloud.api.CloudTaskWakeDiagnostics
 import com.reamicro.fix.cloud.api.CloudTaskWakeScheduler
 import com.reamicro.fix.cloud.api.NextWakeHint
@@ -76,6 +101,8 @@ import com.reamicro.fix.notification.NotificationRecord
 import com.reamicro.fix.notification.NotificationRecordStore
 import com.reamicro.fix.notification.cloudTaskQualityColor
 import org.json.JSONObject
+import top.yukonga.miuix.kmp.basic.Button
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Checkbox
 import top.yukonga.miuix.kmp.basic.DropdownArrowEndAction
@@ -88,23 +115,35 @@ import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.NavigationBar
 import top.yukonga.miuix.kmp.basic.NavigationBarItem
 import top.yukonga.miuix.kmp.basic.PopupPositionProvider
+import top.yukonga.miuix.kmp.basic.PullToRefresh
 import top.yukonga.miuix.kmp.basic.Scaffold
+import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TopAppBar
+import top.yukonga.miuix.kmp.blur.BlendColorEntry
+import top.yukonga.miuix.kmp.blur.BlurColors
+import top.yukonga.miuix.kmp.blur.blendColors
+import top.yukonga.miuix.kmp.blur.blur
+import top.yukonga.miuix.kmp.blur.drawBackdrop
+import top.yukonga.miuix.kmp.blur.isRuntimeShaderSupported
+import top.yukonga.miuix.kmp.blur.layerBackdrop
+import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
+import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.overlay.OverlayListPopup
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Alarm
 import top.yukonga.miuix.kmp.icon.extended.Delete
 import top.yukonga.miuix.kmp.icon.extended.Info
 import top.yukonga.miuix.kmp.icon.extended.Play
 import top.yukonga.miuix.kmp.icon.extended.Recent
-import top.yukonga.miuix.kmp.icon.extended.Refresh
 import top.yukonga.miuix.kmp.icon.extended.Settings
 import top.yukonga.miuix.kmp.icon.extended.Tasks
+import top.yukonga.miuix.kmp.icon.extended.Tune
 import top.yukonga.miuix.kmp.icon.extended.Update
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -115,12 +154,13 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToLong
 
 /** 危险操作（清空、失败态标题）的提示色：新旧两套 UI 保持同一语义。 */
 private val DangerRed = Color(0xFFD03A2B)
 
 /**
- * 模块主界面（miuix 版）：底栏三个页签（记录 / 配置 / 关于）。
+ * 模块主界面（miuix 版）：底栏四个页签（记录 / 任务 / 设置 / 关于）。
  *
  * 为什么换成 miuix：旧版是纯 View 手搓的卡片，观感与系统脱节；miuix 是 Compose
  * Multiplatform 的 HyperOS 风格组件库，与 KernelSU 管理器同一套设计语言——
@@ -151,6 +191,17 @@ class ModuleMainActivity : ComponentActivity() {
     private val notificationSummary = mutableStateOf("")
     private val logSummary = mutableStateOf("")
     private val rootUi = mutableStateOf<RootUi?>(null)
+
+    // ---- 主题设置（设置页「主题」卡片）----
+
+    /** 顶栏与底栏的毛玻璃背景（miuix-blur）：栏底色转透明，改为对穿过的内容做模糊。 */
+    private val blurBars = mutableStateOf(false)
+
+    /** Apple 风格悬浮底栏：底栏收成一枚悬浮胶囊，内容从它底下穿过。 */
+    private val floatingNavBar = mutableStateOf(false)
+
+    /** 悬浮底栏的液态玻璃效果（仅悬浮底栏开启时生效/显示）：胶囊对底下内容实时模糊 + 玻璃描边。 */
+    private val liquidGlass = mutableStateOf(true)
 
     // ---- 弹窗状态 ----
 
@@ -272,6 +323,10 @@ class ModuleMainActivity : ComponentActivity() {
             batteryUnrestricted = status.batteryUnrestricted,
         )
         hideRecentTask.value = hideRecentTaskEnabled()
+        blurBars.value = uiPrefBoolean(KEY_BLUR_BARS)
+        floatingNavBar.value = uiPrefBoolean(KEY_FLOATING_NAV_BAR)
+        // 液态玻璃默认开（KSU 也是这个默认值）：键不存在时取 true。
+        liquidGlass.value = uiPrefBoolean(KEY_LIQUID_GLASS, true)
 
         val notifications = NotificationRecordStore { context }.list()
         notificationSummary.value = if (notifications.isEmpty()) {
@@ -475,27 +530,6 @@ class ModuleMainActivity : ComponentActivity() {
         }
     }
 
-    /** 顶栏用的图标按钮：无底色，只有一枚图标（KSU 顶栏的刷新/排序位即此）。 */
-    @Composable
-    private fun ToolbarIconButton(
-        icon: ImageVector,
-        contentDescription: String,
-        onClick: () -> Unit,
-    ) {
-        IconButton(
-            onClick = onClick,
-            minHeight = 38.dp,
-            minWidth = 38.dp,
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = contentDescription,
-                modifier = Modifier.size(22.dp),
-                tint = MiuixTheme.colorScheme.onSurface,
-            )
-        }
-    }
-
     @Composable
     private fun ModuleApp() {
         // key(tab)：每个页签整套重来。滚到大标题收起状态后切页，若共用同一个 ScrollBehavior，
@@ -504,58 +538,226 @@ class ModuleMainActivity : ComponentActivity() {
             // 大标题随滚动收起：miuix / HyperOS 应用（KernelSU 管理器也是这套）的标准做法。
             // 标题给的是**当前页签**，不是模块名——模块名归「关于」页。
             val scrollBehavior = MiuixScrollBehavior()
+            // 下拉刷新：顶栏不再放刷新按钮，任务页直接下拉触发（原「重算下次时刻」）。
+            var pullRefreshing by remember { mutableStateOf(false) }
+            // 主题设置的三个开关（设置页「主题」卡片）。全关时整套渲染与改动前逐像素一致。
+            // RuntimeShader 要 Android 13+：不支持的设备自动退回不透明栏，不出现透明花屏。
+            val blurSupported = remember { isRuntimeShaderSupported() }
+            val blurred = blurBars.value && blurSupported
+            val floating = floatingNavBar.value
+            val liquid = floating && liquidGlass.value && blurSupported
+            val surface = MiuixTheme.colorScheme.surface
+            // 毛玻璃取样源（KernelSU 管理器同款写法）：整页内容录进一层，栏对这层做模糊。
+            // 录之前先铺一层 surface——必须与 Scaffold 的 containerColor（也是 surface）同值：
+            // 铺错颜色（比如硬编码白）会把白卡片盖在同色页面上，卡片背景直接「消失」。
+            val backdrop = rememberLayerBackdrop {
+                drawRect(surface)
+                drawContent()
+            }
+            // 栏的玻璃罩层：模糊后的内容上压一层半透明 surface，保证文字可读（KSU 0.87）。
+            val barBlurColors = BlurColors(
+                blendColors = listOf(BlendColorEntry(surface.copy(alpha = BAR_TINT_ALPHA))),
+            )
             Scaffold(
                 topBar = {
                     TopAppBar(
                         title = TAB_TITLES[tab.intValue],
                         largeTitle = TAB_TITLES[tab.intValue],
                         scrollBehavior = scrollBehavior,
-                        // 只有**任务页**右上角带按钮（位置照 KSU 模块页右上角的重启按钮）。
-                        // 它做的事就是被移除的那个「重算下次时刻」：按配置的时间点重算下次执行
-                        // 时刻、不执行任务，专治历史遗留的「上次跑完 + 24 小时」。
-                        // 其余三页没有需要原地重算的东西，不放按钮。
-                        actions = {
-                            if (tab.intValue == TAB_TASKS) {
-                                ToolbarIconButton(
-                                    icon = MiuixIcons.Refresh,
-                                    contentDescription = "重算下次时刻",
-                                    onClick = { recomputeSchedule() },
-                                )
-                            }
+                        // 模糊开启时底色交给玻璃层：TopAppBar 自带底色，不改透明会把模糊整个盖住。
+                        color = if (blurred) Color.Transparent else MiuixTheme.colorScheme.surface,
+                        modifier = if (blurred) {
+                            Modifier.textureBlur(
+                                backdrop = backdrop,
+                                shape = RectangleShape,
+                                blurRadius = BAR_BLUR_RADIUS,
+                                colors = barBlurColors,
+                            )
+                        } else {
+                            Modifier
                         },
                     )
                 },
                 bottomBar = {
-                    NavigationBar {
-                        TAB_ICONS.forEachIndexed { index, icon ->
-                            NavigationBarItem(
-                                selected = tab.intValue == index,
-                                onClick = { tab.intValue = index },
-                                icon = icon,
-                                label = TAB_TITLES[index],
+                    if (floating) {
+                        // KSU 风格悬浮胶囊：图标在上、页签名在下，选中项主色 + 圆角高亮块。
+                        // 三档外观——液态玻璃开：vibrancy + 小半径模糊 + 边缘折射（LiquidGlass.kt，
+                        // 与 KernelSU 底栏同配方）；只开模糊：与顶栏同款的大半径毛玻璃；
+                        // 都不开：不透明 surfaceContainer。
+                        val capsuleShape = RoundedCornerShape(FLOAT_BAR_CORNER)
+                        val capsuleBackground = when {
+                            liquid -> Modifier
+                                // 折射需要向外多采 40dp（liquidCapsuleEffects 里的 padding），
+                                // 但那圈「效果区」不该被看见——尤其下拉越界时它录的是未拉伸的
+                                // 旧内容，会在胶囊外圈露出一圈灰色残影。裁到胶囊形内：取样照旧
+                                // （读的是背景层纹理，不受画布裁剪影响），光晕消失。
+                                .clip(capsuleShape)
+                                .drawBackdrop(
+                                    backdrop = backdrop,
+                                    shape = { capsuleShape },
+                                    effects = { liquidCapsuleEffects() },
+                                    highlight = { LiquidCapsuleHighlight },
+                                    onDrawSurface = { drawRect(surface.copy(alpha = LIQUID_SURFACE_ALPHA)) },
+                                )
+                            blurred -> Modifier.drawBackdrop(
+                                backdrop = backdrop,
+                                shape = { capsuleShape },
+                                effects = {
+                                    blur(BAR_BLUR_RADIUS)
+                                    blendColors(barBlurColors)
+                                },
                             )
+                            else -> Modifier.background(MiuixTheme.colorScheme.surfaceContainer, capsuleShape)
+                        }
+                        val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 28.dp)
+                                // KSU 的底部留白：有手势条时贴条上 8dp，三大金刚键时抬 28dp。
+                                .padding(bottom = if (navInset > 0.dp) 8.dp + navInset else 28.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .dropShadow(
+                                        shape = capsuleShape,
+                                        shadow = Shadow(
+                                            radius = 10.dp,
+                                            color = Color.Black,
+                                            alpha = if (isSystemInDarkTheme()) 0.2f else 0.1f,
+                                        ),
+                                    )
+                                    .then(capsuleBackground)
+                                    .height(64.dp)
+                                    .selectableGroup()
+                                    .padding(4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                TAB_ICONS.forEachIndexed { index, icon ->
+                                    val selected = tab.intValue == index
+                                    // 选中态：主色内容 + 一层主色淡底圆块（Material 导航指示器的写法）。
+                                    val itemColor = if (selected) {
+                                        MiuixTheme.colorScheme.primary
+                                    } else {
+                                        MiuixTheme.colorScheme.onSurfaceVariantActions
+                                    }
+                                    Column(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight()
+                                            .background(
+                                                if (selected) MiuixTheme.colorScheme.primary.copy(alpha = 0.12f)
+                                                else Color.Transparent,
+                                                CircleShape,
+                                            )
+                                            .selectable(
+                                                selected = selected,
+                                                interactionSource = remember { MutableInteractionSource() },
+                                                indication = null,
+                                                role = Role.Tab,
+                                                onClick = { tab.intValue = index },
+                                            ),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.Center,
+                                    ) {
+                                        Icon(
+                                            imageVector = icon,
+                                            contentDescription = TAB_TITLES[index],
+                                            tint = itemColor,
+                                            modifier = Modifier.size(24.dp),
+                                        )
+                                        Text(
+                                            text = TAB_TITLES[index],
+                                            color = itemColor,
+                                            fontSize = 11.sp,
+                                            lineHeight = 14.sp,
+                                            maxLines = 1,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        NavigationBar(
+                            color = if (blurred) Color.Transparent else MiuixTheme.colorScheme.surface,
+                            modifier = if (blurred) {
+                                Modifier.textureBlur(
+                                    backdrop = backdrop,
+                                    shape = RectangleShape,
+                                    blurRadius = BAR_BLUR_RADIUS,
+                                    colors = barBlurColors,
+                                )
+                            } else {
+                                Modifier
+                            },
+                        ) {
+                            TAB_ICONS.forEachIndexed { index, icon ->
+                                NavigationBarItem(
+                                    selected = tab.intValue == index,
+                                    onClick = { tab.intValue = index },
+                                    icon = icon,
+                                    label = TAB_TITLES[index],
+                                )
+                            }
                         }
                     }
                 },
             ) { padding ->
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        // 越界回弹必须在绑定滚动行为之前加
-                        .overScrollVertical()
-                        .nestedScroll(scrollBehavior.nestedScrollConnection)
-                        .padding(top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding())
-                        .verticalScroll(rememberScrollState())
-                        // 卡片的水平边距交给卡片自己（KSU 的 12dp），页面只留纵向节奏。
-                        .padding(vertical = 4.dp),
-                ) {
-                    when (tab.intValue) {
-                        TAB_TASKS -> TasksPage()
-                        TAB_CONFIG -> ConfigPage()
-                        TAB_ABOUT -> AboutPage()
-                        else -> RecordsPage()
+                // 只有任务页有下拉刷新（重算下次时刻），其余页签下拉没有任何意义，
+                // 不包 PullToRefresh——多一层只会徒增下拉时差（玻璃底栏透灰影）的暴露面。
+                val scrollContent: @Composable () -> Unit = {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            // 越界回弹必须在绑定滚动行为之前加。
+                            .overScrollVertical()
+                            .nestedScroll(scrollBehavior.nestedScrollConnection)
+                            // 内容即玻璃的取样源；没有任何玻璃消费者时不登记，省掉一次全屏图层录制。
+                            .then(
+                                if (blurred || liquid) {
+                                    Modifier.layerBackdrop(backdrop)
+                                } else {
+                                    Modifier
+                                },
+                            )
+                            .verticalScroll(rememberScrollState())
+                            // 顶栏/底栏的让位改成「滚动容器内」的上内边距：静止位置与滚动范围
+                            // 和原来完全一致，区别只是滚动途中内容会从栏底下穿过——栏不透明时
+                            // 看不出来，开了玻璃才显现（「模糊」要的就是这个）。
+                            .padding(top = padding.calculateTopPadding())
+                            // 卡片的水平边距交给卡片自己（KSU 的 12dp），页面只留纵向节奏。
+                            .padding(vertical = 4.dp),
+                    ) {
+                        when (tab.intValue) {
+                            TAB_TASKS -> TasksPage()
+                            TAB_CONFIG -> ConfigPage()
+                            TAB_ABOUT -> AboutPage()
+                            else -> RecordsPage()
+                        }
+                        // 栏高留在滚动末尾。原来这份让位在容器外，内容永远到不了栏底下；
+                        // 挪进来之后必须补这个占位，否则滚到底时最后一张卡片会压在栏底下。
+                        Spacer(Modifier.height(padding.calculateBottomPadding()))
+                        Spacer(Modifier.height(4.dp))
                     }
-                    Spacer(Modifier.height(4.dp))
+                }
+                if (tab.intValue == TAB_TASKS) {
+                    PullToRefresh(
+                        isRefreshing = pullRefreshing,
+                        onRefresh = {
+                            pullRefreshing = true
+                            recomputeSchedule { pullRefreshing = false }
+                        },
+                        // miuix 默认文案是英文（"Release to refresh"），换成中文。
+                        refreshTexts = listOf("下拉刷新", "松手刷新", "正在刷新…", "刷新成功"),
+                        contentPadding = PaddingValues(top = padding.calculateTopPadding()),
+                        topAppBarScrollBehavior = scrollBehavior,
+                    ) {
+                        scrollContent()
+                    }
+                } else {
+                    scrollContent()
                 }
                 Dialogs()
             }
@@ -622,15 +824,13 @@ class ModuleMainActivity : ComponentActivity() {
     @Composable
     private fun TasksPage() {
         // 概览只做只读播报：那两枚按钮已按需求移除——单个任务的重跑入口在各自卡片的
-        // 「执行」上，「重算下次时刻」移到顶栏右上角那个刷新按钮。
+        // 「执行」上，「重算下次时刻」由本页下拉刷新触发。
         //
-        // 播报正文走 subtitle 而不是 description：这两档字在卡片骨架里本来就不同
-        // （subtitle = 12sp/550，description = 14sp/常规字重），概览用 description 会和
-        // 下面每张任务卡的副信息对不上——同一页出现两种正文（实测帧高 36px vs 31px、
-        // 行距 57px vs 49px）。概览本来也没有标题行右侧的内容，两者位置完全一致。
+        // 播报正文统一走 description（14sp / 常规字重）：与记录页、设置页的卡片正文
+        // 同一档（此前走 subtitle = 12sp/550，实测帧高 49px vs 57px，三页里独此一档）。
         SectionCard(
             title = "任务概览",
-            subtitle = overviewText.value,
+            description = overviewText.value,
         )
         if (taskRows.value.isEmpty()) {
             SectionCard(
@@ -648,11 +848,11 @@ class ModuleMainActivity : ComponentActivity() {
         )
     }
 
-    // ---- 配置页 ----
+    // ---- 设置页 ----
 
     @Composable
     private fun ConfigPage() {
-        // Root 增强原来挂在「关于」页，按需求搬到配置页：它本质是后台唤醒的一种实现方式，
+        // Root 增强原来挂在「关于」页，按需求搬到设置页：它本质是后台唤醒的一种实现方式，
         // 和下面那组「权限与后台」本就是同一件事。
         // 探测要起 su 进程，进页一次即可；结果落在 rootUi。
         LaunchedEffect(Unit) {
@@ -665,6 +865,38 @@ class ModuleMainActivity : ComponentActivity() {
                 )
             }
         }
+        GroupTitle("主题")
+        // 外观相关的开关统一收在一张卡片里（KSU 的「主题设置」也是这个分组法）：
+        // 几行都是 SwitchPreference，标题 + 说明 + 右侧开关，行间不加分隔线（miuix 标准样式）。
+        // 「液态玻璃」只对悬浮底栏有意义，所以只在悬浮底栏开启时出现。
+        Card(
+            modifier = Modifier
+                .padding(horizontal = 12.dp)
+                .padding(bottom = 12.dp),
+            insideMargin = PaddingValues(0.dp),
+        ) {
+            SwitchPreference(
+                title = "模糊",
+                summary = "启用顶栏和底栏的模糊效果",
+                checked = blurBars.value,
+                onCheckedChange = ::toggleBlurBars,
+            )
+            SwitchPreference(
+                title = "悬浮底栏",
+                summary = "使用 Apple 风格的悬浮底栏",
+                checked = floatingNavBar.value,
+                onCheckedChange = ::toggleFloatingNavBar,
+            )
+            if (floatingNavBar.value) {
+                SwitchPreference(
+                    title = "液态玻璃",
+                    summary = "启用悬浮底栏的液态玻璃效果",
+                    checked = liquidGlass.value,
+                    onCheckedChange = ::toggleLiquidGlass,
+                )
+            }
+        }
+
         GroupTitle("权限与后台")
         WakeCards()
 
@@ -704,6 +936,9 @@ class ModuleMainActivity : ComponentActivity() {
      * 卡片里**不再单独写一行「已启用」**——开关本身就是状态（关掉时标题转灰），
      * 副信息里也不再重复。操作行换成 KSU 的胶囊按钮：左「执行」（播放图标，
      * 原来叫「立即执行」）、右「配置」（齿轮图标，名字按要求保留）。
+     *
+     * 副信息走 description（14sp / 常规字重）：三页卡片正文统一同一档，
+     * 别再换回 subtitle（12sp/550）。
      */
     @Composable
     private fun TaskCard(row: TaskRow) {
@@ -711,7 +946,7 @@ class ModuleMainActivity : ComponentActivity() {
             title = row.spec?.title ?: taskTitle(row.task.taskType),
             titleColor = if (row.task.enabled) MiuixTheme.colorScheme.onSurface
             else MiuixTheme.colorScheme.onSurfaceVariantActions,
-            subtitle = row.subtitle,
+            description = row.subtitle,
             trailing = {
                 Switch(
                     checked = row.task.enabled,
@@ -725,7 +960,7 @@ class ModuleMainActivity : ComponentActivity() {
         }
     }
 
-    /** Root 增强（实验性）：状态 + 说明 + 启用/停用。原先在「关于」页，现归配置页。 */
+    /** Root 增强（实验性）：状态 + 说明 + 启用/停用。原先在「关于」页，现归设置页。 */
     @Composable
     private fun RootCard() {
         val root = rootUi.value
@@ -775,9 +1010,9 @@ class ModuleMainActivity : ComponentActivity() {
             }
         }
 
-        // 开关语义对用户友好：checked = 显示后台卡片（ prefs 里存的是"隐藏"）。
-        // 这一行直接用 miuix 自带的 SwitchPreference，外层 Card 只负责给它和别的卡片
-        // 一样的 12dp 外边距——不必为了统一而把它拆成手搓的行。
+        // 「隐藏后台卡片」开关：打开 = 返回桌面时把模块从最近任务卡片里藏起来
+        // （onUserLeaveHint/onStop 里的 setExcludeFromRecents），不影响自动任务。
+        // checked 直接跟 hideRecentTask 状态走，不再放说明行。
         Card(
             modifier = Modifier
                 .padding(horizontal = 12.dp)
@@ -785,13 +1020,8 @@ class ModuleMainActivity : ComponentActivity() {
             insideMargin = PaddingValues(0.dp),
         ) {
             SwitchPreference(
-                title = "后台卡片",
-                summary = if (hideRecentTask.value) {
-                    "已开启：返回桌面后隐藏最近任务卡片，不停止自动任务，也不等于后台保活。"
-                } else {
-                    "可在返回桌面时隐藏模块的最近任务卡片，不影响自动任务执行。"
-                },
-                checked = !hideRecentTask.value,
+                title = "隐藏后台卡片",
+                checked = hideRecentTask.value,
                 onCheckedChange = { toggleHideRecentTask() },
             )
         }
@@ -810,22 +1040,26 @@ class ModuleMainActivity : ComponentActivity() {
      * 顺序上，缺权限才出现的三个入口排在前面，两个固定动作（厂商自启动 / 重排闹钟）殿后；
      * 权限都放行过（多数用户）就只剩后面两个，正好左一个右一个。真到了五个都齐的情况，
      * 就按两两一行铺开，末行左对齐即可——不会像原来 FlowRow 那样把标题和按钮挤成一团。
+     *
+     * 两个固定动作带图标（后台 / 闹钟，和 KSU 卡片的「执行」同一套胶囊观感）；
+     * 三个权限入口是系统设置跳转，无图标胶囊即可。
      */
     @Composable
     private fun PermissionActions() {
         val wake = wakeUi.value
+        // (图标, 文案, 动作)：图标为空 = 纯文字胶囊。
         val entries = buildList {
             if (wake != null && !wake.notificationAllowed) {
-                add("开启通知" to { requestNotificationPermission() })
+                add(Triple<ImageVector?, String, () -> Unit>(null, "开启通知") { requestNotificationPermission() })
             }
             if (wake != null && !wake.exactAlarmAllowed) {
-                add("精确闹钟" to { openSystemSettings(CloudTaskWakeDiagnostics.exactAlarmSettingsIntent()) })
+                add(Triple<ImageVector?, String, () -> Unit>(null, "精确闹钟") { openSystemSettings(CloudTaskWakeDiagnostics.exactAlarmSettingsIntent()) })
             }
             if (wake != null && !wake.batteryUnrestricted) {
-                add("电池优化" to { openSystemSettings(CloudTaskWakeDiagnostics.batteryOptimizationIntent()) })
+                add(Triple<ImageVector?, String, () -> Unit>(null, "电池优化") { openSystemSettings(CloudTaskWakeDiagnostics.batteryOptimizationIntent()) })
             }
-            add("厂商自启动" to { openAutoStartSettings() })
-            add("重排闹钟" to { rescheduleAlarm() })
+            add(Triple<ImageVector?, String, () -> Unit>(MiuixIcons.Tune, "厂商自启动") { openAutoStartSettings() })
+            add(Triple<ImageVector?, String, () -> Unit>(MiuixIcons.Alarm, "重排闹钟") { rescheduleAlarm() })
         }
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             entries.chunked(2).forEach { pair ->
@@ -833,10 +1067,13 @@ class ModuleMainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    CapsuleTextButton(pair[0].first, pair[0].second)
-                    if (pair.size > 1) {
-                        Spacer(Modifier.weight(1f))
-                        CapsuleTextButton(pair[1].first, pair[1].second)
+                    pair.forEachIndexed { index, (icon, text, action) ->
+                        if (index > 0) Spacer(Modifier.weight(1f))
+                        if (icon != null) {
+                            CapsuleButton(icon, text, action)
+                        } else {
+                            CapsuleTextButton(text, action)
+                        }
                     }
                 }
             }
@@ -849,7 +1086,7 @@ class ModuleMainActivity : ComponentActivity() {
      * 专治历史遗留的「上次跑完 + 24 小时」——老版本写进 prefs 的下次时刻不会自己跟着配置
      * 走，重算一次即可对齐；顺带把系统闹钟按新时刻重排。
      */
-    private fun recomputeSchedule() {
+    private fun recomputeSchedule(onFinish: () -> Unit = {}) {
         runBg(
             work = {
                 val updated = LocalTaskStore { applicationContext }.rescheduleEnabledTasks()
@@ -859,6 +1096,7 @@ class ModuleMainActivity : ComponentActivity() {
             then = { message ->
                 toast(message)
                 refresh()
+                onFinish()
             },
         )
     }
@@ -884,10 +1122,32 @@ class ModuleMainActivity : ComponentActivity() {
 
     private fun toggleHideRecentTask() {
         val enabled = !hideRecentTask.value
-        getSharedPreferences("reamicro_module_ui", MODE_PRIVATE).edit().putBoolean("hideRecentTask", enabled).commit()
+        writeUiPref(KEY_HIDE_RECENT_TASK, enabled)
         setTaskExcludedFromRecents(false)
         hideRecentTask.value = enabled
         toast(if (enabled) "返回桌面后自动隐藏模块后台卡片" else "模块后台卡片恢复显示")
+    }
+
+    /**
+     * 「模糊」开关：顶栏与底栏改走毛玻璃（内容从栏底下穿过并实时模糊）。
+     *
+     * 关掉时栏恢复不透明底色，渲染与没做这件事之前完全一致，所以可以随开随关。
+     */
+    private fun toggleBlurBars(enabled: Boolean) {
+        writeUiPref(KEY_BLUR_BARS, enabled)
+        blurBars.value = enabled
+    }
+
+    /** 「悬浮底栏」开关：底栏在标准整条与悬浮胶囊之间切换（胶囊高出台面，内容从底下穿过）。 */
+    private fun toggleFloatingNavBar(enabled: Boolean) {
+        writeUiPref(KEY_FLOATING_NAV_BAR, enabled)
+        floatingNavBar.value = enabled
+    }
+
+    /** 「液态玻璃」开关：只在悬浮底栏开启时有意义——胶囊在「玻璃透视」与「不透明」之间切换。 */
+    private fun toggleLiquidGlass(enabled: Boolean) {
+        writeUiPref(KEY_LIQUID_GLASS, enabled)
+        liquidGlass.value = enabled
     }
 
     private fun setTaskExcludedFromRecents(excluded: Boolean) {
@@ -921,13 +1181,53 @@ class ModuleMainActivity : ComponentActivity() {
         }
         if (spec?.rewardTriggered == true) put(FIELD_DRAW_LIMIT, task.dailyDrawLimit.toString())
         if (spec?.taskType == "pawn") {
-            put(FIELD_PAWN, task.forbiddenPawnPropIds.sorted().joinToString(","))
+            // 预填 = 已存清单 ∪ 名字键默认项（青圭）。老任务存的是旧默认（只有 11-18），
+            // 不并入的话新默认项在弹窗里永远不勾；名字键默认项执行侧还有红色硬规则兜底，
+            // 这里并进去是让它默认可见、默认锁定。
+            put(
+                FIELD_PAWN,
+                (task.forbiddenPawnPropIds + CloudTaskLocalRunner.PROHIBITED_PAWN_PROP_HINTS.keys.filter { it.startsWith("name:") })
+                    .sorted()
+                    .joinToString(","),
+            )
             editor.multiOptions[FIELD_PAWN] = pawnOptionsFromState(accountId)
+            // 打开编辑器就顺手拉一次全量期物（当日期物 + 背包），让入口行的计数先用上
+            // 最新清单；多选弹窗打开时还会再拉一次（见 MultiSelectOverlay）。
+            runBg(work = { runCatching { fetchPawnOptions(accountId) } }, then = { result ->
+                val updated = result.getOrNull()
+                if (updated != null) {
+                    editor.multiOptions[FIELD_PAWN] = updated
+                } else {
+                    toast(result.exceptionOrNull()?.message ?: "读取期物清单失败")
+                }
+            })
         }
         if (spec?.merchant == true) {
             put(FIELD_CITY, task.merchantCityCode)
             put(FIELD_PRINCIPAL, task.merchantPrincipal.takeIf { it > 0L }?.toString().orEmpty())
             put(FIELD_TRANSPORT, task.merchantTransportId.takeIf { it > 0L }?.toString().orEmpty())
+            // 城池/车马的下拉选项来自阅微的行商接口，打开编辑器时现拉。
+            // 行商当前行程（activeTrip）只做**首次**默认值：任务里已经存过配置就
+            // 原样保留，否则每开一次编辑器都会被当前行程覆盖掉已保存的配置。
+            editor.merchantLoading = true
+            runBg(work = { runCatching { fetchMerchantChoices(accountId) } }, then = { result ->
+                editor.merchantLoading = false
+                val fetched = result.getOrNull()
+                if (fetched == null) {
+                    toast(result.exceptionOrNull()?.message ?: "读取城池/车马失败")
+                } else {
+                    editor.merchantCities = fetched.cities
+                    editor.merchantTransports = fetched.transports
+                    val savedCity = task.merchantCityCode
+                    val savedTransport = task.merchantTransportId
+                    if (fetched.activeCityCode.isNotBlank() && savedCity.isBlank()) {
+                        put(FIELD_CITY, fetched.activeCityCode)
+                    }
+                    if (fetched.activeTransportId > 0L && savedTransport <= 0L) {
+                        put(FIELD_TRANSPORT, fetched.activeTransportId.toString())
+                    }
+                }
+            })
         }
         if (spec != null && spec.blessingOptions.isNotEmpty()) {
             put(FIELD_BLESSING, spec.resolveBlessingChoice(task.blessingType))
@@ -943,7 +1243,12 @@ class ModuleMainActivity : ComponentActivity() {
         }
     }
 
-    /** 点「刷新期物清单」时现拉一次：期物的名字与品质只在服务端。 */
+    /**
+     * 现拉一次期物全量（当日期物 + 背包）：期物的名字与品质只在服务端。
+     *
+     * 现在编辑器每次打开都会自动走这一趟，所以**并进**已存图鉴而不是整表替换——
+     * 替换会把上周见过、今天已不在背包里的期物从图鉴里抹掉，已锁它的配置就没了名字。
+     */
     private fun fetchPawnOptions(accountId: String): List<MultiSelectOption> {
         val pawnStore = LocalTaskStore { applicationContext }
         val token = pawnStore.token(accountId)
@@ -954,11 +1259,32 @@ class ModuleMainActivity : ComponentActivity() {
         fetched.error?.let { reason ->
             runOnUiThread { toast("部分期物没读到：$reason") }
         }
-        val state = JSONObject().put(CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG, fetched.catalog)
+        // fetched.catalog 里只有这次拉到的；图鉴里已有的保留，这次学到的覆盖同名条目。
+        val fresh = fetched.catalog.keys().asSequence().mapNotNull { propId ->
+            fetched.catalog.optJSONObject(propId)?.let { entry ->
+                CloudTaskLocalRunner.PawnPropChoice(
+                    propId,
+                    entry.optString("name"),
+                    entry.optString("quality"),
+                )
+            }
+        }.toList()
+        val state = pawnStore.runtimeState(accountId, "pawn")
+        val merged = CloudTaskLocalRunner.mergePawnPropCatalog(
+            state.optJSONObject(CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG) ?: JSONObject(),
+            fresh,
+        )
+        state.put(CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG, merged)
         pawnStore.recordState(accountId, "pawn", state)
         return CloudTaskLocalRunner.pawnPropChoices(state).map {
             MultiSelectOption(it.propId, it.label, cloudTaskQualityColor(it.quality))
         }
+    }
+
+    /** 拉城池/车马全量选项与当前行商状态；互斥筛选（车马类型↔城池要求）在 UI 侧现做。 */
+    private fun fetchMerchantChoices(accountId: String): CloudTaskLocalRunner.MerchantOptionsFetch {
+        val token = LocalTaskStore { applicationContext }.token(accountId)
+        return CloudTaskLocalRunner.fetchMerchantOptions(token)
     }
 
     /** 把对话框里填的值并回任务；时间或数字非法时返回 null。 */
@@ -1011,6 +1337,17 @@ class ModuleMainActivity : ComponentActivity() {
     }
 
     private fun saveTaskEdits(editor: TaskEditor) {
+        // 本金不能超过当前车马的负重（负车上路，宿主会拒）：上限跟车马走，没选车马不设限。
+        if (editor.spec?.merchant == true) {
+            val principal = editor.values[FIELD_PRINCIPAL]?.trim()?.toLongOrNull() ?: 0L
+            val capacity = editor.merchantTransports
+                .firstOrNull { it.id == editor.values[FIELD_TRANSPORT].orEmpty() }
+                ?.carryingCapacity ?: 0L
+            if (principal > capacity && capacity > 0L) {
+                toast("本金不能超过当前车马的负重（$capacity）")
+                return
+            }
+        }
         val fields = editor.values.mapValues { (_, value) -> { value } }
         val updated = applyTaskEdits(editor.task, editor.spec, fields)
         if (updated == null) {
@@ -1119,11 +1456,18 @@ class ModuleMainActivity : ComponentActivity() {
 
     // ---- 关于页 ----
 
+    /**
+     * 「阅微补全计划」卡片：副标题是模块版本 + 构建时间，整张卡片点击打开 GitHub 仓库。
+     *
+     * 构建时间取自 BuildConfig.BUILD_TIME（`build.gradle.kts` 里按构建时刻写入的毫秒时间戳），
+     * 不是 APK 的安装/更新时间——那两者会被「重新安装」带偏，看不出这一版是什么时候编出来的。
+     */
     @Composable
     private fun AboutPage() {
         SectionCard(
             title = "阅微补全计划",
-            subtitle = "模块 ${versionLine()}",
+            subtitle = "模块 ${versionLine()} · 构建 ${buildTimeText()}",
+            onClick = { openUrl(GITHUB_REPO_URL) },
         )
         GroupTitle("状态")
         Card(
@@ -1229,10 +1573,16 @@ class ModuleMainActivity : ComponentActivity() {
 
     @Composable
     private fun TaskEditorDialog(editor: TaskEditor) {
+        // 聚焦输入框在窗口坐标里的底边（EditorField 聚焦时上报），驱动 editorImeLift 做最小位移。
+        val focusedFieldBottom = remember { mutableStateOf(0f) }
         OverlayDialog(
             title = editor.spec?.title ?: taskTitle(editor.task.taskType),
             show = true,
             onDismissRequest = { editorDialog.value = null },
+            // miuix 自带的 imePadding 会把底部对齐的弹窗整个顶到键盘上沿（跳一整个键盘的高度）。
+            // 关掉它，换成 editorImeLift 的「最小位移」：只抬到刚好露出聚焦的输入框。
+            defaultWindowInsetsPadding = false,
+            modifier = Modifier.editorImeLift(fieldBottom = { focusedFieldBottom.value }),
         ) {
             Column(
                 modifier = Modifier
@@ -1247,6 +1597,7 @@ class ModuleMainActivity : ComponentActivity() {
                         hint = "HH:mm",
                         value = editor.values[FIELD_TIME].orEmpty(),
                         onValue = { editor.values[FIELD_TIME] = it },
+                        onFocusBottom = { focusedFieldBottom.value = it },
                     )
                 }
                 if (spec?.autoRead == true) {
@@ -1255,6 +1606,7 @@ class ModuleMainActivity : ComponentActivity() {
                         hint = "分钟",
                         value = editor.values[FIELD_DURATION].orEmpty(),
                         onValue = { editor.values[FIELD_DURATION] = it },
+                        onFocusBottom = { focusedFieldBottom.value = it },
                     )
                     EditorField(
                         label = "图书",
@@ -1262,6 +1614,7 @@ class ModuleMainActivity : ComponentActivity() {
                         value = editor.values[FIELD_BOOKS].orEmpty(),
                         onValue = { editor.values[FIELD_BOOKS] = it },
                         maxLines = 6,
+                        onFocusBottom = { focusedFieldBottom.value = it },
                     )
                 }
                 if (spec?.rewardTriggered == true) {
@@ -1270,35 +1623,23 @@ class ModuleMainActivity : ComponentActivity() {
                         hint = "0 表示抽完彩筹",
                         value = editor.values[FIELD_DRAW_LIMIT].orEmpty(),
                         onValue = { editor.values[FIELD_DRAW_LIMIT] = it },
+                        onFocusBottom = { focusedFieldBottom.value = it },
                     )
                 }
                 if (spec?.taskType == "pawn") {
                     PawnMultiSelectEntry(editor)
                 }
                 if (spec?.merchant == true) {
-                    EditorField(
-                        label = "城池 cityCode",
-                        hint = "留空沿用上次",
-                        value = editor.values[FIELD_CITY].orEmpty(),
-                        onValue = { editor.values[FIELD_CITY] = it },
-                    )
-                    EditorField(
-                        label = "本金",
-                        hint = "留空沿用上次",
-                        value = editor.values[FIELD_PRINCIPAL].orEmpty(),
-                        onValue = { editor.values[FIELD_PRINCIPAL] = it },
-                    )
-                    EditorField(
-                        label = "车马 transportId",
-                        hint = "留空沿用上次",
-                        value = editor.values[FIELD_TRANSPORT].orEmpty(),
-                        onValue = { editor.values[FIELD_TRANSPORT] = it },
-                    )
+                    CityDropdown(editor, editor.merchantLoading)
+                    TransportDropdown(editor, editor.merchantLoading)
                 }
                 if (spec != null && spec.blessingOptions.isNotEmpty()) {
                     // 运签用选择器而不是输入框：用户面对的应该只有「求安签/求财签」，
                     // 不该让他知道也不该让他手打 SAFETY 这种 wire 值。
                     BlessingChooser(editor, spec)
+                }
+                if (spec?.merchant == true) {
+                    PrincipalSlider(editor)
                 }
             }
             Row(
@@ -1306,9 +1647,22 @@ class ModuleMainActivity : ComponentActivity() {
                     .fillMaxWidth()
                     .padding(top = 12.dp),
             ) {
-                TextButton(text = "取消", onClick = { editorDialog.value = null }, modifier = Modifier.weight(1f))
+                // 按钮对齐主题设置弹窗那套：取消浅灰胶囊、保存主色胶囊，等宽并排。
+                Button(
+                    onClick = { editorDialog.value = null },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(),
+                ) {
+                    Text("取消")
+                }
                 Spacer(Modifier.width(16.dp))
-                TextButton(text = "保存", onClick = { saveTaskEdits(editor) }, modifier = Modifier.weight(1f))
+                Button(
+                    onClick = { saveTaskEdits(editor) },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColorsPrimary(),
+                ) {
+                    Text("保存")
+                }
             }
         }
     }
@@ -1316,7 +1670,7 @@ class ModuleMainActivity : ComponentActivity() {
     /**
      * 带悬浮标签的输入框。
      *
-     * 字段名（如「城池 cityCode」）留在框外当标题；原来的小字提示（如「留空沿用上次」）搬进
+     * 字段名（如「执行时间」）留在框外当标题；原来的小字提示（如「HH:mm」）搬进
      * 框里当悬浮标签——平时占在正文那一行，聚焦（点进输入框）或有内容时缩小上浮到框顶。
      *
      * 这样提示不再单独占一行，字段少一行高度；而且「能不能留空 / 该填什么」正好在要动手打字
@@ -1330,6 +1684,7 @@ class ModuleMainActivity : ComponentActivity() {
         value: String,
         onValue: (String) -> Unit,
         maxLines: Int = 1,
+        onFocusBottom: (Float) -> Unit = {},
     ) {
         Text(label, style = MiuixTheme.textStyles.main)
         Spacer(Modifier.height(6.dp))
@@ -1345,7 +1700,15 @@ class ModuleMainActivity : ComponentActivity() {
         // 标签取 onSecondaryContainerVariant：这一档正是「secondaryContainer 底上的文字」，
         // 与输入框自身 #F0F0F0 的底色配套（深色下自动变 #4F4F4F 底 + 亮灰字），不写死颜色。
         val labelColor = MiuixTheme.colorScheme.onSecondaryContainerVariant
-        Box(modifier = Modifier.fillMaxWidth()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .onGloballyPositioned { coords ->
+                    // 聚焦期间持续上报底边（窗口坐标）。弹窗被 editorImeLift 抬起时坐标跟着
+                    // 变小，抬升量在 lift 侧补偿（还原「原始底边」），不会来回振荡。
+                    if (focused) onFocusBottom(coords.boundsInWindow().bottom)
+                },
+        ) {
             TextField(
                 value = value,
                 onValueChange = onValue,
@@ -1372,6 +1735,33 @@ class ModuleMainActivity : ComponentActivity() {
         Spacer(Modifier.height(12.dp))
     }
 
+    /**
+     * 编辑弹窗的键盘「最小位移」：只把弹窗抬到刚好露出聚焦的输入框，而不是像 miuix 自带的
+     * imePadding 那样抬一整个键盘的高度——底部对齐的弹窗会被整个顶到屏幕顶端。
+     *
+     * [fieldBottom] 是聚焦输入框当前在窗口坐标里的底边（EditorField 聚焦期间持续上报）。
+     * 键盘收起时回落到导航栏 inset；抬起量走弹簧动画，键盘弹出时是滑上去而不是瞬移。
+     */
+    @Composable
+    private fun Modifier.editorImeLift(fieldBottom: () -> Float): Modifier {
+        val density = LocalDensity.current
+        val imeBottom = WindowInsets.ime.getBottom(density)
+        val navBottom = WindowInsets.navigationBars.getBottom(density)
+        var applied by remember { mutableIntStateOf(0) }
+        val target = if (imeBottom == 0 || fieldBottom() <= 0f) {
+            0
+        } else {
+            val imeTop = LocalConfiguration.current.screenHeightDp * density.density - imeBottom
+            // fieldBottom 是弹窗抬升后的坐标；加回当前抬升量还原「原始底边」，否则抬起后
+            // 坐标变小 → 判定不用抬 → 落下 → 又要抬，来回振荡。
+            val originalBottom = fieldBottom() + applied
+            (originalBottom + with(density) { 16.dp.toPx() } - imeTop).toInt().coerceIn(0, imeBottom)
+        }
+        val lifted by animateIntAsState(target, spring(dampingRatio = 1f, stiffness = 300f))
+        SideEffect { applied = lifted }
+        return Modifier.padding(bottom = with(density) { maxOf(lifted, navBottom).toDp() })
+    }
+
     /** 「禁当期物」入口：一行摘要按钮，点开多选弹窗。 */
     @Composable
     private fun PawnMultiSelectEntry(editor: TaskEditor) {
@@ -1380,7 +1770,7 @@ class ModuleMainActivity : ComponentActivity() {
         Text("禁当期物", style = MiuixTheme.textStyles.main)
         Spacer(Modifier.height(2.dp))
         Text(
-            "点一下锁定期物禁止典当；清单来自当日期物与背包里见过的期物",
+            "点一下锁定期物禁止典当；清单打开时从阅微现拉（当日期物 + 背包）",
             style = MiuixTheme.textStyles.footnote1,
             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
         )
@@ -1393,21 +1783,27 @@ class ModuleMainActivity : ComponentActivity() {
     }
 
     /**
-     * 「运签」选择器：KSU 设置页那种「左标题 + 说明、右当前值 + ⇅」的一行，点一下在旁边
-     * 弹出选项列表（当前项高亮 + 勾选）——比原来平铺三个 RadioButton 省下近 150dp。
+     * KSU 设置页那种下拉行：左「标题 + 说明」、右「当前值 + ⇅」，点整行在旁边弹出选项列表
+     * （当前项主色高亮 + 勾选）。
      *
-     * 选项本来就只有 2~3 个，平铺在弹窗里和六个输入框抢高度；收进弹层后字段压回一行。
-     * 值文案与弹层里的行都走 [CloudTaskLocalRunner.blessingLabel]，wire 值（SAFETY/WEALTH）
-     * 只在这个映射里出现，界面层看不到也不用手打。
+     * 选项少的选择器都走它，不再各自平铺 RadioButton——平铺在弹窗里和输入框抢高度。
+     * 行与弹层必须是同一个 Box 的直接子节点：miuix 的列表弹层取「直接父布局」的窗口矩形
+     * 当锚点，塞进 Row 里的话锚点会退化成一个 0 宽的占位。
      */
     @Composable
-    private fun BlessingChooser(editor: TaskEditor, spec: CloudAutomationTaskSpec) {
-        val options = spec.blessingOptions
-        val selected = editor.values[FIELD_BLESSING].orEmpty()
+    private fun ChoiceDropdownField(
+        title: String,
+        summary: String,
+        value: String,
+        /** value 为空（或不在选项里）时右侧展示的文案，如「未选择」。 */
+        emptyLabel: String,
+        choices: List<DropdownChoice>,
+        onSelect: (String) -> Unit,
+    ) {
         val muted = MiuixTheme.colorScheme.onSurfaceVariantSummary
         var expanded by remember { mutableStateOf(false) }
-        // 行与弹层必须是同一个 Box 的直接子节点：miuix 的列表弹层取「直接父布局」的窗口矩形
-        // 当锚点，塞进 Row 里的话锚点会退化成一个 0 宽的占位。
+        val currentLabel = choices.firstOrNull { it.value == value }?.label
+            ?: value.ifBlank { emptyLabel }
         Box(modifier = Modifier.fillMaxWidth()) {
             Row(
                 modifier = Modifier
@@ -1417,17 +1813,17 @@ class ModuleMainActivity : ComponentActivity() {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("运签", style = MiuixTheme.textStyles.main)
+                    Text(title, style = MiuixTheme.textStyles.main)
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        options.joinToString("/") { CloudTaskLocalRunner.blessingLabel(it) },
+                        summary,
                         style = MiuixTheme.textStyles.footnote1,
                         color = muted,
                     )
                 }
                 Spacer(Modifier.width(12.dp))
                 Text(
-                    CloudTaskLocalRunner.blessingLabel(selected),
+                    currentLabel,
                     style = MiuixTheme.textStyles.main,
                     color = muted,
                     maxLines = 1,
@@ -1444,14 +1840,14 @@ class ModuleMainActivity : ComponentActivity() {
                 onDismissRequest = { expanded = false },
             ) {
                 ListPopupColumn {
-                    options.forEachIndexed { index, option ->
+                    choices.forEachIndexed { index, choice ->
                         DropdownImpl(
-                            text = CloudTaskLocalRunner.blessingLabel(option),
-                            optionSize = options.size,
-                            isSelected = option == selected,
+                            text = choice.label,
+                            optionSize = choices.size,
+                            isSelected = choice.value == value,
                             index = index,
                             onSelectedIndexChange = {
-                                editor.values[FIELD_BLESSING] = options[it]
+                                onSelect(choices[it].value)
                                 expanded = false
                             },
                         )
@@ -1463,11 +1859,197 @@ class ModuleMainActivity : ComponentActivity() {
     }
 
     /**
+     * 城池对车马的通行要求：`requiredTransportType` 为空表示任何车马都能去（GUSU/LANGYA），
+     * 非空时必须与车马的 `transportType` 一致（楼兰=HORSE，江陵/蓬莱=SHIP——只有船去蓬莱）。
+     * 规则照宿主行商准备页，字段实际取值已探针取证。
+     */
+    private fun cityAccepts(
+        city: CloudTaskLocalRunner.MerchantCityOption,
+        transport: CloudTaskLocalRunner.MerchantTransportOption?,
+    ): Boolean = city.requiredTransportType.isBlank() || transport?.transportType == city.requiredTransportType
+
+    /**
+     * 城池行程的预计耗时（分钟）：宿主公式
+     * `ceil(baseDurationMinutes × (100 − speedPercent) / 100)`——速度加成是**减**耗时，
+     * 没选车马按 0%（smali 取证自 `TravelingMerchantSheetKt.MerchantLoadout`）。
+     */
+    private fun merchantDurationMinutes(
+        city: CloudTaskLocalRunner.MerchantCityOption,
+        transport: CloudTaskLocalRunner.MerchantTransportOption?,
+    ): Long {
+        val speed = transport?.speedPercent ?: 0L
+        return kotlin.math.ceil(city.baseDurationMinutes * (100.0 - speed) / 100.0).toLong()
+    }
+
+    /** 预计耗时的展示格式：不足一小时显示分钟，否则显示小时（整数省小数，如 1.5 小时）。 */
+    private fun formatMerchantDuration(
+        city: CloudTaskLocalRunner.MerchantCityOption,
+        transport: CloudTaskLocalRunner.MerchantTransportOption?,
+    ): String {
+        val minutes = merchantDurationMinutes(city, transport)
+        if (minutes < 60L) return "$minutes 分钟"
+        val hours = String.format(Locale.US, "%.1f", minutes / 60.0).removeSuffix(".0")
+        return "$hours 小时"
+    }
+
+    /**
+     * 行商「城池」下拉：选项来自阅微 `get-traveling-merchant`。
+     *
+     * 与车马互斥——已选车马时只列它去得了的城池；换成去不了的城池时清掉原车马。
+     * 小字是**已选城池**的预计耗时：按宿主行商准备页的公式
+     * `ceil(baseDurationMinutes × (100 − speedPercent) / 100)` 打上车马速度加成
+     * （smali 取证自 `TravelingMerchantSheetKt.MerchantLoadout`，没选车马按 0% 算）。
+     */
+    @Composable
+    private fun CityDropdown(editor: TaskEditor, loading: Boolean) {
+        val selectedTransport = editor.merchantTransports.firstOrNull {
+            it.id == editor.values[FIELD_TRANSPORT].orEmpty()
+        }
+        val compatible = editor.merchantCities.filter { cityAccepts(it, selectedTransport) }
+        val selectedCity = compatible.firstOrNull { it.code == editor.values[FIELD_CITY].orEmpty() }
+        ChoiceDropdownField(
+            title = "城池",
+            summary = when {
+                loading -> "正在读取可选城池…"
+                selectedCity != null -> "预计 ${formatMerchantDuration(selectedCity, selectedTransport)}"
+                selectedTransport != null -> "共 ${compatible.size} 座适配当前车马"
+                else -> "共 ${compatible.size} 座"
+            },
+            value = editor.values[FIELD_CITY].orEmpty(),
+            emptyLabel = "未选择",
+            choices = compatible.map { DropdownChoice(it.code, it.label) },
+            onSelect = { code ->
+                editor.values[FIELD_CITY] = code
+                val city = compatible.firstOrNull { it.code == code } ?: return@ChoiceDropdownField
+                val current = editor.merchantTransports.firstOrNull {
+                    it.id == editor.values[FIELD_TRANSPORT].orEmpty()
+                }
+                // 原车马去不了新城池就清掉，让用户在筛过的清单里重挑。
+                if (current != null && !cityAccepts(city, current)) {
+                    editor.values[FIELD_TRANSPORT] = ""
+                }
+            },
+        )
+    }
+
+    /**
+     * 行商「车马」下拉：只列已拥有的；已选城池时只列去得了的车马（互斥同上）。
+     * 选中后小字换成这匹/艘的实际效果——速度加成与负重（负重也是本金的上限）。
+     */
+    @Composable
+    private fun TransportDropdown(editor: TaskEditor, loading: Boolean) {
+        val selectedCity = editor.merchantCities.firstOrNull {
+            it.code == editor.values[FIELD_CITY].orEmpty()
+        }
+        val compatible = editor.merchantTransports.filter { transport ->
+            transport.owned && (selectedCity == null || cityAccepts(selectedCity, transport))
+        }
+        val selected = compatible.firstOrNull { it.id == editor.values[FIELD_TRANSPORT].orEmpty() }
+        ChoiceDropdownField(
+            title = "车马",
+            summary = when {
+                loading -> "正在读取可用车马…"
+                selected != null -> "速度 +${selected.speedPercent}% · 负重 ${selected.carryingCapacity}"
+                selectedCity != null -> "当前城池没有适配的已拥有车马"
+                else -> "共 ${compatible.size} 项已拥有"
+            },
+            value = editor.values[FIELD_TRANSPORT].orEmpty(),
+            emptyLabel = "未选择",
+            choices = compatible.map { DropdownChoice(it.id, it.label) },
+            onSelect = { id ->
+                editor.values[FIELD_TRANSPORT] = id
+                val transport = compatible.firstOrNull { it.id == id } ?: return@ChoiceDropdownField
+                val current = editor.merchantCities.firstOrNull {
+                    it.code == editor.values[FIELD_CITY].orEmpty()
+                }
+                // 原城池不收这匹车马就清掉，让用户在筛过的清单里重挑。
+                if (current != null && !cityAccepts(current, transport)) {
+                    editor.values[FIELD_CITY] = ""
+                }
+            },
+        )
+    }
+
+    /**
+     * 行商「本金」滑动条：上限就是当前车马的负重，拖动按百分比换算金额。
+     *
+     * 滑到最右（100%）金额恒等于负重本身（不丢取整误差）；0 表示不设本金、
+     * 沿用上次。没选车马时没有负重上限，滑动条禁用。金额存进
+     * [FIELD_PRINCIPAL]，与旧输入框同一字段，执行侧无需感知界面形态。
+     */
+    @Composable
+    private fun PrincipalSlider(editor: TaskEditor) {
+        val capacity = editor.merchantTransports
+            .firstOrNull { it.id == editor.values[FIELD_TRANSPORT].orEmpty() }
+            ?.carryingCapacity ?: 0L
+        val saved = editor.values[FIELD_PRINCIPAL]?.trim()?.toLongOrNull() ?: 0L
+        // 金额以本地 state 为准，拖动时同步写回 values；容量变化（换车马或清单
+        // 异步到达）时用已存值重新对位，超出新车马负重的部分截掉。
+        var amount by remember(capacity) { mutableLongStateOf(saved.coerceAtMost(capacity)) }
+        val muted = MiuixTheme.colorScheme.onSurfaceVariantSummary
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("本金", style = MiuixTheme.textStyles.main)
+                Spacer(Modifier.weight(1f))
+                Text(
+                    when {
+                        capacity <= 0L -> "先选车马"
+                        amount <= 0L -> "沿用上次"
+                        else -> amount.toString()
+                    },
+                    style = MiuixTheme.textStyles.main,
+                    color = muted,
+                )
+            }
+            Slider(
+                value = if (capacity > 0L) (amount.toFloat() / capacity).coerceIn(0f, 1f) else 0f,
+                onValueChange = { fraction ->
+                    if (capacity <= 0L) return@Slider
+                    // 满格恒等于负重本身；其余按拖动百分比四舍五入。
+                    val next = if (fraction >= 1f) capacity else (fraction * capacity).roundToLong()
+                    amount = next
+                    editor.values[FIELD_PRINCIPAL] = next.toString()
+                },
+                valueRange = 0f..1f,
+                enabled = capacity > 0L,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                if (capacity > 0L) "上限 $capacity（当前车马负重），0 = 沿用上次"
+                else "选择车马后按负重设上限",
+                style = MiuixTheme.textStyles.footnote1,
+                color = muted,
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+    }
+
+    /** 运签选择：空串是合法选项（不祈禳），wire 值（SAFETY/WEALTH）不进界面层。 */
+    @Composable
+    private fun BlessingChooser(editor: TaskEditor, spec: CloudAutomationTaskSpec) {
+        val options = spec.blessingOptions
+        ChoiceDropdownField(
+            title = "运签",
+            summary = options.joinToString("/") { CloudTaskLocalRunner.blessingLabel(it) },
+            value = editor.values[FIELD_BLESSING].orEmpty(),
+            emptyLabel = CloudTaskLocalRunner.blessingLabel(""),
+            choices = options.map { DropdownChoice(it, CloudTaskLocalRunner.blessingLabel(it)) },
+            onSelect = { editor.values[FIELD_BLESSING] = it },
+        )
+    }
+
+    /**
      * 多选弹窗：一行一个选项，点一下就切换锁定状态。
      *
      * 「禁当期物」这种配置天然是一组开关——让用户手打 propId 既记不住也看不见。
-     * 清单可以被「刷新期物清单」换掉（名字与品质只在服务端）；刻意不清掉
-     * "刷新后不在清单里"的锁定项：期物可能只是今天已经典当光，用户锁它的意思还在。
+     * 期物的名字与品质只在服务端，所以**每次打开弹窗都现拉一轮完整清单**（当日期物 +
+     * 背包全量）并进图鉴。刻意不清掉"拉完不在清单里"的锁定项：
+     * 期物可能只是今天已经典当光，用户锁它的意思还在。
      */
     @Composable
     private fun MultiSelectOverlay(editor: TaskEditor, label: String) {
@@ -1477,7 +2059,23 @@ class ModuleMainActivity : ComponentActivity() {
                 addAll(CloudTaskLocalRunner.parseForbiddenPawnPropIds(editor.values[label].orEmpty()))
             }
         }
-        var refreshing by mutableStateOf(false)
+        var refreshing by remember { mutableStateOf(false) }
+        // 打开即拉：老图鉴缺今天新见的期物，进来先补一轮。
+        LaunchedEffect(label) {
+            refreshing = true
+            runBg(
+                work = { runCatching { fetchPawnOptions(editor.accountId) } },
+                then = { result ->
+                    refreshing = false
+                    val updated = result.getOrNull()
+                    if (result.isFailure) {
+                        toast(result.exceptionOrNull()?.message ?: "读取清单失败")
+                    } else if (updated != null) {
+                        editor.multiOptions[label] = updated
+                    }
+                },
+            )
+        }
         OverlayDialog(
             title = label,
             show = true,
@@ -1490,81 +2088,64 @@ class ModuleMainActivity : ComponentActivity() {
                     .verticalScroll(rememberScrollState()),
             ) {
                 Text(
-                    "勾选 = 禁止典当；清单来自当日期物与背包里见过的期物。",
+                    "勾选 = 禁止典当；每次打开自动读取最新清单，红色品质一律不自动典当。",
                     style = MiuixTheme.textStyles.footnote1,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                 )
                 Spacer(Modifier.height(6.dp))
-                if (options.isEmpty()) {
+                if (options.isEmpty() && refreshing) {
                     Text(
-                        "暂无可选期物，任务跑过一轮或点下面刷新后再来",
+                        "正在读取期物清单…",
                         style = MiuixTheme.textStyles.footnote1,
                         color = MiuixTheme.colorScheme.onSurfaceContainer,
                     )
                     Spacer(Modifier.height(8.dp))
                 }
-                options.forEach { option ->
-                    val locked = option.value in picked
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                if (locked) picked.remove(option.value) else picked.add(option.value)
-                            }
-                            .padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        // 行内不再写「已锁定 / 可典当」：勾选框本身就是那个状态，
-                        // 语义写在弹窗顶部那一行说明里就够了。
-                        Text(
-                            option.label,
-                            style = MiuixTheme.textStyles.main,
-                            color = option.color?.let { Color(it) } ?: MiuixTheme.colorScheme.onSurface,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Spacer(Modifier.width(12.dp))
-                        Checkbox(
-                            state = if (locked) ToggleableState.On else ToggleableState.Off,
-                            onClick = {
-                                if (locked) picked.remove(option.value) else picked.add(option.value)
-                            },
-                        )
+                    options.forEach { option ->
+                        val locked = option.value in picked
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    if (locked) picked.remove(option.value) else picked.add(option.value)
+                                }
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            // 行内不再写「已锁定 / 可典当」：勾选框本身就是那个状态，
+                            // 语义写在弹窗顶部那一行说明里就够了。
+                            Text(
+                                option.label,
+                                style = MiuixTheme.textStyles.main,
+                                color = option.color?.let { Color(it) } ?: MiuixTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Checkbox(
+                                state = if (locked) ToggleableState.On else ToggleableState.Off,
+                                onClick = {
+                                    if (locked) picked.remove(option.value) else picked.add(option.value)
+                                },
+                            )
+                        }
                     }
                 }
-            }
-            TextButton(
-                text = if (refreshing) "正在读取…" else "刷新期物清单",
-                onClick = {
-                    if (!refreshing) {
-                        refreshing = true
-                        runBg(
-                            work = { runCatching { fetchPawnOptions(editor.accountId) } },
-                            then = { result ->
-                                refreshing = false
-                                val updated = result.getOrNull()
-                                if (result.isFailure) {
-                                    toast(result.exceptionOrNull()?.message ?: "刷新清单失败")
-                                } else if (updated == null) {
-                                    toast("没有读到清单，稍后再试")
-                                } else {
-                                    editor.multiOptions[label] = updated
-                                    toast("清单已更新，共 ${updated.size} 项")
-                                }
-                            },
-                        )
-                    }
-                },
-            )
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 12.dp),
             ) {
-                TextButton(text = "取消", onClick = { editor.multiOpenLabel = null }, modifier = Modifier.weight(1f))
-                Spacer(Modifier.width(16.dp))
-                TextButton(
-                    text = "完成",
+                Button(
+                    onClick = { editor.multiOpenLabel = null },
                     modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(),
+                ) {
+                    Text("取消")
+                }
+                Spacer(Modifier.width(16.dp))
+                Button(
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColorsPrimary(),
                     onClick = {
                         // 落盘还是同一份 ID 集合，沿用「按标签取字符串」通道回传。
                         editor.values[label] = picked
@@ -1572,7 +2153,9 @@ class ModuleMainActivity : ComponentActivity() {
                             .joinToString(",")
                         editor.multiOpenLabel = null
                     },
-                )
+                ) {
+                    Text("完成")
+                }
             }
         }
     }
@@ -1639,8 +2222,36 @@ class ModuleMainActivity : ComponentActivity() {
         )
     }
 
-    private fun hideRecentTaskEnabled(): Boolean =
-        getSharedPreferences("reamicro_module_ui", MODE_PRIVATE).getBoolean("hideRecentTask", false)
+    private fun hideRecentTaskEnabled(): Boolean = uiPrefBoolean(KEY_HIDE_RECENT_TASK)
+
+    // ---- 模块界面自己的偏好 ----
+
+    /** 界面偏好（隐藏后台卡片 / 主题设置）读：都落在同一份 prefs 里。 */
+    private fun uiPrefBoolean(key: String, defValue: Boolean = false): Boolean =
+        getSharedPreferences(UI_PREFS, MODE_PRIVATE).getBoolean(key, defValue)
+
+    /** 界面偏好写：同步落盘（commit），避免用户刚切完开关就被系统回收进程而丢设置。 */
+    private fun writeUiPref(key: String, value: Boolean) {
+        getSharedPreferences(UI_PREFS, MODE_PRIVATE).edit().putBoolean(key, value).commit()
+    }
+
+    /**
+     * 构建时间文案。
+     *
+     * 取 BuildConfig.BUILD_TIME（`build.gradle.kts` 按构建时刻写进去的毫秒时间戳），不是
+     * APK 的安装/更新时间——那两者会被「重新安装」带偏，看不出这一版是什么时候编出来的。
+     */
+    private fun buildTimeText(): String =
+        runCatching {
+            SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(BuildConfig.BUILD_TIME))
+        }.getOrDefault("未知")
+
+    /** 打开外部链接（GitHub 仓库）。没有可用浏览器时给一句人话，别把异常抛到界面上。 */
+    private fun openUrl(url: String) {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { startActivity(intent) }
+            .onFailure { toast("没有可以打开这个链接的应用") }
+    }
 
     private fun toast(message: String) {
         android.widget.Toast.makeText(applicationContext, message, android.widget.Toast.LENGTH_SHORT).show()
@@ -1788,7 +2399,7 @@ class ModuleMainActivity : ComponentActivity() {
         val actions: List<Pair<String, () -> Unit>> = emptyList(),
     )
 
-    /** 任务编辑器的存活状态：values 按标签存当前值，multiOptions 可被刷新替换。 */
+    /** 任务编辑器的存活状态：values 按标签存当前值，multiOptions / 行商选项可被刷新替换。 */
     private class TaskEditor(
         val accountId: String,
         val task: LocalTask,
@@ -1797,20 +2408,50 @@ class ModuleMainActivity : ComponentActivity() {
         val values = mutableStateMapOf<String, String>()
         val multiOptions = mutableStateMapOf<String, List<MultiSelectOption>>()
 
+        /** 行商城池/车马全量选项，打开编辑器时后台从阅微拉；城池↔车马的互斥在 UI 侧现筛。 */
+        var merchantCities: List<CloudTaskLocalRunner.MerchantCityOption> by mutableStateOf(emptyList())
+        var merchantTransports: List<CloudTaskLocalRunner.MerchantTransportOption> by mutableStateOf(emptyList())
+
+        /** 行商可选项是否还在拉取中。 */
+        var merchantLoading: Boolean by mutableStateOf(false)
+
         /** 非空时在该编辑器之上再弹多选弹窗。 */
         var multiOpenLabel: String? by mutableStateOf(null)
     }
+
+    /** 下拉选择器的一个选项：value 是落库值，label 是展示文案。 */
+    private data class DropdownChoice(val value: String, val label: String)
 
     private companion object {
         const val LOG_TAG = "ReaMicroMain"
         const val REQUEST_POST_NOTIFICATIONS = 4501
 
-        // 底栏四页签：记录（历史）/ 任务（每任务开关与参数）/ 配置（系统级设置）/ 关于。
+        /** 模块界面自己的偏好文件与键名（隐藏后台卡片、主题设置）。 */
+        const val UI_PREFS = "reamicro_module_ui"
+        const val KEY_HIDE_RECENT_TASK = "hideRecentTask"
+        const val KEY_BLUR_BARS = "themeBlurBars"
+        const val KEY_FLOATING_NAV_BAR = "themeFloatingNavBar"
+        const val KEY_LIQUID_GLASS = "themeLiquidGlass"
+
+        /** 悬浮底栏的圆角：与 miuix FloatingToolbarDefaults.CornerRadius 同为 28dp。 */
+        val FLOAT_BAR_CORNER = 28.dp
+
+        /** 顶栏/标准底栏的模糊半径与罩层透明度（对齐 KSU 的 BlurredBar：25f + surface 0.87）。 */
+        const val BAR_BLUR_RADIUS = 25f
+        const val BAR_TINT_ALPHA = 0.87f
+
+        /** 液态玻璃胶囊表面的奶白罩层透明度：压一点底色保证图标可读，又不能厚到看不出玻璃。 */
+        const val LIQUID_SURFACE_ALPHA = 0.4f
+
+        /** 项目主页：「阅微补全计划」卡片点进去的地方。 */
+        const val GITHUB_REPO_URL = "https://github.com/YGHFv/ReaMicro-Extend"
+
+        // 底栏四页签：记录（历史）/ 任务（每任务开关与参数）/ 设置（系统级设置）/ 关于。
         const val TAB_RECORDS = 0
         const val TAB_TASKS = 1
         const val TAB_CONFIG = 2
         const val TAB_ABOUT = 3
-        val TAB_TITLES = listOf("记录", "任务", "配置", "关于")
+        val TAB_TITLES = listOf("记录", "任务", "设置", "关于")
         val TAB_ICONS = listOf(MiuixIcons.Recent, MiuixIcons.Tasks, MiuixIcons.Settings, MiuixIcons.Info)
 
         /** 窗口底色：首帧之前系统栏区域显示的颜色，跟着深浅色走（透明会让部分 ROM 露黑边）。 */

@@ -1,4 +1,11 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!--
+      miuix-blur 库把 minSdk 声明成 33（RuntimeShader 需要 Android 13）。库内所有效果路径都有
+      isRuntimeShaderSupported()（SDK_INT >= 33）运行时门禁，低版本设备只是没有效果、不会崩；
+      模块自己的调用侧同样先查这个开关再挂玻璃层，所以放行合并。
+    -->
+    <uses-sdk tools:overrideLibrary="top.yukonga.miuix.kmp.blur" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />

@@ -173,6 +173,10 @@ dependencies {
     implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.4")
     implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.4")
 
+    // 顶栏/底栏的毛玻璃与悬浮底栏的液态玻璃（设置页「主题」里的开关）。
+    // 用 miuix 官方 blur 库（KernelSU 管理器同款），与 miuix-ui 同版本、同一家发布，不引入第三套图形栈。
+    implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.4")
+
     compileOnly("io.github.libxposed:api:101.0.1")
 
     testImplementation("junit:junit:4.13.2")
