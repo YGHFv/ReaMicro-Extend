@@ -17,6 +17,7 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
@@ -474,6 +475,7 @@ internal fun WebDavDriveHook.createWebDavLoginRouteView(context: Context, navGra
     return createWebDavLoginContent(
         context = context,
         prefs = prefs,
+        colors = WebDavPageColors(context),
         onBack = { popBackStack(navGraphScope) },
         onSaved = {
             popBackStack(navGraphScope)
@@ -1227,6 +1229,37 @@ internal fun WebDavDriveHook.rememberCleartextHost(requestUrl: String) {
     }
 }
 
+/**
+ * WebDAV 全屏自绘页的系统栏图标明暗。
+ *
+ * 浅色页面要 LIGHT_STATUS_BAR / LIGHT_NAVIGATION_BAR 换深色图标；深色页面必须把这两位清掉，
+ * 否则默认的浅色图标会被当成深色图标画在深色底上而看不见。先清后按需置，避免宿主
+ * 原有 flag 把它带进来。layoutInScreen 对应登录页「内容铺到系统栏下」的既有行为。
+ */
+internal fun webDavSystemUiVisibility(old: Int, dark: Boolean, layoutInScreen: Boolean): Int {
+    val lightMask = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+    var flags = old and lightMask.inv()
+    if (layoutInScreen) {
+        flags = flags or View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+    }
+    if (!dark) flags = flags or lightMask
+    return flags
+}
+
+/**
+ * API 30+ 走 WindowInsetsController 重述一次系统栏外观（systemUiVisibility 的 LIGHT_* 已废弃）。
+ * 与 ReaderHook.applyFullTextSearchSystemBarAppearance 同一写法。
+ */
+internal fun applyWebDavSystemBarAppearance(window: Window, dark: Boolean) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+    val lightBars = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+        WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+    window.insetsController?.setSystemBarsAppearance(
+        if (dark) 0 else lightBars,
+        lightBars,
+    )
+}
+
 internal fun WebDavDriveHook.showWebDavAuthIntroPage() {
     val activity = activityProvider()
     if (activity == null) {
@@ -1235,7 +1268,15 @@ internal fun WebDavDriveHook.showWebDavAuthIntroPage() {
     }
     activity.runOnUiThread {
         webDavAuthDialog?.takeIf { it.isShowing }?.dismiss()
-        val dialog = Dialog(activity, android.R.style.Theme_Material_Light_NoActionBar).apply {
+        val colors = WebDavPageColors(activity)
+        val dialog = Dialog(
+            activity,
+            if (colors.dark) {
+                android.R.style.Theme_Material_NoActionBar
+            } else {
+                android.R.style.Theme_Material_Light_NoActionBar
+            },
+        ).apply {
             requestWindowFeature(Window.FEATURE_NO_TITLE)
             setCanceledOnTouchOutside(false)
             setOnKeyListener { _, keyCode, event ->
@@ -1251,12 +1292,12 @@ internal fun WebDavDriveHook.showWebDavAuthIntroPage() {
         val oldStatusBarColor = activity.window.statusBarColor
         val oldNavigationBarColor = activity.window.navigationBarColor
         val oldSystemUiVisibility = activity.window.decorView.systemUiVisibility
-        activity.window.statusBarColor = Color.WHITE
-        activity.window.navigationBarColor = Color.WHITE
+        activity.window.statusBarColor = colors.pageBackground
+        activity.window.navigationBarColor = colors.pageBackground
         activity.window.decorView.systemUiVisibility =
-            oldSystemUiVisibility or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+            webDavSystemUiVisibility(oldSystemUiVisibility, colors.dark, layoutInScreen = false)
 
-        dialog.setContentView(createWebDavAuthIntroView(activity, dialog))
+        dialog.setContentView(createWebDavAuthIntroView(activity, dialog, colors))
         dialog.setOnDismissListener {
             if (webDavAuthDialog === dialog) {
                 webDavAuthDialog = null
@@ -1272,24 +1313,29 @@ internal fun WebDavDriveHook.showWebDavAuthIntroPage() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
             )
-            setBackgroundDrawable(ColorDrawable(Color.WHITE))
-            statusBarColor = Color.WHITE
-            navigationBarColor = Color.WHITE
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                navigationBarDividerColor = Color.WHITE
+            setBackgroundDrawable(ColorDrawable(colors.pageBackground))
+            statusBarColor = colors.pageBackground
+            navigationBarColor = colors.pageBackground
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                navigationBarDividerColor = colors.pageBackground
             }
             decorView.systemUiVisibility =
-                decorView.systemUiVisibility or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+                webDavSystemUiVisibility(decorView.systemUiVisibility, colors.dark, layoutInScreen = false)
+            applyWebDavSystemBarAppearance(this, colors.dark)
             clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
     }
 }
 
-internal fun WebDavDriveHook.createWebDavAuthIntroView(activity: Activity, dialog: Dialog): View {
+internal fun WebDavDriveHook.createWebDavAuthIntroView(
+    activity: Activity,
+    dialog: Dialog,
+    colors: WebDavPageColors,
+): View {
     val root = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
-        setBackgroundColor(Color.WHITE)
+        setBackgroundColor(colors.pageBackground)
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1301,7 +1347,7 @@ internal fun WebDavDriveHook.createWebDavAuthIntroView(activity: Activity, dialo
             activity.dp(56),
         )
     }
-    val backButton = WebDavBackButton(activity).apply {
+    val backButton = WebDavBackButton(activity, colors.backIcon).apply {
         setOnClickListener { dialog.dismiss() }
         contentDescription = "返回"
         layoutParams = FrameLayout.LayoutParams(activity.dp(48), activity.dp(48), Gravity.START or Gravity.CENTER_VERTICAL).apply {
@@ -1310,7 +1356,7 @@ internal fun WebDavDriveHook.createWebDavAuthIntroView(activity: Activity, dialo
     }
     val title = TextView(activity).apply {
         text = WEBDAV_TITLE
-        setTextColor(Color.rgb(32, 36, 38))
+        setTextColor(colors.titleText)
         textSize = 18f
         gravity = Gravity.CENTER
         typeface = android.graphics.Typeface.SERIF
@@ -1337,12 +1383,12 @@ internal fun WebDavDriveHook.createWebDavAuthIntroView(activity: Activity, dialo
     val spacerTop = View(activity).apply {
         layoutParams = LinearLayout.LayoutParams(1, 0, 0.9f)
     }
-    val illustration = WebDavEmptyView(activity).apply {
+    val illustration = WebDavEmptyView(activity, colors).apply {
         layoutParams = LinearLayout.LayoutParams(activity.dp(150), activity.dp(116))
     }
     val tips = TextView(activity).apply {
         text = WEBDAV_AUTH_TIPS
-        setTextColor(Color.rgb(94, 98, 102))
+        setTextColor(colors.bodyText)
         textSize = 15f
         gravity = Gravity.CENTER
         includeFontPadding = false
@@ -1361,7 +1407,7 @@ internal fun WebDavDriveHook.createWebDavAuthIntroView(activity: Activity, dialo
         includeFontPadding = false
         minHeight = 0
         minWidth = 0
-        background = roundedDrawable(Color.rgb(221, 221, 221), activity.dp(7).toFloat())
+        background = roundedDrawable(colors.neutralButton, activity.dp(7).toFloat())
         setPadding(0, 0, 0, 0)
         setOnClickListener {
             dialog.dismiss()
@@ -1396,7 +1442,13 @@ internal fun WebDavDriveHook.showWebDavLoginPage() {
     }
     activity.runOnUiThread {
         webDavLoginDialog?.takeIf { it.isShowing }?.dismiss()
-        val dialog = Dialog(activity).apply {
+        val colors = WebDavPageColors(activity)
+        // themeResId=0 保持沿用宿主 Activity 主题（浅色下与历史行为一致），深色才显式换深色主题，
+        // 否则 EditText 光标 / 选择色仍是浅色主题那一套。
+        val dialog = Dialog(
+            activity,
+            if (colors.dark) android.R.style.Theme_Material_NoActionBar else 0,
+        ).apply {
             requestWindowFeature(Window.FEATURE_NO_TITLE)
             setCanceledOnTouchOutside(false)
             setOnKeyListener { _, keyCode, event ->
@@ -1422,20 +1474,16 @@ internal fun WebDavDriveHook.showWebDavLoginPage() {
         } else {
             null
         }
-        activity.window.statusBarColor = Color.WHITE
+        activity.window.statusBarColor = colors.pageBackground
         activity.window.navigationBarColor = Color.TRANSPARENT
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             activity.window.isNavigationBarContrastEnforced = false
             activity.window.isStatusBarContrastEnforced = false
         }
         activity.window.decorView.systemUiVisibility =
-            oldSystemUiVisibility or
-                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
-                View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR or
-                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
-                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            webDavSystemUiVisibility(oldSystemUiVisibility, colors.dark, layoutInScreen = true)
         val prefs = activity.getSharedPreferences(WEBDAV_PREFS, Context.MODE_PRIVATE)
-        dialog.setContentView(createWebDavLoginView(activity, dialog, prefs))
+        dialog.setContentView(createWebDavLoginView(activity, dialog, prefs, colors))
         dialog.window?.apply {
             attributes = attributes.apply { windowAnimations = 0 }
             setWindowAnimations(0)
@@ -1460,22 +1508,19 @@ internal fun WebDavDriveHook.showWebDavLoginPage() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
             )
-            setBackgroundDrawable(ColorDrawable(Color.WHITE))
-            statusBarColor = Color.WHITE
+            setBackgroundDrawable(ColorDrawable(colors.pageBackground))
+            statusBarColor = colors.pageBackground
             navigationBarColor = Color.TRANSPARENT
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 navigationBarDividerColor = Color.TRANSPARENT
             }
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 isNavigationBarContrastEnforced = false
                 isStatusBarContrastEnforced = false
             }
             decorView.systemUiVisibility =
-                decorView.systemUiVisibility or
-                    View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
-                    View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR or
-                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
-                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                webDavSystemUiVisibility(decorView.systemUiVisibility, colors.dark, layoutInScreen = true)
+            applyWebDavSystemBarAppearance(this, colors.dark)
             clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN)
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
@@ -1487,10 +1532,12 @@ internal fun WebDavDriveHook.createWebDavLoginView(
     activity: Activity,
     dialog: Dialog,
     prefs: android.content.SharedPreferences,
+    colors: WebDavPageColors,
 ): View =
     createWebDavLoginContent(
         context = activity,
         prefs = prefs,
+        colors = colors,
         onBack = { dialog.dismiss() },
         onSaved = { dialog.dismiss() },
     )
@@ -1498,11 +1545,12 @@ internal fun WebDavDriveHook.createWebDavLoginView(
 internal fun WebDavDriveHook.createWebDavLoginContent(
     context: Context,
     prefs: android.content.SharedPreferences,
+    colors: WebDavPageColors,
     onBack: () -> Unit,
     onSaved: () -> Unit,
 ): View {
     val scroll = ScrollView(context).apply {
-        setBackgroundColor(Color.WHITE)
+        setBackgroundColor(colors.pageBackground)
         overScrollMode = View.OVER_SCROLL_NEVER
         isFillViewport = true
         layoutParams = ViewGroup.LayoutParams(
@@ -1512,7 +1560,7 @@ internal fun WebDavDriveHook.createWebDavLoginContent(
     }
     val root = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
-        setBackgroundColor(Color.WHITE)
+        setBackgroundColor(colors.pageBackground)
         setPadding(0, 0, 0, context.dp(20))
         layoutParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1525,7 +1573,7 @@ internal fun WebDavDriveHook.createWebDavLoginContent(
             context.statusBarHeight() + context.dp(64),
         )
     }
-    val backButton = WebDavBackButton(context).apply {
+    val backButton = WebDavBackButton(context, colors.backIcon).apply {
         setOnClickListener { onBack() }
         contentDescription = "返回"
         layoutParams = FrameLayout.LayoutParams(context.dp(48), context.dp(48), Gravity.START).apply {
@@ -1553,12 +1601,12 @@ internal fun WebDavDriveHook.createWebDavLoginContent(
             bottomMargin = context.dp(28)
         }
     }
-    brand.addView(WebDavLogoView(context).apply {
+    brand.addView(WebDavLogoView(context, colors.accent).apply {
         layoutParams = LinearLayout.LayoutParams(context.dp(42), context.dp(42))
     })
     brand.addView(TextView(context).apply {
         text = WEBDAV_TITLE
-        setTextColor(Color.rgb(53, 112, 196))
+        setTextColor(colors.brandTitle)
         textSize = 28f
         typeface = android.graphics.Typeface.SERIF
         includeFontPadding = false
@@ -1571,7 +1619,7 @@ internal fun WebDavDriveHook.createWebDavLoginContent(
     })
     val title = TextView(context).apply {
         text = "欢迎登录 WebDAV 账号"
-        setTextColor(Color.rgb(34, 38, 40))
+        setTextColor(colors.primaryText)
         textSize = 26f
         typeface = android.graphics.Typeface.SERIF
         includeFontPadding = true
@@ -1582,16 +1630,16 @@ internal fun WebDavDriveHook.createWebDavLoginContent(
             bottomMargin = context.dp(22)
         }
     }
-    val server = webDavEditText(context, "服务器地址", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI).apply {
+    val server = webDavEditText(context, "服务器地址", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI, colors).apply {
         setText(prefs.getString(KEY_URL, "").orEmpty())
     }
-    val username = webDavEditText(context, "账号", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL).apply {
+    val username = webDavEditText(context, "账号", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL, colors).apply {
         setText(prefs.getString(KEY_USERNAME, "").orEmpty())
     }
-    val password = webDavEditText(context, "密码", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
+    val password = webDavEditText(context, "密码", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD, colors)
     val note = TextView(context).apply {
         text = "登录信息仅保存在本机。"
-        setTextColor(Color.rgb(139, 143, 148))
+        setTextColor(colors.noteText)
         textSize = 15f
         includeFontPadding = true
         layoutParams = LinearLayout.LayoutParams(
@@ -1613,7 +1661,7 @@ internal fun WebDavDriveHook.createWebDavLoginContent(
         includeFontPadding = false
         minHeight = 0
         minWidth = 0
-        background = roundedDrawable(Color.rgb(221, 221, 221), context.dp(8).toFloat())
+        background = roundedDrawable(colors.neutralButton, context.dp(8).toFloat())
         setPadding(0, 0, 0, 0)
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1651,7 +1699,7 @@ internal fun WebDavDriveHook.createWebDavLoginContent(
             password.text?.toString()?.isNotEmpty() == true
         submit.isEnabled = enabled
         submit.background = roundedDrawable(
-            if (enabled) Color.rgb(75, 175, 167) else Color.rgb(221, 221, 221),
+            if (enabled) colors.accent else colors.neutralButton,
             context.dp(8).toFloat(),
         )
         submit.alpha = if (enabled) 1f else 0.72f
@@ -1681,17 +1729,22 @@ internal fun WebDavDriveHook.createWebDavLoginContent(
     return scroll
 }
 
-internal fun WebDavDriveHook.webDavEditText(context: Context, hintText: String, inputTypeValue: Int): EditText =
+internal fun WebDavDriveHook.webDavEditText(
+    context: Context,
+    hintText: String,
+    inputTypeValue: Int,
+    colors: WebDavPageColors,
+): EditText =
     EditText(context).apply {
         hint = hintText
-        setHintTextColor(Color.rgb(166, 166, 166))
-        setTextColor(Color.rgb(34, 38, 40))
+        setHintTextColor(colors.hintText)
+        setTextColor(colors.primaryText)
         textSize = 16f
         typeface = android.graphics.Typeface.SERIF
         includeFontPadding = false
         inputType = inputTypeValue
         setSingleLine(true)
-        background = roundedDrawable(Color.rgb(247, 247, 247), context.dp(8).toFloat())
+        background = roundedDrawable(colors.inputBackground, context.dp(8).toFloat())
         setPadding(context.dp(16), 0, context.dp(16), 0)
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,

@@ -14,9 +14,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -49,6 +53,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.reamicro.fix.cloud.api.CloudTaskWakeDiagnostics
@@ -72,13 +78,16 @@ import com.reamicro.fix.notification.cloudTaskQualityColor
 import org.json.JSONObject
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Checkbox
+import top.yukonga.miuix.kmp.basic.DropdownArrowEndAction
+import top.yukonga.miuix.kmp.basic.DropdownImpl
 import top.yukonga.miuix.kmp.basic.HorizontalDivider
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.basic.ListPopupColumn
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.NavigationBar
 import top.yukonga.miuix.kmp.basic.NavigationBarItem
-import top.yukonga.miuix.kmp.basic.RadioButton
+import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Switch
@@ -87,6 +96,7 @@ import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import top.yukonga.miuix.kmp.overlay.OverlayListPopup
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Delete
 import top.yukonga.miuix.kmp.icon.extended.Info
@@ -613,9 +623,14 @@ class ModuleMainActivity : ComponentActivity() {
     private fun TasksPage() {
         // 概览只做只读播报：那两枚按钮已按需求移除——单个任务的重跑入口在各自卡片的
         // 「执行」上，「重算下次时刻」移到顶栏右上角那个刷新按钮。
+        //
+        // 播报正文走 subtitle 而不是 description：这两档字在卡片骨架里本来就不同
+        // （subtitle = 12sp/550，description = 14sp/常规字重），概览用 description 会和
+        // 下面每张任务卡的副信息对不上——同一页出现两种正文（实测帧高 36px vs 31px、
+        // 行距 57px vs 49px）。概览本来也没有标题行右侧的内容，两者位置完全一致。
         SectionCard(
             title = "任务概览",
-            description = overviewText.value,
+            subtitle = overviewText.value,
         )
         if (taskRows.value.isEmpty()) {
             SectionCard(
@@ -1298,23 +1313,62 @@ class ModuleMainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * 带悬浮标签的输入框。
+     *
+     * 字段名（如「城池 cityCode」）留在框外当标题；原来的小字提示（如「留空沿用上次」）搬进
+     * 框里当悬浮标签——平时占在正文那一行，聚焦（点进输入框）或有内容时缩小上浮到框顶。
+     *
+     * 这样提示不再单独占一行，字段少一行高度；而且「能不能留空 / 该填什么」正好在要动手打字
+     * 的时候贴着输入位置出现。原先标签、提示两行都在框外，一个字段占 118dp（24+2+18+6+56+12），
+     * 三个字段就把弹窗顶到 420dp 的滚动上限上去。
+     */
     @Composable
-    private fun EditorField(label: String, hint: String, value: String, onValue: (String) -> Unit, maxLines: Int = 1) {
+    private fun EditorField(
+        label: String,
+        hint: String,
+        value: String,
+        onValue: (String) -> Unit,
+        maxLines: Int = 1,
+    ) {
         Text(label, style = MiuixTheme.textStyles.main)
-        if (hint.isNotBlank()) {
-            Spacer(Modifier.height(2.dp))
-            Text(
-                hint,
-                style = MiuixTheme.textStyles.footnote1,
-                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            )
-        }
         Spacer(Modifier.height(6.dp))
-        TextField(
-            value = value,
-            onValueChange = onValue,
-            maxLines = maxLines,
-        )
+        // 框内正文位置 = 输入框的上下内边距：悬浮标签未上浮时与输入文字同一排，上浮后收到框顶。
+        val textTop = 16.dp
+        val interaction = remember { MutableInteractionSource() }
+        val focused by interaction.collectIsFocusedAsState()
+        // 上浮条件取「聚焦 || 有内容」：只看有内容的话，点进空框后要等敲下第一个字标签才弹
+        // 上去，很跳；只看聚焦的话，填好的字段一失焦标签就掉回来压住正文。
+        val floated = focused || value.isNotEmpty()
+        val labelTop by animateDpAsState(if (floated) 4.dp else textTop)
+        val labelSize by animateDpAsState(if (floated) 10.dp else 17.dp)
+        // 标签取 onSecondaryContainerVariant：这一档正是「secondaryContainer 底上的文字」，
+        // 与输入框自身 #F0F0F0 的底色配套（深色下自动变 #4F4F4F 底 + 亮灰字），不写死颜色。
+        val labelColor = MiuixTheme.colorScheme.onSecondaryContainerVariant
+        Box(modifier = Modifier.fillMaxWidth()) {
+            TextField(
+                value = value,
+                onValueChange = onValue,
+                modifier = Modifier.fillMaxWidth(),
+                insideMargin = DpSize(16.dp, textTop),
+                maxLines = maxLines,
+                interactionSource = interaction,
+            )
+            // 标签不吃点击：它只是一层画在输入框上的文字，点到哪儿都是下面那层接管焦点。
+            if (hint.isNotBlank()) {
+                Text(
+                    hint,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 16.dp, top = labelTop),
+                    fontSize = labelSize.value.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = labelColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
         Spacer(Modifier.height(12.dp))
     }
 
@@ -1338,32 +1392,74 @@ class ModuleMainActivity : ComponentActivity() {
         Spacer(Modifier.height(12.dp))
     }
 
+    /**
+     * 「运签」选择器：KSU 设置页那种「左标题 + 说明、右当前值 + ⇅」的一行，点一下在旁边
+     * 弹出选项列表（当前项高亮 + 勾选）——比原来平铺三个 RadioButton 省下近 150dp。
+     *
+     * 选项本来就只有 2~3 个，平铺在弹窗里和六个输入框抢高度；收进弹层后字段压回一行。
+     * 值文案与弹层里的行都走 [CloudTaskLocalRunner.blessingLabel]，wire 值（SAFETY/WEALTH）
+     * 只在这个映射里出现，界面层看不到也不用手打。
+     */
     @Composable
     private fun BlessingChooser(editor: TaskEditor, spec: CloudAutomationTaskSpec) {
         val options = spec.blessingOptions
-        Text("运签", style = MiuixTheme.textStyles.main)
-        Spacer(Modifier.height(2.dp))
-        Text(
-            options.joinToString("/") { CloudTaskLocalRunner.blessingLabel(it) },
-            style = MiuixTheme.textStyles.footnote1,
-            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-        )
-        Spacer(Modifier.height(6.dp))
         val selected = editor.values[FIELD_BLESSING].orEmpty()
-        options.forEach { option ->
+        val muted = MiuixTheme.colorScheme.onSurfaceVariantSummary
+        var expanded by remember { mutableStateOf(false) }
+        // 行与弹层必须是同一个 Box 的直接子节点：miuix 的列表弹层取「直接父布局」的窗口矩形
+        // 当锚点，塞进 Row 里的话锚点会退化成一个 0 宽的占位。
+        Box(modifier = Modifier.fillMaxWidth()) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { editor.values[FIELD_BLESSING] = option }
+                    .clickable { expanded = true }
                     .padding(vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                RadioButton(selected = option == selected, onClick = { editor.values[FIELD_BLESSING] = option })
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("运签", style = MiuixTheme.textStyles.main)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        options.joinToString("/") { CloudTaskLocalRunner.blessingLabel(it) },
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = muted,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    CloudTaskLocalRunner.blessingLabel(selected),
+                    style = MiuixTheme.textStyles.main,
+                    color = muted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 Spacer(Modifier.width(8.dp))
-                Text(CloudTaskLocalRunner.blessingLabel(option), style = MiuixTheme.textStyles.main)
+                DropdownArrowEndAction(actionColor = muted)
+            }
+            OverlayListPopup(
+                show = expanded,
+                alignment = PopupPositionProvider.Align.End,
+                // 弹层自带压暗层：弹窗底和弹层底都是白，不压一层的话边界分不清。
+                enableWindowDim = true,
+                onDismissRequest = { expanded = false },
+            ) {
+                ListPopupColumn {
+                    options.forEachIndexed { index, option ->
+                        DropdownImpl(
+                            text = CloudTaskLocalRunner.blessingLabel(option),
+                            optionSize = options.size,
+                            isSelected = option == selected,
+                            index = index,
+                            onSelectedIndexChange = {
+                                editor.values[FIELD_BLESSING] = options[it]
+                                expanded = false
+                            },
+                        )
+                    }
+                }
             }
         }
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(12.dp))
     }
 
     /**

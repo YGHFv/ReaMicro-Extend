@@ -219,9 +219,57 @@ internal data class LocalLibrarySearchIndex(
     val complete: Boolean,
 )
 
-internal class WebDavBackButton(context: Context) : View(context) {
+/**
+ * WebDAV 授权介绍页 / 登录页的配色。
+ *
+ * 这两页是模块自绘的原生视图，不经过宿主 Compose 主题，深浅色要自己判断。原先所有颜色都
+ * 写死浅色（白底 + 深灰字 + 浅灰按钮），深色模式下整屏刺眼。这里按 uiMode 给两套等价取值：
+ * 浅色一套与历史外观逐值一致（不改现有效果），深色一套取与 ModuleDialogTheme 深色回退同档的
+ * 中性色，品牌色（WebDAV 青绿 / 标题蓝）只提亮、不换色相。
+ */
+internal class WebDavPageColors(context: Context) {
+    val dark: Boolean = context.isNightMode()
+
+    /** 页面与系统栏底色。 */
+    val pageBackground: Int = if (dark) Color.rgb(17, 19, 24) else Color.WHITE
+
+    /** 顶栏标题（介绍页）。 */
+    val titleText: Int = if (dark) Color.rgb(229, 231, 235) else Color.rgb(32, 36, 38)
+
+    /** 登录页大标题与输入框正文。 */
+    val primaryText: Int = if (dark) Color.rgb(229, 231, 235) else Color.rgb(34, 38, 40)
+
+    /** 说明文字 / 介绍页提示。 */
+    val bodyText: Int = if (dark) Color.rgb(178, 183, 191) else Color.rgb(94, 98, 102)
+
+    /** 脚注（「登录信息仅保存在本机。」）。 */
+    val noteText: Int = if (dark) Color.rgb(146, 152, 162) else Color.rgb(139, 143, 148)
+
+    /** 返回箭头。 */
+    val backIcon: Int = if (dark) Color.rgb(226, 229, 234) else Color.rgb(34, 38, 40)
+
+    /** 输入框底色与占位符。 */
+    val inputBackground: Int = if (dark) Color.rgb(30, 33, 39) else Color.rgb(247, 247, 247)
+    val hintText: Int = if (dark) Color.rgb(124, 130, 140) else Color.rgb(166, 166, 166)
+
+    /** 中性按钮底（介绍页 CTA、登录页未填全时的提交键），文字恒白。 */
+    val neutralButton: Int = if (dark) Color.rgb(56, 59, 65) else Color.rgb(221, 221, 221)
+
+    /** 品牌青绿（可提交按钮 / 插图主块）。 */
+    val accent: Int = if (dark) Color.rgb(84, 190, 181) else Color.rgb(75, 175, 167)
+
+    /** 登录页品牌标题蓝。 */
+    val brandTitle: Int = if (dark) Color.rgb(122, 168, 238) else Color.rgb(53, 112, 196)
+
+    /** 空态插图的三档中性色（底块 / 纸页 / 装饰线）。 */
+    val illustrationSurface: Int = if (dark) Color.rgb(36, 40, 46) else Color.rgb(243, 246, 247)
+    val illustrationBand: Int = if (dark) Color.rgb(48, 53, 59) else Color.rgb(225, 232, 234)
+    val illustrationLine: Int = if (dark) Color.rgb(62, 68, 75) else Color.rgb(214, 222, 224)
+}
+
+internal class WebDavBackButton(context: Context, private val iconColor: Int) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(34, 38, 40)
+        color = iconColor
         style = Paint.Style.FILL
     }
     private val path = Path()
@@ -254,7 +302,7 @@ internal class WebDavBackButton(context: Context) : View(context) {
         (value * resources.displayMetrics.density + 0.5f).toInt()
 }
 
-internal class WebDavLogoView(context: Context) : View(context) {
+internal class WebDavLogoView(context: Context, private val accentColor: Int) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val path = Path()
     private val rect = RectF()
@@ -264,7 +312,7 @@ internal class WebDavLogoView(context: Context) : View(context) {
         val w = width.toFloat()
         val h = height.toFloat()
         paint.style = Paint.Style.FILL
-        paint.color = Color.rgb(75, 175, 167)
+        paint.color = accentColor
         rect.set(0f, 0f, w, h)
         canvas.drawRoundRect(rect, dp(8).toFloat(), dp(8).toFloat(), paint)
 
@@ -289,7 +337,7 @@ internal class WebDavLogoView(context: Context) : View(context) {
         (value * resources.displayMetrics.density + 0.5f).toInt()
 }
 
-internal class WebDavEmptyView(context: Context) : View(context) {
+internal class WebDavEmptyView(context: Context, private val colors: WebDavPageColors) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val path = Path()
     private val rect = RectF()
@@ -299,15 +347,15 @@ internal class WebDavEmptyView(context: Context) : View(context) {
         val w = width.toFloat()
         val h = height.toFloat()
         paint.style = Paint.Style.FILL
-        paint.color = Color.rgb(243, 246, 247)
+        paint.color = colors.illustrationSurface
         rect.set(w * 0.17f, h * 0.27f, w * 0.83f, h * 0.86f)
         canvas.drawRoundRect(rect, dp(10).toFloat(), dp(10).toFloat(), paint)
 
-        paint.color = Color.rgb(225, 232, 234)
+        paint.color = colors.illustrationBand
         rect.set(w * 0.25f, h * 0.18f, w * 0.75f, h * 0.38f)
         canvas.drawRoundRect(rect, dp(8).toFloat(), dp(8).toFloat(), paint)
 
-        paint.color = Color.rgb(75, 175, 167)
+        paint.color = colors.accent
         rect.set(w * 0.36f, h * 0.45f, w * 0.64f, h * 0.68f)
         canvas.drawRoundRect(rect, dp(7).toFloat(), dp(7).toFloat(), paint)
 
@@ -322,7 +370,7 @@ internal class WebDavEmptyView(context: Context) : View(context) {
         path.cubicTo(w * 0.44f, h * 0.67f, w * 0.40f, h * 0.63f, w * 0.43f, h * 0.57f)
         canvas.drawPath(path, paint)
 
-        paint.color = Color.rgb(214, 222, 224)
+        paint.color = colors.illustrationLine
         rect.set(w * 0.31f, h * 0.76f, w * 0.69f, h * 0.79f)
         canvas.drawRoundRect(rect, dp(2).toFloat(), dp(2).toFloat(), paint)
     }
