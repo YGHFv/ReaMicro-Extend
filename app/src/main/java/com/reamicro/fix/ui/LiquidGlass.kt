@@ -15,27 +15,20 @@ import top.yukonga.miuix.kmp.blur.highlight.LightSource
 import top.yukonga.miuix.kmp.blur.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.blur.runtimeShaderEffect
 
-// 液态玻璃（liquid glass）效果组：移植自 KernelSU 管理器的 ui/component/liquid/Lens.kt
-// 与其 FloatingBottomBar 的胶囊配方；两者均改编自 Kyant0/AndroidLiquidGlass（Apache 2.0）
-// 与 compose-miuix-ui 官方示例（IosLiquidGlassNavigationBar）。这里只保留悬浮底栏胶囊
-// 用到的无色散分支。
+// 液态玻璃效果组：移植自 KernelSU 管理器的 ui/component/liquid/Lens.kt
+// 与其 FloatingBottomBar 的胶囊配方。
 
-/**
- * 悬浮底栏胶囊的完整玻璃配方（与 KernelSU 底栏同参数）：
- * 饱和度 ×1.5（vibrancy）→ 小半径模糊 → 边缘折射（lens）。
- * padding 先抬到 40dp，给折射向外采样留出余量，玻璃边缘才不会被裁断。
- */
+fun BackdropEffectScope.vibrancy() {
+    colorControls(brightness = 0f, contrast = 1f, saturation = 1.5f)
+}
+
 fun BackdropEffectScope.liquidCapsuleEffects() {
     padding = maxOf(padding, 40.dp.toPx())
-    colorControls(brightness = 0f, contrast = 1f, saturation = 1.5f)
+    vibrancy()
     blur(4.dp.toPx(), 4.dp.toPx())
     liquidLens(refractionHeight = 24.dp.toPx(), refractionAmount = 24.dp.toPx())
 }
 
-/**
- * 胶囊边缘高光：KernelSU 的 iosIndicatorSpecular 原值、alpha 0.75（静态版——KSU 还会
- * 按重力感应旋转主光源，底栏这么小一条看不出差别，省掉传感器订阅）。
- */
 val LiquidCapsuleHighlight: Highlight = Highlight(
     width = 1.dp,
     alpha = 0.75f,
@@ -56,11 +49,12 @@ val LiquidCapsuleHighlight: Highlight = Highlight(
     ),
 )
 
-/**
- * 边缘折射：贴着形状内边一圈，把取样坐标沿边缘法线向外推，形成「玻璃厚度」的扭曲感。
- * 折射带之外（中心区域）原样取样，所以中间内容依然清晰。
- */
-fun BackdropEffectScope.liquidLens(refractionHeight: Float, refractionAmount: Float) {
+fun BackdropEffectScope.liquidLens(
+    refractionHeight: Float,
+    refractionAmount: Float,
+    depthEffect: Boolean = false,
+    chromaticAberration: Float = 0f,
+) {
     if (!isRuntimeShaderSupported()) return
     if (refractionHeight <= 0f || refractionAmount <= 0f) return
 
@@ -69,6 +63,13 @@ fun BackdropEffectScope.liquidLens(refractionHeight: Float, refractionAmount: Fl
     }
 
     val radii = roundedRectCornerRadii() ?: return
+    val dispersionEnabled = chromaticAberration > 0f
+    val shaderString = if (dispersionEnabled) {
+        ROUNDED_RECT_REFRACTION_WITH_DISPERSION_SHADER
+    } else {
+        ROUNDED_RECT_REFRACTION_SHADER
+    }
+    val key = if (dispersionEnabled) "LiquidGlassLensDispersion" else "LiquidGlassLens"
 
     val sf = downscaleFactor.coerceAtLeast(1).toFloat()
     val scaledSizeW = size.width / sf
@@ -79,8 +80,8 @@ fun BackdropEffectScope.liquidLens(refractionHeight: Float, refractionAmount: Fl
     val scaledRadii = FloatArray(radii.size) { radii[it] / sf }
 
     runtimeShaderEffect(
-        key = "LiquidGlassLens",
-        shaderString = ROUNDED_RECT_REFRACTION_SHADER,
+        key = key,
+        shaderString = shaderString,
         uniformShaderName = "content",
     ) {
         setFloatUniform("size", scaledSizeW, scaledSizeH)
@@ -88,11 +89,13 @@ fun BackdropEffectScope.liquidLens(refractionHeight: Float, refractionAmount: Fl
         setFloatUniform("cornerRadii", scaledRadii)
         setFloatUniform("refractionHeight", scaledRefractionHeight)
         setFloatUniform("refractionAmount", -scaledRefractionAmount)
-        setFloatUniform("depthEffect", 0f)
+        setFloatUniform("depthEffect", if (depthEffect) 1f else 0f)
+        if (dispersionEnabled) {
+            setFloatUniform("chromaticAberration", chromaticAberration)
+        }
     }
 }
 
-/** 从效果的 shape 上取四个圆角半径（Capsule 是 CircleShape，四角同值），非圆角形状不给折射。 */
 private fun BackdropEffectScope.roundedRectCornerRadii(): FloatArray? {
     val cornerShape = shape as? CornerBasedShape ?: return null
     val sizePx = size
@@ -172,5 +175,79 @@ half4 main(float2 coord) {
 
     float2 refractedCoord = coord + d * grad;
     return content.eval(refractedCoord);
+}
+"""
+
+private const val ROUNDED_RECT_REFRACTION_WITH_DISPERSION_SHADER = """
+uniform shader content;
+
+uniform float2 size;
+uniform float2 offset;
+uniform float4 cornerRadii;
+uniform float refractionHeight;
+uniform float refractionAmount;
+uniform float depthEffect;
+uniform float chromaticAberration;
+
+$ROUNDED_RECT_SDF
+
+float circleMap(float x) {
+    return 1.0 - sqrt(1.0 - x * x);
+}
+
+half4 main(float2 coord) {
+    float2 halfSize = size * 0.5;
+    float2 centeredCoord = (coord + offset) - halfSize;
+    float radius = radiusAt(centeredCoord, cornerRadii);
+
+    float sd = sdRoundedRect(centeredCoord, halfSize, radius);
+    if (-sd >= refractionHeight) {
+        return content.eval(coord);
+    }
+    sd = min(sd, 0.0);
+
+    float d = circleMap(1.0 - -sd / refractionHeight) * refractionAmount;
+    float gradRadius = min(radius * 1.5, min(halfSize.x, halfSize.y));
+    float2 grad = normalize(gradSdRoundedRect(centeredCoord, halfSize, gradRadius) + depthEffect * normalize(centeredCoord));
+
+    float2 refractedCoord = coord + d * grad;
+    float dispersionIntensity = chromaticAberration * ((centeredCoord.x * centeredCoord.y) / (halfSize.x * halfSize.y));
+    float2 dispersedCoord = d * grad * dispersionIntensity;
+
+    half4 color = half4(0.0);
+
+    half4 red = content.eval(refractedCoord + dispersedCoord);
+    color.r += red.r / 3.5;
+    color.a += red.a / 7.0;
+
+    half4 orange = content.eval(refractedCoord + dispersedCoord * (2.0 / 3.0));
+    color.r += orange.r / 3.5;
+    color.g += orange.g / 7.0;
+    color.a += orange.a / 7.0;
+
+    half4 yellow = content.eval(refractedCoord + dispersedCoord * (1.0 / 3.0));
+    color.r += yellow.r / 3.5;
+    color.g += yellow.g / 3.5;
+    color.a += yellow.a / 7.0;
+
+    half4 green = content.eval(refractedCoord);
+    color.g += green.g / 3.5;
+    color.a += green.a / 7.0;
+
+    half4 cyan = content.eval(refractedCoord - dispersedCoord * (1.0 / 3.0));
+    color.g += cyan.g / 3.5;
+    color.b += cyan.b / 3.0;
+    color.a += cyan.a / 7.0;
+
+    half4 blue = content.eval(refractedCoord - dispersedCoord * (2.0 / 3.0));
+    color.b += blue.b / 3.0;
+    color.a += blue.a / 7.0;
+
+    half4 purple = content.eval(refractedCoord - dispersedCoord);
+    color.r += purple.r / 7.0;
+    color.b += purple.b / 3.0;
+    color.a += purple.a / 7.0;
+
+    return color;
 }
 """
