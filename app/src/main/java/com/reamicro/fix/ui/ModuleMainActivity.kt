@@ -206,11 +206,14 @@ class ModuleMainActivity : ComponentActivity() {
     private val overviewText = mutableStateOf("")
     private val wakeUi = mutableStateOf<WakeUi?>(null)
     private val hideRecentTask = mutableStateOf(false)
+
+    /** 隐藏桌面图标：禁用 launcher 别名。主界面本身不受影响，隐藏后仍能进来把它关掉。 */
+    private val hideLauncherIcon = mutableStateOf(false)
     private val notificationSummary = mutableStateOf("")
     private val logSummary = mutableStateOf("")
     private val rootUi = mutableStateOf<RootUi?>(null)
 
-    // ---- 主题设置（设置页「主题」卡片）----
+    // ---- 界面设置（设置页「界面」卡片）----
 
     /** 顶栏与底栏的毛玻璃背景（miuix-blur）：栏底色转透明，改为对穿过的内容做模糊。 */
     private val blurBars = mutableStateOf(false)
@@ -246,6 +249,8 @@ class ModuleMainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // 窗口底色跟着深浅色走：首帧之前系统栏区域显示的就是它（透明会让部分 ROM 露黑边）。
         applyPredictiveBack(uiPrefBoolean(KEY_PREDICTIVE_BACK))
+        // 重装 APK 会把组件状态重置成默认（隐藏掉的图标又冒出来），进界面时按开关重新对齐一次。
+        applyLauncherIconVisibility(uiPrefBoolean(KEY_HIDE_LAUNCHER_ICON))
         window?.setBackgroundDrawable(ColorDrawable(if (resolveDark(themeMode.intValue)) DARK_WINDOW_BG else LIGHT_WINDOW_BG))
         ModuleAndroidLog.legacy(LOG_TAG, "module main ui opened")
         refresh()
@@ -357,6 +362,7 @@ class ModuleMainActivity : ComponentActivity() {
             batteryUnrestricted = status.batteryUnrestricted,
         )
         hideRecentTask.value = hideRecentTaskEnabled()
+        hideLauncherIcon.value = uiPrefBoolean(KEY_HIDE_LAUNCHER_ICON)
         blurBars.value = uiPrefBoolean(KEY_BLUR_BARS)
         floatingNavBar.value = uiPrefBoolean(KEY_FLOATING_NAV_BAR)
         // 液态玻璃默认开（KSU 也是这个默认值）：键不存在时取 true。
@@ -860,9 +866,9 @@ class ModuleMainActivity : ComponentActivity() {
                 )
             }
         }
-        GroupTitle("主题")
-        // 外观相关的开关统一收在一张卡片里（KSU 的「主题设置」也是这个分组法）：
-        // 第一行是主题模式下拉，与「页面切换手势」同款：点右侧展开选择。
+        GroupTitle("界面")
+        // 外观相关的开关统一收在一张卡片里（KSU 把这一组叫「主题设置」）：
+        // 第一行是主题下拉，与「页面切换手势」同款：点右侧展开选择。
         // 「液态玻璃」只对悬浮底栏有意义，所以只在悬浮底栏开启时出现。
         Card(
             modifier = Modifier
@@ -871,8 +877,8 @@ class ModuleMainActivity : ComponentActivity() {
             insideMargin = PaddingValues(0.dp),
         ) {
             OverlayDropdownPreference(
-                title = "主题模式",
-                summary = "跟随系统时随系统深浅色切换，也可固定日间或夜间",
+                title = "主题",
+                summary = "跟随系统，或固定为日间/夜间",
                 items = listOf("跟随系统", "日间主题", "夜间主题"),
                 selectedIndex = themeMode.intValue.coerceIn(THEME_FOLLOW_SYSTEM, THEME_DARK),
                 onSelectedIndexChange = ::setThemeMode,
@@ -909,20 +915,20 @@ class ModuleMainActivity : ComponentActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 SwitchPreference(
                     title = "预测性返回手势",
-                    summary = "从边缘返回时预览上一层。修改后立即重建界面",
+                    summary = "边缘返回时预览上一层",
                     checked = predictiveBack.value,
                     onCheckedChange = ::togglePredictiveBack,
                 )
             }
             SwitchPreference(
                 title = "横移返回手势",
-                summary = "从屏幕边缘横滑关闭当前弹窗",
+                summary = "边缘横滑关闭弹窗",
                 checked = swipeBack.value,
                 onCheckedChange = ::toggleSwipeBack,
             )
             OverlayDropdownPreference(
                 title = "页面切换手势",
-                summary = "左右滑动切换页签时，怎么处理页面里正在滚动的列表",
+                summary = "左右滑动切页时的列表滚动处理",
                 items = listOf("默认", "跨轴拦截", "iOS 风格"),
                 selectedIndex = pagerGestureMode.intValue.coerceIn(0, 2),
                 onSelectedIndexChange = ::setPagerGestureMode,
@@ -1042,9 +1048,12 @@ class ModuleMainActivity : ComponentActivity() {
             }
         }
 
-        // 「隐藏后台卡片」开关：打开 = 返回桌面时把模块从最近任务卡片里藏起来
-        // （onUserLeaveHint/onStop 里的 setExcludeFromRecents），不影响自动任务。
-        // checked 直接跟 hideRecentTask 状态走，不再放说明行。
+        // 两个「藏起来」的开关共用一张卡片：
+        // ①「隐藏后台卡片」：打开 = 返回桌面时把模块从最近任务卡片里藏起来
+        //    （onUserLeaveHint/onStop 里的 setExcludeFromRecents），不影响自动任务。
+        // ②「隐藏桌面图标」：打开 = 禁用 launcher 别名（.ui.ModuleLauncherAlias），
+        //    图标从桌面消失。主界面自身始终 enabled，隐藏后仍能进来关掉它，不会把自己锁在外面。
+        // 两行 checked 都直接跟状态走，不放说明行。
         Card(
             modifier = Modifier
                 .padding(horizontal = 12.dp)
@@ -1055,6 +1064,11 @@ class ModuleMainActivity : ComponentActivity() {
                 title = "隐藏后台卡片",
                 checked = hideRecentTask.value,
                 onCheckedChange = { toggleHideRecentTask() },
+            )
+            SwitchPreference(
+                title = "隐藏桌面图标",
+                checked = hideLauncherIcon.value,
+                onCheckedChange = ::toggleHideLauncherIcon,
             )
         }
 
@@ -1158,6 +1172,43 @@ class ModuleMainActivity : ComponentActivity() {
         setTaskExcludedFromRecents(false)
         hideRecentTask.value = enabled
         toast(if (enabled) "返回桌面后自动隐藏模块后台卡片" else "模块后台卡片恢复显示")
+    }
+
+    /**
+     * 「隐藏桌面图标」开关：禁用的只是 launcher 别名，主界面自身不动。
+     *
+     * 为什么绕一层别名：直接禁主界面会把唯一入口一起删掉，隐藏后就再也打不开本页、
+     * 也就关不掉这个开关了。别名禁用后 `getLaunchIntentForPackage` 会返回 null，
+     * 桌面与 LSPosed 管理器里的「打开」都会失效，所以 toast 里把剩下的入口写清楚。
+     */
+    private fun toggleHideLauncherIcon(enabled: Boolean) {
+        writeUiPref(KEY_HIDE_LAUNCHER_ICON, enabled)
+        hideLauncherIcon.value = enabled
+        applyLauncherIconVisibility(enabled)
+        toast(
+            if (enabled) "桌面图标已隐藏；adb 恢复：am start -n $MODULE_PACKAGE/$MAIN_ACTIVITY_CLASS"
+            else "桌面图标已恢复",
+        )
+    }
+
+    /**
+     * 按开关值对齐 launcher 别名的启用状态。
+     *
+     * DONT_KILL_APP：别把正在翻这个开关的界面自己杀掉。重装 APK 会把组件状态重置回默认
+     * （图标又冒出来），所以每次进界面都要按开关重新对齐一次，见 [onCreate]。
+     */
+    private fun applyLauncherIconVisibility(hidden: Boolean) {
+        runCatching {
+            packageManager.setComponentEnabledSetting(
+                ComponentName(this, LAUNCHER_ALIAS_CLASS),
+                if (hidden) {
+                    PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+                } else {
+                    PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                },
+                PackageManager.DONT_KILL_APP,
+            )
+        }.onFailure { ModuleAndroidLog.error(LOG_TAG, "更新桌面图标可见性失败", it) }
     }
 
     /**
@@ -2347,7 +2398,7 @@ class ModuleMainActivity : ComponentActivity() {
 
     // ---- 模块界面自己的偏好 ----
 
-    /** 界面偏好（隐藏后台卡片 / 主题设置）读：都落在同一份 prefs 里。 */
+    /** 界面偏好（隐藏后台卡片 / 隐藏桌面图标 / 界面设置）读：都落在同一份 prefs 里。 */
     private fun uiPrefBoolean(key: String, defValue: Boolean = false): Boolean =
         getSharedPreferences(UI_PREFS, MODE_PRIVATE).getBoolean(key, defValue)
 
@@ -2554,9 +2605,10 @@ class ModuleMainActivity : ComponentActivity() {
         const val LOG_TAG = "ReaMicroMain"
         const val REQUEST_POST_NOTIFICATIONS = 4501
 
-        /** 模块界面自己的偏好文件与键名（隐藏后台卡片、主题设置）。 */
+        /** 模块界面自己的偏好文件与键名（隐藏后台卡片、隐藏桌面图标、界面设置）。 */
         const val UI_PREFS = "reamicro_module_ui"
         const val KEY_HIDE_RECENT_TASK = "hideRecentTask"
+        const val KEY_HIDE_LAUNCHER_ICON = "hideLauncherIcon"
         const val KEY_BLUR_BARS = "themeBlurBars"
         const val KEY_FLOATING_NAV_BAR = "themeFloatingNavBar"
         const val KEY_LIQUID_GLASS = "themeLiquidGlass"
@@ -2564,6 +2616,18 @@ class ModuleMainActivity : ComponentActivity() {
         const val KEY_PAGER_GESTURE = "pagerGestureMode"
         const val KEY_SWIPE_BACK = "swipeBack"
         const val KEY_PREDICTIVE_BACK = "predictiveBack"
+
+        /**
+         * 模块包名、桌面图标别名与主界面类名。
+         *
+         * launcher 的 intent-filter 挂在 `ModuleLauncherAlias` 上（见 AndroidManifest.xml），
+         * 「隐藏桌面图标」禁用的就是它——主界面 `ModuleMainActivity` 始终保持 enabled，
+         * 所以恢复时要拉的是主界面：`am start -n com.reamicro.fix/.ui.ModuleMainActivity`
+         * （**不是别名**，别名此刻正被禁用着，拉不起来）。
+         */
+        const val MODULE_PACKAGE = "com.reamicro.fix"
+        const val LAUNCHER_ALIAS_CLASS = "com.reamicro.fix.ui.ModuleLauncherAlias"
+        const val MAIN_ACTIVITY_CLASS = "com.reamicro.fix.ui.ModuleMainActivity"
 
         const val THEME_FOLLOW_SYSTEM = 0
         const val THEME_LIGHT = 1

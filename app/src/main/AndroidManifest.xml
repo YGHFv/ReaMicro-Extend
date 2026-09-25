@@ -171,18 +171,30 @@
 
         <!-- 模块自己的主界面。此前模块没有任何 launcher activity，装完可能长期处于 stopped 状态，
              而 stopped 应用的广播收不到——系统闹钟唤醒正是靠广播。有了它，用户装完会打开一次，
-             应用即脱离 stopped；界面本身也是查看任务记录/通知记录/诊断日志的入口。 -->
+             应用即脱离 stopped；界面本身也是查看任务记录/通知记录/诊断日志的入口。
+             桌面图标改由下面的 activity-alias 提供：模块设置里的「隐藏桌面图标」禁用的是别名，
+             主界面自身始终保持 enabled，隐藏后仍能用 am start -n com.reamicro.fix/.ui.ModuleMainActivity
+             把它拉起来（别名一禁，桌面图标与 getLaunchIntentForPackage 就都没了），
+             所以不会把自己彻底锁在外面。 -->
         <activity
             android:name=".ui.ModuleMainActivity"
             android:enabled="true"
             android:exported="true"
             android:label="@string/module_name"
-            android:theme="@style/ModuleTheme">
+            android:theme="@style/ModuleTheme" />
+
+        <activity-alias
+            android:name=".ui.ModuleLauncherAlias"
+            android:enabled="true"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:label="@string/module_name"
+            android:targetActivity=".ui.ModuleMainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
 
         <activity
             android:name=".notification.OnlineCompletionNotificationActivity"

@@ -81,8 +81,8 @@ android {
         applicationId = "com.reamicro.fix"
         minSdk = 26
         targetSdk = 35
-    versionCode = 68
-    versionName = "2.3.6"
+    versionCode = 69
+    versionName = "2.3.7"
     }
 
     compileOptions {
