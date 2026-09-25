@@ -228,7 +228,7 @@ class ModuleMainActivity : ComponentActivity() {
     private val themeMode = mutableIntStateOf(THEME_FOLLOW_SYSTEM)
 
     /** 页面左右滑被列表惯性抢走时怎么处理：0 默认、1 跨轴拦截、2 iOS 风格。 */
-    private val pagerGestureMode = mutableIntStateOf(PagerInterceptionMode.CrossAxis.ordinal)
+    private val pagerGestureMode = mutableIntStateOf(PagerInterceptionMode.CrossAxisInterceptor.ordinal)
 
     /** 从屏幕边缘横滑关闭顶层弹窗。根页面没有可返回的上一页，所以不退出应用。 */
     private val swipeBack = mutableStateOf(true)
@@ -362,7 +362,7 @@ class ModuleMainActivity : ComponentActivity() {
         // 液态玻璃默认开（KSU 也是这个默认值）：键不存在时取 true。
         liquidGlass.value = uiPrefBoolean(KEY_LIQUID_GLASS, true)
         themeMode.intValue = uiPrefInt(KEY_THEME_MODE).coerceIn(THEME_FOLLOW_SYSTEM, THEME_DARK)
-        pagerGestureMode.intValue = uiPrefInt(KEY_PAGER_GESTURE, PagerInterceptionMode.CrossAxis.ordinal)
+        pagerGestureMode.intValue = uiPrefInt(KEY_PAGER_GESTURE, PagerInterceptionMode.CrossAxisInterceptor.ordinal)
             .coerceIn(0, PagerInterceptionMode.entries.lastIndex)
         swipeBack.value = uiPrefBoolean(KEY_SWIPE_BACK, true)
         predictiveBack.value = uiPrefBoolean(KEY_PREDICTIVE_BACK)
@@ -576,7 +576,7 @@ class ModuleMainActivity : ComponentActivity() {
         val pagerMode = PagerInterceptionMode.entries.getOrElse(pagerGestureMode.intValue) {
             PagerInterceptionMode.Native
         }
-        val interceptPager = pagerMode == PagerInterceptionMode.CrossAxis
+        val interceptPager = pagerMode == PagerInterceptionMode.CrossAxisInterceptor
         // 顶层弹窗打开时左右滑只负责关闭弹窗，不再同时翻页。
         val overlayOpen = textDialog.value != null || editorDialog.value != null
         val userScrollEnabled = !overlayOpen
@@ -697,7 +697,6 @@ class ModuleMainActivity : ComponentActivity() {
             val pagerModifier = Modifier
                 .pagerGestureOverride(
                     pagerState = pagerState,
-                    flingBehavior = pagerFling,
                     mode = pagerMode,
                     enabled = userScrollEnabled,
                 )
