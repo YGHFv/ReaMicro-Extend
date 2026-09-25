@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.ActivityManager
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.drawable.ColorDrawable
@@ -13,6 +14,7 @@ import android.os.Bundle
 import android.view.WindowInsetsController
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.core.animateDpAsState
@@ -20,6 +22,10 @@ import androidx.compose.animation.core.animateIntAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.horizontalDrag
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -41,6 +47,10 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults.flingBehavior
+import androidx.compose.foundation.pager.PagerDefaults.pageNestedScrollConnection
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -50,16 +60,21 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
@@ -140,11 +155,19 @@ import top.yukonga.miuix.kmp.icon.extended.Settings
 import top.yukonga.miuix.kmp.icon.extended.Tasks
 import top.yukonga.miuix.kmp.icon.extended.Tune
 import top.yukonga.miuix.kmp.icon.extended.Update
+import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.utils.PagerGestureNestedScrollConnection
+import top.yukonga.miuix.kmp.utils.PagerInterceptionMode
+import top.yukonga.miuix.kmp.utils.PagerNavigationSpringSpec
 import top.yukonga.miuix.kmp.utils.overScrollVertical
+import top.yukonga.miuix.kmp.utils.pagerGestureOverride
+import top.yukonga.miuix.kmp.utils.springAnimateToPage
 import top.yukonga.miuix.kmp.theme.darkColorScheme
 import top.yukonga.miuix.kmp.theme.lightColorScheme
+import kotlinx.coroutines.launch
+import org.lsposed.hiddenapibypass.HiddenApiBypass
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -198,6 +221,21 @@ class ModuleMainActivity : ComponentActivity() {
     /** 悬浮底栏的液态玻璃效果（仅悬浮底栏开启时生效/显示）：胶囊对底下内容实时模糊 + 玻璃描边。 */
     private val liquidGlass = mutableStateOf(true)
 
+    /**
+     * 深浅色：0 跟随系统、1 日间、2 夜间。
+     * 与 KSU 的 themeMode 同一套下标，不带 Monet 的 +3 偏移。
+     */
+    private val themeMode = mutableIntStateOf(THEME_FOLLOW_SYSTEM)
+
+    /** 页面左右滑被列表惯性抢走时怎么处理：0 默认、1 跨轴拦截、2 iOS 风格。 */
+    private val pagerGestureMode = mutableIntStateOf(PagerInterceptionMode.CrossAxis.ordinal)
+
+    /** 从屏幕边缘横滑关闭顶层弹窗。根页面没有可返回的上一页，所以不退出应用。 */
+    private val swipeBack = mutableStateOf(true)
+
+    /** Android 14+ 的系统预测性返回。改的是隐藏接口，开关后重建界面才生效。 */
+    private val predictiveBack = mutableStateOf(false)
+
     // ---- 弹窗状态 ----
 
     private val textDialog = mutableStateOf<TextDialogUi?>(null)
@@ -207,11 +245,12 @@ class ModuleMainActivity : ComponentActivity() {
         ModuleLogBuffer.attach(this)
         super.onCreate(savedInstanceState)
         // 窗口底色跟着深浅色走：首帧之前系统栏区域显示的就是它（透明会让部分 ROM 露黑边）。
-        window?.setBackgroundDrawable(ColorDrawable(if (isNightMode()) DARK_WINDOW_BG else LIGHT_WINDOW_BG))
+        applyPredictiveBack(uiPrefBoolean(KEY_PREDICTIVE_BACK))
+        window?.setBackgroundDrawable(ColorDrawable(if (resolveDark(themeMode.intValue)) DARK_WINDOW_BG else LIGHT_WINDOW_BG))
         ModuleAndroidLog.legacy(LOG_TAG, "module main ui opened")
         refresh()
         setContent {
-            val dark = isSystemInDarkTheme()
+            val dark = resolveDark(themeMode.intValue)
             ImmersiveSystemBars(dark)
             SystemBarAppearance(dark)
             MiuixTheme(colors = if (dark) darkColorScheme() else lightColorScheme()) {
@@ -322,6 +361,11 @@ class ModuleMainActivity : ComponentActivity() {
         floatingNavBar.value = uiPrefBoolean(KEY_FLOATING_NAV_BAR)
         // 液态玻璃默认开（KSU 也是这个默认值）：键不存在时取 true。
         liquidGlass.value = uiPrefBoolean(KEY_LIQUID_GLASS, true)
+        themeMode.intValue = uiPrefInt(KEY_THEME_MODE).coerceIn(THEME_FOLLOW_SYSTEM, THEME_DARK)
+        pagerGestureMode.intValue = uiPrefInt(KEY_PAGER_GESTURE, PagerInterceptionMode.CrossAxis.ordinal)
+            .coerceIn(0, PagerInterceptionMode.entries.lastIndex)
+        swipeBack.value = uiPrefBoolean(KEY_SWIPE_BACK, true)
+        predictiveBack.value = uiPrefBoolean(KEY_PREDICTIVE_BACK)
 
         val notifications = NotificationRecordStore { context }.list()
         notificationSummary.value = if (notifications.isEmpty()) {
@@ -527,39 +571,101 @@ class ModuleMainActivity : ComponentActivity() {
 
     @Composable
     private fun ModuleApp() {
-        // key(tab)：每个页签整套重来。滚到大标题收起状态后切页，若共用同一个 ScrollBehavior，
-        // 新页面会「标题已经是收起态、内容却在顶部」；顺带每页也各自一份滚动位置。
-        key(tab.intValue) {
-            // 大标题随滚动收起：miuix / HyperOS 应用（KernelSU 管理器也是这套）的标准做法。
-            // 标题给的是**当前页签**，不是模块名——模块名归「关于」页。
-            val scrollBehavior = MiuixScrollBehavior()
-            // 下拉刷新：顶栏不再放刷新按钮，任务页直接下拉触发（原「重算下次时刻」）。
-            var pullRefreshing by remember { mutableStateOf(false) }
-            // 主题设置的三个开关（设置页「主题」卡片）。全关时整套渲染与改动前逐像素一致。
-            // RuntimeShader 要 Android 13+：不支持的设备自动退回不透明栏，不出现透明花屏。
-            val blurSupported = remember { isRuntimeShaderSupported() }
-            val blurred = blurBars.value && blurSupported
-            val floating = floatingNavBar.value
-            val liquid = floating && liquidGlass.value && blurSupported
-            val surface = MiuixTheme.colorScheme.surface
-            // 毛玻璃取样源（KernelSU 管理器同款写法）：整页内容录进一层，栏对这层做模糊。
-            // 录之前先铺一层 surface——必须与 Scaffold 的 containerColor（也是 surface）同值：
-            // 铺错颜色（比如硬编码白）会把白卡片盖在同色页面上，卡片背景直接「消失」。
-            val backdrop = rememberLayerBackdrop {
-                drawRect(surface)
-                drawContent()
-            }
-            // 栏的玻璃罩层：模糊后的内容上压一层半透明 surface，保证文字可读（KSU 0.87）。
-            val barBlurColors = BlurColors(
-                blendColors = listOf(BlendColorEntry(surface.copy(alpha = BAR_TINT_ALPHA))),
-            )
-            Scaffold(
-                topBar = {
-                    TopAppBar(
-                        title = TAB_TITLES[tab.intValue],
-                        largeTitle = TAB_TITLES[tab.intValue],
-                        scrollBehavior = scrollBehavior,
-                        // 模糊开启时底色交给玻璃层：TopAppBar 自带底色，不改透明会把模糊整个盖住。
+        val pagerState = rememberPagerState(initialPage = tab.intValue, pageCount = { TAB_TITLES.size })
+        val scope = rememberCoroutineScope()
+        val pagerMode = PagerInterceptionMode.entries.getOrElse(pagerGestureMode.intValue) {
+            PagerInterceptionMode.Native
+        }
+        val interceptPager = pagerMode == PagerInterceptionMode.CrossAxis
+        // 顶层弹窗打开时左右滑只负责关闭弹窗，不再同时翻页。
+        val overlayOpen = textDialog.value != null || editorDialog.value != null
+        val userScrollEnabled = !overlayOpen
+        LaunchedEffect(pagerState.settledPage) {
+            tab.intValue = pagerState.settledPage
+        }
+        BackHandler(enabled = overlayOpen) { dismissTopOverlay() }
+
+        val scrollBehaviors = List(TAB_TITLES.size) { MiuixScrollBehavior() }
+        var pullRefreshing by remember { mutableStateOf(false) }
+        val blurSupported = remember { isRuntimeShaderSupported() }
+        val blurred = blurBars.value && blurSupported
+        val floating = floatingNavBar.value
+        val liquid = floating && liquidGlass.value && blurSupported
+        val surface = MiuixTheme.colorScheme.surface
+        val backdrop = rememberLayerBackdrop {
+            drawRect(surface)
+            drawContent()
+        }
+        val barBlurColors = BlurColors(
+            blendColors = listOf(BlendColorEntry(surface.copy(alpha = BAR_TINT_ALPHA))),
+        )
+        val currentPage = pagerState.currentPage.coerceIn(0, TAB_TITLES.lastIndex)
+        val scrollBehavior = scrollBehaviors[currentPage]
+        val animateToTab: (Int) -> Unit = { index ->
+            scope.launch { pagerState.springAnimateToPage(index) }
+        }
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = TAB_TITLES[currentPage],
+                    largeTitle = TAB_TITLES[currentPage],
+                    scrollBehavior = scrollBehavior,
+                    color = if (blurred) Color.Transparent else MiuixTheme.colorScheme.surface,
+                    modifier = if (blurred) {
+                        Modifier.textureBlur(
+                            backdrop = backdrop,
+                            shape = RectangleShape,
+                            blurRadius = BAR_BLUR_RADIUS,
+                            colors = barBlurColors,
+                        )
+                    } else {
+                        Modifier
+                    },
+                )
+            },
+            bottomBar = {
+                if (floating) {
+                    val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 28.dp)
+                            .padding(bottom = if (navInset > 0.dp) 8.dp + navInset else 28.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        FloatingBottomBar(
+                            selectedIndex = currentPage,
+                            onSelected = animateToTab,
+                            backdrop = backdrop,
+                            tabsCount = TAB_ICONS.size,
+                            isBlurEnabled = liquid,
+                        ) { activateTab ->
+                            TAB_ICONS.forEachIndexed { index, icon ->
+                                FloatingBottomBarItem(
+                                    selected = currentPage == index,
+                                    onClick = { activateTab(index) },
+                                ) {
+                                    Icon(
+                                        imageVector = icon,
+                                        contentDescription = TAB_TITLES[index],
+                                        tint = top.yukonga.miuix.kmp.theme.LocalContentColor.current,
+                                        modifier = Modifier.size(24.dp),
+                                    )
+                                    Text(
+                                        text = TAB_TITLES[index],
+                                        color = top.yukonga.miuix.kmp.theme.LocalContentColor.current,
+                                        fontSize = 11.sp,
+                                        lineHeight = 14.sp,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Visible,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    NavigationBar(
                         color = if (blurred) Color.Transparent else MiuixTheme.colorScheme.surface,
                         modifier = if (blurred) {
                             Modifier.textureBlur(
@@ -571,130 +677,85 @@ class ModuleMainActivity : ComponentActivity() {
                         } else {
                             Modifier
                         },
-                    )
-                },
-                bottomBar = {
-                    if (floating) {
-                        val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 28.dp)
-                                .padding(bottom = if (navInset > 0.dp) 8.dp + navInset else 28.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            FloatingBottomBar(
-                                selectedIndex = tab.intValue,
-                                onSelected = { tab.intValue = it },
-                                backdrop = backdrop,
-                                tabsCount = TAB_ICONS.size,
-                                isBlurEnabled = liquid,
-                            ) { activateTab ->
-                                TAB_ICONS.forEachIndexed { index, icon ->
-                                    FloatingBottomBarItem(
-                                        selected = tab.intValue == index,
-                                        onClick = { activateTab(index) },
-                                    ) {
-                                        Icon(
-                                            imageVector = icon,
-                                            contentDescription = TAB_TITLES[index],
-                                            tint = top.yukonga.miuix.kmp.theme.LocalContentColor.current,
-                                            modifier = Modifier.size(24.dp),
-                                        )
-                                        Text(
-                                            text = TAB_TITLES[index],
-                                            color = top.yukonga.miuix.kmp.theme.LocalContentColor.current,
-                                            fontSize = 11.sp,
-                                            lineHeight = 14.sp,
-                                            maxLines = 1,
-                                            softWrap = false,
-                                            overflow = TextOverflow.Visible,
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        NavigationBar(
-                            color = if (blurred) Color.Transparent else MiuixTheme.colorScheme.surface,
-                            modifier = if (blurred) {
-                                Modifier.textureBlur(
-                                    backdrop = backdrop,
-                                    shape = RectangleShape,
-                                    blurRadius = BAR_BLUR_RADIUS,
-                                    colors = barBlurColors,
-                                )
-                            } else {
-                                Modifier
-                            },
-                        ) {
-                            TAB_ICONS.forEachIndexed { index, icon ->
-                                NavigationBarItem(
-                                    selected = tab.intValue == index,
-                                    onClick = { tab.intValue = index },
-                                    icon = icon,
-                                    label = TAB_TITLES[index],
-                                )
-                            }
+                    ) {
+                        TAB_ICONS.forEachIndexed { index, icon ->
+                            NavigationBarItem(
+                                selected = currentPage == index,
+                                onClick = { animateToTab(index) },
+                                icon = icon,
+                                label = TAB_TITLES[index],
+                            )
                         }
                     }
+                }
+            },
+        ) { padding ->
+            val pagerFling = flingBehavior(
+                state = pagerState,
+                snapAnimationSpec = PagerNavigationSpringSpec,
+            )
+            val pagerModifier = Modifier
+                .pagerGestureOverride(
+                    pagerState = pagerState,
+                    flingBehavior = pagerFling,
+                    mode = pagerMode,
+                    enabled = userScrollEnabled,
+                )
+                .then(if (blurred || floating) Modifier.layerBackdrop(backdrop) else Modifier)
+            HorizontalPager(
+                modifier = pagerModifier,
+                state = pagerState,
+                beyondViewportPageCount = 1,
+                userScrollEnabled = userScrollEnabled && !interceptPager,
+                overscrollEffect = null,
+                pageNestedScrollConnection = if (interceptPager) {
+                    PagerGestureNestedScrollConnection
+                } else {
+                    pageNestedScrollConnection(pagerState, Orientation.Horizontal)
                 },
-            ) { padding ->
-                // 只有任务页有下拉刷新（重算下次时刻），其余页签下拉没有任何意义，
-                // 不包 PullToRefresh——多一层只会徒增下拉时差（玻璃底栏透灰影）的暴露面。
+                flingBehavior = pagerFling,
+            ) { page ->
+                val pageScroll = scrollBehaviors[page]
                 val scrollContent: @Composable () -> Unit = {
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            // 越界回弹必须在绑定滚动行为之前加。
                             .overScrollVertical()
-                            .nestedScroll(scrollBehavior.nestedScrollConnection)
-                            // 内容即玻璃的取样源；没有任何玻璃消费者时不登记，省掉一次全屏图层录制。
-                            .then(
-                                if (blurred || floating) {
-                                    Modifier.layerBackdrop(backdrop)
-                                } else {
-                                    Modifier
-                                },
-                            )
-                            .verticalScroll(rememberScrollState())
-                            // 顶栏/底栏的让位改成「滚动容器内」的上内边距：静止位置与滚动范围
-                            // 和原来完全一致，区别只是滚动途中内容会从栏底下穿过——栏不透明时
-                            // 看不出来，开了玻璃才显现（「模糊」要的就是这个）。
+                            .nestedScroll(pageScroll.nestedScrollConnection)
+                            .verticalScroll(rememberScrollState(), overscrollEffect = null)
                             .padding(top = padding.calculateTopPadding())
-                            // 卡片的水平边距交给卡片自己（KSU 的 12dp），页面只留纵向节奏。
                             .padding(vertical = 4.dp),
                     ) {
-                        when (tab.intValue) {
+                        when (page) {
                             TAB_TASKS -> TasksPage()
                             TAB_CONFIG -> ConfigPage()
                             TAB_ABOUT -> AboutPage()
                             else -> RecordsPage()
                         }
-                        // 栏高留在滚动末尾。原来这份让位在容器外，内容永远到不了栏底下；
-                        // 挪进来之后必须补这个占位，否则滚到底时最后一张卡片会压在栏底下。
                         Spacer(Modifier.height(padding.calculateBottomPadding()))
                         Spacer(Modifier.height(4.dp))
                     }
                 }
-                if (tab.intValue == TAB_TASKS) {
+                if (page == TAB_TASKS) {
                     PullToRefresh(
                         isRefreshing = pullRefreshing,
                         onRefresh = {
                             pullRefreshing = true
                             recomputeSchedule { pullRefreshing = false }
                         },
-                        // miuix 默认文案是英文（"Release to refresh"），换成中文。
                         refreshTexts = listOf("下拉刷新", "松手刷新", "正在刷新…", "刷新成功"),
                         contentPadding = PaddingValues(top = padding.calculateTopPadding()),
-                        topAppBarScrollBehavior = scrollBehavior,
+                        topAppBarScrollBehavior = pageScroll,
                     ) {
                         scrollContent()
                     }
                 } else {
                     scrollContent()
                 }
-                Dialogs()
+            }
+            Dialogs()
+            if (swipeBack.value && (textDialog.value != null || editorDialog.value != null)) {
+                Box(Modifier.fillMaxSize().swipeBack { dismissTopOverlay() })
             }
         }
     }
@@ -802,7 +863,7 @@ class ModuleMainActivity : ComponentActivity() {
         }
         GroupTitle("主题")
         // 外观相关的开关统一收在一张卡片里（KSU 的「主题设置」也是这个分组法）：
-        // 几行都是 SwitchPreference，标题 + 说明 + 右侧开关，行间不加分隔线（miuix 标准样式）。
+        // 第一行是主题模式下拉，与「页面切换手势」同款：点右侧展开选择。
         // 「液态玻璃」只对悬浮底栏有意义，所以只在悬浮底栏开启时出现。
         Card(
             modifier = Modifier
@@ -810,6 +871,13 @@ class ModuleMainActivity : ComponentActivity() {
                 .padding(bottom = 12.dp),
             insideMargin = PaddingValues(0.dp),
         ) {
+            OverlayDropdownPreference(
+                title = "主题模式",
+                summary = "跟随系统时随系统深浅色切换，也可固定日间或夜间",
+                items = listOf("跟随系统", "日间主题", "夜间主题"),
+                selectedIndex = themeMode.intValue.coerceIn(THEME_FOLLOW_SYSTEM, THEME_DARK),
+                onSelectedIndexChange = ::setThemeMode,
+            )
             SwitchPreference(
                 title = "模糊",
                 summary = "启用顶栏和底栏的模糊效果",
@@ -830,6 +898,36 @@ class ModuleMainActivity : ComponentActivity() {
                     onCheckedChange = ::toggleLiquidGlass,
                 )
             }
+        }
+
+        GroupTitle("手势")
+        Card(
+            modifier = Modifier
+                .padding(horizontal = 12.dp)
+                .padding(bottom = 12.dp),
+            insideMargin = PaddingValues(0.dp),
+        ) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                SwitchPreference(
+                    title = "预测性返回手势",
+                    summary = "从边缘返回时预览上一层。修改后立即重建界面",
+                    checked = predictiveBack.value,
+                    onCheckedChange = ::togglePredictiveBack,
+                )
+            }
+            SwitchPreference(
+                title = "横移返回手势",
+                summary = "从屏幕边缘横滑关闭当前弹窗",
+                checked = swipeBack.value,
+                onCheckedChange = ::toggleSwipeBack,
+            )
+            OverlayDropdownPreference(
+                title = "页面切换手势",
+                summary = "左右滑动切换页签时，怎么处理页面里正在滚动的列表",
+                items = listOf("默认", "跨轴拦截", "iOS 风格"),
+                selectedIndex = pagerGestureMode.intValue.coerceIn(0, 2),
+                onSelectedIndexChange = ::setPagerGestureMode,
+            )
         }
 
         GroupTitle("权限与后台")
@@ -1083,6 +1181,95 @@ class ModuleMainActivity : ComponentActivity() {
     private fun toggleLiquidGlass(enabled: Boolean) {
         writeUiPref(KEY_LIQUID_GLASS, enabled)
         liquidGlass.value = enabled
+    }
+
+    /** 主题分段：跟随系统 / 日间 / 夜间。窗口底色一起改，避免切到夜间时状态栏底下还是白的。 */
+    private fun setThemeMode(mode: Int) {
+        val value = mode.coerceIn(THEME_FOLLOW_SYSTEM, THEME_DARK)
+        writeUiPrefInt(KEY_THEME_MODE, value)
+        themeMode.intValue = value
+        window?.setBackgroundDrawable(ColorDrawable(if (resolveDark(value)) DARK_WINDOW_BG else LIGHT_WINDOW_BG))
+    }
+
+    private fun setPagerGestureMode(mode: Int) {
+        val value = mode.coerceIn(0, PagerInterceptionMode.entries.lastIndex)
+        writeUiPrefInt(KEY_PAGER_GESTURE, value)
+        pagerGestureMode.intValue = value
+    }
+
+    private fun toggleSwipeBack(enabled: Boolean) {
+        writeUiPref(KEY_SWIPE_BACK, enabled)
+        swipeBack.value = enabled
+    }
+
+    /**
+     * 预测性返回走系统隐藏接口，和 KSU 一样：先放行隐藏 API，再改当前 ApplicationInfo。
+     * 这个开关要重建界面才作用到已经注册的返回回调。
+     */
+    private fun togglePredictiveBack(enabled: Boolean) {
+        writeUiPref(KEY_PREDICTIVE_BACK, enabled)
+        predictiveBack.value = enabled
+        applyPredictiveBack(enabled)
+        recreate()
+    }
+
+    private fun applyPredictiveBack(enabled: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
+        runCatching {
+            HiddenApiBypass.addHiddenApiExemptions(
+                "Landroid/content/pm/ApplicationInfo;->setEnableOnBackInvokedCallback",
+            )
+            val method = ApplicationInfo::class.java.getDeclaredMethod(
+                "setEnableOnBackInvokedCallback",
+                Boolean::class.javaPrimitiveType,
+            )
+            method.isAccessible = true
+            method.invoke(applicationInfo, enabled)
+        }.onFailure { ModuleAndroidLog.error(LOG_TAG, "更新预测性返回失败", it) }
+    }
+
+    /** 0 跟随系统，1 强制日间，2 强制夜间。 */
+    private fun resolveDark(mode: Int): Boolean = when (mode) {
+        THEME_LIGHT -> false
+        THEME_DARK -> true
+        else -> isNightMode()
+    }
+
+    /**
+     * 横移返回：从起始边缘滑过屏幕三分之一就关闭顶层弹窗。
+     * 方向按布局方向取，RTL 从右缘起滑；根页面没有弹窗时不消费手势，左右滑仍然翻页。
+     */
+    @Composable
+    private fun Modifier.swipeBack(onDismiss: () -> Unit): Modifier {
+        val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+        val callback by rememberUpdatedState(onDismiss)
+        return pointerInput(rtl) {
+            val edge = 28.dp.toPx()
+            val threshold = 96.dp.toPx()
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                val atEdge = if (rtl) down.position.x >= size.width - edge else down.position.x <= edge
+                if (!atEdge) return@awaitEachGesture
+                down.consume()
+                var total = 0f
+                horizontalDrag(down.id) { change ->
+                    val delta = change.positionChange().x
+                    total += if (rtl) -delta else delta
+                    change.consume()
+                }
+                if (total >= threshold) callback()
+            }
+        }
+    }
+
+    /** 横移返回和系统返回共用：先关多选，再关编辑器，最后关文本弹窗。 */
+    private fun dismissTopOverlay() {
+        val editor = editorDialog.value
+        when {
+            editor?.multiOpenLabel != null -> editor.multiOpenLabel = null
+            editor != null -> editorDialog.value = null
+            textDialog.value != null -> textDialog.value = null
+        }
     }
 
     private fun setTaskExcludedFromRecents(excluded: Boolean) {
@@ -2170,6 +2357,13 @@ class ModuleMainActivity : ComponentActivity() {
         getSharedPreferences(UI_PREFS, MODE_PRIVATE).edit().putBoolean(key, value).commit()
     }
 
+    private fun uiPrefInt(key: String, defValue: Int = 0): Int =
+        getSharedPreferences(UI_PREFS, MODE_PRIVATE).getInt(key, defValue)
+
+    private fun writeUiPrefInt(key: String, value: Int) {
+        getSharedPreferences(UI_PREFS, MODE_PRIVATE).edit().putInt(key, value).commit()
+    }
+
     /**
      * 构建时间文案。
      *
@@ -2367,6 +2561,14 @@ class ModuleMainActivity : ComponentActivity() {
         const val KEY_BLUR_BARS = "themeBlurBars"
         const val KEY_FLOATING_NAV_BAR = "themeFloatingNavBar"
         const val KEY_LIQUID_GLASS = "themeLiquidGlass"
+        const val KEY_THEME_MODE = "themeMode"
+        const val KEY_PAGER_GESTURE = "pagerGestureMode"
+        const val KEY_SWIPE_BACK = "swipeBack"
+        const val KEY_PREDICTIVE_BACK = "predictiveBack"
+
+        const val THEME_FOLLOW_SYSTEM = 0
+        const val THEME_LIGHT = 1
+        const val THEME_DARK = 2
 
         /** 悬浮底栏的圆角：与 miuix FloatingToolbarDefaults.CornerRadius 同为 28dp。 */
         val FLOAT_BAR_CORNER = 28.dp
