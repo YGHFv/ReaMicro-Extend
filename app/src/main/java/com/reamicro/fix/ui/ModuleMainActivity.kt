@@ -18,8 +18,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateIntAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
@@ -33,6 +31,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -42,7 +42,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -58,7 +57,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -82,12 +80,11 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -122,6 +119,7 @@ import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.ListPopupColumn
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
+import top.yukonga.miuix.kmp.basic.ScrollBehavior
 import top.yukonga.miuix.kmp.basic.NavigationBar
 import top.yukonga.miuix.kmp.basic.NavigationBarItem
 import top.yukonga.miuix.kmp.basic.PopupPositionProvider
@@ -144,6 +142,7 @@ import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
 import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import top.yukonga.miuix.kmp.window.WindowDialog
 import top.yukonga.miuix.kmp.overlay.OverlayListPopup
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Alarm
@@ -735,7 +734,7 @@ class ModuleMainActivity : ComponentActivity() {
                             TAB_TASKS -> TasksPage()
                             TAB_CONFIG -> ConfigPage()
                             TAB_ABOUT -> AboutPage()
-                            else -> RecordsPage()
+                            else -> {}
                         }
                         Spacer(Modifier.height(padding.calculateBottomPadding()))
                         Spacer(Modifier.height(4.dp))
@@ -754,6 +753,13 @@ class ModuleMainActivity : ComponentActivity() {
                     ) {
                         scrollContent()
                     }
+                } else if (page == TAB_RECORDS) {
+                    // 记录页条目上百，不能进 verticalScroll 的整体组合 Column，单独走 Lazy 容器。
+                    RecordsPage(
+                        topPadding = padding.calculateTopPadding(),
+                        bottomPadding = padding.calculateBottomPadding(),
+                        scrollBehavior = pageScroll,
+                    )
                 } else {
                     scrollContent()
                 }
@@ -767,31 +773,57 @@ class ModuleMainActivity : ComponentActivity() {
 
     // ---- 记录页 ----
 
+    /**
+     * 记录页：条目上百，必须走 LazyColumn 只组合可见卡片。原来的 verticalScroll Column 会把
+     * 全部记录一次性组合进布局树，进页面、下拉刷新、每次状态变更都全量重建整页卡片，是
+     * 整体卡顿的大头。LazyColumn 不能嵌在 verticalScroll 里，所以这里自带头部内边距与
+     * 大标题折叠的 nestedScroll 接线，不再包进 pager 的通用 scrollContent。
+     */
     @Composable
-    private fun RecordsPage() {
+    private fun RecordsPage(topPadding: Dp, bottomPadding: Dp, scrollBehavior: ScrollBehavior) {
         val list = recordsState.value
-        if (list.isEmpty()) {
-            SectionCard(
-                title = "还没有执行记录",
-                description = "到「任务」页点任务卡片上的「执行」可以先跑一轮；点任意一条记录能看详情（运签、奖励、行商事件）",
-            )
-            return
-        }
-        Text(
-            "共 ${list.size} 条 · 失败 ${failedCount.intValue} 条",
-            modifier = Modifier.padding(horizontal = 28.dp),
-            style = MiuixTheme.textStyles.footnote1,
-            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-        )
-        Spacer(Modifier.height(2.dp))
-        // 按天分组：同一天只出一行日标题（今天 / 昨天 / MM-dd），行内就只留 HH:mm——
-        // 比每条都写满「09-24 08:04:44」清爽，也更容易按天扫读。
-        list.forEachIndexed { index, (accountId, record) ->
-            val day = dayLabel(record.at)
-            if (index == 0 || dayLabel(list[index - 1].second.at) != day) {
-                GroupTitle(day)
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .overScrollVertical()
+                .nestedScroll(scrollBehavior.nestedScrollConnection),
+            contentPadding = PaddingValues(
+                top = topPadding + 4.dp,
+                bottom = bottomPadding + 8.dp,
+            ),
+        ) {
+            if (list.isEmpty()) {
+                item(key = "empty", contentType = "empty") {
+                    SectionCard(
+                        title = "还没有执行记录",
+                        description = "到「任务」页点任务卡片上的「执行」可以先跑一轮；点任意一条记录能看详情（运签、奖励、行商事件）",
+                    )
+                }
+                return@LazyColumn
             }
-            RecordCard(accountId, record)
+            item(key = "summary", contentType = "summary") {
+                Text(
+                    "共 ${list.size} 条 · 失败 ${failedCount.intValue} 条",
+                    modifier = Modifier.padding(horizontal = 28.dp),
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
+                Spacer(Modifier.height(2.dp))
+            }
+            itemsIndexed(
+                items = list,
+                // key = 账号 + 时刻 + 任务类型：记录按时刻倒序插入，稳定 key 让新记录只组合新增项。
+                key = { _, (accountId, record) -> "$accountId-${record.at}-${record.taskType}" },
+                contentType = { _, _ -> "record" },
+            ) { index, (accountId, record) ->
+                // 按天分组：同一天只出一行日标题（今天 / 昨天 / MM-dd），行内就只留 HH:mm——
+                // 比每条都写满「09-24 08:04:44」清爽，也更容易按天扫读。
+                val day = dayLabel(record.at)
+                if (index == 0 || dayLabel(list[index - 1].second.at) != day) {
+                    GroupTitle(day)
+                }
+                RecordCard(accountId, record)
+            }
         }
     }
 
@@ -1745,16 +1777,14 @@ class ModuleMainActivity : ComponentActivity() {
 
     @Composable
     private fun TaskEditorDialog(editor: TaskEditor) {
-        // 聚焦输入框在窗口坐标里的底边（EditorField 聚焦时上报），驱动 editorImeLift 做最小位移。
-        val focusedFieldBottom = remember { mutableStateOf(0f) }
-        OverlayDialog(
+        // 带 TextField 的弹窗必须用 WindowDialog（独立窗口）而不是 OverlayDialog（Scaffold 内渲染）：
+        // OverlayDialog 的 imePadding 会和 Scaffold 的键盘避让叠加，键盘一弹弹窗就飞到屏幕上半部分
+        // （ReaPress-Extend ExpressBackupPage 2026-09-27 真机同款问题，两项目同库同 ROM）。
+        // WindowDialog 是库的标准控件、同款视觉，键盘避让由它自己的窗口处理。
+        WindowDialog(
             title = editor.spec?.title ?: taskTitle(editor.task.taskType),
             show = true,
             onDismissRequest = { editorDialog.value = null },
-            // miuix 自带的 imePadding 会把底部对齐的弹窗整个顶到键盘上沿（跳一整个键盘的高度）。
-            // 关掉它，换成 editorImeLift 的「最小位移」：只抬到刚好露出聚焦的输入框。
-            defaultWindowInsetsPadding = false,
-            modifier = Modifier.editorImeLift(fieldBottom = { focusedFieldBottom.value }),
         ) {
             Column(
                 modifier = Modifier
@@ -1769,7 +1799,6 @@ class ModuleMainActivity : ComponentActivity() {
                         hint = "HH:mm",
                         value = editor.values[FIELD_TIME].orEmpty(),
                         onValue = { editor.values[FIELD_TIME] = it },
-                        onFocusBottom = { focusedFieldBottom.value = it },
                     )
                 }
                 if (spec?.autoRead == true) {
@@ -1778,7 +1807,6 @@ class ModuleMainActivity : ComponentActivity() {
                         hint = "分钟",
                         value = editor.values[FIELD_DURATION].orEmpty(),
                         onValue = { editor.values[FIELD_DURATION] = it },
-                        onFocusBottom = { focusedFieldBottom.value = it },
                     )
                     EditorField(
                         label = "图书",
@@ -1786,7 +1814,6 @@ class ModuleMainActivity : ComponentActivity() {
                         value = editor.values[FIELD_BOOKS].orEmpty(),
                         onValue = { editor.values[FIELD_BOOKS] = it },
                         maxLines = 6,
-                        onFocusBottom = { focusedFieldBottom.value = it },
                     )
                 }
                 if (spec?.rewardTriggered == true) {
@@ -1795,7 +1822,6 @@ class ModuleMainActivity : ComponentActivity() {
                         hint = "0 表示抽完彩筹",
                         value = editor.values[FIELD_DRAW_LIMIT].orEmpty(),
                         onValue = { editor.values[FIELD_DRAW_LIMIT] = it },
-                        onFocusBottom = { focusedFieldBottom.value = it },
                     )
                 }
                 if (spec?.taskType == "pawn") {
@@ -1856,7 +1882,6 @@ class ModuleMainActivity : ComponentActivity() {
         value: String,
         onValue: (String) -> Unit,
         maxLines: Int = 1,
-        onFocusBottom: (Float) -> Unit = {},
     ) {
         Text(label, style = MiuixTheme.textStyles.main)
         Spacer(Modifier.height(6.dp))
@@ -1873,13 +1898,7 @@ class ModuleMainActivity : ComponentActivity() {
         // 与输入框自身 #F0F0F0 的底色配套（深色下自动变 #4F4F4F 底 + 亮灰字），不写死颜色。
         val labelColor = MiuixTheme.colorScheme.onSecondaryContainerVariant
         Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .onGloballyPositioned { coords ->
-                    // 聚焦期间持续上报底边（窗口坐标）。弹窗被 editorImeLift 抬起时坐标跟着
-                    // 变小，抬升量在 lift 侧补偿（还原「原始底边」），不会来回振荡。
-                    if (focused) onFocusBottom(coords.boundsInWindow().bottom)
-                },
+            modifier = Modifier.fillMaxWidth(),
         ) {
             TextField(
                 value = value,
@@ -1905,33 +1924,6 @@ class ModuleMainActivity : ComponentActivity() {
             }
         }
         Spacer(Modifier.height(12.dp))
-    }
-
-    /**
-     * 编辑弹窗的键盘「最小位移」：只把弹窗抬到刚好露出聚焦的输入框，而不是像 miuix 自带的
-     * imePadding 那样抬一整个键盘的高度——底部对齐的弹窗会被整个顶到屏幕顶端。
-     *
-     * [fieldBottom] 是聚焦输入框当前在窗口坐标里的底边（EditorField 聚焦期间持续上报）。
-     * 键盘收起时回落到导航栏 inset；抬起量走弹簧动画，键盘弹出时是滑上去而不是瞬移。
-     */
-    @Composable
-    private fun Modifier.editorImeLift(fieldBottom: () -> Float): Modifier {
-        val density = LocalDensity.current
-        val imeBottom = WindowInsets.ime.getBottom(density)
-        val navBottom = WindowInsets.navigationBars.getBottom(density)
-        var applied by remember { mutableIntStateOf(0) }
-        val target = if (imeBottom == 0 || fieldBottom() <= 0f) {
-            0
-        } else {
-            val imeTop = LocalConfiguration.current.screenHeightDp * density.density - imeBottom
-            // fieldBottom 是弹窗抬升后的坐标；加回当前抬升量还原「原始底边」，否则抬起后
-            // 坐标变小 → 判定不用抬 → 落下 → 又要抬，来回振荡。
-            val originalBottom = fieldBottom() + applied
-            (originalBottom + with(density) { 16.dp.toPx() } - imeTop).toInt().coerceIn(0, imeBottom)
-        }
-        val lifted by animateIntAsState(target, spring(dampingRatio = 1f, stiffness = 300f))
-        SideEffect { applied = lifted }
-        return Modifier.padding(bottom = with(density) { maxOf(lifted, navBottom).toDp() })
     }
 
     /** 「禁当期物」入口：一行摘要按钮，点开多选弹窗。 */
@@ -2530,6 +2522,12 @@ class ModuleMainActivity : ComponentActivity() {
     private fun formatDateTime(at: Long): String =
         SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault()).format(Date(at))
 
+    // 格式化器只建一次反复用：记录页每张卡片、每个分组标题都要调，每次 new 一个
+    // SimpleDateFormat/Calendar 是纯浪费（UI 单线程使用，无线程安全问题）。
+    private val dayFormat = SimpleDateFormat("MM-dd", Locale.getDefault())
+    private val dayYearFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+    private val clockFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+
     /** 记录列表的日分组标题：今天 / 昨天 / MM-dd（跨年才补年份）。 */
     private fun dayLabel(at: Long): String {
         val now = Calendar.getInstance()
@@ -2539,14 +2537,13 @@ class ModuleMainActivity : ComponentActivity() {
                 0 -> return "今天"
                 1 -> return "昨天"
             }
-            return SimpleDateFormat("MM-dd", Locale.getDefault()).format(Date(at))
+            return dayFormat.format(Date(at))
         }
-        return SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(at))
+        return dayYearFormat.format(Date(at))
     }
 
     /** 已经按天分组之后，行内只需要时刻。 */
-    private fun formatClock(at: Long): String =
-        SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(at))
+    private fun formatClock(at: Long): String = clockFormat.format(Date(at))
 
     // ---- 展示用快照结构 ----
 

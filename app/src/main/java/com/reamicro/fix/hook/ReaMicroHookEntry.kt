@@ -136,14 +136,6 @@ class ReaMicroHookEntry {
             settingsProvider = settingsProvider,
         )
         installFeature("ProfileBackgroundHook", profileBackgroundHook::install)
-        installFeature("ReaderBackgroundHook") {
-            ReaderBackgroundHook(
-                classLoader = classLoader,
-                activityProvider = activityProvider,
-                settings = moduleSettings,
-                settingsProvider = settingsProvider,
-            ).install()
-        }
         val bookDetailsAssociationActionHook = BookDetailsAssociationActionHook(
             classLoader = classLoader,
             activityProvider = activityProvider,

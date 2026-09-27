@@ -94,17 +94,6 @@ class ModuleSettingsTest {
     }
 
     @Test
-    fun readerBackgroundChildSwitchControlsBackgroundExtension() {
-        val disabledChild = ModuleSettingsSnapshot(readerBackgroundEnabled = false)
-        val enabledChild = disabledChild.copy(readerBackgroundEnabled = true)
-        val disabledModule = enabledChild.copy(moduleEnabled = false)
-
-        assertFalse(disabledChild.canUseReaderBackground)
-        assertTrue(enabledChild.canUseReaderBackground)
-        assertFalse(disabledModule.canUseReaderBackground)
-    }
-
-    @Test
     fun readerAutoPageChildSwitchControlsAutoPage() {
         val disabledChild = ModuleSettingsSnapshot(
             readerAutoPageEnabled = false,

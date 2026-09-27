@@ -562,15 +562,6 @@ internal fun ReaMicroSettingsHook.renderReaderCompletionSettingsContent(innerPad
         )
         val rows = listOf(
             ToggleRow(
-                key = ModuleSettings.KEY_READER_BACKGROUND_ENABLED,
-                title = "\u80cc\u666f\u6269\u5c55",
-                checked = snapshot.readerBackgroundEnabled,
-                onChanged = { checked, _ ->
-                    settings.setReaderBackgroundEnabled(checked)
-                    checked
-                },
-            ),
-            ToggleRow(
                 key = ModuleSettings.KEY_READER_AUTO_PAGE_ENABLED,
                 title = "\u81ea\u52a8\u9605\u8bfb",
                 checked = snapshot.readerAutoPageEnabled,

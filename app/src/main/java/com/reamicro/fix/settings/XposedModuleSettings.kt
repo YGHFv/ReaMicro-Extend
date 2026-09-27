@@ -98,10 +98,6 @@ class XposedModuleSettings(
         putBoolean(ModuleSettings.KEY_READER_READ_ALOUD_LYRICON_ENABLED, enabled)
     }
 
-    fun setReaderBackgroundEnabled(enabled: Boolean) {
-        putBoolean(ModuleSettings.KEY_READER_BACKGROUND_ENABLED, enabled)
-    }
-
     fun setReaderAutoPageEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_READER_AUTO_PAGE_ENABLED, enabled)
     }
@@ -670,10 +666,6 @@ class XposedModuleSettings(
             ModuleSettings.KEY_READER_READ_ALOUD_LYRICON_ENABLED,
             ModuleSettings.DEFAULT_READER_READ_ALOUD_LYRICON_ENABLED,
         )
-        val readerBackgroundEnabled = prefs.getBoolean(
-            ModuleSettings.KEY_READER_BACKGROUND_ENABLED,
-            ModuleSettings.DEFAULT_READER_BACKGROUND_ENABLED,
-        )
         val readerAutoPageEnabled = prefs.getBoolean(
             ModuleSettings.KEY_READER_AUTO_PAGE_ENABLED,
             ModuleSettings.DEFAULT_READER_AUTO_PAGE_ENABLED,
@@ -775,7 +767,6 @@ class XposedModuleSettings(
                     readerSelectionHighlightEnabled ||
                     ModuleSettings.DEFAULT_READER_ENABLED,
             ),
-            readerBackgroundEnabled = readerBackgroundEnabled,
             readerLongPressEnabled = readerLongPressEnabled,
             readerReadAloudEnabled = readerReadAloudEnabled,
             readerReadAloudIgnoreAudioFocus = readerReadAloudIgnoreAudioFocus,

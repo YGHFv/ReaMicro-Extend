@@ -31,7 +31,6 @@ class ModuleSettingsContractTest {
         assertEquals("association_unlink_enabled", ModuleSettings.KEY_ASSOCIATION_UNLINK_ENABLED)
         assertEquals("association_cover_fix_enabled", ModuleSettings.KEY_ASSOCIATION_COVER_FIX_ENABLED)
         assertEquals("reader_enabled", ModuleSettings.KEY_READER_ENABLED)
-        assertEquals("reader_background_enabled", ModuleSettings.KEY_READER_BACKGROUND_ENABLED)
         assertEquals("reader_long_press_enabled", ModuleSettings.KEY_READER_LONG_PRESS_ENABLED)
         assertEquals("reader_read_aloud_enabled", ModuleSettings.KEY_READER_READ_ALOUD_ENABLED)
         assertEquals("reader_read_aloud_ignore_audio_focus", ModuleSettings.KEY_READER_READ_ALOUD_IGNORE_AUDIO_FOCUS)
@@ -114,7 +113,6 @@ class ModuleSettingsContractTest {
             ModuleSettings.KEY_ASSOCIATION_UNLINK_ENABLED,
             ModuleSettings.KEY_ASSOCIATION_COVER_FIX_ENABLED,
             ModuleSettings.KEY_READER_ENABLED,
-            ModuleSettings.KEY_READER_BACKGROUND_ENABLED,
             ModuleSettings.KEY_READER_LONG_PRESS_ENABLED,
             ModuleSettings.KEY_READER_READ_ALOUD_ENABLED,
             ModuleSettings.KEY_READER_READ_ALOUD_IGNORE_AUDIO_FOCUS,
@@ -190,7 +188,6 @@ class ModuleSettingsContractTest {
         assertEquals(false, ModuleSettings.DEFAULT_ASSOCIATION_UNLINK_ENABLED)
         assertEquals(false, ModuleSettings.DEFAULT_ASSOCIATION_COVER_FIX_ENABLED)
         assertEquals(true, ModuleSettings.DEFAULT_READER_ENABLED)
-        assertEquals(true, ModuleSettings.DEFAULT_READER_BACKGROUND_ENABLED)
         assertEquals(false, ModuleSettings.DEFAULT_READER_LONG_PRESS_ENABLED)
         assertEquals(true, ModuleSettings.DEFAULT_READER_READ_ALOUD_ENABLED)
         assertEquals(false, ModuleSettings.DEFAULT_READER_READ_ALOUD_IGNORE_AUDIO_FOCUS)
