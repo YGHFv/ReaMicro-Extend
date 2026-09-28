@@ -1,10 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
-    <!--
-      miuix-blur 库把 minSdk 声明成 33（RuntimeShader 需要 Android 13）。库内所有效果路径都有
-      isRuntimeShaderSupported()（SDK_INT >= 33）运行时门禁，低版本设备只是没有效果、不会崩；
-      模块自己的调用侧同样先查这个开关再挂玻璃层，所以放行合并。
-    -->
     <uses-sdk tools:overrideLibrary="top.yukonga.miuix.kmp.blur" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -15,12 +10,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <!--
-      Android 12+ 不申请 SCHEDULE_EXACT_ALARM 时 canScheduleExactAlarms() 恒为 false，
-      云任务闹钟会降级到 setAndAllowWhileIdle——该 API 在 Doze 下可能被推迟数小时。
-      USE_EXACT_ALARM（Android 13+）适用于闹钟/日程类应用，声明后系统默认授予、
-      用户不能撤销；SCHEDULE_EXACT_ALARM 作为 12 及部分 13 ROM 的回退，需要用户手动授权。
-    -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
@@ -28,9 +17,6 @@
     <queries>
         <package android:name="app.zhendong.reamicro" />
         <package android:name="com.reamicro.fix" />
-        <!-- 厂商自启动设置页：主界面要能跳到它们。Android 11+ 起隐式 Intent 需要包可见性，
-             否则解析不到会静默失败（各 ROM 的组件名见 RootWakeController 附近的候选列表与
-             ModuleMainActivity.openAutoStartSettings）。 -->
         <package android:name="com.miui.securitycenter" />
         <package android:name="com.coloros.safecenter" />
         <package android:name="com.huawei.systemmanager" />
@@ -43,6 +29,7 @@
         android:allowBackup="false"
         android:description="@string/module_description"
         android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/module_name"
         android:theme="@style/AppTheme"
         android:enableOnBackInvokedCallback="false"
@@ -99,7 +86,6 @@
             </intent-filter>
         </receiver>
 
-        <!-- exported=true：闹钟与宿主的重排请求都由阅微进程显式投递到这里，非导出会被系统拒收。 -->
         <receiver
             android:name=".cloud.api.CloudTaskHeartbeatReceiver"
             android:enabled="true"
@@ -119,8 +105,6 @@
             android:exported="false"
             android:permission="android.permission.BIND_JOB_SERVICE" />
 
-        <!-- 宿主进程自己排不了闹钟：它排出来的是阅微名下的模糊闹钟，且写不进模块的唤醒时刻文件。
-             这里只重排、不执行任务。 -->
         <receiver
             android:name=".cloud.api.CloudTaskRescheduleReceiver"
             android:enabled="true"
@@ -130,8 +114,6 @@
             </intent-filter>
         </receiver>
 
-        <!-- 接收宿主（阅微进程）下发的本地任务配置。explicit component + 带
-             FLAG_INCLUDE_STOPPED_PACKAGES 的广播才能投递到未启动过的模块，而 provider 做不到。 -->
         <receiver
             android:name=".cloud.local.LocalTaskMirrorReceiver"
             android:enabled="true"
@@ -141,8 +123,6 @@
             </intent-filter>
         </receiver>
 
-        <!-- 同上，但下发的是 API 服务器配置：模块进程要用它去服务器拉消息并回执。
-             原来的 provider 通道在模块处于 stopped 时无法被解析，故改走广播。 -->
         <receiver
             android:name=".cloud.api.ApiServerSettingsMirrorReceiver"
             android:enabled="true"
@@ -169,15 +149,9 @@
             </intent-filter>
         </receiver>
 
-        <!-- 模块自己的主界面。此前模块没有任何 launcher activity，装完可能长期处于 stopped 状态，
-             而 stopped 应用的广播收不到——系统闹钟唤醒正是靠广播。有了它，用户装完会打开一次，
-             应用即脱离 stopped；界面本身也是查看任务记录/通知记录/诊断日志的入口。
-             桌面图标改由下面的 activity-alias 提供：模块设置里的「隐藏桌面图标」禁用的是别名，
-             主界面自身始终保持 enabled，隐藏后仍能用 am start -n com.reamicro.fix/.ui.ModuleMainActivity
-             把它拉起来（别名一禁，桌面图标与 getLaunchIntentForPackage 就都没了），
-             所以不会把自己彻底锁在外面。 -->
         <activity
             android:name=".ui.ModuleMainActivity"
+            android:configChanges="locale|layoutDirection"
             android:enabled="true"
             android:exported="true"
             android:label="@string/module_name"
@@ -188,6 +162,133 @@
             android:enabled="true"
             android:exported="true"
             android:icon="@mipmap/ic_launcher"
+            android:roundIcon="@mipmap/ic_launcher_round"
+            android:label="@string/module_name"
+            android:targetActivity=".ui.ModuleMainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.ModuleIconAliasMono"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_02"
+            android:roundIcon="@mipmap/ic_launcher_02_round"
+            android:label="@string/module_name"
+            android:targetActivity=".ui.ModuleMainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.ModuleIconAliasGold"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_03"
+            android:roundIcon="@mipmap/ic_launcher_03_round"
+            android:label="@string/module_name"
+            android:targetActivity=".ui.ModuleMainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.ModuleIconAliasNight"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_04"
+            android:roundIcon="@mipmap/ic_launcher_04_round"
+            android:label="@string/module_name"
+            android:targetActivity=".ui.ModuleMainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.ModuleIconAliasSky"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_05"
+            android:roundIcon="@mipmap/ic_launcher_05_round"
+            android:label="@string/module_name"
+            android:targetActivity=".ui.ModuleMainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.ModuleIconAliasDark"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_06"
+            android:roundIcon="@mipmap/ic_launcher_06_round"
+            android:label="@string/module_name"
+            android:targetActivity=".ui.ModuleMainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.ModuleIconAliasRose"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_07"
+            android:roundIcon="@mipmap/ic_launcher_07_round"
+            android:label="@string/module_name"
+            android:targetActivity=".ui.ModuleMainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.ModuleIconAliasBlue"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_08"
+            android:roundIcon="@mipmap/ic_launcher_08_round"
+            android:label="@string/module_name"
+            android:targetActivity=".ui.ModuleMainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.ModuleIconAliasViolet"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_09"
+            android:roundIcon="@mipmap/ic_launcher_09_round"
+            android:label="@string/module_name"
+            android:targetActivity=".ui.ModuleMainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.ModuleIconAliasSlate"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_10"
+            android:roundIcon="@mipmap/ic_launcher_10_round"
             android:label="@string/module_name"
             android:targetActivity=".ui.ModuleMainActivity">
             <intent-filter>
@@ -201,6 +302,7 @@
             android:enabled="true"
             android:excludeFromRecents="true"
             android:exported="true"
+            android:taskAffinity=""
             android:theme="@style/NoDisplayTheme" />
 
         <activity
@@ -208,6 +310,7 @@
             android:enabled="true"
             android:excludeFromRecents="true"
             android:exported="true"
+            android:taskAffinity=""
             android:theme="@style/NoDisplayTheme" />
 
         <activity

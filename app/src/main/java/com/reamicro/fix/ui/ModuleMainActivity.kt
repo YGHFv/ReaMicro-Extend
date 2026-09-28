@@ -1,5 +1,12 @@
 package com.reamicro.fix.ui
 
+import com.reamicro.fix.R
+import android.content.Context
+import androidx.annotation.StringRes
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalResources
 import android.Manifest
 import android.app.ActivityManager
 import android.content.ComponentName
@@ -17,10 +24,16 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.horizontalDrag
@@ -38,6 +51,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -74,8 +88,12 @@ import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.res.colorResource
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.boundsInWindow
@@ -165,6 +183,8 @@ import top.yukonga.miuix.kmp.utils.pagerGestureOverride
 import top.yukonga.miuix.kmp.utils.springAnimateToPage
 import top.yukonga.miuix.kmp.theme.darkColorScheme
 import top.yukonga.miuix.kmp.theme.lightColorScheme
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import org.lsposed.hiddenapibypass.HiddenApiBypass
 import java.text.SimpleDateFormat
@@ -206,11 +226,35 @@ class ModuleMainActivity : ComponentActivity() {
     private val wakeUi = mutableStateOf<WakeUi?>(null)
     private val hideRecentTask = mutableStateOf(false)
 
-    /** 隐藏桌面图标：禁用 launcher 别名。主界面本身不受影响，隐藏后仍能进来把它关掉。 */
+    /** 隐藏桌面图标：禁用全部图标别名。主界面本身不受影响，隐藏后仍能进来把它关掉。 */
     private val hideLauncherIcon = mutableStateOf(false)
+    /** 当前选中的桌面图标配色（未隐藏时才实际显示）。 */
+    private val launcherIconStyle = mutableStateOf(ModuleIconStyle.DEFAULT)
+    /** 上一次桌面图标操作暴露的异常状态（多入口/读失败/恢复失败等），供界面提示。null 表示正常。 */
+    private val launcherIconIssue = mutableStateOf<LauncherIconIssue?>(null)
+
+    /**
+     * 桌面图标切换/隐藏的状态机。判定（回显、恢复、失败回滚、原子提交）都在 [LauncherIconController]，
+     * 这里只提供 PackageManager 适配与偏好读写；懒加载保证在 Context 就绪后再取 packageManager。
+     */
+    private val launcherIcons by lazy {
+        LauncherIconController(
+            ModuleIconStyle.aliases(),
+            ModuleIconStyle.androidComponents(this),
+            launcherIconPreferences(),
+        )
+    }
+
+    /** 应用语言：0=跟随系统 1=简体中文 2=English。以模块自己的偏好为准（见 [ModuleLanguage]）。 */
+    private val appLanguage = mutableIntStateOf(0)
+    private val languageContext = mutableStateOf<Context?>(null)
+    private val uiContext: Context get() = languageContext.value ?: this
+
+    private fun uiText(@StringRes id: Int, vararg args: Any): String =
+        if (args.isEmpty()) uiContext.getString(id) else uiContext.getString(id, *args)
     private val notificationSummary = mutableStateOf("")
     private val logSummary = mutableStateOf("")
-    private val rootUi = mutableStateOf<RootUi?>(null)
+    private val rootUi = mutableStateOf<RootWakeController.Status?>(null)
 
     // ---- 界面设置（设置页「界面」卡片）----
 
@@ -246,19 +290,33 @@ class ModuleMainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         ModuleLogBuffer.attach(this)
         super.onCreate(savedInstanceState)
+        tab.intValue = savedInstanceState?.getInt(STATE_TAB, TAB_RECORDS) ?: TAB_RECORDS
+        themeMode.intValue = uiPrefInt(KEY_THEME_MODE).coerceIn(THEME_FOLLOW_SYSTEM, THEME_DARK)
         // 窗口底色跟着深浅色走：首帧之前系统栏区域显示的就是它（透明会让部分 ROM 露黑边）。
         applyPredictiveBack(uiPrefBoolean(KEY_PREDICTIVE_BACK))
-        // 重装 APK 会把组件状态重置成默认（隐藏掉的图标又冒出来），进界面时按开关重新对齐一次。
-        applyLauncherIconVisibility(uiPrefBoolean(KEY_HIDE_LAUNCHER_ICON))
+        // 进界面时对齐一次桌面图标：恢复被进程中断的切换，并把桌面图标被重置回默认（例如某些
+        // 环境下组件状态被清成 manifest 默认）的情况纠回用户偏好。restore 内部做失败回滚，
+        // 不会因为一次 PackageManager 异常把界面点崩；结果同步回界面状态与提示。
+        applyLauncherIconResult(launcherIcons.restore())
+        updateLanguageContext()
         window?.setBackgroundDrawable(ColorDrawable(if (resolveDark(themeMode.intValue)) DARK_WINDOW_BG else LIGHT_WINDOW_BG))
         ModuleAndroidLog.legacy(LOG_TAG, "module main ui opened")
         refresh()
         setContent {
-            val dark = resolveDark(themeMode.intValue)
-            ImmersiveSystemBars(dark)
-            SystemBarAppearance(dark)
-            MiuixTheme(colors = if (dark) darkColorScheme() else lightColorScheme()) {
-                ModuleApp()
+            val localizedContext = uiContext
+            CompositionLocalProvider(
+                LocalContext provides localizedContext,
+                LocalResources provides localizedContext.resources,
+                LocalLayoutDirection provides if (localizedContext.resources.configuration.layoutDirection == android.view.View.LAYOUT_DIRECTION_RTL)
+                    LayoutDirection.Rtl else LayoutDirection.Ltr,
+                LocalConfiguration provides Configuration(localizedContext.resources.configuration),
+            ) {
+                val dark = resolveDark(themeMode.intValue)
+                ImmersiveSystemBars(dark)
+                SystemBarAppearance(dark)
+                MiuixTheme(colors = if (dark) darkColorScheme() else lightColorScheme()) {
+                    ModuleApp()
+                }
             }
         }
     }
@@ -302,6 +360,9 @@ class ModuleMainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         setTaskExcludedFromRecents(false)
+        // 先无条件刷新一次，保证从通知/后台回到界面时立即反映最新状态（通知记录、任务、日志等）；
+        // 不要只依赖 sync 回调——回调可能延迟或不触发，会表现为「通知都发了，进来状态没更新」。
+        refresh()
         KsuTaskBridge.requestSync(applicationContext) { runOnUiThread { if (!isFinishing && !isDestroyed) refresh() } }
     }
 
@@ -354,14 +415,15 @@ class ModuleMainActivity : ComponentActivity() {
         val status = CloudTaskWakeDiagnostics.inspect(this)
         wakeUi.value = WakeUi(
             healthy = status.healthy,
-            summary = status.summary(),
-            details = status.details().joinToString("\n"),
+            summary = moduleWakeSummary(uiContext, status),
+            details = moduleWakeDetails(uiContext, status).joinToString("\n"),
             notificationAllowed = status.notificationAllowed,
             exactAlarmAllowed = status.exactAlarmAllowed,
             batteryUnrestricted = status.batteryUnrestricted,
         )
         hideRecentTask.value = hideRecentTaskEnabled()
-        hideLauncherIcon.value = uiPrefBoolean(KEY_HIDE_LAUNCHER_ICON)
+        // 回显只读：以组件实际状态为准，UNKNOWN/多入口/未完成的切换都如实反映，不被偏好值盖掉。
+        applyLauncherIconResult(launcherIcons.inspect(), notify = false)
         blurBars.value = uiPrefBoolean(KEY_BLUR_BARS)
         floatingNavBar.value = uiPrefBoolean(KEY_FLOATING_NAV_BAR)
         // 液态玻璃默认开（KSU 也是这个默认值）：键不存在时取 true。
@@ -374,16 +436,15 @@ class ModuleMainActivity : ComponentActivity() {
 
         val notifications = NotificationRecordStore { context }.list()
         notificationSummary.value = if (notifications.isEmpty()) {
-            "还没有通知记录。任务结果通知会在这里留下投递结果（含失败原因）。"
+            uiText(R.string.notification_empty_summary)
         } else {
             val delivered = notifications.count { it.delivered }
-            "共 ${notifications.size} 条：成功投出 $delivered 条，未投出 ${notifications.size - delivered} 条。\n" +
-                "未投出的说明模块进程当时没能发出通知（被系统冻结或未启动），服务器会保留该消息下次重发。"
+            uiText(R.string.notification_summary, notifications.size, delivered, notifications.size - delivered)
         }
         val logs = ModuleLogBuffer.snapshot()
         val path = ModuleLogBuffer.filePath()
-        logSummary.value = "共 ${logs.size} 条（最新在前）。模块进程的日志默认不出现在 logcat 里，这里能直接看到。" +
-            (path?.let { "\n落盘位置：$it" } ?: "\n尚未落盘（模块还没被唤醒过）")
+        logSummary.value = uiText(R.string.log_summary, logs.size,
+            path?.let { uiText(R.string.log_file_path, it) } ?: uiText(R.string.log_file_unavailable))
     }
 
     /** 「任务概览」正文，与旧版逐字对齐（唤醒早于任务时刻的说明必须保留）。 */
@@ -395,13 +456,17 @@ class ModuleMainActivity : ComponentActivity() {
      * 唤醒可能早于任务本身是正常的（零点例行唤醒、云端任务完成时刻），但那不是用户需要
      * 在概览里读的信息。
      */
-    private fun buildOverviewText(store: LocalTaskStore): String = buildString {
+    private fun buildOverviewText(store: LocalTaskStore): String {
         val enabled = taskRows.value.count { it.task.enabled }
-        append("${accountCount.value} 个账号、$enabled 个任务已启用")
-        val wakeAt = NextWakeHint.read(this@ModuleMainActivity)
-        append("\n唤醒时刻：${wakeAt.takeIf { it > 0L }?.let(::formatTime) ?: "未排程"}")
+        val wakeAt = NextWakeHint.read(this)
         val nextTaskAt = futureNextRunAt(store)
-        append("\n下次任务时刻：${nextTaskAt?.let(::formatTime) ?: "无"}")
+        return uiText(
+            R.string.task_overview_body,
+            accountCount.intValue,
+            enabled,
+            wakeAt.takeIf { it > 0L }?.let(::formatTime) ?: uiText(R.string.status_unscheduled),
+            nextTaskAt?.let(::formatTime) ?: uiText(R.string.common_none),
+        )
     }
 
     /**
@@ -414,8 +479,7 @@ class ModuleMainActivity : ComponentActivity() {
         val spec = specOf(task.taskType)
         return buildString {
             if (spec != null && spec.blessingOptions.isNotEmpty()) {
-                append("运签 ")
-                append(CloudTaskLocalRunner.blessingLabel(task.blessingType))
+                append(uiText(R.string.task_blessing_summary, blessingLabel(task.blessingType)))
                 append('\n')
             }
             append(nextRunLine(accountId, task, spec))
@@ -576,7 +640,8 @@ class ModuleMainActivity : ComponentActivity() {
 
     @Composable
     private fun ModuleApp() {
-        val pagerState = rememberPagerState(initialPage = tab.intValue, pageCount = { TAB_TITLES.size })
+        val tabTitles = TAB_TITLE_RES.map { stringResource(it) }
+        val pagerState = rememberPagerState(initialPage = tab.intValue, pageCount = { TAB_TITLE_RES.size })
         val scope = rememberCoroutineScope()
         val pagerMode = PagerInterceptionMode.entries.getOrElse(pagerGestureMode.intValue) {
             PagerInterceptionMode.Native
@@ -590,7 +655,7 @@ class ModuleMainActivity : ComponentActivity() {
         }
         BackHandler(enabled = overlayOpen) { dismissTopOverlay() }
 
-        val scrollBehaviors = List(TAB_TITLES.size) { MiuixScrollBehavior() }
+        val scrollBehaviors = List(TAB_TITLE_RES.size) { MiuixScrollBehavior() }
         var pullRefreshing by remember { mutableStateOf(false) }
         val blurSupported = remember { isRuntimeShaderSupported() }
         val blurred = blurBars.value && blurSupported
@@ -604,16 +669,52 @@ class ModuleMainActivity : ComponentActivity() {
         val barBlurColors = BlurColors(
             blendColors = listOf(BlendColorEntry(surface.copy(alpha = BAR_TINT_ALPHA))),
         )
-        val currentPage = pagerState.currentPage.coerceIn(0, TAB_TITLES.lastIndex)
+        // 底栏高亮 / 顶栏标题用这个即时状态：点击立刻切高亮，不等 Pager 动画推进（原来直接读
+        // pagerState.currentPage，要等动画过半才更新，点击反馈明显滞后，观感就是"卡一下"）。
+        // 手势滑动时由下方的同步逻辑跟随真实页。
+        var selectedPage by remember { mutableIntStateOf(tab.intValue.coerceIn(0, TAB_TITLE_RES.lastIndex)) }
+        var isNavigating by remember { mutableStateOf(false) }
+        var navJob by remember { mutableStateOf<Job?>(null) }
+        // 首帧只组当前页，组合完成后再预载其余页：避免首次进入/切换时四页内容一起组合造成掉帧。
+        var contentReady by remember { mutableStateOf(false) }
+        LaunchedEffect(Unit) { contentReady = true }
+        // 手势滑动改变真实页时让高亮跟随；导航动画进行中不抢，避免与 animateToTab 打架。
+        LaunchedEffect(pagerState.currentPage) {
+            if (!isNavigating && selectedPage != pagerState.currentPage) {
+                selectedPage = pagerState.currentPage
+            }
+        }
+        val currentPage = selectedPage.coerceIn(0, TAB_TITLE_RES.lastIndex)
         val scrollBehavior = scrollBehaviors[currentPage]
+        // 点底栏切页：先取消上一次未完成的动画再起新的，连续点击不会堆叠多个 springAnimateToPage
+        // 相互打架（原来每次点都新起协程、无取消，是切换卡顿的主因）。高亮已在上面即时更新。
         val animateToTab: (Int) -> Unit = { index ->
-            scope.launch { pagerState.springAnimateToPage(index) }
+            if (index != selectedPage) {
+                navJob?.cancel()
+                selectedPage = index
+                isNavigating = true
+                navJob = scope.launch {
+                    val myJob = coroutineContext.job
+                    try {
+                        pagerState.springAnimateToPage(index)
+                    } finally {
+                        // 只有自己仍是最新的导航协程时才复位：连续快点时旧协程被 cancel，其 finally
+                        // 可能在新协程已置 isNavigating=true 之后才跑，若无这道 myJob 守卫就会把状态
+                        // 错误复位，导致手势同步逻辑在新动画中途抢改 selectedPage、高亮跳变
+                        // （KernelSU MainPagerState 同款守卫）。
+                        if (navJob == myJob) {
+                            isNavigating = false
+                            if (pagerState.currentPage != index) selectedPage = pagerState.currentPage
+                        }
+                    }
+                }
+            }
         }
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = TAB_TITLES[currentPage],
-                    largeTitle = TAB_TITLES[currentPage],
+                    title = tabTitles[currentPage],
+                    largeTitle = tabTitles[currentPage],
                     scrollBehavior = scrollBehavior,
                     color = if (blurred) Color.Transparent else MiuixTheme.colorScheme.surface,
                     modifier = if (blurred) {
@@ -639,6 +740,9 @@ class ModuleMainActivity : ComponentActivity() {
                         contentAlignment = Alignment.Center,
                     ) {
                         FloatingBottomBar(
+                            // 拦住落在悬浮底栏本体上的点击/手势，避免穿透到底层 Pager 触发翻页或滚动
+                            // （KernelSU 的 BottomBarMiuix 同款 detectTapGestures 空实现）。
+                            modifier = Modifier.pointerInput(Unit) { detectTapGestures { } },
                             selectedIndex = currentPage,
                             onSelected = animateToTab,
                             backdrop = backdrop,
@@ -649,15 +753,18 @@ class ModuleMainActivity : ComponentActivity() {
                                 FloatingBottomBarItem(
                                     selected = currentPage == index,
                                     onClick = { activateTab(index) },
+                                    // 每个 tab 最小 76dp（KernelSU 同款）：配合底栏的 IntrinsicSize.Min，
+                                    // 让悬浮胶囊按内容收成合理宽度的窄胶囊居中，而非拉满整行。
+                                    modifier = Modifier.defaultMinSize(minWidth = 76.dp),
                                 ) {
                                     Icon(
                                         imageVector = icon,
-                                        contentDescription = TAB_TITLES[index],
+                                        contentDescription = tabTitles[index],
                                         tint = top.yukonga.miuix.kmp.theme.LocalContentColor.current,
                                         modifier = Modifier.size(24.dp),
                                     )
                                     Text(
-                                        text = TAB_TITLES[index],
+                                        text = tabTitles[index],
                                         color = top.yukonga.miuix.kmp.theme.LocalContentColor.current,
                                         fontSize = 11.sp,
                                         lineHeight = 14.sp,
@@ -688,7 +795,7 @@ class ModuleMainActivity : ComponentActivity() {
                                 selected = currentPage == index,
                                 onClick = { animateToTab(index) },
                                 icon = icon,
-                                label = TAB_TITLES[index],
+                                label = tabTitles[index],
                             )
                         }
                     }
@@ -709,7 +816,9 @@ class ModuleMainActivity : ComponentActivity() {
             HorizontalPager(
                 modifier = pagerModifier,
                 state = pagerState,
-                beyondViewportPageCount = 1,
+                // 首帧只组当前页（0），组合稳定后再预载其余页（3=全部）：与 KernelSU 同策略，
+                // 避免冷启动/首切时四页一起组合掉帧。
+                beyondViewportPageCount = if (contentReady) 3 else 0,
                 userScrollEnabled = userScrollEnabled && !interceptPager,
                 overscrollEffect = null,
                 pageNestedScrollConnection = if (interceptPager) {
@@ -730,11 +839,17 @@ class ModuleMainActivity : ComponentActivity() {
                             .padding(top = padding.calculateTopPadding())
                             .padding(vertical = 4.dp),
                     ) {
-                        when (page) {
-                            TAB_TASKS -> TasksPage()
-                            TAB_CONFIG -> ConfigPage()
-                            TAB_ABOUT -> AboutPage()
-                            else -> {}
+                        // 懒组合：首帧只组当前页，其余页等 contentReady 再组，避免一次性组四页掉帧。
+                        // 与 beyondViewportPageCount 的分级预载配套（KernelSU 同策略）。
+                        // 记录页条目上百，已移出 pager 单独走 Lazy 容器（见下方 TAB_RECORDS 分支），
+                        // 这里 else 留空即可。
+                        if (contentReady || page == currentPage) {
+                            when (page) {
+                                TAB_TASKS -> TasksPage()
+                                TAB_CONFIG -> ConfigPage(isCurrentPage = page == currentPage)
+                                TAB_ABOUT -> AboutPage()
+                                else -> {}
+                            }
                         }
                         Spacer(Modifier.height(padding.calculateBottomPadding()))
                         Spacer(Modifier.height(4.dp))
@@ -747,7 +862,7 @@ class ModuleMainActivity : ComponentActivity() {
                             pullRefreshing = true
                             recomputeSchedule { pullRefreshing = false }
                         },
-                        refreshTexts = listOf("下拉刷新", "松手刷新", "正在刷新…", "刷新成功"),
+                        refreshTexts = listOf(uiText(R.string.refresh_pull), uiText(R.string.refresh_release), uiText(R.string.refresh_running), uiText(R.string.refresh_success)),
                         contentPadding = PaddingValues(top = padding.calculateTopPadding()),
                         topAppBarScrollBehavior = pageScroll,
                     ) {
@@ -795,15 +910,15 @@ class ModuleMainActivity : ComponentActivity() {
             if (list.isEmpty()) {
                 item(key = "empty", contentType = "empty") {
                     SectionCard(
-                        title = "还没有执行记录",
-                        description = "到「任务」页点任务卡片上的「执行」可以先跑一轮；点任意一条记录能看详情（运签、奖励、行商事件）",
+                        title = uiText(R.string.records_empty_title),
+                        description = uiText(R.string.records_empty_description),
                     )
                 }
                 return@LazyColumn
             }
             item(key = "summary", contentType = "summary") {
                 Text(
-                    "共 ${list.size} 条 · 失败 ${failedCount.intValue} 条",
+                    uiText(R.string.record_summary, list.size, failedCount.intValue),
                     modifier = Modifier.padding(horizontal = 28.dp),
                     style = MiuixTheme.textStyles.footnote1,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
@@ -837,7 +952,8 @@ class ModuleMainActivity : ComponentActivity() {
     private fun RecordCard(accountId: String, record: LocalTaskRecord) {
         val failed = record.result != "success"
         SectionCard(
-            title = taskTitle(record.taskType) + if (failed) "（${resultLabel(record.result)}）" else "",
+            title = if (failed) uiText(R.string.record_failed_title, taskTitle(record.taskType), resultLabel(record.result))
+            else taskTitle(record.taskType),
             titleColor = if (failed) DangerRed else MiuixTheme.colorScheme.onSurface,
             trailing = {
                 Text(
@@ -862,19 +978,19 @@ class ModuleMainActivity : ComponentActivity() {
         // 播报正文统一走 description（14sp / 常规字重）：与记录页、设置页的卡片正文
         // 同一档（此前走 subtitle = 12sp/550，实测帧高 49px vs 57px，三页里独此一档）。
         SectionCard(
-            title = "任务概览",
+            title = uiText(R.string.task_overview_title),
             description = overviewText.value,
         )
         if (taskRows.value.isEmpty()) {
             SectionCard(
-                title = "还没有本地任务",
-                description = "在阅微的设置页里启用任务后，这里就能配置",
+                title = uiText(R.string.tasks_empty_title),
+                description = uiText(R.string.tasks_empty_description),
             )
         } else {
             taskRows.value.forEach { row -> TaskCard(row) }
         }
         Text(
-            "本地任务由模块进程执行；与阅微设置页同步时保留最新配置，旧镜像不会覆盖刚保存的选择。",
+            uiText(R.string.tasks_sync_note),
             modifier = Modifier.padding(horizontal = 28.dp),
             style = MiuixTheme.textStyles.footnote1,
             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
@@ -884,21 +1000,44 @@ class ModuleMainActivity : ComponentActivity() {
     // ---- 设置页 ----
 
     @Composable
-    private fun ConfigPage() {
+    private fun ConfigPage(isCurrentPage: Boolean = true) {
         // Root 增强原来挂在「关于」页，按需求搬到设置页：它本质是后台唤醒的一种实现方式，
         // 和下面那组「权限与后台」本就是同一件事。
-        // 探测要起 su 进程，进页一次即可；结果落在 rootUi。
-        LaunchedEffect(Unit) {
-            if (rootUi.value == null) {
+        // 探测要起 su 进程，且只在**真正切到设置页**时才跑一次：分级预载（beyondViewportPageCount=3）
+        // 会提前把设置页组合出来，若用 LaunchedEffect(Unit) 就会在用户还没进设置页时就起 su 进程。
+        // 用 isCurrentPage 门控（KernelSU 各 Pager 的 hasActivated 同款），避免这次无谓的 root 探测。
+        LaunchedEffect(isCurrentPage) {
+            if (isCurrentPage && rootUi.value == null) {
                 runBg(
                     work = { RootWakeController.inspect(applicationContext) },
                     then = { status ->
-                        rootUi.value = RootUi(status.rootAvailable, status.displayTitle(), status.message)
+                        rootUi.value = status
                     },
                 )
             }
         }
-        GroupTitle("界面")
+        // 语言板块：应用语言切换（跟随系统 / 简体中文 / English）。
+        GroupTitle(stringResource(R.string.section_language))
+        Card(
+            modifier = Modifier
+                .padding(horizontal = 12.dp)
+                .padding(bottom = 12.dp),
+            insideMargin = PaddingValues(0.dp),
+        ) {
+            OverlayDropdownPreference(
+                title = stringResource(R.string.pref_app_language_title),
+                summary = stringResource(R.string.pref_app_language_summary),
+                items = listOf(
+                    stringResource(R.string.language_system),
+                    stringResource(R.string.language_zh),
+                    stringResource(R.string.language_en),
+                ),
+                selectedIndex = appLanguage.intValue.coerceIn(0, 2),
+                onSelectedIndexChange = ::setAppLanguage,
+            )
+        }
+
+        GroupTitle(stringResource(R.string.section_interface))
         // 外观相关的开关统一收在一张卡片里（KSU 把这一组叫「主题设置」）：
         // 第一行是主题下拉，与「页面切换手势」同款：点右侧展开选择。
         // 「液态玻璃」只对悬浮底栏有意义，所以只在悬浮底栏开启时出现。
@@ -909,35 +1048,72 @@ class ModuleMainActivity : ComponentActivity() {
             insideMargin = PaddingValues(0.dp),
         ) {
             OverlayDropdownPreference(
-                title = "主题",
-                summary = "跟随系统，或固定为日间/夜间",
-                items = listOf("跟随系统", "日间主题", "夜间主题"),
+                title = stringResource(R.string.pref_theme_title),
+                summary = stringResource(R.string.pref_theme_summary),
+                items = listOf(
+                    stringResource(R.string.theme_system),
+                    stringResource(R.string.theme_light),
+                    stringResource(R.string.theme_dark),
+                ),
                 selectedIndex = themeMode.intValue.coerceIn(THEME_FOLLOW_SYSTEM, THEME_DARK),
                 onSelectedIndexChange = ::setThemeMode,
             )
             SwitchPreference(
-                title = "模糊",
-                summary = "启用顶栏和底栏的模糊效果",
+                title = stringResource(R.string.pref_blur_title),
+                summary = stringResource(R.string.pref_blur_summary),
                 checked = blurBars.value,
                 onCheckedChange = ::toggleBlurBars,
             )
             SwitchPreference(
-                title = "悬浮底栏",
-                summary = "使用 Apple 风格的悬浮底栏",
+                title = stringResource(R.string.pref_floating_bar_title),
+                summary = stringResource(R.string.pref_floating_bar_summary),
                 checked = floatingNavBar.value,
                 onCheckedChange = ::toggleFloatingNavBar,
             )
             if (floatingNavBar.value) {
                 SwitchPreference(
-                    title = "液态玻璃",
-                    summary = "启用悬浮底栏的液态玻璃效果",
+                    title = stringResource(R.string.pref_liquid_glass_title),
+                    summary = stringResource(R.string.pref_liquid_glass_summary),
                     checked = liquidGlass.value,
                     onCheckedChange = ::toggleLiquidGlass,
                 )
             }
         }
 
-        GroupTitle("手势")
+        // 个性化：切换应用图标（含横向图标选择器）+ 两个隐藏开关。
+        GroupTitle(stringResource(R.string.section_personalization))
+        Card(
+            modifier = Modifier
+                .padding(horizontal = 12.dp)
+                .padding(bottom = 12.dp),
+            insideMargin = PaddingValues(0.dp),
+        ) {
+            Column {
+                Text(
+                    text = stringResource(R.string.pref_app_icon_title),
+                    fontSize = MiuixTheme.textStyles.headline1.fontSize,
+                    fontWeight = FontWeight.Medium,
+                    color = MiuixTheme.colorScheme.onSurface,
+                    modifier = Modifier.padding(start = 16.dp, top = 14.dp, end = 16.dp, bottom = 10.dp),
+                )
+                LauncherIconPicker()
+                Spacer(Modifier.height(12.dp))
+            }
+            SwitchPreference(
+                title = stringResource(R.string.pref_hide_recent_title),
+                summary = stringResource(R.string.pref_hide_recent_summary),
+                checked = hideRecentTask.value,
+                onCheckedChange = { toggleHideRecentTask() },
+            )
+            SwitchPreference(
+                title = stringResource(R.string.pref_hide_launcher_title),
+                summary = stringResource(R.string.pref_hide_launcher_summary),
+                checked = hideLauncherIcon.value,
+                onCheckedChange = ::toggleHideLauncherIcon,
+            )
+        }
+
+        GroupTitle(stringResource(R.string.section_gesture))
         Card(
             modifier = Modifier
                 .padding(horizontal = 12.dp)
@@ -946,55 +1122,59 @@ class ModuleMainActivity : ComponentActivity() {
         ) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 SwitchPreference(
-                    title = "预测性返回手势",
-                    summary = "边缘返回时预览上一层",
+                    title = stringResource(R.string.pref_predictive_back_title),
+                    summary = stringResource(R.string.pref_predictive_back_summary),
                     checked = predictiveBack.value,
                     onCheckedChange = ::togglePredictiveBack,
                 )
             }
             SwitchPreference(
-                title = "横移返回手势",
-                summary = "边缘横滑关闭弹窗",
+                title = stringResource(R.string.pref_swipe_back_title),
+                summary = stringResource(R.string.pref_swipe_back_summary),
                 checked = swipeBack.value,
                 onCheckedChange = ::toggleSwipeBack,
             )
             OverlayDropdownPreference(
-                title = "页面切换手势",
-                summary = "左右滑动切页时的列表滚动处理",
-                items = listOf("默认", "跨轴拦截", "iOS 风格"),
+                title = stringResource(R.string.pref_pager_gesture_title),
+                summary = stringResource(R.string.pref_pager_gesture_summary),
+                items = listOf(
+                    stringResource(R.string.pager_gesture_default),
+                    stringResource(R.string.pager_gesture_cross),
+                    stringResource(R.string.pager_gesture_ios),
+                ),
                 selectedIndex = pagerGestureMode.intValue.coerceIn(0, 2),
                 onSelectedIndexChange = ::setPagerGestureMode,
             )
         }
 
-        GroupTitle("权限与后台")
+        GroupTitle(uiText(R.string.section_permissions))
         WakeCards()
 
-        GroupTitle("Root 增强（实验性）")
+        GroupTitle(uiText(R.string.section_root))
         RootCard()
 
-        GroupTitle("通知与日志")
+        GroupTitle(uiText(R.string.section_notifications_logs))
         SectionCard(
-            title = "通知记录",
+            title = uiText(R.string.notification_records_title),
             description = notificationSummary.value,
         ) {
-            CapsuleButton(MiuixIcons.Info, "查看") { showNotificationRecords() }
+            CapsuleButton(MiuixIcons.Info, uiText(R.string.action_view)) { showNotificationRecords() }
             Spacer(Modifier.weight(1f))
-            CapsuleButton(MiuixIcons.Delete, "清空") {
+            CapsuleButton(MiuixIcons.Delete, uiText(R.string.action_clear)) {
                 NotificationRecordStore { applicationContext }.clear()
-                toast("通知记录已清空")
+                toast(uiText(R.string.toast_notifications_cleared))
                 refresh()
             }
         }
         SectionCard(
-            title = "模块日志",
+            title = uiText(R.string.module_logs_title),
             description = logSummary.value,
         ) {
-            CapsuleButton(MiuixIcons.Info, "查看") { showLogs() }
+            CapsuleButton(MiuixIcons.Info, uiText(R.string.action_view)) { showLogs() }
             Spacer(Modifier.weight(1f))
-            CapsuleButton(MiuixIcons.Delete, "清空") {
+            CapsuleButton(MiuixIcons.Delete, uiText(R.string.action_clear)) {
                 ModuleLogBuffer.clear()
-                toast("日志已清空")
+                toast(uiText(R.string.toast_logs_cleared))
                 refresh()
             }
         }
@@ -1013,7 +1193,7 @@ class ModuleMainActivity : ComponentActivity() {
     @Composable
     private fun TaskCard(row: TaskRow) {
         SectionCard(
-            title = row.spec?.title ?: taskTitle(row.task.taskType),
+            title = taskTitle(row.task.taskType),
             titleColor = if (row.task.enabled) MiuixTheme.colorScheme.onSurface
             else MiuixTheme.colorScheme.onSurfaceVariantActions,
             description = row.subtitle,
@@ -1024,9 +1204,9 @@ class ModuleMainActivity : ComponentActivity() {
                 )
             },
         ) {
-            CapsuleButton(MiuixIcons.Play, "执行") { runSingleTask(row.accountId, row.task) }
+            CapsuleButton(MiuixIcons.Play, uiText(R.string.action_run)) { runSingleTask(row.accountId, row.task) }
             Spacer(Modifier.weight(1f))
-            CapsuleButton(MiuixIcons.Settings, "配置") { openTaskEditor(row.accountId, row.task, row.spec) }
+            CapsuleButton(MiuixIcons.Settings, uiText(R.string.action_configure)) { openTaskEditor(row.accountId, row.task, row.spec) }
         }
     }
 
@@ -1035,7 +1215,7 @@ class ModuleMainActivity : ComponentActivity() {
     private fun RootCard() {
         val root = rootUi.value
         SectionCard(
-            title = root?.title ?: "Root 状态（正在检测…）",
+            title = root?.let { moduleRootTitle(uiContext, it) } ?: uiText(R.string.root_checking),
             titleColor = if (root?.rootAvailable == true) {
                 MiuixTheme.colorScheme.onSurface
             } else {
@@ -1043,19 +1223,17 @@ class ModuleMainActivity : ComponentActivity() {
             },
             description = buildString {
                 if (root != null) {
-                    append(root.message)
+                    append(moduleRootMessage(uiContext, root))
                     append('\n')
                 }
                 append(
-                    "部分机型（如 HyperOS）会冻结后台应用，冻结期间系统闹钟与通知广播都不会执行。" +
-                        "启用后，由 root 侧的看门狗在任务时刻唤醒模块（模块每次排完闹钟会把下次时刻写给它），" +
-                        "不受冻结影响。\n开启会在 /data/adb/service.d 写入一个开机脚本；停用会删除它。",
+                    uiText(R.string.root_description),
                 )
             },
         ) {
-            CapsuleButton(MiuixIcons.Play, "启用") { rootAction { RootWakeController.enable(applicationContext) } }
+            CapsuleButton(MiuixIcons.Play, uiText(R.string.action_enable)) { rootAction { RootWakeController.enable(uiContext) } }
             Spacer(Modifier.weight(1f))
-            CapsuleButton(MiuixIcons.Delete, "停用") { rootAction { RootWakeController.disable(applicationContext) } }
+            CapsuleButton(MiuixIcons.Delete, uiText(R.string.action_disable)) { rootAction { RootWakeController.disable(uiContext) } }
         }
     }
 
@@ -1063,52 +1241,109 @@ class ModuleMainActivity : ComponentActivity() {
     private fun WakeCards() {
         val wake = wakeUi.value
         SectionCard(
-            title = "后台唤醒",
+            title = uiText(R.string.wake_title),
             titleColor = if (wake == null || wake.healthy) MiuixTheme.colorScheme.onSurface else DangerRed,
             description = wake?.let { w ->
                 if (w.details.isNotBlank()) "${w.summary}\n${w.details}" else w.summary
             },
         )
         SectionCard(
-            title = "本地任务执行模式",
-            description = KsuTaskBridge.statusText(applicationContext),
+            title = uiText(R.string.execution_mode_title),
+            description = KsuTaskBridge.statusText(uiContext),
         ) {
-            CapsuleButton(MiuixIcons.Settings, "说明与切换") { showExecutionModeDialog() }
+            CapsuleButton(MiuixIcons.Settings, uiText(R.string.execution_switch)) { showExecutionModeDialog() }
             Spacer(Modifier.weight(1f))
-            CapsuleButton(MiuixIcons.Update, "同步状态") {
-                rootAction { KsuTaskBridge.synchronize(applicationContext); "状态已同步" }
+            CapsuleButton(MiuixIcons.Update, uiText(R.string.action_sync_status)) {
+                rootAction { KsuTaskBridge.synchronize(uiContext); uiText(R.string.toast_status_synced) }
             }
         }
 
-        // 两个「藏起来」的开关共用一张卡片：
-        // ①「隐藏后台卡片」：打开 = 返回桌面时把模块从最近任务卡片里藏起来
-        //    （onUserLeaveHint/onStop 里的 setExcludeFromRecents），不影响自动任务。
-        // ②「隐藏桌面图标」：打开 = 禁用 launcher 别名（.ui.ModuleLauncherAlias），
-        //    图标从桌面消失。主界面自身始终 enabled，隐藏后仍能进来关掉它，不会把自己锁在外面。
-        // 两行 checked 都直接跟状态走，不放说明行。
-        Card(
-            modifier = Modifier
-                .padding(horizontal = 12.dp)
-                .padding(bottom = 12.dp),
-            insideMargin = PaddingValues(0.dp),
-        ) {
-            SwitchPreference(
-                title = "隐藏后台卡片",
-                checked = hideRecentTask.value,
-                onCheckedChange = { toggleHideRecentTask() },
-            )
-            SwitchPreference(
-                title = "隐藏桌面图标",
-                checked = hideLauncherIcon.value,
-                onCheckedChange = ::toggleHideLauncherIcon,
-            )
-        }
-
         SectionCard(
-            title = "授权与跳转",
-            description = "通知权限要在这里授予；精确闹钟与电池优化放行后，通知才不会延迟数小时。",
+            title = uiText(R.string.permissions_title),
+            description = uiText(R.string.permissions_description),
         ) {
             PermissionActions()
+        }
+    }
+
+    /**
+     * 图标配色选择器：一行横向滚动的圆形预览，选中项高亮描边并显示两字名称。
+     * 点选立即调用 [selectLauncherIcon]（隐藏状态下仅记录，恢复时生效）。
+     */
+    @Composable
+    private fun LauncherIconPicker() {
+        val current = launcherIconStyle.value
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            ModuleIconStyle.entries.forEach { style ->
+                val selected = style == current
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable { selectLauncherIcon(style) }
+                        .padding(4.dp),
+                ) {
+                    // 四角圆润 18dp（用 Compose 标准 RoundedCornerShape，普通圆弧）。minSdk 26，
+                    // 不用 miuix squircle——它的着色器要 API 33+，低版本会回退，不如直接用圆角矩形统一。
+                    // 描边：未选中 1.2dp / 选中 1.5dp，只有选中态用 primary 蓝、未选中用淡分割线色。
+                    val iconShape = RoundedCornerShape(18.dp)
+                    val borderColor by animateColorAsState(
+                        targetValue = if (selected) {
+                            MiuixTheme.colorScheme.primary
+                        } else {
+                            MiuixTheme.colorScheme.dividerLine
+                        },
+                        label = "iconBorder",
+                    )
+                    val borderWidth by animateDpAsState(
+                        targetValue = if (selected) 1.5.dp else 1.2.dp,
+                        label = "iconBorderWidth",
+                    )
+                    // 预览按 adaptive-icon 的两层自行叠合：底层背景色 + 上层前景位图。
+                    // 不直接光栅化整张 adaptive-icon(mipmap XML)——那样在部分 ROM（HyperOS 等）
+                    // 画不出前景、预览空白。前景是 PNG，painterResource 可直接加载。
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(iconShape)
+                            .background(colorResource(style.background))
+                            .border(borderWidth, borderColor, iconShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        // 前景 PNG 按 adaptive-icon 规范带大片透明安全边距（108dp 画布里图案只占
+                        // 中间一小块），直接铺满会显得"空白居多"。真实启动器显示时会把前景裁剪放大
+                        // （108dp → 可视约 72dp，≈1.5x）。这里给预览前景做同等缩放，观感与桌面一致。
+                        // 仅影响预览渲染，不改任何图标资源、也不影响真实应用图标。
+                        Image(
+                            painter = painterResource(style.foreground),
+                            contentDescription = uiText(style.labelRes),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(iconShape)
+                                .graphicsLayer {
+                                    scaleX = 1.5f
+                                    scaleY = 1.5f
+                                },
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = uiText(style.labelRes),
+                        fontSize = 12.sp,
+                        color = if (selected) {
+                            MiuixTheme.colorScheme.primary
+                        } else {
+                            MiuixTheme.colorScheme.onSurfaceVariantSummary
+                        },
+                    )
+                }
+            }
         }
     }
 
@@ -1128,16 +1363,16 @@ class ModuleMainActivity : ComponentActivity() {
         // (图标, 文案, 动作)：图标为空 = 纯文字胶囊。
         val entries = buildList {
             if (wake != null && !wake.notificationAllowed) {
-                add(Triple<ImageVector?, String, () -> Unit>(null, "开启通知") { requestNotificationPermission() })
+                add(Triple<ImageVector?, String, () -> Unit>(null, uiText(R.string.permission_notifications)) { requestNotificationPermission() })
             }
             if (wake != null && !wake.exactAlarmAllowed) {
-                add(Triple<ImageVector?, String, () -> Unit>(null, "精确闹钟") { openSystemSettings(CloudTaskWakeDiagnostics.exactAlarmSettingsIntent()) })
+                add(Triple<ImageVector?, String, () -> Unit>(null, uiText(R.string.permission_exact_alarm)) { openSystemSettings(CloudTaskWakeDiagnostics.exactAlarmSettingsIntent()) })
             }
             if (wake != null && !wake.batteryUnrestricted) {
-                add(Triple<ImageVector?, String, () -> Unit>(null, "电池优化") { openSystemSettings(CloudTaskWakeDiagnostics.batteryOptimizationIntent()) })
+                add(Triple<ImageVector?, String, () -> Unit>(null, uiText(R.string.permission_battery)) { openSystemSettings(CloudTaskWakeDiagnostics.batteryOptimizationIntent()) })
             }
-            add(Triple<ImageVector?, String, () -> Unit>(MiuixIcons.Tune, "厂商自启动") { openAutoStartSettings() })
-            add(Triple<ImageVector?, String, () -> Unit>(MiuixIcons.Alarm, "重排闹钟") { rescheduleAlarm() })
+            add(Triple<ImageVector?, String, () -> Unit>(MiuixIcons.Tune, uiText(R.string.permission_autostart)) { openAutoStartSettings() })
+            add(Triple<ImageVector?, String, () -> Unit>(MiuixIcons.Alarm, uiText(R.string.action_reschedule)) { rescheduleAlarm() })
         }
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             entries.chunked(2).forEach { pair ->
@@ -1169,7 +1404,7 @@ class ModuleMainActivity : ComponentActivity() {
             work = {
                 val updated = LocalTaskStore { applicationContext }.rescheduleEnabledTasks()
                 runCatching { CloudTaskWakeScheduler.schedule(applicationContext) }
-                if (updated > 0) "已按配置时间重算 $updated 个任务" else "任务时刻已经和配置一致"
+                if (updated > 0) uiText(R.string.toast_schedule_recomputed, updated) else uiText(R.string.toast_schedule_unchanged)
             },
             then = { message ->
                 toast(message)
@@ -1194,7 +1429,7 @@ class ModuleMainActivity : ComponentActivity() {
         store.setEnabled(accountId, task.taskType, enabled, store.token(accountId))
         // 开关变了要重排闹钟，否则新启用的任务不会被唤醒执行。
         runCatching { CloudTaskWakeScheduler.schedule(applicationContext) }
-        toast("${taskTitle(task.taskType)}已${if (enabled) "启用" else "停用"}")
+        toast(uiText(if (enabled) R.string.toast_task_enabled else R.string.toast_task_disabled, taskTitle(task.taskType)))
         refresh()
     }
 
@@ -1203,7 +1438,7 @@ class ModuleMainActivity : ComponentActivity() {
         writeUiPref(KEY_HIDE_RECENT_TASK, enabled)
         setTaskExcludedFromRecents(false)
         hideRecentTask.value = enabled
-        toast(if (enabled) "返回桌面后自动隐藏模块后台卡片" else "模块后台卡片恢复显示")
+        toast(if (enabled) uiText(R.string.toast_recents_hidden) else uiText(R.string.toast_recents_shown))
     }
 
     /**
@@ -1212,35 +1447,137 @@ class ModuleMainActivity : ComponentActivity() {
      * 为什么绕一层别名：直接禁主界面会把唯一入口一起删掉，隐藏后就再也打不开本页、
      * 也就关不掉这个开关了。别名禁用后 `getLaunchIntentForPackage` 会返回 null，
      * 桌面与 LSPosed 管理器里的「打开」都会失效，所以 toast 里把剩下的入口写清楚。
+     *
+     * 结果按实际生效情况提示：成功隐藏才写恢复入口，成功恢复才说已恢复；失败则给失败文案，
+     * 并让开关回显回退到 [applyLauncherIconResult] 读到的真实状态，不再无条件报成功。
      */
     private fun toggleHideLauncherIcon(enabled: Boolean) {
-        writeUiPref(KEY_HIDE_LAUNCHER_ICON, enabled)
-        hideLauncherIcon.value = enabled
-        applyLauncherIconVisibility(enabled)
+        val result = launcherIcons.setHidden(enabled)
+        applyLauncherIconResult(result, notify = false)
+        val hidden = result.view.choice.hidden
         toast(
-            if (enabled) "桌面图标已隐藏；adb 恢复：am start -n $MODULE_PACKAGE/$MAIN_ACTIVITY_CLASS"
-            else "桌面图标已恢复",
+            when {
+                !result.success -> uiText(R.string.toast_icon_switch_failed)
+                hidden -> uiText(R.string.toast_launcher_hidden, MODULE_PACKAGE, MAIN_ACTIVITY_CLASS)
+                else -> uiText(R.string.toast_launcher_shown)
+            },
         )
     }
 
     /**
-     * 按开关值对齐 launcher 别名的启用状态。
+     * 切换桌面图标配色。
      *
-     * DONT_KILL_APP：别把正在翻这个开关的界面自己杀掉。重装 APK 会把组件状态重置回默认
-     * （图标又冒出来），所以每次进界面都要按开关重新对齐一次，见 [onCreate]。
+     * 隐藏状态下也能选：控制器只更新偏好、不点亮别名，等关掉「隐藏桌面图标」时再套用。
+     * 未隐藏时立即生效并核对组件实际状态，失败会自动回滚到上一套配色，界面回显随之纠正。
      */
-    private fun applyLauncherIconVisibility(hidden: Boolean) {
-        runCatching {
-            packageManager.setComponentEnabledSetting(
-                ComponentName(this, LAUNCHER_ALIAS_CLASS),
-                if (hidden) {
-                    PackageManager.COMPONENT_ENABLED_STATE_DISABLED
-                } else {
-                    PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-                },
-                PackageManager.DONT_KILL_APP,
+    private fun selectLauncherIcon(style: ModuleIconStyle) {
+        val hiddenBefore = hideLauncherIcon.value
+        val result = launcherIcons.selectStyle(style.key)
+        applyLauncherIconResult(result, notify = false)
+        // 隐藏态下切配色不点亮别名（避免把隐藏的图标重新点出来），因此不打扰用户；
+        // 仅在“可见”场景按实际结果提示成功或失败。
+        if (!hiddenBefore && !result.view.choice.hidden) {
+            toast(
+                if (result.success) uiText(R.string.toast_icon_switched, uiText(style.labelRes))
+                else uiText(R.string.toast_icon_switch_failed),
             )
-        }.onFailure { ModuleAndroidLog.error(LOG_TAG, "更新桌面图标可见性失败", it) }
+        }
+    }
+
+    /**
+     * 把控制器结果同步到界面：当前配色、隐藏开关、异常状态一次对齐。
+     *
+     * 只信控制器读到的**实际状态**（[LauncherIconView.choice] 由组件枚举推导），
+     * 不再各处单独读偏好、各改各的。[notify] 为 true 时（目前仅进界面恢复用）在检测到
+     * 异常状态时补一条提示，让“看起来没变”的失败/多入口也有反馈。
+     */
+    private fun applyLauncherIconResult(result: LauncherIconResult, notify: Boolean = true) {
+        val view = result.view
+        launcherIconStyle.value = ModuleIconStyle.fromKey(view.choice.key)
+        hideLauncherIcon.value = view.choice.hidden
+        launcherIconIssue.value = view.issue
+        view.issue?.let { ModuleAndroidLog.error(LOG_TAG, "桌面图标状态异常：$it", result.error) }
+        if (notify) {
+            when (view.issue) {
+                LauncherIconIssue.MULTIPLE ->
+                    toast(uiText(R.string.toast_icon_multiple, MODULE_PACKAGE, MAIN_ACTIVITY_CLASS))
+                LauncherIconIssue.RECOVERY_FAILED, LauncherIconIssue.SAVE_FAILED, LauncherIconIssue.APPLY_FAILED ->
+                    toast(uiText(R.string.toast_icon_switch_failed))
+                else -> Unit
+            }
+        }
+    }
+
+    /**
+     * 桌面图标控制器的偏好读写：落在同一份 UI prefs 里。
+     *
+     * confirmed = 上一套稳定选择；pending = 已落盘但未完成的切换（进程中断可续做）；
+     * configured = 是否已被用户设置过（区分“全新安装未设置”与“确实选择了默认款”）。
+     * 写入用 commit 并返回结果，让控制器据此判断“保存是否真的成功”。
+     */
+    private fun launcherIconPreferences(): LauncherIconPreferences = object : LauncherIconPreferences {
+        override fun read(): LauncherIconRecord {
+            val configured = uiPrefString(KEY_LAUNCHER_ICON_STYLE) != null || uiPrefBoolean(KEY_HIDE_LAUNCHER_ICON)
+            val confirmed = LauncherIconChoice(
+                ModuleIconStyle.fromKey(uiPrefString(KEY_LAUNCHER_ICON_STYLE)).key,
+                hidden = uiPrefBoolean(KEY_HIDE_LAUNCHER_ICON),
+            )
+            val pending = uiPrefString(KEY_LAUNCHER_ICON_PENDING)?.let { key ->
+                LauncherIconChoice(ModuleIconStyle.fromKey(key).key, hidden = uiPrefBoolean(KEY_LAUNCHER_ICON_PENDING_HIDDEN))
+            }
+            return LauncherIconRecord(confirmed, pending, configured)
+        }
+
+        override fun write(record: LauncherIconRecord): Boolean =
+            getSharedPreferences(UI_PREFS, MODE_PRIVATE).edit()
+                .putString(KEY_LAUNCHER_ICON_STYLE, record.confirmed.key)
+                .putBoolean(KEY_HIDE_LAUNCHER_ICON, record.confirmed.hidden)
+                .apply {
+                    if (record.pending == null) {
+                        remove(KEY_LAUNCHER_ICON_PENDING)
+                        remove(KEY_LAUNCHER_ICON_PENDING_HIDDEN)
+                    } else {
+                        putString(KEY_LAUNCHER_ICON_PENDING, record.pending.key)
+                        putBoolean(KEY_LAUNCHER_ICON_PENDING_HIDDEN, record.pending.hidden)
+                    }
+                }
+                .commit()
+    }
+
+    /**
+     * 只更新语言配置和可观察的资源上下文，不销毁 Activity / Compose 树。
+     * Android 13+ 同步系统应用语言；旧系统持久化选择并使用局部配置，不改全局 Locale。
+     */
+    private fun setAppLanguage(index: Int) {
+        if (index !in 0..2 || index == currentAppLanguageIndex()) return
+        runCatching { ModuleLanguage.setSelection(this, index) }
+            .onSuccess {
+                updateLanguageContext()
+                refresh()
+            }
+            .onFailure {
+                ModuleAndroidLog.error(LOG_TAG, "Failed to change app language", it)
+                toast(uiText(R.string.error_language_change))
+            }
+    }
+
+    private fun currentAppLanguageIndex(): Int = ModuleLanguage.selection(this)
+
+    private fun updateLanguageContext() {
+        appLanguage.intValue = currentAppLanguageIndex()
+        languageContext.value = ModuleLanguage.localizedContext(this, appLanguage.intValue)
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        updateLanguageContext()
+        refresh()
+        window.setBackgroundDrawable(ColorDrawable(if (resolveDark(themeMode.intValue)) DARK_WINDOW_BG else LIGHT_WINDOW_BG))
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putInt(STATE_TAB, tab.intValue)
+        super.onSaveInstanceState(outState)
     }
 
     /**
@@ -1370,8 +1707,8 @@ class ModuleMainActivity : ComponentActivity() {
     /**
      * 任务配置编辑：字段随任务类型变化（与阅微设置页同一套语义）。
      *
-     * 所有字段值都落在 [TaskEditor.values]（按标签取值），保存时直接交给
-     * [applyTaskEdits]——与旧版 editDialog 的 register 通道等价，标签是唯一键。
+     * 所有字段值都落在 [TaskEditor.values]（按稳定字段键取值），保存时直接交给
+     * [applyTaskEdits]——与旧版 editDialog 的 register 通道等价，字段键与翻译后的标签无关。
      */
     private fun openTaskEditor(accountId: String, task: LocalTask, spec: CloudAutomationTaskSpec?) {
         val editor = TaskEditor(accountId, task, spec)
@@ -1402,7 +1739,7 @@ class ModuleMainActivity : ComponentActivity() {
                 if (updated != null) {
                     editor.multiOptions[FIELD_PAWN] = updated
                 } else {
-                    toast(result.exceptionOrNull()?.message ?: "读取期物清单失败")
+                    toast(result.exceptionOrNull()?.message ?: uiText(R.string.error_pawn_load))
                 }
             })
         }
@@ -1418,7 +1755,7 @@ class ModuleMainActivity : ComponentActivity() {
                 editor.merchantLoading = false
                 val fetched = result.getOrNull()
                 if (fetched == null) {
-                    toast(result.exceptionOrNull()?.message ?: "读取城池/车马失败")
+                    toast(result.exceptionOrNull()?.message ?: uiText(R.string.error_merchant_load))
                 } else {
                     editor.merchantCities = fetched.cities
                     editor.merchantTransports = fetched.transports
@@ -1440,10 +1777,10 @@ class ModuleMainActivity : ComponentActivity() {
     }
 
     /** 从执行时攒下的图鉴里读禁当期物清单（不含网络请求，刷新才走网络）。 */
-    private fun pawnOptionsFromState(accountId: String): List<MultiSelectOption> {
+    private fun pawnOptionsFromState(accountId: String): List<ModulePawnOption> {
         val state = LocalTaskStore { applicationContext }.runtimeState(accountId, "pawn")
         return CloudTaskLocalRunner.pawnPropChoices(state).map {
-            MultiSelectOption(it.propId, it.label, cloudTaskQualityColor(it.quality))
+            ModulePawnOption(it.propId, it.name, cloudTaskQualityColor(it.quality), it.hint)
         }
     }
 
@@ -1453,15 +1790,15 @@ class ModuleMainActivity : ComponentActivity() {
      * 现在编辑器每次打开都会自动走这一趟，所以**并进**已存图鉴而不是整表替换——
      * 替换会把上周见过、今天已不在背包里的期物从图鉴里抹掉，已锁它的配置就没了名字。
      */
-    private fun fetchPawnOptions(accountId: String): List<MultiSelectOption> {
+    private fun fetchPawnOptions(accountId: String): List<ModulePawnOption> {
         val pawnStore = LocalTaskStore { applicationContext }
         val token = pawnStore.token(accountId)
         if (token.isBlank()) {
-            throw IllegalStateException("阅微登录凭据无效，请重新登录后再刷新")
+            throw IllegalStateException(uiText(R.string.error_credential_invalid))
         }
         val fetched = CloudTaskLocalRunner.fetchPawnPropCatalog(token)
         fetched.error?.let { reason ->
-            runOnUiThread { toast("部分期物没读到：$reason") }
+            runOnUiThread { toast(uiText(R.string.toast_pawn_partial, reason)) }
         }
         // fetched.catalog 里只有这次拉到的；图鉴里已有的保留，这次学到的覆盖同名条目。
         val fresh = fetched.catalog.keys().asSequence().mapNotNull { propId ->
@@ -1481,7 +1818,7 @@ class ModuleMainActivity : ComponentActivity() {
         state.put(CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG, merged)
         pawnStore.recordState(accountId, "pawn", state)
         return CloudTaskLocalRunner.pawnPropChoices(state).map {
-            MultiSelectOption(it.propId, it.label, cloudTaskQualityColor(it.quality))
+            ModulePawnOption(it.propId, it.name, cloudTaskQualityColor(it.quality), it.hint)
         }
     }
 
@@ -1503,7 +1840,7 @@ class ModuleMainActivity : ComponentActivity() {
             val hour = parts.getOrNull(0)?.toIntOrNull()
             val minute = parts.getOrNull(1)?.toIntOrNull()
             if (parts.size != 2 || hour == null || minute == null || hour !in 0..23 || minute !in 0..59) return null
-            "%02d:%02d".format(hour, minute)
+            String.format(Locale.ROOT, "%02d:%02d", hour, minute)
         } else task.timeOfDay
         val duration = if (spec?.autoRead == true) {
             text(FIELD_DURATION).toIntOrNull()?.takeIf { it in 1..720 } ?: return null
@@ -1548,20 +1885,20 @@ class ModuleMainActivity : ComponentActivity() {
                 .firstOrNull { it.id == editor.values[FIELD_TRANSPORT].orEmpty() }
                 ?.carryingCapacity ?: 0L
             if (principal > capacity && capacity > 0L) {
-                toast("本金不能超过当前车马的负重（$capacity）")
+                toast(uiText(R.string.error_principal_capacity, capacity))
                 return
             }
         }
         val fields = editor.values.mapValues { (_, value) -> { value } }
         val updated = applyTaskEdits(editor.task, editor.spec, fields)
         if (updated == null) {
-            toast("填写有误，请检查时间与数字")
+            toast(uiText(R.string.error_invalid_fields))
             return
         }
         val store = LocalTaskStore { applicationContext }
         store.saveTask(editor.accountId, updated, store.token(editor.accountId))
         runCatching { CloudTaskWakeScheduler.schedule(applicationContext) }
-        toast("配置已保存")
+        toast(uiText(R.string.toast_config_saved))
         editorDialog.value = null
         refresh()
     }
@@ -1569,35 +1906,19 @@ class ModuleMainActivity : ComponentActivity() {
     // ---- 文本弹窗 ----
 
     private fun showRecordDetail(accountId: String, record: LocalTaskRecord) {
-        val detail = runCatching { JSONObject(record.detail) }.getOrNull()
-        val lines = buildList {
-            add("时间：${formatDateTime(record.at)}")
-            add("任务：${taskTitle(record.taskType)}")
-            add("账号：$accountId")
-            add("结果：${resultLabel(record.result)}")
-            add("")
-            add(record.message)
-        }
         textDialog.value = TextDialogUi(
-            title = "${taskTitle(record.taskType)} 详情",
-            content = localTaskRecordDetailText(
-                lines.joinToString("\n"),
-                detail?.let { localTaskRecordDetailFields(record.taskType, it) }.orEmpty(),
-            ).toString(),
+            title = { uiText(R.string.record_detail_title, taskTitle(record.taskType)) },
+            content = { moduleRecordDetailText(uiContext, accountId, record, taskTitle(record.taskType), resultLabel(record.result)) },
         )
     }
 
     private fun showExecutionModeDialog() {
         textDialog.value = TextDialogUi(
-            title = "本地任务执行模式",
-            content = "Android 模式由系统闹钟与后台任务执行。KSU 模式由刷入模块的独立进程运行同一套任务逻辑，APK 被关闭也能继续。\n\n" +
-                "两种模式共用原来的本地任务设置，不需要重新配置。切换只等待本机正在执行的这一轮完成并保存进度，不会等待行商旅程结束或轶闻解锁；共用配置也不能跳过这个防重复执行的交接。\n\n" +
-                "KSU 模式为实验功能：需刷入配套 ZIP、授权本应用 root，只支持主用户。登录凭据会复制到 /data/adb/reamicro-automation 的 root 私有文件（目录 700、文件 600），普通应用不可读。切回 Android 会同步最终记录并清除该凭据副本。\n\n" +
-                "配套 KSU 模块已内置在 APK 里：点「使用 KSU」会先检查模块是否已刷入，没有就用 ksud 自动安装，装好后自动切换到 KSU 模式。如果安装后提示需要重启，重启设备再点一次即可。\n\n" +
-                "KSU 仍可能受设备休眠、断网、模块停用、token 失效或接口风控影响，并非绝对准时。检测失败时不自动切回，避免重复消费。卸载 KSU 模块前必须先切回 Android。",
+            title = { uiText(R.string.execution_mode_title) },
+            content = { uiText(R.string.execution_mode_description) },
             actions = listOf(
-                "使用 KSU" to { rootAction { KsuTaskBridge.enable(applicationContext) } },
-                "使用 Android" to { rootAction { KsuTaskBridge.disable(applicationContext) } },
+                R.string.execution_use_ksu to { rootAction { KsuTaskBridge.enable(uiContext) } },
+                R.string.execution_use_android to { rootAction { KsuTaskBridge.disable(uiContext) } },
             ),
         )
     }
@@ -1605,20 +1926,20 @@ class ModuleMainActivity : ComponentActivity() {
     private fun showNotificationRecords() {
         val records = NotificationRecordStore { applicationContext }.list()
         textDialog.value = TextDialogUi(
-            title = "通知记录",
-            content = if (records.isEmpty()) {
-                "还没有通知记录。"
+            title = { uiText(R.string.notification_records_title) },
+            content = { if (records.isEmpty()) {
+                uiText(R.string.notification_empty)
             } else {
                 records.joinToString("\n\n") { record ->
                     buildString {
                         append(formatDateTime(record.at))
                         append(" · ")
-                        append(if (record.delivered) "已发出" else "未发出")
+                        append(if (record.delivered) uiText(R.string.notification_sent) else uiText(R.string.notification_not_sent))
                         append('\n')
                         append(record.title)
                         append('\n')
                         append(record.text)
-                        append("\n来源：")
+                        append(uiText(R.string.notification_source_prefix))
                         append(record.source)
                         if (record.detail.isNotBlank()) {
                             append(" · ")
@@ -1626,11 +1947,11 @@ class ModuleMainActivity : ComponentActivity() {
                         }
                     }
                 }
-            },
+            } },
             actions = listOf(
-                "清空" to {
+                R.string.action_clear to {
                     NotificationRecordStore { applicationContext }.clear()
-                    toast("通知记录已清空")
+                    toast(uiText(R.string.toast_notifications_cleared))
                     textDialog.value = null
                     refresh()
                 },
@@ -1641,16 +1962,16 @@ class ModuleMainActivity : ComponentActivity() {
     private fun showLogs() {
         val logs = ModuleLogBuffer.snapshot()
         textDialog.value = TextDialogUi(
-            title = "模块日志",
-            content = if (logs.isEmpty()) {
-                "暂无日志。"
+            title = { uiText(R.string.module_logs_title) },
+            content = { if (logs.isEmpty()) {
+                uiText(R.string.logs_empty)
             } else {
                 logs.joinToString("\n") { "${formatDateTime(it.at)} ${it.level}/${it.tag}: ${it.message}" }
-            },
+            } },
             actions = listOf(
-                "清空" to {
+                R.string.action_clear to {
                     ModuleLogBuffer.clear()
-                    toast("日志已清空")
+                    toast(uiText(R.string.toast_logs_cleared))
                     textDialog.value = null
                     refresh()
                 },
@@ -1669,26 +1990,26 @@ class ModuleMainActivity : ComponentActivity() {
     @Composable
     private fun AboutPage() {
         SectionCard(
-            title = "阅微补全计划",
-            subtitle = "模块 ${versionLine()} · 构建 ${buildTimeText()}",
+            title = uiText(R.string.module_name),
+            subtitle = uiText(R.string.about_version, versionLine(), buildTimeText()),
             onClick = { openUrl(GITHUB_REPO_URL) },
         )
-        GroupTitle("状态")
+        GroupTitle(uiText(R.string.about_status))
         Card(
             modifier = Modifier
                 .padding(horizontal = 12.dp)
                 .padding(bottom = 12.dp),
             insideMargin = PaddingValues(16.dp),
         ) {
-            StatusLine("模块进程", "PID ${android.os.Process.myPid()}")
+            StatusLine(uiText(R.string.about_process), uiText(R.string.about_pid, android.os.Process.myPid()))
             CardDivider()
             StatusLine(
-                "通知权限",
-                if (CloudTaskNotifications.hasPermission(this@ModuleMainActivity)) "已授予"
-                else "未授予（结果只能在打开阅微时以提示条显示）",
+                uiText(R.string.permission_notification_title),
+                if (CloudTaskNotifications.hasPermission(this@ModuleMainActivity)) uiText(R.string.permission_granted)
+                else uiText(R.string.permission_denied_brief),
             )
             CardDivider()
-            StatusLine("唤醒时刻", formatTime(NextWakeHint.read(this@ModuleMainActivity)))
+            StatusLine(uiText(R.string.wake_time_title), formatTime(NextWakeHint.read(this@ModuleMainActivity)))
         }
     }
 
@@ -1723,14 +2044,14 @@ class ModuleMainActivity : ComponentActivity() {
     private fun Dialogs() {
         textDialog.value?.let { dialog ->
             OverlayDialog(
-                title = dialog.title,
+                title = dialog.title(),
                 show = true,
                 onDismissRequest = { textDialog.value = null },
             ) {
                 // 不再套一层 Card：弹窗本身就是一张卡片，再套一层会多出一圈 16dp 内边距，
                 // 正文相对标题看起来是「缩进」的。正文直接交给弹窗自己的 insideMargin 更整齐。
                 Text(
-                    dialog.content,
+                    dialog.content(),
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(max = 420.dp)
@@ -1757,7 +2078,7 @@ class ModuleMainActivity : ComponentActivity() {
                     .padding(top = 12.dp),
                 horizontalArrangement = Arrangement.End,
             ) {
-                TextButton(text = "关闭", onClick = dismiss)
+                TextButton(text = uiText(R.string.action_close), onClick = dismiss)
             }
         } else {
             Row(
@@ -1765,10 +2086,10 @@ class ModuleMainActivity : ComponentActivity() {
                     .fillMaxWidth()
                     .padding(top = 12.dp),
             ) {
-                TextButton(text = "取消", onClick = dismiss)
+                TextButton(text = uiText(R.string.action_cancel), onClick = dismiss)
                 Spacer(Modifier.weight(1f))
                 dialog.actions.forEach { (label, action) ->
-                    TextButton(text = label, onClick = action)
+                    TextButton(text = uiText(label), onClick = action)
                     Spacer(Modifier.width(8.dp))
                 }
             }
@@ -1782,7 +2103,7 @@ class ModuleMainActivity : ComponentActivity() {
         // （ReaPress-Extend ExpressBackupPage 2026-09-27 真机同款问题，两项目同库同 ROM）。
         // WindowDialog 是库的标准控件、同款视觉，键盘避让由它自己的窗口处理。
         WindowDialog(
-            title = editor.spec?.title ?: taskTitle(editor.task.taskType),
+            title = taskTitle(editor.task.taskType),
             show = true,
             onDismissRequest = { editorDialog.value = null },
         ) {
@@ -1795,22 +2116,22 @@ class ModuleMainActivity : ComponentActivity() {
                 val spec = editor.spec
                 if (spec?.rewardTriggered != true && spec?.merchant != true) {
                     EditorField(
-                        label = "执行时间",
-                        hint = "HH:mm",
+                        label = uiText(R.string.field_time),
+                        hint = uiText(R.string.field_time_hint),
                         value = editor.values[FIELD_TIME].orEmpty(),
                         onValue = { editor.values[FIELD_TIME] = it },
                     )
                 }
                 if (spec?.autoRead == true) {
                     EditorField(
-                        label = "阅读时长",
-                        hint = "分钟",
+                        label = uiText(R.string.field_duration),
+                        hint = uiText(R.string.field_duration_hint),
                         value = editor.values[FIELD_DURATION].orEmpty(),
                         onValue = { editor.values[FIELD_DURATION] = it },
                     )
                     EditorField(
-                        label = "图书",
-                        hint = "每行 bookId|书名，留空=最近阅读",
+                        label = uiText(R.string.field_books),
+                        hint = uiText(R.string.field_books_hint),
                         value = editor.values[FIELD_BOOKS].orEmpty(),
                         onValue = { editor.values[FIELD_BOOKS] = it },
                         maxLines = 6,
@@ -1818,8 +2139,8 @@ class ModuleMainActivity : ComponentActivity() {
                 }
                 if (spec?.rewardTriggered == true) {
                     EditorField(
-                        label = "每日祈愿上限",
-                        hint = "0 表示抽完彩筹",
+                        label = uiText(R.string.field_draw_limit),
+                        hint = uiText(R.string.field_draw_limit_hint),
                         value = editor.values[FIELD_DRAW_LIMIT].orEmpty(),
                         onValue = { editor.values[FIELD_DRAW_LIMIT] = it },
                     )
@@ -1851,7 +2172,7 @@ class ModuleMainActivity : ComponentActivity() {
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(),
                 ) {
-                    Text("取消")
+                    Text(uiText(R.string.action_cancel))
                 }
                 Spacer(Modifier.width(16.dp))
                 Button(
@@ -1859,7 +2180,7 @@ class ModuleMainActivity : ComponentActivity() {
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColorsPrimary(),
                 ) {
-                    Text("保存")
+                    Text(uiText(R.string.action_save))
                 }
             }
         }
@@ -1931,16 +2252,16 @@ class ModuleMainActivity : ComponentActivity() {
     private fun PawnMultiSelectEntry(editor: TaskEditor) {
         val options = editor.multiOptions[FIELD_PAWN].orEmpty()
         val picked = CloudTaskLocalRunner.parseForbiddenPawnPropIds(editor.values[FIELD_PAWN].orEmpty())
-        Text("禁当期物", style = MiuixTheme.textStyles.main)
+        Text(uiText(R.string.field_pawn), style = MiuixTheme.textStyles.main)
         Spacer(Modifier.height(2.dp))
         Text(
-            "点一下锁定期物禁止典当；清单打开时从阅微现拉（当日期物 + 背包）",
+            uiText(R.string.field_pawn_hint),
             style = MiuixTheme.textStyles.footnote1,
             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
         )
         Spacer(Modifier.height(6.dp))
         TextButton(
-            text = multiSelectSummary(options, picked),
+            text = modulePawnSelectionSummary(uiContext, options, picked),
             onClick = { editor.multiOpenLabel = FIELD_PAWN },
         )
         Spacer(Modifier.height(12.dp))
@@ -2051,9 +2372,9 @@ class ModuleMainActivity : ComponentActivity() {
         transport: CloudTaskLocalRunner.MerchantTransportOption?,
     ): String {
         val minutes = merchantDurationMinutes(city, transport)
-        if (minutes < 60L) return "$minutes 分钟"
+        if (minutes < 60L) return uiText(R.string.duration_minutes, minutes)
         val hours = String.format(Locale.US, "%.1f", minutes / 60.0).removeSuffix(".0")
-        return "$hours 小时"
+        return uiText(R.string.duration_hours, hours)
     }
 
     /**
@@ -2072,15 +2393,15 @@ class ModuleMainActivity : ComponentActivity() {
         val compatible = editor.merchantCities.filter { cityAccepts(it, selectedTransport) }
         val selectedCity = compatible.firstOrNull { it.code == editor.values[FIELD_CITY].orEmpty() }
         ChoiceDropdownField(
-            title = "城池",
+            title = uiText(R.string.field_city),
             summary = when {
-                loading -> "正在读取可选城池…"
-                selectedCity != null -> "预计 ${formatMerchantDuration(selectedCity, selectedTransport)}"
-                selectedTransport != null -> "共 ${compatible.size} 座适配当前车马"
-                else -> "共 ${compatible.size} 座"
+                loading -> uiText(R.string.merchant_cities_loading)
+                selectedCity != null -> uiText(R.string.merchant_estimate, formatMerchantDuration(selectedCity, selectedTransport))
+                selectedTransport != null -> uiText(R.string.merchant_cities_compatible, compatible.size)
+                else -> uiText(R.string.merchant_cities_count, compatible.size)
             },
             value = editor.values[FIELD_CITY].orEmpty(),
-            emptyLabel = "未选择",
+            emptyLabel = uiText(R.string.selection_none),
             choices = compatible.map { DropdownChoice(it.code, it.label) },
             onSelect = { code ->
                 editor.values[FIELD_CITY] = code
@@ -2110,15 +2431,15 @@ class ModuleMainActivity : ComponentActivity() {
         }
         val selected = compatible.firstOrNull { it.id == editor.values[FIELD_TRANSPORT].orEmpty() }
         ChoiceDropdownField(
-            title = "车马",
+            title = uiText(R.string.field_transport),
             summary = when {
-                loading -> "正在读取可用车马…"
-                selected != null -> "速度 +${selected.speedPercent}% · 负重 ${selected.carryingCapacity}"
-                selectedCity != null -> "当前城池没有适配的已拥有车马"
-                else -> "共 ${compatible.size} 项已拥有"
+                loading -> uiText(R.string.merchant_transports_loading)
+                selected != null -> uiText(R.string.merchant_transport_stats, selected.speedPercent, selected.carryingCapacity)
+                selectedCity != null -> uiText(R.string.merchant_no_transport)
+                else -> uiText(R.string.merchant_transports_count, compatible.size)
             },
             value = editor.values[FIELD_TRANSPORT].orEmpty(),
-            emptyLabel = "未选择",
+            emptyLabel = uiText(R.string.selection_none),
             choices = compatible.map { DropdownChoice(it.id, it.label) },
             onSelect = { id ->
                 editor.values[FIELD_TRANSPORT] = id
@@ -2158,12 +2479,12 @@ class ModuleMainActivity : ComponentActivity() {
                     .padding(vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("本金", style = MiuixTheme.textStyles.main)
+                Text(uiText(R.string.field_principal), style = MiuixTheme.textStyles.main)
                 Spacer(Modifier.weight(1f))
                 Text(
                     when {
-                        capacity <= 0L -> "先选车马"
-                        amount <= 0L -> "沿用上次"
+                        capacity <= 0L -> uiText(R.string.merchant_select_transport)
+                        amount <= 0L -> uiText(R.string.merchant_reuse_previous)
                         else -> amount.toString()
                     },
                     style = MiuixTheme.textStyles.main,
@@ -2184,8 +2505,8 @@ class ModuleMainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth(),
             )
             Text(
-                if (capacity > 0L) "上限 $capacity（当前车马负重），0 = 沿用上次"
-                else "选择车马后按负重设上限",
+                if (capacity > 0L) uiText(R.string.merchant_principal_limit, capacity)
+                else uiText(R.string.merchant_capacity_hint),
                 style = MiuixTheme.textStyles.footnote1,
                 color = muted,
             )
@@ -2198,11 +2519,11 @@ class ModuleMainActivity : ComponentActivity() {
     private fun BlessingChooser(editor: TaskEditor, spec: CloudAutomationTaskSpec) {
         val options = spec.blessingOptions
         ChoiceDropdownField(
-            title = "运签",
-            summary = options.joinToString("/") { CloudTaskLocalRunner.blessingLabel(it) },
+            title = uiText(R.string.field_blessing),
+            summary = options.joinToString("/") { blessingLabel(it) },
             value = editor.values[FIELD_BLESSING].orEmpty(),
-            emptyLabel = CloudTaskLocalRunner.blessingLabel(""),
-            choices = options.map { DropdownChoice(it, CloudTaskLocalRunner.blessingLabel(it)) },
+            emptyLabel = blessingLabel(""),
+            choices = options.map { DropdownChoice(it, blessingLabel(it)) },
             onSelect = { editor.values[FIELD_BLESSING] = it },
         )
     }
@@ -2233,7 +2554,7 @@ class ModuleMainActivity : ComponentActivity() {
                     refreshing = false
                     val updated = result.getOrNull()
                     if (result.isFailure) {
-                        toast(result.exceptionOrNull()?.message ?: "读取清单失败")
+                        toast(result.exceptionOrNull()?.message ?: uiText(R.string.error_list_load))
                     } else if (updated != null) {
                         editor.multiOptions[label] = updated
                     }
@@ -2241,7 +2562,7 @@ class ModuleMainActivity : ComponentActivity() {
             )
         }
         OverlayDialog(
-            title = label,
+            title = uiText(R.string.field_pawn),
             show = true,
             onDismissRequest = { editor.multiOpenLabel = null },
         ) {
@@ -2252,14 +2573,14 @@ class ModuleMainActivity : ComponentActivity() {
                     .verticalScroll(rememberScrollState()),
             ) {
                 Text(
-                    "勾选 = 禁止典当；每次打开自动读取最新清单，红色品质一律不自动典当。",
+                    uiText(R.string.pawn_protection_hint),
                     style = MiuixTheme.textStyles.footnote1,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                 )
                 Spacer(Modifier.height(6.dp))
                 if (options.isEmpty() && refreshing) {
                     Text(
-                        "正在读取期物清单…",
+                        uiText(R.string.pawn_loading),
                         style = MiuixTheme.textStyles.footnote1,
                         color = MiuixTheme.colorScheme.onSurfaceContainer,
                     )
@@ -2279,7 +2600,7 @@ class ModuleMainActivity : ComponentActivity() {
                             // 行内不再写「已锁定 / 可典当」：勾选框本身就是那个状态，
                             // 语义写在弹窗顶部那一行说明里就够了。
                             Text(
-                                option.label,
+                                modulePawnOptionLabel(uiContext, option),
                                 style = MiuixTheme.textStyles.main,
                                 color = option.color?.let { Color(it) } ?: MiuixTheme.colorScheme.onSurface,
                                 modifier = Modifier.weight(1f),
@@ -2304,7 +2625,7 @@ class ModuleMainActivity : ComponentActivity() {
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(),
                 ) {
-                    Text("取消")
+                    Text(uiText(R.string.action_cancel))
                 }
                 Spacer(Modifier.width(16.dp))
                 Button(
@@ -2318,7 +2639,7 @@ class ModuleMainActivity : ComponentActivity() {
                         editor.multiOpenLabel = null
                     },
                 ) {
-                    Text("完成")
+                    Text(uiText(R.string.action_done))
                 }
             }
         }
@@ -2330,7 +2651,7 @@ class ModuleMainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_POST_NOTIFICATIONS)
         } else {
-            toast("当前系统无需申请通知权限")
+            toast(uiText(R.string.permission_notification_not_required))
         }
     }
 
@@ -2338,13 +2659,13 @@ class ModuleMainActivity : ComponentActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != REQUEST_POST_NOTIFICATIONS) return
         val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
-        toast(if (granted) "通知权限已授予" else "未授予通知权限，任务结果只能在打开阅微时以提示条显示")
+        toast(if (granted) uiText(R.string.toast_notification_granted) else uiText(R.string.permission_notification_denied))
         refresh()
     }
 
     private fun openSystemSettings(intent: Intent?) {
         if (intent == null) {
-            toast("当前系统无需该项设置")
+            toast(uiText(R.string.settings_not_required))
             return
         }
         openFirstAvailable(intent)
@@ -2370,14 +2691,14 @@ class ModuleMainActivity : ComponentActivity() {
     private fun openFirstAvailable(vararg intents: Intent) {
         val opened = intents.map { it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
             .any { runCatching { startActivity(it); true }.getOrDefault(false) }
-        if (!opened) toast("无法打开系统设置，请手动到系统设置里授权")
+        if (!opened) toast(uiText(R.string.error_open_settings))
     }
 
     private fun rescheduleAlarm() {
         runBg(
             work = {
                 CloudTaskWakeScheduler.schedule(applicationContext)
-                "已重排闹钟：下次唤醒 ${formatTime(NextWakeHint.read(applicationContext))}"
+                uiText(R.string.toast_alarm_rescheduled, formatTime(NextWakeHint.read(applicationContext)))
             },
             then = { message ->
                 toast(message)
@@ -2406,6 +2727,13 @@ class ModuleMainActivity : ComponentActivity() {
         getSharedPreferences(UI_PREFS, MODE_PRIVATE).edit().putInt(key, value).commit()
     }
 
+    private fun uiPrefString(key: String, defValue: String? = null): String? =
+        getSharedPreferences(UI_PREFS, MODE_PRIVATE).getString(key, defValue)
+
+    private fun writeUiPrefString(key: String, value: String) {
+        getSharedPreferences(UI_PREFS, MODE_PRIVATE).edit().putString(key, value).commit()
+    }
+
     /**
      * 构建时间文案。
      *
@@ -2414,14 +2742,14 @@ class ModuleMainActivity : ComponentActivity() {
      */
     private fun buildTimeText(): String =
         runCatching {
-            SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(BuildConfig.BUILD_TIME))
-        }.getOrDefault("未知")
+            SimpleDateFormat("yyyy-MM-dd HH:mm", uiContext.resources.configuration.locales[0]).format(Date(BuildConfig.BUILD_TIME))
+        }.getOrDefault(uiText(R.string.status_unknown))
 
     /** 打开外部链接（GitHub 仓库）。没有可用浏览器时给一句人话，别把异常抛到界面上。 */
     private fun openUrl(url: String) {
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         runCatching { startActivity(intent) }
-            .onFailure { toast("没有可以打开这个链接的应用") }
+            .onFailure { toast(uiText(R.string.error_open_link)) }
     }
 
     private fun toast(message: String) {
@@ -2465,14 +2793,15 @@ class ModuleMainActivity : ComponentActivity() {
      * - 其余任务是每天固定时间，直接显示下次时刻。
      */
     private fun nextRunLine(accountId: String, task: LocalTask, spec: CloudAutomationTaskSpec?): String {
-        if (!task.enabled) return "未启用"
-        if (spec?.rewardTriggered == true) return "每日轶闻完成后自动祈愿"
+        if (!task.enabled) return uiText(R.string.status_not_enabled)
+        if (spec?.rewardTriggered == true) return uiText(R.string.task_wish_trigger)
+        val next = if (task.nextRunAt > 0L) formatDateTime(task.nextRunAt) else uiText(R.string.status_pending_schedule)
         if (spec?.merchant == true) {
-            val poll = if (task.nextRunAt > 0L) "下次检查 ${formatDateTime(task.nextRunAt)}" else "下次检查 待排程"
+            val poll = uiText(R.string.task_next_check, next)
             val tripEnd = lastMerchantTripEnd(accountId, task.taskType)
-            return if (tripEnd != null) "$poll\n行商预计 $tripEnd 完成" else poll
+            return if (tripEnd != null) uiText(R.string.task_merchant_next, poll, tripEnd) else poll
         }
-        return if (task.nextRunAt > 0L) "下次 ${formatDateTime(task.nextRunAt)}" else "下次 待排程"
+        return uiText(R.string.task_next_run, next)
     }
 
     private fun lastMerchantTripEnd(accountId: String, taskType: String): String? {
@@ -2492,23 +2821,30 @@ class ModuleMainActivity : ComponentActivity() {
 
     /** 任务结果的展示文案。内部值（success/failed/paused…）不该直接出现在界面上。 */
     private fun resultLabel(result: String): String = when (result) {
-        "success" -> "成功"
-        "failed" -> "失败"
-        "paused" -> "已暂停"
-        "skipped" -> "已跳过"
-        "" -> "未知"
+        "success" -> uiText(R.string.result_success)
+        "failed" -> uiText(R.string.result_failed)
+        "paused" -> uiText(R.string.result_paused)
+        "skipped" -> uiText(R.string.result_skipped)
+        "" -> uiText(R.string.status_unknown)
         else -> result
     }
 
-    private fun taskTitle(taskType: String): String =
-        CLOUD_AUTOMATION_TASKS.firstOrNull { it.taskType == taskType }?.title ?: when (taskType) {
-            "yeshe_checkin" -> "每日轶闻"
-            "yeshe_draw_card" -> "自动祈愿"
-            "cloud_auto_read" -> "自动阅读"
-            "traveling_merchant" -> "自动行商"
-            "pawn" -> "期物典当"
+    private fun taskTitle(taskType: String): String = when (taskType) {
+            "yeshe_checkin" -> uiText(R.string.task_daily_lore)
+            "yeshe_draw_card" -> uiText(R.string.task_auto_wish)
+            "cloud_auto_read" -> uiText(R.string.task_auto_read)
+            "traveling_merchant" -> uiText(R.string.task_merchant)
+            "pawn" -> uiText(R.string.task_pawn)
             else -> taskType
         }
+
+    private fun blessingLabel(type: String): String = when (type.trim().uppercase(Locale.ROOT)) {
+        "LUCK" -> uiText(R.string.blessing_luck)
+        "SAFETY" -> uiText(R.string.blessing_safety)
+        "WEALTH" -> uiText(R.string.blessing_wealth)
+        "" -> uiText(R.string.blessing_none)
+        else -> type
+    }
 
     private fun specOf(taskType: String): CloudAutomationTaskSpec? =
         CLOUD_AUTOMATION_TASKS.firstOrNull { it.taskType == taskType }
@@ -2517,16 +2853,10 @@ class ModuleMainActivity : ComponentActivity() {
         runCatching { packageManager.getPackageInfo(packageName, 0).versionName.orEmpty() }.getOrDefault("2.3.6")
 
     private fun formatTime(at: Long): String =
-        if (at <= 0L) "未排程" else SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(at))
+        if (at <= 0L) uiText(R.string.status_unscheduled) else SimpleDateFormat("MM-dd HH:mm", uiContext.resources.configuration.locales[0]).format(Date(at))
 
     private fun formatDateTime(at: Long): String =
-        SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault()).format(Date(at))
-
-    // 格式化器只建一次反复用：记录页每张卡片、每个分组标题都要调，每次 new 一个
-    // SimpleDateFormat/Calendar 是纯浪费（UI 单线程使用，无线程安全问题）。
-    private val dayFormat = SimpleDateFormat("MM-dd", Locale.getDefault())
-    private val dayYearFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
-    private val clockFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+        SimpleDateFormat("MM-dd HH:mm:ss", uiContext.resources.configuration.locales[0]).format(Date(at))
 
     /** 记录列表的日分组标题：今天 / 昨天 / MM-dd（跨年才补年份）。 */
     private fun dayLabel(at: Long): String {
@@ -2534,16 +2864,17 @@ class ModuleMainActivity : ComponentActivity() {
         val target = Calendar.getInstance().apply { timeInMillis = at }
         if (now.get(Calendar.YEAR) == target.get(Calendar.YEAR)) {
             when (now.get(Calendar.DAY_OF_YEAR) - target.get(Calendar.DAY_OF_YEAR)) {
-                0 -> return "今天"
-                1 -> return "昨天"
+                0 -> return uiText(R.string.day_today)
+                1 -> return uiText(R.string.day_yesterday)
             }
-            return dayFormat.format(Date(at))
+            return SimpleDateFormat("MM-dd", uiContext.resources.configuration.locales[0]).format(Date(at))
         }
-        return dayYearFormat.format(Date(at))
+        return SimpleDateFormat("yyyy-MM-dd", uiContext.resources.configuration.locales[0]).format(Date(at))
     }
 
     /** 已经按天分组之后，行内只需要时刻。 */
-    private fun formatClock(at: Long): String = clockFormat.format(Date(at))
+    private fun formatClock(at: Long): String =
+        SimpleDateFormat("HH:mm", uiContext.resources.configuration.locales[0]).format(Date(at))
 
     // ---- 展示用快照结构 ----
 
@@ -2566,23 +2897,22 @@ class ModuleMainActivity : ComponentActivity() {
     )
 
     /** Root 探测结果的展示投影（后台线程完成后落到 rootUi）。 */
-    private data class RootUi(val rootAvailable: Boolean, val title: String, val message: String)
 
     /** 纯文本弹窗：详情/说明/记录/日志共用，actions 非空时额外带「取消」。 */
     private data class TextDialogUi(
-        val title: String,
-        val content: String,
-        val actions: List<Pair<String, () -> Unit>> = emptyList(),
+        val title: () -> String,
+        val content: () -> String,
+        val actions: List<Pair<Int, () -> Unit>> = emptyList(),
     )
 
-    /** 任务编辑器的存活状态：values 按标签存当前值，multiOptions / 行商选项可被刷新替换。 */
+    /** 任务编辑器的存活状态：values 按稳定字段键存当前值，multiOptions / 行商选项可被刷新替换。 */
     private class TaskEditor(
         val accountId: String,
         val task: LocalTask,
         val spec: CloudAutomationTaskSpec?,
     ) {
         val values = mutableStateMapOf<String, String>()
-        val multiOptions = mutableStateMapOf<String, List<MultiSelectOption>>()
+        val multiOptions = mutableStateMapOf<String, List<ModulePawnOption>>()
 
         /** 行商城池/车马全量选项，打开编辑器时后台从阅微拉；城池↔车马的互斥在 UI 侧现筛。 */
         var merchantCities: List<CloudTaskLocalRunner.MerchantCityOption> by mutableStateOf(emptyList())
@@ -2600,12 +2930,17 @@ class ModuleMainActivity : ComponentActivity() {
 
     private companion object {
         const val LOG_TAG = "ReaMicroMain"
+        const val STATE_TAB = "selectedTab"
         const val REQUEST_POST_NOTIFICATIONS = 4501
 
         /** 模块界面自己的偏好文件与键名（隐藏后台卡片、隐藏桌面图标、界面设置）。 */
         const val UI_PREFS = "reamicro_module_ui"
         const val KEY_HIDE_RECENT_TASK = "hideRecentTask"
         const val KEY_HIDE_LAUNCHER_ICON = "hideLauncherIcon"
+        const val KEY_LAUNCHER_ICON_STYLE = "launcherIconStyle"
+        /** 未完成切换的日志：进程被杀后 [LauncherIconController.restore] 据此续做或回滚。 */
+        const val KEY_LAUNCHER_ICON_PENDING = "launcherIconPending"
+        const val KEY_LAUNCHER_ICON_PENDING_HIDDEN = "launcherIconPendingHidden"
         const val KEY_BLUR_BARS = "themeBlurBars"
         const val KEY_FLOATING_NAV_BAR = "themeFloatingNavBar"
         const val KEY_LIQUID_GLASS = "themeLiquidGlass"
@@ -2623,7 +2958,6 @@ class ModuleMainActivity : ComponentActivity() {
          * （**不是别名**，别名此刻正被禁用着，拉不起来）。
          */
         const val MODULE_PACKAGE = "com.reamicro.fix"
-        const val LAUNCHER_ALIAS_CLASS = "com.reamicro.fix.ui.ModuleLauncherAlias"
         const val MAIN_ACTIVITY_CLASS = "com.reamicro.fix.ui.ModuleMainActivity"
 
         const val THEME_FOLLOW_SYSTEM = 0
@@ -2648,22 +2982,22 @@ class ModuleMainActivity : ComponentActivity() {
         const val TAB_TASKS = 1
         const val TAB_CONFIG = 2
         const val TAB_ABOUT = 3
-        val TAB_TITLES = listOf("记录", "任务", "设置", "关于")
+        val TAB_TITLE_RES = listOf(R.string.tab_records, R.string.tab_tasks, R.string.tab_settings, R.string.tab_about)
         val TAB_ICONS = listOf(MiuixIcons.Recent, MiuixIcons.Tasks, MiuixIcons.Settings, MiuixIcons.Info)
 
         /** 窗口底色：首帧之前系统栏区域显示的颜色，跟着深浅色走（透明会让部分 ROM 露黑边）。 */
         val LIGHT_WINDOW_BG = android.graphics.Color.WHITE
         val DARK_WINDOW_BG = android.graphics.Color.BLACK
 
-        // 编辑弹窗字段标签：渲染与 applyTaskEdits 必须用同一套（标签即取值键）。
-        const val FIELD_TIME = "执行时间"
-        const val FIELD_DURATION = "阅读时长"
-        const val FIELD_BOOKS = "图书"
-        const val FIELD_DRAW_LIMIT = "每日祈愿上限"
-        const val FIELD_PAWN = "禁当期物"
-        const val FIELD_CITY = "城池 cityCode"
-        const val FIELD_PRINCIPAL = "本金"
-        const val FIELD_TRANSPORT = "车马 transportId"
-        const val FIELD_BLESSING = "运签"
+        // 编辑器内部键只用于临时状态；显示标签走资源，切换语言不会改变键。
+        const val FIELD_TIME = "timeOfDay"
+        const val FIELD_DURATION = "durationMinutes"
+        const val FIELD_BOOKS = "books"
+        const val FIELD_DRAW_LIMIT = "dailyDrawLimit"
+        const val FIELD_PAWN = "forbiddenPawnPropIds"
+        const val FIELD_CITY = "merchantCityCode"
+        const val FIELD_PRINCIPAL = "merchantPrincipal"
+        const val FIELD_TRANSPORT = "merchantTransportId"
+        const val FIELD_BLESSING = "blessingType"
     }
 }

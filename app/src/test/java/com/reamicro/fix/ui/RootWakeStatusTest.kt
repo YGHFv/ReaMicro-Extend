@@ -1,16 +1,17 @@
 package com.reamicro.fix.ui
 
+import com.reamicro.fix.R
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Root 卡片的标题与说明必须同源。
+ * Root 卡片的状态必须同源。
  *
  * 回归背景：实机（无 root 的 HyperOS）上出现过「看门狗运行中」配「未启用看门狗」这种互相矛盾的
  * 展示——原因是界面拿三个布尔值各自推导标题和说明，两处口径不一致就会打架。现在状态只由
- * [RootWakeController.Status.stateLabel] 推导一次，这里把整个真值表锁住。
+ * [RootWakeController.Status.stateResource] 推导一次（返回语言无关的资源 ID），这里把整个
+ * 真值表锁在资源 ID 上，不再绑定任何一种语言的具体文案。
  */
 class RootWakeStatusTest {
 
@@ -19,7 +20,7 @@ class RootWakeStatusTest {
             rootAvailable = available,
             watchdogInstalled = installed,
             watchdogRunning = running,
-            message = "说明",
+            message = "",
         )
 
     @Test
@@ -31,37 +32,29 @@ class RootWakeStatusTest {
             status(false, false, true),
             status(false, true, true),
         ).forEach { s ->
-            assertEquals("未授权", s.stateLabel())
+            assertEquals(R.string.root_unauthorized, s.stateResource())
         }
     }
 
     @Test
     fun `有 root 时按运行与安装状态递进`() {
-        assertEquals("已授权，未启用", status(true, false, false).stateLabel())
-        assertEquals("看门狗已安装", status(true, true, false).stateLabel())
-        assertEquals("看门狗运行中", status(true, true, true).stateLabel())
+        assertEquals(R.string.root_authorized_inactive, status(true, false, false).stateResource())
+        assertEquals(R.string.root_installed, status(true, true, false).stateResource())
+        assertEquals(R.string.root_running, status(true, true, true).stateResource())
     }
 
     @Test
     fun `脚本被删但循环还活着时仍报运行中`() {
         // 这条组合只在一种情况下出现：停用时 `rm` 成功而 `pkill` 失败（或两者之间被打断）。
         // 此时循环确实还在跑，说"未启用"会把用户引向错误的判断；如实报"运行中"才有用——
-        // 界面上的"未启用看门狗"说明会同时提示脚本已不在，用户知道重启后不会自动生效。
-        assertEquals("看门狗运行中", status(true, false, true).stateLabel())
+        // 界面上的说明会同时提示脚本已不在，用户知道重启后不会自动生效。
+        assertEquals(R.string.root_running, status(true, false, true).stateResource())
     }
 
     @Test
-    fun `标题带上前缀且与状态一致`() {
-        val s = status(true, true, true)
-        assertEquals("Root 状态：${s.stateLabel()}", s.displayTitle())
-        assertTrue(s.displayTitle().startsWith("Root 状态："))
-    }
-
-    @Test
-    fun `不可用状态不会出现运行中的字样`() {
-        val title = status(false, true, true).displayTitle()
-        assertFalse(title.contains("运行中"))
-        assertTrue(title.contains("未授权"))
+    fun `不可用状态与运行中状态是不同的资源`() {
+        // 未授权绝不能和"运行中"取到同一个资源 ID（原缺陷正是两者被混为一谈）。
+        assertTrue(status(false, true, true).stateResource() != status(true, true, true).stateResource())
     }
 
     /**

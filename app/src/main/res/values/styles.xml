@@ -1,5 +1,12 @@
 <resources>
-    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar" />
+    <!--
+      application 级主题。已完全移除自定义启动页（SplashScreen）配置：
+      启动图标由系统按当前生效的 launcher 别名（用户所选配色那套）显示，不再有任何固定遮罩。
+      windowBackground 仅留一层纯底色，避免冷启动首帧闪系统默认背景。
+    -->
+    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
     <style name="NoDisplayTheme" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowBackground">@android:color/transparent</item>
