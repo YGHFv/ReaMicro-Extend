@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -52,6 +54,21 @@ object CloudTaskNotifications {
             context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
 
     /**
+     * 点击通知打开模块主界面。显式指向 ModuleMainActivity（不是被禁用的 launcher 别名），
+     * 带 NEW_TASK + CLEAR_TOP：已在运行则复用并回到栈顶，触发 onResume 里的状态刷新。
+     */
+    private fun contentIntent(context: Context): PendingIntent {
+        val intent = Intent().apply {
+            component = ComponentName(MODULE_PACKAGE_NAME, "$MODULE_PACKAGE_NAME.ui.ModuleMainActivity")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        return PendingIntent.getActivity(
+            context, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    /**
      * 在当前进程发出通知。只应由模块进程里的组件调用。
      * 返回是否成功发出，调用方据此决定要不要继续兜底、以及能不能回执给服务器。
      *
@@ -88,6 +105,7 @@ object CloudTaskNotifications {
                 .setContentTitle(title)
                 .setContentText(displayText)
                 .setStyle(Notification.BigTextStyle().bigText(displayText))
+                .setContentIntent(contentIntent(context))
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(true)
             // 用消息 ID 派生通知 ID，同一条消息重复投递只会覆盖而不是堆叠。

@@ -1,6 +1,9 @@
 package com.reamicro.fix.ui
 
 import android.content.Context
+import androidx.annotation.StringRes
+import com.reamicro.fix.R
+import com.reamicro.fix.i18n.moduleString
 import com.reamicro.fix.cloud.api.CloudTaskWakeScheduler
 import com.reamicro.fix.cloud.api.NextWakeHint
 import com.reamicro.fix.cloud.ksu.RootCommandRunner
@@ -25,7 +28,7 @@ object RootWakeController {
     private const val ADB_DIR = "/data/adb"
 
     /** 循环读文件的粒度上限：睡得太久就感知不到"用户刚改了配置"。 */
-    private const val MAX_SLEEP_SECONDS = 15 * 60
+    internal const val MAX_SLEEP_SECONDS = 15 * 60
 
     /** 广播之后的冷却，等模块写回新的唤醒时刻。 */
     private const val COOLDOWN_SECONDS = 5 * 60
@@ -37,21 +40,21 @@ object RootWakeController {
         val message: String,
     ) {
         /**
-         * 状态短标签。**只在这里推导一次**。
+         * 状态短标签的**语言无关**资源 ID。**只在这里推导一次**。
          *
          * 之前是界面拿三个布尔值各自判断"标题"和"说明"，两边口径不一致时就会出现
          * 「看门狗运行中」配「未启用看门狗」这种自相矛盾的展示（实机见过）。
-         * 现在状态与说明同源，且 [rootAvailable] 为假时无条件显示未授权——没有 root 就谈不上
+         * 现在状态与说明同源；返回资源 ID 而非文案，切换语言时由展示层（[moduleRootTitle]）
+         * 取当前语言的字符串。[rootAvailable] 为假时无条件显示未授权——没有 root 就谈不上
          * 看门狗在不在跑，探测结果也不可信。
          */
-        fun stateLabel(): String = when {
-            !rootAvailable -> "未授权"
-            watchdogRunning -> "看门狗运行中"
-            watchdogInstalled -> "看门狗已安装"
-            else -> "已授权，未启用"
+        @StringRes
+        fun stateResource(): Int = when {
+            !rootAvailable -> R.string.root_unauthorized
+            watchdogRunning -> R.string.root_running
+            watchdogInstalled -> R.string.root_installed
+            else -> R.string.root_authorized_inactive
         }
-
-        fun displayTitle(): String = "Root 状态：${stateLabel()}"
     }
 
     fun prefs(context: Context) = context.applicationContext
@@ -76,7 +79,7 @@ object RootWakeController {
                 rootAvailable = false,
                 watchdogInstalled = false,
                 watchdogRunning = false,
-                message = "未检测到 root（已尝试 su -c id），无法使用 root 唤醒；系统闹钟唤醒不受影响",
+                message = context.moduleString(R.string.root_unavailable_description),
             )
         }
         val installed = probeYes("test -f $WATCHDOG_PATH && echo yes")
@@ -86,9 +89,9 @@ object RootWakeController {
             watchdogInstalled = installed,
             watchdogRunning = running,
             message = when {
-                installed && running -> "看门狗已安装并在运行，按任务时刻唤醒（读不到时刻时每 ${MAX_SLEEP_SECONDS / 60} 分钟兜底）"
-                installed -> "看门狗已安装（开机后自动生效）"
-                else -> "尚未启用看门狗，root 已授权可直接开启"
+                installed && running -> context.moduleString(R.string.root_running_description, MAX_SLEEP_SECONDS / 60)
+                installed -> context.moduleString(R.string.root_installed_description)
+                else -> context.moduleString(R.string.root_inactive_description)
             },
         )
     }
@@ -117,7 +120,7 @@ object RootWakeController {
      */
     @Synchronized
     fun enable(context: Context): String {
-        if (!isRootAvailable()) return "未检测到 root，无法启用"
+        if (!isRootAvailable()) return context.moduleString(R.string.root_enable_unavailable)
         val appContext = context.applicationContext
         val script = watchdogScript(NextWakeHint.file(appContext).absolutePath)
         return runCatching {
@@ -126,7 +129,7 @@ object RootWakeController {
                 "mkdir -p ${ADB_DIR}/service.d && cat > $WATCHDOG_PATH <<'EOF'\n$script\nEOF\nchmod 755 $WATCHDOG_PATH",
                 timeoutSeconds = 20,
             )
-            check(write.exitCode == 0) { "看门狗脚本写入失败" }
+            check(write.exitCode == 0) { context.moduleString(R.string.root_write_failed) }
             // 2) 顺手把模块加进 Doze 白名单与活跃待机桶：降低被系统冻结/延迟的概率。
             //    白名单和看门狗都只降低延迟概率，仍会受休眠及厂商后台策略影响。
             val whitelist = runCatching {
@@ -143,26 +146,26 @@ object RootWakeController {
             prefs(context).edit().putBoolean(KEY_ENABLED, true).commit()
             ModuleAndroidLog.legacy(LOG_TAG, "root watchdog enabled at $WATCHDOG_PATH")
             if (probeYes("test -f $WATCHDOG_PATH && echo yes")) {
-                "看门狗已启用：按任务时刻唤醒（读不到时刻时每 ${MAX_SLEEP_SECONDS / 60} 分钟兜底），开机自动生效"
+                context.moduleString(R.string.root_enabled, MAX_SLEEP_SECONDS / 60)
             } else {
-                "脚本写入似乎未成功：${write.output.take(200).ifBlank { "无输出" }}"
+                context.moduleString(R.string.root_write_uncertain, write.output.take(200).ifBlank { context.moduleString(R.string.common_no_output) })
             }
         }.getOrElse {
             ModuleAndroidLog.error(LOG_TAG, "root watchdog enable failed: ${it.message}", it)
-            "启用失败：${it.message ?: it.javaClass.simpleName}"
+            context.moduleString(R.string.root_enable_failed, it.message ?: it.javaClass.simpleName)
         }
     }
 
     /** 关闭：删脚本并结束循环。 */
     fun disable(context: Context): String = runCatching {
         runRoot("rm -f $WATCHDOG_PATH; pkill -f [r]eamicro-watchdog.sh", timeoutSeconds = 15)
-        check(!isWatchdogRunning()) { "看门狗尚未停止，请重试" }
+        check(!isWatchdogRunning()) { context.moduleString(R.string.root_not_stopped) }
         prefs(context).edit().putBoolean(KEY_ENABLED, false).commit()
         ModuleAndroidLog.legacy(LOG_TAG, "root watchdog disabled")
-        "看门狗已停用"
+        context.moduleString(R.string.root_disabled)
     }.getOrElse {
         ModuleAndroidLog.error(LOG_TAG, "root watchdog disable failed: ${it.message}", it)
-        "停用失败：${it.message ?: it.javaClass.simpleName}"
+        context.moduleString(R.string.root_disable_failed, it.message ?: it.javaClass.simpleName)
     }
 
     /** 用户上次的选择，用于界面回显（实际是否在位以 [inspect] 为准）。 */
