@@ -147,7 +147,6 @@ object CloudTaskNotifications {
 
     private fun notificationId(messageId: String): Int = BASE_NOTIFICATION_ID + (messageId.hashCode() and 0xFFFF)
 
-    internal fun notificationIdForTest(messageId: String): Int = notificationId(messageId)
 
     private const val BASE_NOTIFICATION_ID = 4400
 }

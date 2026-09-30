@@ -74,7 +74,7 @@ object XposedBridge {
         return framework.hook(method)
             .setPriority(callback.priority)
             .intercept { chain ->
-                interceptForTest(
+                interceptHook(
                     callback,
                     HookChain(
                         executable = chain.executable,
@@ -121,7 +121,7 @@ object XposedBridge {
             .toList()
     }
 
-    internal fun interceptForTest(callback: XC_MethodHook, chain: HookChain): Any? {
+    internal fun interceptHook(callback: XC_MethodHook, chain: HookChain): Any? {
         val param = XC_MethodHook.MethodHookParam(
             chain.executable,
             chain.thisObject,

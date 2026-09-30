@@ -19,7 +19,7 @@ import com.reamicro.fix.online.download.OnlineOnDemandMetadataStore
 // 章节预取与重试、按需跳转拦截、spine 缓存就绪后的重放与可见页刷新。
 //
 // 从 ReaderHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（tools/extract-hook-cluster.mjs）。
+// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaderHook.logOnDemandPrefetchDebug(message: String) {
     XposedBridge.log("$LOG_PREFIX on-demand prefetch $message")
 }

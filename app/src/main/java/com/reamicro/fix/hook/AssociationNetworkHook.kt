@@ -1,5 +1,6 @@
 package com.reamicro.fix.hook
 
+import android.annotation.SuppressLint
 import com.reamicro.fix.association.network.AssociationNetworkScope
 import com.reamicro.fix.xposed.XC_MethodHook
 import com.reamicro.fix.xposed.XposedBridge
@@ -9,6 +10,9 @@ import java.net.URL
 internal object AssociationNetworkHook {
     @Volatile private var installed = false
 
+    // Intentional Xposed-only access to optional host/platform internals.
+    // Keep each lookup guarded and restrict bypasses to AssociationNetworkScope.
+    @SuppressLint("BlockedPrivateApi")
     @Synchronized fun install() {
         if (installed) return
         var count = 0

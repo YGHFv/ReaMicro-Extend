@@ -46,7 +46,7 @@ import com.reamicro.fix.hook.reader.*
 // 翻页纠错。
 //
 // 从 ReaderHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（tools/extract-hook-cluster.mjs）。
+// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaderHook.canRunFullTextSearch(): Boolean {
     val snapshot = settingsProvider()
     return snapshot.moduleEnabled

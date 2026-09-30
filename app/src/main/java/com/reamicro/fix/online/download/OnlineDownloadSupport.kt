@@ -96,7 +96,7 @@ import com.reamicro.fix.logging.logWebDav
 // 章节索引与失败记录的读写、目录解析、重试退避、进度文案、按需下载地址推导、
 // 下载缓存清理。
 //
-// 这些函数不依赖 hook 实例——由 tools/find-pure-functions.mjs 编译验证。
+// 这些函数不依赖 hook 实例——由 已移除的一次性生成工具 编译验证。
 internal fun throwIfOnlineCompletionDownloadCancelled(task: OnlineCompletionDownloadTask) {
     if (task.cancelRequested || Thread.currentThread().isInterrupted) {
         throw OnlineCompletionDownloadCancelledException()

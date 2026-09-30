@@ -13,7 +13,7 @@ import com.reamicro.fix.hook.reader.*
 // 所有 hookXxx()：挂到阅读页的 ViewModel、目录、底栏、选择控制器等宿主方法上。
 //
 // 从 ReaderHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（tools/extract-hook-cluster.mjs）。
+// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaderHook.hookReaderViewModel() {
     runCatching {
         val cls = classLoader.loadClass(READER_VIEW_MODEL_CLASS)

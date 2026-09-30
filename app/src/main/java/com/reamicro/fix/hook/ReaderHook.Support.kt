@@ -36,7 +36,7 @@ import com.reamicro.fix.hook.reader.*
 // 反射调用宿主 Compose 构件与协程、取当前书籍与页面、内存回收、各类小工具。
 //
 // 从 ReaderHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（tools/extract-hook-cluster.mjs）。
+// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaderHook.releaseReaderStrongReferences(reason: String, releaseEpub: Boolean) {
     currentPageStrong = null
     if (releaseEpub) currentEpubStrong = null

@@ -531,8 +531,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
  * `account_<accountId>` → `<accountId>`；不是账号键或 ID 为空时返回 null。
  *
  * 与 [LocalTaskStore] 内部的账号键拼法（`KEY_ACCOUNT_PREFIX + accountId`）严格互逆，
- * 这个往返关系是那组聚合方法正确性的基础，所以单独抽出来并配了单测
- * （`LocalTaskStoreAccountKeysTest`）。
+ * 这个往返关系是账号配置聚合逻辑正确性的基础。
  */
 internal fun accountIdFromStorageKey(storageKey: String): String? =
     storageKey.takeIf { it.startsWith(LocalTaskStore.KEY_ACCOUNT_PREFIX) }

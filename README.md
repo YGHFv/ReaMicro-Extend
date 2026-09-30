@@ -85,7 +85,7 @@
 - 期物典当的「禁当期物」列出席物点选锁定，弹窗内可「刷新期物清单」现拉当日期物与背包全量（名字与品质只在服务端，任务没跑过也能列全）；按品质从高到低排列，期物名用游戏内一致的品质色显示；默认跳过祈禳/传承/夺宝要用的消耗品，一项都不锁则不禁止。
 - 任务通知直接显示奖励明细并给物品上品质色；自动行商通知带新行商结束时间与新运签效果。
 - Root 唤醒仍受休眠、断网、登录失效和内核策略影响，不保证绝对准点；云端任务仍由 API 服务器执行。
-- 当前实现及真机验证见 [ROOT增强说明](docs/root-enhancement.md)，模块使用见 [模块说明](module/README.md)。
+- 模块安装、启停及使用限制见 [Root 模块说明](module/README.md)。
 
 ### 屏幕方向
 
@@ -112,18 +112,6 @@
 - JDK 17
 - Android SDK
 
-运行单元测试：
-
-```bash
-./gradlew :app:testDebugUnitTest
-```
-
-体积与复杂度度量（只报数，不阻断构建）：
-
-```bash
-./gradlew :app:detekt
-```
-
 构建调试版：
 
 ```bash
@@ -135,6 +123,11 @@
 ```bash
 ./gradlew :app:assembleRelease
 ```
+
+CI 分别构建并上传 debug 和 release 包，release 失败会直接报错，不会回退到 debug。
+GitHub Release 仅发布 release APK 和配套模块；debug APK 在 Actions 构建产物中单独下载。
+debug 始终使用调试签名；未配置正式密钥的 release 输出 `release-unsigned.apk`，签名后才能安装。
+GitHub Actions 正式签名需要四个 Secrets：`RELEASE_KEYSTORE_BASE64`、`RELEASE_KEYSTORE_PASSWORD`、`RELEASE_KEY_ALIAS`、`RELEASE_KEY_PASSWORD`。
 
 如果需要本地签名正式版，可通过环境变量或 `signing/reamicro-release-secrets.txt` 配置：
 
@@ -153,7 +146,7 @@ sdk.dir=C:/Users/<name>/AppData/Local/Android/Sdk
 
 ## 代码结构
 
-包划分、分层约定与重构工具见 [docs/architecture.md](docs/architecture.md)。
+`app/` 为 Android 模块，`module/` 为配套 Root 模块，`server/` 为 API 服务端；`source-files/` 保存内置书源，`third_party/` 保存第三方编辑器。
 
 改动前值得知道的两条：
 
@@ -209,3 +202,13 @@ sdk.dir=C:/Users/<name>/AppData/Local/Android/Sdk
 2. 用户应确保其通过本模块访问、下载、处理或阅读相关内容的行为符合适用法律法规及权利要求。
 3. 若权利人认为某些第三方规则、第三方内容或第三方服务存在涉嫌侵权情形，应优先向相关内容、规则或服务的实际托管方、发布方或运营方主张权利。
 4. 如需联系本项目开发者处理与本仓库直接相关的问题，请提供有效身份证明、权属证明、具体链接、规则信息及相关说明；开发者将在合理技术能力范围内进行处理。
+
+## 致谢与许可证
+
+感谢以下开源项目及其开发者：
+
+- [KernelSU](https://github.com/tiann/KernelSU)：界面与特效参考。
+- [Miuix](https://github.com/miuix-kotlin-multiplatform/miuix)：界面组件库。
+- [Scripta](https://github.com/YuKongA/scripta)：代码编辑器。
+
+本项目使用上述项目的相关代码与组件时，遵守各自的许可证，并保留相应的版权与许可声明。

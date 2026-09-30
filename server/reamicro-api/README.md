@@ -48,10 +48,9 @@ curl http://127.0.0.1:5222/v1/health
 两条约定值得注意：
 
 - **可变全局都住在 `runtime`**，各模块在调用时读 `runtime.X`，不要 `from app.runtime import X`
-  （那样拿到的是导入时快照）。测试重定向数据目录就是改 `runtime` 的属性。
-- **跨模块调用可被打桩的函数时通过模块引用**，例如 `releases_module.sync_module_release()`
-  而不是 `from app.releases import sync_module_release`，否则测试打桩源模块不生效，
-  会真去连外部服务。
+  （那样拿到的是导入时快照），运行时配置应统一通过 `runtime` 读取。
+- **跨模块调用通过模块引用**，例如 `releases_module.sync_module_release()`
+  而不是 `from app.releases import sync_module_release`，避免使用过期的函数绑定。
 
 ## 管理后台
 
@@ -212,4 +211,4 @@ X-ReaMicro-Api-Key: <key>
 
 Release 的 `versionName` 优先取 tag，tag 不是语义版本号时（例如 CI 的 `ci-123-1`）从 Release 标题中提取，便于客户端按版本号比较新旧。
 
-运维监控可使用认证请求访问 `/metrics` 获取 Prometheus 指标。主管理员可通过 `/admin/api-keys` 查看密钥元数据，并使用带 `X-Admin-CSRF` 的 POST `/admin/api-keys/{keyId}/revoke` 吊销泄露密钥。GitHub Actions 会先运行服务端单元测试和编译检查，只有通过后才构建并发布 GHCR 镜像。
+运维监控可使用认证请求访问 `/metrics` 获取 Prometheus 指标。主管理员可通过 `/admin/api-keys` 查看密钥元数据，并使用带 `X-Admin-CSRF` 的 POST `/admin/api-keys/{keyId}/revoke` 吊销泄露密钥。GitHub Actions 会先检查服务端源码语法，然后构建并发布 GHCR 镜像。

@@ -66,7 +66,7 @@ import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 // 反射调用宿主 Compose 构件、取宿主主题色与排版、日志导出、以及各类小工具。
 //
 // 从 ReaMicroSettingsHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的
-// 结果重新缩进回去与原文逐字节比对，不一致直接中止（tools/extract-hook-cluster.mjs）。
+// 结果重新缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 // 设置页 LazyColumn 构建函数是 R8 生成的 synthetic lambda，名称会随阅微版本变化。
 // 2.1 是 "SettingsScreen$lambda$0$0$1$0"，2.2 是 "SettingsScreen$lambda$0$1$0$0"。
 // 这里按稳定签名解析：首参是宿主 NavGraphScope，末参是 Compose LazyListScope。
