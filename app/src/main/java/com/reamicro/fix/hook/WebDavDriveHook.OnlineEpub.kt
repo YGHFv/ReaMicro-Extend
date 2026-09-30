@@ -61,7 +61,7 @@ import com.reamicro.fix.logging.logWebDav
 // 默认样式与字体嵌入、正文图片本地化。
 //
 // 从 WebDavDriveHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（tools/extract-hook-cluster.mjs）。
+// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun WebDavDriveHook.localizeOnlineChapterImages(
     bookDir: File,
     target: OnlineDownloadTarget,

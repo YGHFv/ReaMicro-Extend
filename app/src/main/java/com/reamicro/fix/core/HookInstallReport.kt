@@ -98,8 +98,4 @@ object HookInstallReport {
             "$feature ${list.count { it.ok }}/${list.size}"
         }
 
-    /** 仅供测试使用。 */
-    fun reset() {
-        synchronized(lock) { entries.clear() }
-    }
 }

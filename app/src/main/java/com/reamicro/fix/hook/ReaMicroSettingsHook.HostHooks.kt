@@ -12,7 +12,7 @@ import com.reamicro.fix.hook.settings.*
 // 所有 hookXxx()：把模块的设置项挂进宿主设置页的列表与导航图。
 //
 // 从 ReaMicroSettingsHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的
-// 结果重新缩进回去与原文逐字节比对，不一致直接中止（tools/extract-hook-cluster.mjs）。
+// 结果重新缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 /**
  * 组合期「插入下标越界」诊断（发现页 `insertBottomUp` → `MutableVector.add` 越界闪退专用）。
  *

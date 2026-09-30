@@ -27,7 +27,7 @@ import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 // 颜色与图片选择、裁剪位置、显示模式、模糊与透明度。
 //
 // 从 ReaMicroSettingsHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的
-// 结果重新缩进回去与原文逐字节比对，不一致直接中止（tools/extract-hook-cluster.mjs）。
+// 结果重新缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaMicroSettingsHook.profileBackgroundColorSummary(value: String): String =
     profileBackgroundArgbHex(profileBackgroundColorValue(value))
 

@@ -35,7 +35,7 @@ import com.reamicro.fix.hook.webdav.*
 // 默认样式与字体嵌入。
 //
 // 这些函数不依赖 hook 实例，也不碰宿主类——「不依赖」是编译器验证过的结论：
-// tools/find-pure-functions.mjs 逐个去掉接收者后整仓仍能编译。因此它们可以直接
+// 已移除的一次性生成工具 逐个去掉接收者后整仓仍能编译。因此它们可以直接
 // 用 JVM 单测覆盖。
 internal fun existingOnlineChapterImageHrefs(
     bookDir: File,

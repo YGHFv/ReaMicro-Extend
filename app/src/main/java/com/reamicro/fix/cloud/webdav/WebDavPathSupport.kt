@@ -57,7 +57,7 @@ import com.reamicro.fix.logging.logWebDav
 //
 // 路径规整与父子推导、href 解析、日志脱敏、文件名安全化、登录页 HTML。
 //
-// 这些函数不依赖 hook 实例——由 tools/find-pure-functions.mjs 编译验证。
+// 这些函数不依赖 hook 实例——由 已移除的一次性生成工具 编译验证。
 internal fun cleartextHostOf(value: Any?): String =
     when (value) {
         null -> ""

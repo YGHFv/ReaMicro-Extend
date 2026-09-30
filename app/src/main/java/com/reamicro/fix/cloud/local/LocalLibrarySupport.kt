@@ -29,7 +29,7 @@ import com.reamicro.fix.online.download.enqueueNativeImport
 //
 // 路径编解码、条目排序、可读路径展示、书籍文件类型判定。
 //
-// 这些函数不依赖 hook 实例——由 tools/find-pure-functions.mjs 编译验证。
+// 这些函数不依赖 hook 实例——由 已移除的一次性生成工具 编译验证。
 internal fun syntheticLocalLibraryBookEntry(path: String): LocalLibraryEntry =
     LocalLibraryEntry(
         name = path.substringAfterLast(':').decodeLocalPathPart().substringAfterLast('/').ifBlank { LOCAL_LIBRARY_TITLE },

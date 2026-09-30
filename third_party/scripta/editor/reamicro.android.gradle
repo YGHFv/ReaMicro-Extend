@@ -17,14 +17,11 @@ android {
     buildFeatures { compose true }
     sourceSets {
         main.java.srcDirs = ['src/commonMain/kotlin', 'src/androidMain/kotlin']
-        test.java.srcDirs = ['src/commonTest/kotlin']
     }
 }
 def commonSources = fileTree('src/commonMain/kotlin') { include '**/*.kt' }
 tasks.withType(KotlinCompile).configureEach {
-    if (name.contains('UnitTest')) {
-        source(fileTree('src/commonTest/kotlin') { include '**/*.kt' })
-    } else if (!name.contains('Test')) {
+    if (!name.contains('Test')) {
         source(commonSources, fileTree('src/androidMain/kotlin') { include '**/*.kt' })
         compilerOptions.freeCompilerArgs.addAll(
             '-Xmulti-platform',
@@ -37,6 +34,4 @@ dependencies {
     api 'org.jetbrains.compose.foundation:foundation-android:1.12.0'
     implementation 'org.jetbrains.kotlinx:kotlinx-serialization-core:1.10.0'
     implementation 'androidx.activity:activity-ktx:1.13.0'
-    testImplementation 'org.jetbrains.kotlin:kotlin-test-junit:2.4.20'
-    testImplementation 'junit:junit:4.13.2'
 }

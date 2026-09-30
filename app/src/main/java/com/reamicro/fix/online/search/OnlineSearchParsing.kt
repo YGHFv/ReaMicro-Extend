@@ -56,7 +56,7 @@ import com.reamicro.fix.hook.webdav.*
 // 按书源规则解析 JSON/HTML 搜索结果、抽取书名作者封面、格式化字数与更新时间、
 // 归一化连载状态。
 //
-// 这些函数不依赖 hook 实例——由 tools/find-pure-functions.mjs 编译验证：逐个去掉
+// 这些函数不依赖 hook 实例——由 已移除的一次性生成工具 编译验证：逐个去掉
 // 接收者后整仓仍能编译。
 internal fun sanitizeHostCloudSearchResults(param: XC_MethodHook.MethodHookParam, map: Map<*, *>) {
     runCatching {

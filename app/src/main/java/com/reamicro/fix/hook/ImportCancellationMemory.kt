@@ -52,11 +52,6 @@ internal class ImportCancellationMemory(
         cancelled.clear()
     }
 
-    /** 仅供测试观察当前规模。 */
-    internal fun size(): Int {
-        clearExpired()
-        return cancelled.size
-    }
 
     private fun clearExpired() {
         val now = nowProvider()

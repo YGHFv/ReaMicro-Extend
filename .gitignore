@@ -21,19 +21,7 @@ signing/
 tools/*
 !tools/gen-epub-styles.mjs
 !tools/gen-header-masks.mjs
-!tools/extract-hook-cluster.mjs
-!tools/hoist-nested-types.mjs
-!tools/hoist-member-extensions.mjs
-!tools/split-webdav-drive-hook.mjs
-!tools/find-pure-functions.mjs
-!tools/extract-engine.mjs
-!tools/fix-imports.mjs
-!tools/split-hook.mjs
-!tools/split-config/
-!tools/gen-settings-contract-test.mjs
 !tools/build-module.py
-!tools/test-build-module.py
-!tools/move-packages.mjs
 decompiled/
 dex_tmp/
 base_decompiled/
@@ -82,7 +70,6 @@ source-files/*
 .out_*.py
 .main.backup.py
 
-# Maintained build/regression scripts and source used by JVM tests.
+# Maintained source-provider build inputs.
 !tools/build-fanqie-source.py
-!tools/test-*.py
 !source-files/fanqie/

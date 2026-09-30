@@ -42,7 +42,7 @@ import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 // 高亮规则面板。
 //
 // 从 ReaMicroSettingsHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的
-// 结果重新缩进回去与原文逐字节比对，不一致直接中止（tools/extract-hook-cluster.mjs）。
+// 结果重新缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 // 借用宿主 item$default 调用时机，在高亮界面 LazyColumn 最前面插入"补全计划"入口。
 // onClick 由 ReaderHook 通过 highlightScreenEntryOnClick 提供。
 internal fun ReaMicroSettingsHook.insertHighlightScreenEntryItem(lazyListScope: Any) {

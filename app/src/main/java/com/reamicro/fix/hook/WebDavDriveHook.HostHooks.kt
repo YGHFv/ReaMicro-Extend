@@ -37,7 +37,7 @@ import com.reamicro.fix.logging.logWebDav
 // 所有 hookXxx()：只负责挂到宿主方法上，具体实现在其它簇。
 //
 // 从 WebDavDriveHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（tools/extract-hook-cluster.mjs）。
+// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun WebDavDriveHook.hookOnlineCompletionBookRowDuration() {
     runCatching {
         val bookRowInfo = cls(BOOK_ROW_INFO_CLASS).declaredMethods.first {

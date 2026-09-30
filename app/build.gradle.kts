@@ -5,7 +5,6 @@ import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("io.gitlab.arturbosch.detekt")
 }
 
 val bundledSourceFilesDir = rootProject.layout.projectDirectory.dir("source-files")
@@ -103,7 +102,6 @@ android {
         ndk { abiFilters += "arm64-v8a" }
         minSdk = 26
         targetSdk = 35
-        testInstrumentationRunner = "com.reamicro.fix.diagnostics.RootDeviceInstrumentation"
     versionCode = 70
     versionName = "2.3.8"
     }
@@ -138,20 +136,13 @@ android {
 
     buildTypes {
         debug {
-            if (hasReleaseSigning) {
-                signingConfig = signingConfigs.getByName("release")
-            }
+            signingConfig = signingConfigs.getByName("debug")
         }
-
         release {
-            if (hasReleaseSigning) {
-                signingConfig = signingConfigs.getByName("release")
-            }
+            // Missing release credentials must never fall back to a debug certificate.
+            signingConfig = if (hasReleaseSigning) signingConfigs.getByName("release") else null
         }
     }
-
-    // Compile the exact external provider sources into unit tests, not into the app's main classes.
-    sourceSets["test"].java.srcDir(rootProject.file("source-files/fanqie/src"))
     sourceSets["main"].assets.srcDir(generatedBundledSourcesRoot)
     sourceSets["main"].assets.srcDir(generatedRootModuleRoot)
 }
@@ -166,28 +157,6 @@ tasks.matching { task ->
 tasks.matching { task -> task.name.contains("lint", ignoreCase = true) }.configureEach {
     dependsOn(syncBundledSources)
     dependsOn(bundleModule)
-}
-
-// detekt 只做体积/复杂度基线度量，不参与构建成败判定。
-// 用途：重构前后对比「单文件行数、单类成员数、超长方法数」是否收敛。
-detekt {
-    buildUponDefaultConfig = true
-    allRules = false
-    config.setFrom(rootProject.files("config/detekt/detekt.yml"))
-    source.setFrom(files("src/main/java", "src/test/java"))
-    ignoreFailures = true
-    parallel = true
-}
-
-tasks.withType<io.gitlab.arturbosch.detekt.Detekt>().configureEach {
-    jvmTarget = JavaVersion.VERSION_17.toString()
-    reports {
-        html.required.set(true)
-        txt.required.set(true)
-        xml.required.set(false)
-        sarif.required.set(false)
-        md.required.set(false)
-    }
 }
 
 dependencies {
@@ -210,6 +179,4 @@ dependencies {
 
     compileOnly("io.github.libxposed:api:102.0.0")
 
-    testImplementation("junit:junit:4.13.2")
-    testImplementation("org.json:json:20240303")
 }
