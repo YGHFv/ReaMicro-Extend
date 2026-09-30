@@ -64,7 +64,8 @@ jobs:
         run: |
           export ANDROID_HOME="$RUNNER_TEMP/android-sdk"
           mkdir -p "$ANDROID_HOME/cmdline-tools"
-          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o "$RUNNER_TEMP/android-commandline-tools.zip"
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-16111833_latest.zip -o "$RUNNER_TEMP/android-commandline-tools.zip"
+          echo "0877a1d048fe4a24efe2eff536ca4223f7adeb58648bb81909d33c446918cfa8  $RUNNER_TEMP/android-commandline-tools.zip" | sha256sum -c -
           unzip -q "$RUNNER_TEMP/android-commandline-tools.zip" -d "$ANDROID_HOME/cmdline-tools"
           mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
@@ -74,8 +75,10 @@ jobs:
 
       - name: Install Android SDK packages
         run: |
-          yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses
-          sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-37" "build-tools;37.0.0"
+          # CLI 23 supports the Android 37 minor-version repository format.
+          # Its compatibility sdkmanager accepts licenses during installation.
+          sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
+          test -f "$ANDROID_HOME/platforms/android-37.0/android.jar"
 
       - name: Make Gradle executable
         run: chmod +x ./gradlew
