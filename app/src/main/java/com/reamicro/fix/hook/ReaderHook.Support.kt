@@ -1096,19 +1096,12 @@ internal fun ReaderHook.currentTextContentFile(root: File, itemRefs: Iterable<*>
 }
 
 internal fun ReaderHook.replaceUniqueTextInFile(file: File, oldText: String, newText: String): Boolean {
-    val content = runCatching { file.readText(StandardCharsets.UTF_8) }.getOrNull() ?: return false
-    val candidates = listOf(oldText, escapeXmlText(oldText)).distinct().filter { it.isNotBlank() }
-    for (candidate in candidates) {
-        val first = content.indexOf(candidate)
-        if (first < 0) continue
-        if (content.indexOf(candidate, first + candidate.length) >= 0) return false
-        val replacement = if (candidate == oldText) newText else escapeXmlText(newText)
-        file.writeText(content.replaceRange(first, first + candidate.length, replacement), StandardCharsets.UTF_8)
-        return true
-    }
-    return false
+    val loaded = com.reamicro.fix.epub.editor.EpubTextFiles.load(file)
+    val updated = com.reamicro.fix.epub.editor.replaceUniqueSelectionText(loaded.text, oldText, newText)
+        ?: return false
+    com.reamicro.fix.epub.editor.EpubTextFiles.save(file, updated, loaded.snapshot)
+    return true
 }
-
 internal fun ReaderHook.escapeXmlText(value: String): String =
     value
         .replace("&", "&amp;")

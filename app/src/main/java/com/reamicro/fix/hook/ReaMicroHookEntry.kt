@@ -51,8 +51,8 @@ class ReaMicroHookEntry {
                 val appContext = activity.applicationContext
                 CloudTaskNotificationPoller.poll(appContext, source = "foreground-heartbeat")
                 // 本地自动任务不在阅微进程里跑：宿主与模块各跑一遍会让两边状态分叉、请求互相撞车
-                // （实机见过「操作过于频繁」）。这里只把配置和「可以跑一轮」的意图交给模块进程。
-                com.reamicro.fix.cloud.local.LocalTaskMirror.push(appContext, runDue = true)
+                // （实机见过「操作过于频繁」）。这里只把配置交给模块进程。
+                com.reamicro.fix.cloud.local.LocalTaskMirror.push(appContext)
                 heartbeatHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS)
             }
         }
@@ -270,8 +270,9 @@ class ReaMicroHookEntry {
                         ApiPackageAutoUpdater.checkIfDue(activity.applicationContext, moduleSettings)
                         CloudTaskNotificationPoller.poll(activity.applicationContext)
                         val appContext = activity.applicationContext
-                        // 用户打开阅微 = 明确的「现在该跑一跑了」信号：让模块进程静默同步配置并执行。
-                        com.reamicro.fix.cloud.local.LocalTaskMirror.push(appContext, runDue = true)
+                        com.reamicro.fix.migration.LegacyAndroidWakeCleanup.runForHost(appContext)
+                        // 仅同步配置；本地自动调度只由已明确开启的 ROOT增强承担。
+                        com.reamicro.fix.cloud.local.LocalTaskMirror.push(appContext)
                         startForegroundHeartbeat()
                         XposedBridge.log("$LOG_PREFIX MainActivity.onCreate hooked")
                     }

@@ -9,23 +9,17 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
-    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <queries>
         <package android:name="app.zhendong.reamicro" />
         <package android:name="com.reamicro.fix" />
-        <package android:name="com.miui.securitycenter" />
-        <package android:name="com.coloros.safecenter" />
-        <package android:name="com.huawei.systemmanager" />
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>
     </queries>
 
     <application
+        android:name=".RootEnhancementApplication"
         android:allowBackup="false"
         android:description="@string/module_description"
         android:icon="@mipmap/ic_launcher"
@@ -34,6 +28,18 @@
         android:theme="@style/AppTheme"
         android:enableOnBackInvokedCallback="false"
         android:usesCleartextTraffic="true">
+        <!-- Root/shell completion only. Do not let ordinary apps repeatedly trigger su/config sync. -->
+        <receiver android:name=".cloud.root.RootTaskSyncReceiver" android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="com.reamicro.fix.ROOT_TASK_SYNC" />
+            </intent-filter>
+        </receiver>
+        <receiver android:name=".migration.PackageUpgradeReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
         <meta-data
             android:name="xposedmodule"
             android:value="true" />
@@ -86,33 +92,11 @@
             </intent-filter>
         </receiver>
 
-        <receiver
-            android:name=".cloud.api.CloudTaskHeartbeatReceiver"
-            android:enabled="true"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.reamicro.fix.CLOUD_TASK_HEARTBEAT" />
-                <action android:name="com.reamicro.fix.KSU_TASK_SYNC" />
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-                <action android:name="android.intent.action.TIME_SET" />
-                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
-            </intent-filter>
-        </receiver>
 
-        <service
-            android:name=".cloud.local.LocalTaskJobService"
-            android:exported="false"
-            android:permission="android.permission.BIND_JOB_SERVICE" />
 
-        <receiver
-            android:name=".cloud.api.CloudTaskRescheduleReceiver"
-            android:enabled="true"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.reamicro.fix.RESCHEDULE_WAKE" />
-            </intent-filter>
-        </receiver>
+
+
+
 
         <receiver
             android:name=".cloud.local.LocalTaskMirrorReceiver"
@@ -151,11 +135,18 @@
 
         <activity
             android:name=".ui.ModuleMainActivity"
+            android:launchMode="singleTop"
             android:configChanges="locale|layoutDirection"
             android:enabled="true"
             android:exported="true"
             android:label="@string/module_name"
-            android:theme="@style/ModuleTheme" />
+            android:theme="@style/ModuleTheme">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="de.robv.android.xposed.category.MODULE_SETTINGS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
 
         <activity-alias
             android:name=".ui.ModuleLauncherAlias"

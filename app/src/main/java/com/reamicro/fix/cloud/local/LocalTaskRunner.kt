@@ -1,53 +1,37 @@
 package com.reamicro.fix.cloud.local
 
 import android.content.Context
-import com.reamicro.fix.cloud.api.CloudTaskWakeScheduler
 import com.reamicro.fix.logging.ModuleAndroidLog
 import com.reamicro.fix.notification.CloudTaskNotifications
 import com.reamicro.fix.xposed.XposedBridge
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 本地自动任务的手动与后台执行入口。
+ * 本地任务的显式手动处理入口；自动调度仅由 Root 模块提供。
  *
  * 配置与阅微 token 保存在本机 [LocalTaskStore]，不经过云任务服务器。
- * Android 模式调用 [LocalTaskEngine]；KSU 模式只同步配置、状态和执行请求，不在模块内重复运行。
+ * ROOT增强停用时只响应用户手动操作；开启时把请求提交给 Root，不在应用内重复处理。
  * 两种本地模式都复用 [CloudTaskLocalRunner.runTask]，结果通过模块的通知渠道发出。
  */
 object LocalTaskRunner {
     private val running = AtomicBoolean(false)
 
-    fun runDue(context: Context, maxTasks: Int = 8, force: Boolean = false): Int {
-        if (!running.compareAndSet(false, true)) return 0
-        val appContext = context.applicationContext
-        return try {
-            if (com.reamicro.fix.cloud.ksu.KsuTaskBridge.isEnabled(appContext)) {
-                com.reamicro.fix.cloud.ksu.KsuTaskBridge.synchronize(appContext, force = force)
-                0
-            } else engine(appContext).runDue(maxTasks, force).size
-        } finally {
-            running.set(false)
-            runCatching { CloudTaskWakeScheduler.schedule(appContext) }
-        }
-    }
-
     fun runTaskNow(context: Context, accountId: String, taskType: String): String {
         if (!running.compareAndSet(false, true)) return "任务正在执行，请稍后重试"
         val appContext = context.applicationContext
         return try {
-            if (com.reamicro.fix.cloud.ksu.KsuTaskBridge.isEnabled(appContext)) {
-                com.reamicro.fix.cloud.ksu.KsuTaskBridge.synchronize(appContext, requested = LocalTaskKey(accountId, taskType))
-                "已提交 KSU 执行，请稍后查看任务记录"
+            if (com.reamicro.fix.cloud.root.RootTaskBridge.isEnabled(appContext)) {
+                com.reamicro.fix.cloud.root.RootTaskBridge.synchronize(appContext, requested = LocalTaskKey(accountId, taskType))
+                "已提交 Root 后台任务，请稍后查看任务记录"
             } else engine(appContext).runDue(maxTasks = 1, requested = LocalTaskKey(accountId, taskType))
                 .firstOrNull()?.message ?: "任务不存在"
         } finally {
             running.set(false)
-            runCatching { CloudTaskWakeScheduler.schedule(appContext) }
         }
     }
 
-    internal fun switchExecutionMode(action: () -> String): String {
-        if (!running.compareAndSet(false, true)) return "任务正在执行，完成后再切换执行模式"
+    internal fun withTaskControl(action: () -> String): String {
+        if (!running.compareAndSet(false, true)) return "任务正在执行，完成后再更改 Root增强状态"
         return try { action() } finally { running.set(false) }
     }
 

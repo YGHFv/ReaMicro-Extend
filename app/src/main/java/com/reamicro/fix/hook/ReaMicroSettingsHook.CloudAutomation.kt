@@ -123,25 +123,11 @@ internal fun ReaMicroSettingsHook.renderCloudAutomationSettingsContent(innerPadd
                 },
             )
         }
-        val wakeReport = activityProvider()?.let {
-            com.reamicro.fix.cloud.api.CloudTaskWakeDiagnostics.inspect(it.applicationContext)
-        }
-        val utilityRows = listOf(
-            ActionRow(
-                key = "cloud_automation_wake",
-                title = "任务结果通知",
-                subtitle = wakeReport?.summary() ?: "检查通知与后台唤醒权限",
-                onClick = ::openCloudAutomationWakeDialog,
-            ),
-        )
         addLazyItem(lazyListScope, "cloud_automation_account_card".hashCode()) { itemComposer ->
             renderHostActionCard(accountRows, itemComposer)
         }
         addLazyItem(lazyListScope, "cloud_automation_task_card".hashCode()) { itemComposer ->
             renderHostActionCard(taskRows, itemComposer)
-        }
-        addLazyItem(lazyListScope, "cloud_automation_utility_card".hashCode()) { itemComposer ->
-            renderHostActionCard(utilityRows, itemComposer)
         }
         targetUnit()
     }
@@ -587,84 +573,6 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
     }
 }
 
-private fun ReaMicroSettingsHook.openCloudAutomationWakeDialog() {
-    val activity = activityProvider() ?: return
-    activity.runOnUiThread {
-        val colors = SettingsDialogColors(activity)
-        val dialog = Dialog(activity)
-        val card = settingsDialogCard(activity, colors)
-        card.addView(settingsDialogTitle(activity, "任务结果通知", colors))
-        val wakeStatus = TextView(activity).apply {
-            setTextColor(colors.body)
-            setPadding(24, 8, 24, 8)
-        }
-        val wakeActions = settingsDialogActions(activity)
-        card.addView(wakeStatus, apiServerRowParams(activity))
-        card.addView(wakeActions)
-
-        fun refreshWakeStatus() {
-            val diagnostics = com.reamicro.fix.cloud.api.CloudTaskWakeDiagnostics
-            val report = diagnostics.inspect(activity.applicationContext)
-            wakeStatus.text = buildString {
-                append(report.summary())
-                append('\n')
-                append(report.details().joinToString("\n"))
-                if (!report.healthy) append("\n任务仍会在服务器执行，权限只影响结果通知时效。")
-            }
-            wakeActions.removeAllViews()
-            if (!report.exactAlarmAllowed) {
-                wakeActions.addView(
-                    settingsDialogButton(activity, "允许精确闹钟", colors, SettingsDialogButtonRole.Neutral).apply {
-                        setOnClickListener {
-                            if (!diagnostics.launchFirstAvailable(activity, diagnostics.exactAlarmSettingsIntent(), diagnostics.moduleDetailsIntent())) {
-                                showToast("无法打开系统设置，请手动允许模块使用闹钟")
-                            }
-                        }
-                    },
-                    settingsDialogButtonParams(activity),
-                )
-            }
-            if (!report.batteryUnrestricted) {
-                wakeActions.addView(
-                    settingsDialogButton(activity, "放行电池优化", colors, SettingsDialogButtonRole.Neutral).apply {
-                        setOnClickListener {
-                            if (!diagnostics.launchFirstAvailable(activity, diagnostics.batteryOptimizationIntent(), diagnostics.moduleDetailsIntent())) {
-                                showToast("无法打开系统设置，请手动把模块耗电策略改为无限制")
-                            }
-                        }
-                    },
-                    settingsDialogButtonParams(activity),
-                )
-            }
-            if (!report.notificationAllowed) {
-                wakeActions.addView(
-                    settingsDialogButton(activity, "开启通知", colors, SettingsDialogButtonRole.Neutral).apply {
-                        setOnClickListener {
-                            if (!diagnostics.launchFirstAvailable(activity, diagnostics.notificationSettingsIntent(), diagnostics.moduleDetailsIntent())) {
-                                showToast("无法打开系统设置，请手动允许模块发送通知")
-                            }
-                        }
-                    },
-                    settingsDialogButtonParams(activity),
-                )
-            }
-            wakeActions.addView(
-                settingsDialogButton(activity, "重新检测", colors, SettingsDialogButtonRole.Neutral).apply {
-                    setOnClickListener { refreshWakeStatus() }
-                },
-                settingsDialogButtonParams(activity),
-            )
-            wakeActions.addView(
-                settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply {
-                    setOnClickListener { dialog.dismiss() }
-                },
-                settingsDialogButtonParams(activity),
-            )
-        }
-        refreshWakeStatus()
-        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, dismissOnThemeChange = true)
-    }
-}
 
 internal fun normalizeCloudAutomationTime(raw: String): String {
     val parts = raw.trim().split(':', limit = 2)

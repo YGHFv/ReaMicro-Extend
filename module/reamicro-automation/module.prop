@@ -1,0 +1,6 @@
+id=reamicro_automation
+name=ReaMicro Root Enhancement
+version=1.0
+versionCode=9
+author=ReaMicro Extend
+description=KernelSU / Magisk / APatch script-only local task runner. Explicit opt-in in the APK; manager-managed updates and removal. Action opens the Compose UI. Experimental, no system mount required.

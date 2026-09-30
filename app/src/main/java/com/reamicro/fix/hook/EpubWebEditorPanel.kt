@@ -30,6 +30,9 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import com.reamicro.fix.epub.editor.EpubOpfMetadata
+import com.reamicro.fix.epub.editor.EpubTextFiles
+import com.reamicro.fix.epub.editor.usesScriptaEpubEditor
 import com.reamicro.fix.settings.FontSettingsSnapshot
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.xposed.XposedBridge
@@ -49,7 +52,15 @@ internal class EpubWebEditorPanel(
     private val settingsProvider: () -> ModuleSettingsSnapshot = { ModuleSettingsSnapshot() },
     private val fontSettingsProvider: () -> FontSettingsSnapshot = { FontSettingsSnapshot() },
 ) {
-    private val dialog = Dialog(activity)
+    private val dialog by lazy { Dialog(com.reamicro.fix.core.InjectedModuleContext.create(activity), com.reamicro.fix.R.style.EpubFullScreenDialog) }
+    private var nativeEditor: EpubScriptaPanel? = null
+    private var structure: EpubStructureView? = null
+    private var structureView: View? = null
+    private var legacyActive = false
+    private var webReady = false
+    private var disposed = false
+    private var pendingLegacyScript: String? = null
+    private val bridge by lazy { Bridge() }
     private lateinit var webView: WebView
     private lateinit var container: FrameLayout
     private lateinit var loadingOverlay: View
@@ -86,8 +97,10 @@ internal class EpubWebEditorPanel(
     @Volatile private var safeAreaBottomCssPx: Int = 0
     private val globalUiFontFile: File? by lazy { resolveGlobalUiFontFile() }
 
-    fun show() {
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+    // The native structure page must not start Chromium or load the legacy document.
+    // Keep one WebView per panel, created only for advanced editing / global search.
+    private fun ensureLegacyWebView() {
+        if (::webView.isInitialized) return
         webView = WebView(activity).apply {
             setBackgroundColor(Color.TRANSPARENT)
             setLayerType(View.LAYER_TYPE_HARDWARE, null)
@@ -95,6 +108,10 @@ internal class EpubWebEditorPanel(
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     activity.runOnUiThread {
+                        if (disposed || !dialog.isShowing) return@runOnUiThread
+                        webReady = true
+                        pendingLegacyScript?.let { webView.evaluateJavascript(it, null) }
+                        pendingLegacyScript = null
                         hideLoadingOverlay()
                         // 页面刚加载完会重置 <html> 上的内联样式，安全区变量要在每次加载后重设。
                         applySafeAreaToPage()
@@ -110,7 +127,7 @@ internal class EpubWebEditorPanel(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
             }
-            addJavascriptInterface(Bridge(), BRIDGE_NAME)
+            addJavascriptInterface(bridge, BRIDGE_NAME)
             loadDataWithBaseURL(
                 editorBaseUrl(),
                 editorHtml(),
@@ -119,13 +136,15 @@ internal class EpubWebEditorPanel(
                 null,
             )
         }
-        loadingOverlay = buildLoadingOverlay()
+        container.addView(webView, 0, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+    }
+    fun show() {
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        loadingOverlay = FrameLayout(activity).apply { visibility = View.GONE }
         container = FrameLayout(activity).apply {
             setBackgroundColor(pageBackground())
-            addView(webView, FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            ))
             addView(loadingOverlay, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -140,7 +159,7 @@ internal class EpubWebEditorPanel(
             //     文件树最后一项仍然完整可见、可点，不会被小白条压住。
             //     注意取值只认导航栏（见 navigationBarBottomCssPx），键盘不影响它。
             container.setOnApplyWindowInsetsListener { view, insets ->
-                view.setPadding(0, insets.systemWindowInsetTop, 0, 0)
+                view.setPadding(0, if (legacyActive) insets.systemWindowInsetTop else 0, 0, 0)
                 val bottom = navigationBarBottomCssPx(insets)
                 if (bottom != safeAreaBottomCssPx) {
                     safeAreaBottomCssPx = bottom
@@ -149,30 +168,55 @@ internal class EpubWebEditorPanel(
                 insets
             }
         }
+                structure = EpubStructureView(
+            activity = activity, root = root,
+            request = { name, args ->
+                val method = Bridge::class.java.getDeclaredMethod(name, *Array(args.size) { String::class.java })
+                method.isAccessible = true
+                synchronized(bridge) { method.invoke(bridge, *args)?.toString().orEmpty() }
+            },
+            openScripta = ::openScripta, openLegacy = ::openLegacy,
+            close = { dialog.dismiss() }, uiFontFileProvider = { globalUiFontFile },
+        )
+        structureView = structure!!.create()
+        container.addView(structureView, FrameLayout.LayoutParams(-1, -1))
         dialog.setContentView(container)
+        structure?.bindWindow(dialog.window)
         dialog.setOnKeyListener { _, keyCode, event ->
             if (keyCode != KeyEvent.KEYCODE_BACK || event.action != KeyEvent.ACTION_UP) {
                 return@setOnKeyListener false
             }
+            if (!legacyActive) {
+                if (structure?.handleBack() != true) dialog.dismiss()
+                return@setOnKeyListener true
+            }
             webView.evaluateJavascript("window.FileEditorNative && window.FileEditorNative.handleBack()") { result ->
-                if (result != "true") dialog.dismiss()
+                if (result != "true") returnToStructure()
             }
             true
         }
         dialog.setOnDismissListener {
+            disposed = true
+            pendingLegacyScript = null
+            nativeEditor?.dismissForHostShutdown()
+            nativeEditor = null
+            structure?.dispose()
+            structure = null
+            structureView = null
             synchronized(activePanels) {
                 activePanels.remove(activity)
             }
             cleanupStagedCover()
             runCatching { activity.unregisterComponentCallbacks(themeCallbacks) }
-            runCatching {
+            if (::webView.isInitialized) runCatching {
+                webView.stopLoading()
                 webView.removeJavascriptInterface(BRIDGE_NAME)
                 webView.destroy()
             }
-            if (metadataChanged && !activity.isFinishing) {
+            if (metadataChanged && !activity.isFinishing && !activity.isDestroyed) {
                 activity.window?.decorView?.postDelayed({
                     runCatching {
-                        if (!activity.isFinishing) activity.recreate()
+                        if (!activity.isFinishing && !activity.isDestroyed) activity.recreate()
                     }.onFailure {
                         XposedBridge.log("$LOG_PREFIX file editor metadata refresh failed: ${it.stackTraceToString()}")
                     }
@@ -198,18 +242,19 @@ internal class EpubWebEditorPanel(
                 WindowManager.LayoutParams.MATCH_PARENT,
             )
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-            addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
+            addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS)
                 clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION)
                 addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
-                statusBarColor = bg
+                statusBarColor = Color.TRANSPARENT
                 // 导航栏不铺系统底色（配合 isNavigationBarContrastEnforced=false）：
                 // WebView 铺到屏幕底，底部那条留白改由页面自己负责
                 // （见 show() 的 insets 监听 + applySafeAreaToPage 的 --safe-bottom）。
                 navigationBarColor = Color.TRANSPARENT
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                attributes = attributes.apply { layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES }
                 navigationBarDividerColor = Color.TRANSPARENT
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -228,6 +273,7 @@ internal class EpubWebEditorPanel(
 
     private fun updateWindowTheme(dark: Boolean) {
         activity.runOnUiThread {
+            structure?.updateTheme()
             val bg = if (dark) 0xFF111318.toInt() else 0xFFF2F3F8.toInt()
             if (::container.isInitialized) {
                 container.setBackgroundColor(bg)
@@ -239,7 +285,7 @@ internal class EpubWebEditorPanel(
                 setBackgroundDrawable(ColorDrawable(bg))
                 decorView.setBackgroundColor(bg)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    statusBarColor = bg
+                    statusBarColor = Color.TRANSPARENT
                     // 与 configureWindow 一致：导航栏保持透明，由容器底色兜底。
                     navigationBarColor = Color.TRANSPARENT
                 }
@@ -338,56 +384,8 @@ internal class EpubWebEditorPanel(
         return flags
     }
 
-    private fun buildLoadingOverlay(): View {
-        val colors = ModuleDialogTheme.palette(activity)
-        return FrameLayout(activity).apply {
-            setBackgroundColor(colors.pageBackground)
-            isClickable = true
-            isFocusable = true
-            addView(
-                LinearLayout(activity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    gravity = android.view.Gravity.CENTER
-                    addView(
-                        ProgressBar(activity).apply {
-                            isIndeterminate = true
-                            ModuleDialogTheme.tintProgress(this, colors.primary)
-                        },
-                        LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ),
-                    )
-                    addView(
-                        TextView(activity).apply {
-                            text = "正在载入图书结构"
-                            setTextColor(colors.body)
-                            textSize = 13f
-                            setPadding(0, dp(14), 0, 0)
-                        },
-                        LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ),
-                    )
-                }.also { layout ->
-                    layout.setPadding(dp(28), dp(22), dp(28), dp(22))
-                    layout.background = android.graphics.drawable.GradientDrawable().apply {
-                        setColor(colors.rowBackground)
-                        cornerRadius = dp(8).toFloat()
-                    }
-                },
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    android.view.Gravity.CENTER,
-                ),
-            )
-        }
-    }
-
     private fun hideLoadingOverlay() {
-        if (!::loadingOverlay.isInitialized) return
+        if (disposed || !::loadingOverlay.isInitialized || !::webView.isInitialized) return
         webView.animate().alpha(1f).setDuration(140L).start()
         loadingOverlay.animate()
             .alpha(0f)
@@ -406,14 +404,102 @@ internal class EpubWebEditorPanel(
         (activity.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES
 
+    private fun openScripta(path: String) {
+        if (!dialog.isShowing || nativeEditor != null || activity.isFinishing) return
+        runCatching {
+            EpubScriptaPanel(
+                activity = activity, root = root, relativePath = path,
+                onSaved = {
+                    refreshBookFileCache()
+                    activity.runOnUiThread {
+                        structure?.refresh()
+                        if (dialog.isShowing && ::webView.isInitialized) webView.evaluateJavascript(
+                            "window.FileEditorNative.nativeSaved(" + JSONObject.quote(path) + ")", null,
+                        )
+                    }
+                },
+                onClosed = { nativeEditor = null },
+            ).also { nativeEditor = it }.show()
+        }.onFailure {
+            nativeEditor = null
+            XposedBridge.log("$LOG_PREFIX Scripta open failed: ${it.stackTraceToString()}")
+            activity.toast("编辑器打开失败：${it.message}")
+        }
+    }
+
+    private fun openLegacy(path: String?, metadata: Boolean) {
+        if (disposed || !dialog.isShowing) return
+        try {
+            ensureLegacyWebView()
+        } catch (e: Exception) {
+            XposedBridge.log("$LOG_PREFIX legacy editor initialisation failed: ${e.stackTraceToString()}")
+            activity.toast("编辑器打开失败：${e.message}")
+            return
+        }
+        legacyActive = true
+        container.requestApplyInsets()
+        structureView?.visibility = View.GONE
+        webView.visibility = View.VISIBLE
+        val script = "window.FileEditorNative && window.FileEditorNative.openLegacyPath(" +
+            (path?.let(JSONObject::quote) ?: "null") + "," + metadata + ")"
+        if (webReady) webView.evaluateJavascript(script, null) else pendingLegacyScript = script
+    }
+    private fun returnToStructure() {
+        if (!dialog.isShowing) return
+        legacyActive = false
+        container.requestApplyInsets()
+        if (::webView.isInitialized) webView.visibility = View.GONE
+        structureView?.visibility = View.VISIBLE
+        structure?.refresh()
+    }
     private inner class Bridge {
+        @JavascriptInterface
+        fun cssRules(path: String?): String = safeJson {
+            val file = resolveChild(path.orEmpty())
+            require(file.isFile && file.extension.equals("css", true)) { "不是 CSS 文件" }
+            require(file.length() <= MAX_TEXT_BYTES) { "CSS 文件超出查看器安全范围" }
+            val rules = com.reamicro.fix.epub.editor.hostStyleSheetPreview(activity.classLoader, file)
+            JSONObject().put("ok", true).put("rules", rules).toString()
+        }
+
+        @JavascriptInterface
+        fun getMetadata(path: String?): String = safeJson {
+            val file = resolveChild(path.orEmpty())
+            require(file.isFile && file.extension.equals("opf", true)) { "不是 OPF 文件" }
+            JSONObject().put("ok", true).put("metadata", metadataJson(file)).toString()
+        }
+        @JavascriptInterface
+        fun saveMetadataField(path: String?, field: String?, value: String?, expected: String?): String = safeJson {
+            val file = resolveChild(path.orEmpty())
+            require(file.isFile && file.extension.equals("opf", true)) { "不是 OPF 文件" }
+            val loaded = EpubTextFiles.load(file)
+            val key = field.orEmpty()
+            require(EpubOpfMetadata.read(loaded.text)[key] == expected.orEmpty()) {
+                "此字段已被其他操作修改，请重新打开"
+            }
+            val next = EpubOpfMetadata.update(loaded.text, key, value.orEmpty())
+            EpubTextFiles.save(file, next, loaded.snapshot)
+            val metadata = metadataJson(file)
+            syncBookMetadata(metadata)
+            JSONObject().put("ok", true).put("message", "已保存").put("metadata", metadata).toString()
+        }
+
+        @JavascriptInterface
+        fun openNativeEditor(path: String?): String = safeJson {
+            val relative = path.orEmpty()
+            require(usesScriptaEpubEditor(relative)) { "该文件不使用 Scripta" }
+            require(resolveChild(relative).isFile) { "文件不存在" }
+            activity.runOnUiThread { openScripta(relative) }
+            JSONObject().put("ok", true).toString()
+        }
+
         @JavascriptInterface
         fun initialData(): String = safeJson {
             val files = allFiles()
             JSONObject()
                 .put("title", bookTitle)
                 .put("status", "已解包 ${files.size} 个文件")
-                .put("metadata", metadataJson())
+                .put("metadata", metadataJson(files = files))
                 .put("files", filesJson(files))
                 .toString()
         }
@@ -435,7 +521,11 @@ internal class EpubWebEditorPanel(
             require(file.length() <= MAX_TEXT_BYTES) { "文件过大，暂不支持编辑" }
             JSONObject()
                 .put("ok", true)
-                .put("content", String(file.readBytes(), StandardCharsets.UTF_8))
+                .apply {
+                    val loaded = EpubTextFiles.load(file)
+                    put("content", loaded.text)
+                    put("token", loaded.snapshot.fingerprint.sha256)
+                }
                 .toString()
         }
 
@@ -444,17 +534,32 @@ internal class EpubWebEditorPanel(
             val file = resolveChild(path.orEmpty())
             require(file.isFile) { "文件不存在" }
             require(isTextFile(file)) { "该文件不支持文本编辑" }
-            file.writeText(content.orEmpty(), StandardCharsets.UTF_8)
+            val loaded = EpubTextFiles.load(file)
+            EpubTextFiles.save(file, content.orEmpty(), loaded.snapshot)
             refreshBookFileCache()
             JSONObject().put("ok", true).put("message", "已保存").toString()
         }
 
         @JavascriptInterface
+        fun writeTextVersioned(path: String?, content: String?, expectedToken: String?): String = safeJson {
+            val file = resolveChild(path.orEmpty())
+            require(file.isFile && isTextFile(file)) { "不是可编辑的文件" }
+            val loaded = EpubTextFiles.load(file)
+            require(!expectedToken.isNullOrBlank() && loaded.snapshot.fingerprint.sha256 == expectedToken) {
+                "文件已被其他操作修改，请重新打开后再保存"
+            }
+            EpubTextFiles.save(file, content.orEmpty(), loaded.snapshot)
+            val token = EpubTextFiles.load(file).snapshot.fingerprint.sha256
+            refreshBookFileCache()
+            JSONObject().put("ok", true).put("message", "已保存").put("token", token).toString()
+        }
+        @JavascriptInterface
         fun replaceText(path: String?, content: String?): String = safeJson {
             val file = resolveChild(path.orEmpty())
             require(file.isFile) { "文件不存在" }
             require(isTextFile(file)) { "该文件不支持文本编辑" }
-            file.writeText(content.orEmpty(), StandardCharsets.UTF_8)
+            val loaded = EpubTextFiles.load(file)
+            EpubTextFiles.save(file, content.orEmpty(), loaded.snapshot)
             refreshBookFileCache()
             JSONObject().put("ok", true).toString()
         }
@@ -672,7 +777,11 @@ internal class EpubWebEditorPanel(
 
         @JavascriptInterface
         fun close() {
-            activity.runOnUiThread { dialog.dismiss() }
+            activity.runOnUiThread { if (legacyActive) returnToStructure() else dialog.dismiss() }
+        }
+        @JavascriptInterface
+        fun closeLegacyEditor() {
+            activity.runOnUiThread { returnToStructure() }
         }
 
         @JavascriptInterface
@@ -716,7 +825,9 @@ internal class EpubWebEditorPanel(
             },
         )
         pendingImportGroupPath = ""
-        webView.evaluateJavascript(
+        structure?.refresh()
+        if (!legacyActive) activity.toast(result.optString("message"))
+        if (::webView.isInitialized) webView.evaluateJavascript(
             "window.FileEditorNative && window.FileEditorNative.onImportResult(${JSONObject.quote(result.toString())})",
             null,
         )
@@ -768,7 +879,7 @@ internal class EpubWebEditorPanel(
             },
         )
         pendingCoverPath = ""
-        webView.evaluateJavascript(
+        if (::webView.isInitialized) webView.evaluateJavascript(
             "window.FileEditorNative && window.FileEditorNative.onCoverResult(${JSONObject.quote(result.toString())})",
             null,
         )
@@ -950,19 +1061,27 @@ internal class EpubWebEditorPanel(
             .put("sizeText", formatFileSize(file.length()))
             .put("detail", fileDetail(file, kind))
             .put("editable", isTextFile(file))
+            .put("nativeEditor", usesScriptaEpubEditor(relative))
             .put("preview", "")
             .put("color", iconColor(kind, file.name))
     }
 
-    private fun metadataJson(): JSONObject {
-        val opf = opfFile()
-        val content = opf?.let { runCatching { it.readText(StandardCharsets.UTF_8) }.getOrDefault("") }.orEmpty()
-        val cover = opf?.let { findCoverFile(it) }
+    private fun metadataJson(opfOverride: File? = null, files: List<File>? = null): JSONObject {
+        // Reuse this load's snapshot, including the no-OPF case; never cache across edits.
+        val opf = opfOverride ?: if (files != null) {
+            files.firstOrNull { it.extension.equals("opf", ignoreCase = true) }
+        } else opfFile()
+        val content = opf?.let { runCatching { EpubTextFiles.load(it).text }.getOrDefault("") }.orEmpty()
+        val fields = runCatching { EpubOpfMetadata.read(content) }.getOrDefault(emptyMap())
+        val cover = opf?.let { findCoverFile(it, files) }
         return JSONObject()
-            .put("title", tagText(content, "dc:title").ifBlank { bookTitle })
-            .put("author", tagText(content, "dc:creator"))
-            .put("subtitle", tagText(content, "dc:subtitle"))
-            .put("publisher", tagText(content, "dc:publisher"))
+            .put("opfPath", opf?.let(::relativePath).orEmpty())
+            .put("language", fields["language"].orEmpty())
+            .put("date", fields["date"].orEmpty())
+            .put("title", fields["title"] ?: tagText(content, "dc:title"))
+            .put("author", fields["author"] ?: tagText(content, "dc:creator"))
+            .put("subtitle", fields["subtitle"] ?: tagText(content, "dc:subtitle"))
+            .put("publisher", fields["publisher"] ?: tagText(content, "dc:publisher"))
             .put("maker", tagText(content, "meta", "name", "generator"))
             .put("series", tagText(content, "meta", "name", "calibre:series"))
             .put("tags", subjectsJson(content))
@@ -1213,7 +1332,7 @@ internal class EpubWebEditorPanel(
         error("无法生成封面 ID")
     }
 
-    private fun findCoverFile(opf: File): File? {
+    private fun findCoverFile(opf: File, files: List<File>? = null): File? {
         val content = runCatching { opf.readText(StandardCharsets.UTF_8) }.getOrDefault("")
         val itemRegex = Regex("<item\\b[^>]*>", RegexOption.IGNORE_CASE)
         val coverId = Regex("<meta\\b[^>]*>", RegexOption.IGNORE_CASE)
@@ -1243,7 +1362,7 @@ internal class EpubWebEditorPanel(
             val file = File(opfDir, Uri.decode(href)).canonicalFile
             if (file.isFile) return file
         }
-        return allFiles().firstOrNull {
+        return (files ?: allFiles()).firstOrNull {
             fileKind(it) == "image" && it.name.contains("cover", ignoreCase = true)
         }
     }
@@ -1284,13 +1403,20 @@ internal class EpubWebEditorPanel(
             .replace("&apos;", "'")
             .replace("&amp;", "&")
 
-    private fun allFiles(): List<File> =
-        root.walkTopDown()
+    private fun allFiles(): List<File> {
+        // Canonical path resolution is I/O: calculate sort keys once, not per comparison.
+        data class IndexedFile(val file: File, val group: String, val name: String)
+        return root.walkTopDown()
             .filter { it.isFile }
-            .filterNot { relativePath(it).startsWith("META-INF/", ignoreCase = true) }
-            .sortedWith(compareBy<File> { relativePath(it).substringBeforeLast("/", "") }
-                .thenBy { naturalName(it.name) })
+            .mapNotNull { file ->
+                val relative = relativePath(file)
+                if (relative.startsWith("META-INF/", ignoreCase = true)) null
+                else IndexedFile(file, relative.substringBeforeLast("/", ""), naturalName(file.name))
+            }
+            .sortedWith(compareBy<IndexedFile> { it.group }.thenBy { it.name })
+            .map { it.file }
             .toList()
+    }
 
     private fun fileDetail(file: File, kind: String): String =
         when (kind) {
@@ -1635,16 +1761,76 @@ button{border:0;background:transparent;color:inherit;padding:0}
 html[data-theme="dark"] .sheet{background:#191c20}html[data-theme="dark"] .sheet .plain{background:#252932}html[data-theme="dark"] .sheet .danger{background:#402126;color:#ffb4b4}html[data-theme="dark"] .field,html[data-theme="dark"] .highlight,html[data-theme="dark"] .editor-stack,html[data-theme="dark"] .code-wrap,html[data-theme="dark"] .font-preview{background:#15171c;color:#e5e6eb}html[data-theme="dark"] .lines{background:#111318;color:#7f8794}html[data-theme="dark"] .code-input{color:#e5e6eb;-webkit-text-fill-color:#e5e6eb;caret-color:#e5e6eb}html[data-theme="dark"] .editor-head,html[data-theme="dark"] .topbar{background:var(--bg);border-color:#2a2f38}html[data-theme="dark"] .title,html[data-theme="dark"] .editor-title strong{color:#f2f4f7}html[data-theme="dark"] .editor-title small,html[data-theme="dark"] .tool,html[data-theme="dark"] .back{color:#b5bac5}html[data-theme="dark"] .meta-card{background:#191c20;border-color:#2a2f38}html[data-theme="dark"] .meta-row label{color:#aeb5c2}html[data-theme="dark"] .meta-row input,html[data-theme="dark"] .meta-tags{background:#15171c;border-color:#303742;color:#e5e6eb}html[data-theme="dark"] .meta-row input.readonly{background:#12151a;color:#cdd4df}html[data-theme="dark"] .meta-cover{background:#151a20;border-color:#303742;color:#8d96a5}html[data-theme="dark"] .meta-actions .secondary{background:var(--accent-soft);color:var(--accent-text);border-color:#303742}html[data-theme="dark"] .replace-card{background:rgba(25,28,32,.96);border-color:#2a2f38}html[data-theme="dark"] .replace input,html[data-theme="dark"] .replace select{background:#171a1f;border-color:#303742;color:#e5e6eb}html[data-theme="dark"] .replace-label,html[data-theme="dark"] .replace-progress,html[data-theme="dark"] .replace-count,html[data-theme="dark"] .replace-options{color:#98a2b3}html[data-theme="dark"] .replace-actions button{background:var(--accent-soft);color:var(--accent-text)}html[data-theme="dark"] .replace-batch button{background:var(--accent)}html[data-theme="dark"] .scope-switch{background:#171a1f;border-color:#303742}html[data-theme="dark"] .scope-btn{color:#9ca7b6}html[data-theme="dark"] .scope-btn.active{background:#222833;color:#e5e6eb}html[data-theme="dark"] .icon-search{background:#1f3340;color:#8ec9f0}html[data-theme="dark"] .icon-save{background:var(--accent-soft);color:var(--accent-text)}html[data-theme="dark"] .icon-save.dirty{background:#c14961;color:#fff}html[data-theme="dark"] .icon-close{background:#3b252b;color:#f0b7c1}html[data-theme="dark"] .confirm-card{background:#191c20}html[data-theme="dark"] .confirm-card h3{color:#f2f4f7}html[data-theme="dark"] .confirm-card p{color:#98a2b3}html[data-theme="dark"] .confirm-card p strong{color:#f2f4f7}html[data-theme="dark"] .confirm-actions .cancel{background:#2a2f38;color:#c5cad4}html[data-theme="dark"] .confirm-actions .plain{background:#41272d;color:#ffb8c6}html[data-theme="dark"] .confirm-actions .primary{background:var(--accent)}html[data-theme="dark"] .hl-tag{color:#8db6ff}html[data-theme="dark"] .hl-name{color:#7bd3a8}html[data-theme="dark"] .hl-attr{color:#f4b37a}html[data-theme="dark"] .hl-string{color:#ff9f93}html[data-theme="dark"] .hl-comment{color:#7e8795}html[data-theme="dark"] .hl-key{color:#d5a3ff}html[data-theme="dark"] .hl-num{color:#7ad0e3}html[data-theme="dark"] .hl-punc{color:#aab2bf}
 @media (prefers-color-scheme:dark){.sheet{background:#191c20}.sheet .plain{background:#252932}.sheet .danger{background:#402126;color:#ffb4b4}.field,.highlight,.editor-stack,.code-wrap,.font-preview{background:#15171c;color:#e5e6eb}.lines{background:#111318;color:#7f8794}.code-input{color:#e5e6eb;-webkit-text-fill-color:#e5e6eb;caret-color:#e5e6eb}.editor-head,.topbar{background:var(--bg);border-color:#2a2f38}.title,.editor-title strong{color:#f2f4f7}.editor-title small,.tool,.back{color:#b5bac5}.replace-card{background:rgba(25,28,32,.96);border-color:#2a2f38}.replace input,.replace select{background:#171a1f;border-color:#303742;color:#e5e6eb}.replace-label,.replace-progress,.replace-count,.replace-options{color:#98a2b3}.replace-actions button{background:var(--accent-soft);color:var(--accent-text)}.replace-batch button{background:var(--accent)}.scope-switch{background:#171a1f;border-color:#303742}.scope-btn{color:#9ca7b6}.scope-btn.active{background:#222833;color:#e5e6eb}.icon-search{background:#1f3340;color:#8ec9f0}.icon-save{background:var(--accent-soft);color:var(--accent-text)}.icon-save.dirty{background:#c14961;color:#fff}.icon-close{background:#3b252b;color:#f0b7c1}.confirm-card{background:#191c20}.confirm-card h3{color:#f2f4f7}.confirm-card p{color:#98a2b3}.confirm-card p strong{color:#f2f4f7}.confirm-actions .cancel{background:#2a2f38;color:#c5cad4}.confirm-actions .plain{background:#41272d;color:#ffb8c6}.confirm-actions .primary{background:var(--accent)}.hl-tag{color:#8db6ff}.hl-name{color:#7bd3a8}.hl-attr{color:#f4b37a}.hl-string{color:#ff9f93}.hl-comment{color:#7e8795}.hl-key{color:#d5a3ff}.hl-num{color:#7ad0e3}.hl-punc{color:#aab2bf}}
 @media (max-width:420px){.meta{padding:10px 14px 24px}.meta-card{padding:12px;border-radius:8px}.meta-grid{grid-template-columns:minmax(0,1fr) 112px;gap:12px}.meta-cover{width:112px}.meta-two{grid-template-columns:1fr}.meta-actions{grid-template-columns:1fr 1fr;gap:10px}.meta-actions button{height:48px;font-size:14px}.editor-head{padding:8px 12px 6px}.editor-actions{grid-auto-columns:34px;gap:6px}.icon-btn{width:34px;height:34px;border-radius:10px}.icon-btn svg{width:18px;height:18px}.replace{padding:0 8px 4px}.replace-card{padding:10px 10px 8px;border-radius:18px}.replace-row{grid-template-columns:54px minmax(0,1fr);gap:7px}.replace input,.replace select{height:36px;padding:0 10px}.replace-actions{gap:5px}.replace-actions button,.replace-batch button{height:36px;font-size:12px}.replace-options{grid-template-columns:1fr 1fr;grid-template-areas:"scope scope" "regex text";gap:7px}.scope-switch{grid-area:scope}.replace-options label:nth-of-type(1){grid-area:regex}.replace-options label:nth-of-type(2){grid-area:text;justify-self:end}.scope-btn{font-size:11px;padding:0 6px}}
+
+/* ReaMicro 1.3: EpubFileRow (32dp indent; 16/14dp icon padding; 30x36dp image),
+   EpubFolderRow (16/12dp padding), metadata ItemRow (card/divider/value/edit). */
+.topbar{height:56px;grid-template-columns:48px minmax(0,1fr) 48px;padding:0 4px}
+.title{font-size:18px;font-weight:500;padding-top:0!important;line-height:1.3!important}
+.back,.tool{width:48px;height:48px;color:var(--text)}
+.topbar svg,.editor-back svg{width:24px;height:24px;stroke:currentColor;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.section{border-top:0}
+.group-head{min-height:48px;height:auto;padding:4px 16px;grid-template-columns:minmax(0,1fr) 40px 40px;background:var(--bg)}
+.group-title{letter-spacing:0;font-size:14px;text-transform:none}
+.group-icon{width:40px;height:40px;color:var(--muted)}
+.file-row{height:64px;margin-left:32px;grid-template-columns:62px minmax(0,1fr) 48px}
+.file-row>button:first-child{padding:14px 16px}
+.thumb,.kind-icon{width:30px;height:36px;border-radius:3px}
+.file-name{font-size:16px;font-weight:400;line-height:1.35}
+.file-detail{font-size:12px;margin-top:4px}
+.more{width:48px;padding:0}
+.meta{padding:16px;display:grid;gap:12px}
+.host-meta-card{display:block;width:100%;padding:16px;background:var(--paper);border:1px solid var(--line);border-radius:8px;text-align:left}
+.host-meta-label{display:block;font-size:14px;color:var(--text);padding-bottom:12px;border-bottom:1px solid var(--line)}
+.host-meta-value{display:flex;align-items:center;gap:16px;padding-top:12px;color:var(--muted);font-size:14px;line-height:1.6}
+.host-meta-value>span{flex:1;min-width:0;overflow-wrap:anywhere}
+.host-meta-value svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.7;flex:none}
+#metaFieldValue{min-height:96px;height:auto;padding:12px;line-height:1.6;resize:vertical}
+.editor{grid-template-rows:56px minmax(0,1fr) auto}
+.editor-head{display:flex;gap:0;padding:0 4px;background:var(--bg);backdrop-filter:none;border-color:var(--line)}
+.editor-back{width:48px;height:48px;flex:none;display:grid;place-items:center}
+.editor-title{flex:1;min-width:0;padding:0 4px}
+.editor-title strong{font-size:18px;font-weight:500}
+.editor-title small{font-size:11px;color:var(--muted)}
+.editor-actions{display:flex;gap:0}
+.icon-btn{width:48px;height:48px;border-radius:0;box-shadow:none;background:transparent!important;color:var(--muted)!important}
+.icon-btn svg{width:22px;height:22px}
+.icon-save.dirty{color:var(--accent)!important;box-shadow:none}
+.icon-close{display:none}
+.app.previewing .icon-search,.app.previewing .icon-save{display:none}
+.preview{height:100%;width:100%;background:var(--bg);padding:16px;overflow:hidden;touch-action:none}
+.preview img{user-select:none;max-width:100%;max-height:100%;transform-origin:center;will-change:transform}
+.sheet{background:var(--paper);box-shadow:none}
+.sheet h3{font-size:18px;font-weight:500}
+.sheet button{font-weight:500}
+.sheet .plain{background:var(--bg);color:var(--text)}
+.field{background:var(--paper);color:var(--text)}
+
+
+#sourceEditBtn{display:none;color:var(--accent);height:48px;padding:0 12px;font-size:14px}
+.css-preview #sourceEditBtn{display:block}
+.font-preview{padding:8px 16px;background:var(--bg);font-size:16px}
+.host-font-card{background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:16px;margin:8px 0}
+.host-font-language{font-family:var(--ui-font-family,sans-serif);font-size:14px;color:var(--muted);padding-bottom:12px;border-bottom:1px solid var(--line)}
+.host-font-sample{font-family:previewFont;font-size:20px;line-height:1.6;margin:12px 0 0;overflow-wrap:anywhere}
+.host-css-preview{height:100%;overflow:auto;padding:0 16px;background:var(--bg)}
+.host-css-rule{padding:16px 0;border-bottom:1px solid var(--line)}
+.host-css-rule h3{margin:0 0 8px;font-size:16px;font-weight:500;color:#008000;overflow-wrap:anywhere}
+.host-css-row{display:flex;align-items:center;gap:16px;padding:8px 0}
+.host-css-description{flex:1;font-size:14px;line-height:1.4}
+.host-css-description small{display:block;font-size:12px;color:var(--muted);margin-top:3px}
+.host-css-row code{max-width:55%;font-size:14px;color:var(--muted);text-align:right;overflow-wrap:anywhere;white-space:pre-wrap}
+html[data-theme="dark"] .host-css-rule h3{color:#7bd3a8}
+
 </style>
 </head>
 <body>
 <main id="app" class="app">
-  <header class="topbar"><button class="back" onclick="FileEditorNative.closeOrBack()">‹</button><div id="title" class="title" style="padding-top:8px;line-height:1"></div><button class="tool" onclick="FileEditorNative.refresh()">↻</button></header>
+  <header class="topbar"><button class="back" aria-label="返回" onclick="FileEditorNative.closeOrBack()"><svg viewBox="0 0 24 24"><path d="M19 12H5m7-7-7 7 7 7"/></svg></button><div id="title" class="title" style="padding-top:8px;line-height:1"></div><button class="tool" aria-label="刷新" onclick="FileEditorNative.refresh()"><svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17a8 8 0 0 0 14 1M20 7A8 8 0 0 0 6 6"/></svg></button></header>
   <section id="meta" class="meta"></section>
   <p id="status" class="status"></p>
   <section id="tree"></section>
   <section id="editor" class="editor">
-    <div class="editor-head"><div class="editor-title"><strong id="editName"></strong><small id="editPath"></small></div><div class="editor-actions"><button id="searchBtn" class="icon-btn icon-search" onclick="FileEditorNative.toggleReplace()"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg></button><button id="saveBtn" class="icon-btn icon-save" onclick="FileEditorNative.save()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h11l3 3v13H5z"></path><path d="M8 4v6h8V4"></path><path d="M9 20v-6h6v6"></path></svg></button><button class="icon-btn icon-close" onclick="FileEditorNative.closeEditor()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12"></path><path d="M18 6L6 18"></path></svg></button></div></div>
+    <div class="editor-head"><button class="editor-back" aria-label="返回文件树" onclick="FileEditorNative.closeEditor()"><svg viewBox="0 0 24 24"><path d="M19 12H5m7-7-7 7 7 7"/></svg></button><div class="editor-title"><strong id="editName"></strong><small id="editPath"></small></div><div class="editor-actions"><button id="sourceEditBtn" onclick="FileEditorNative.editCurrentSource()">编辑源码</button><button id="searchBtn" class="icon-btn icon-search" onclick="FileEditorNative.toggleReplace()"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg></button><button id="saveBtn" class="icon-btn icon-save" onclick="FileEditorNative.save()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h11l3 3v13H5z"></path><path d="M8 4v6h8V4"></path><path d="M9 20v-6h6v6"></path></svg></button><button class="icon-btn icon-close" onclick="FileEditorNative.closeEditor()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12"></path><path d="M18 6L6 18"></path></svg></button></div></div>
     <div id="editorBody" class="code-wrap"><pre id="lines" class="lines">1</pre><textarea id="text"></textarea></div>
     <div id="replace" class="replace"><div class="replace-card"><div class="replace-head"><strong>查找替换</strong><div class="replace-meta"><span id="replaceStatus" class="replace-progress"></span><span id="scopeCount" class="replace-count"></span></div></div><div class="replace-row"><span class="replace-label">查找</span><input id="find" placeholder="输入查找内容"></div><div class="replace-row"><span class="replace-label">替换为</span><input id="repl" placeholder="留空则删除"></div><div class="replace-actions"><button onclick="FileEditorNative.findPrev()">上一个</button><button onclick="FileEditorNative.count()">计数</button><button onclick="FileEditorNative.findNext()">下一个</button></div><div class="replace-batch"><button onclick="FileEditorNative.replaceCurrent()">替换当前</button><button onclick="FileEditorNative.replaceAll()">替换全部</button></div><div class="replace-options"><input id="scope" type="hidden" value="current"><div class="scope-switch"><button type="button" id="scopeCurrent" class="scope-btn active" onclick="FileEditorNative.setScope('current')">当前文件</button><button type="button" id="scopeHtml" class="scope-btn" onclick="FileEditorNative.setScope('html')">HTML章节</button><button type="button" id="scopeAll" class="scope-btn" onclick="FileEditorNative.setScope('all')">所有文本</button></div><label><input id="regex" class="check" type="checkbox"> 正则</label><label><input id="textOnly" class="check" type="checkbox"> 仅文本</label></div></div></div>
   </section>
@@ -1670,8 +1856,14 @@ function restoreTreeScroll(){requestAnimationFrame(()=>window.scrollTo(0,state.t
 function groupFiles(){const map={};state.files.forEach(f=>{const k=f.group||"ROOT";if(!map[k])map[k]={name:k,path:f.groupPath||"",files:[]};map[k].files.push(f);if(state.open[k]===undefined)state.open[k]=true});state.groups=map}
 function mergeDecorations(nextFiles,invalidatePaths=[]){const invalid=new Set(invalidatePaths||[]);const previous=new Map((state.files||[]).map(f=>[f.path,f]));return nextFiles.map(file=>{const old=previous.get(file.path);if(!old||invalid.has(file.path))return file;if(!file.preview&&old.preview)file.preview=old.preview;if((!file.detail||file.detail==="章节内容")&&old.detail&&old.detail!=="章节内容")file.detail=old.detail;return file})}
 function refresh(invalidatePaths=[]){const arr=callJson(()=>api.listFiles());if(Array.isArray(arr)){state.files=mergeDecorations(arr,invalidatePaths);state.decorating=false;groupFiles();renderTree();restoreTreeScroll();byId("status").textContent="已解包 "+state.files.length+" 个文件";queueDecorations()}}
-function renderAll(){byId("title").textContent=state.page==="tree"?"EPUB 文件树":"EPUB元数据";byId("status").textContent=state.status||"";document.getElementById("app").classList.toggle("tree-mode",state.page==="tree");renderMetaPage();groupFiles();renderTree();queueDecorations();loadCoverPreview()}
-function renderMetaPage(){const m=state.metadata||{};byId("meta").innerHTML='<div class="meta-card"><div class="meta-grid"><div class="meta-fields"><div class="meta-row"><label>书名</label><input id="metaTitle" value="'+esc(m.title||state.title||"")+'"></div><div class="meta-row"><label>作者</label><input id="metaAuthor" value="'+esc(m.author||"")+'"></div></div><button class="meta-cover" id="metaCover" ontouchstart="FileEditorNative.armCoverPicker()" onmousedown="FileEditorNative.armCoverPicker()" onclick="FileEditorNative.pickCoverImage()"><span>点击选取封面</span></button></div><div class="meta-two" style="margin-top:14px"><div class="meta-row"><label>副标题</label><input id="metaSubtitle" value="'+esc(m.subtitle||"")+'"></div><div class="meta-row"><label>出版社</label><input id="metaPublisher" value="'+esc(m.publisher||"")+'"></div><div class="meta-row"><label>制作信息</label><input id="metaMaker" value="'+esc(m.maker||"")+'"></div><div class="meta-row"><label>制作系列</label><input id="metaSeries" value="'+esc(m.series||"")+'"></div><div class="meta-row meta-wide"><label>UUID / 标识符</label><input class="readonly" id="metaUuid" readonly onclick="FileEditorNative.copyUuid()" value="'+esc(m.uuid||"")+'"></div></div><p class="meta-hint">UUID 使用阅微/EPUB 当前生成值，仅可点击复制，不允许直接修改。</p><div class="meta-actions"><button class="secondary" onclick="FileEditorNative.openTreePage()">编辑 EPUB 文件</button><button class="primary" onclick="FileEditorNative.saveMeta()">保存</button></div></div>'}
+function renderAll(){byId("title").textContent=state.page==="tree"?"书籍存储":"EPUB 元数据";byId("status").textContent=state.status||"";document.getElementById("app").classList.toggle("tree-mode",state.page==="tree");renderMetaPage();groupFiles();renderTree();queueDecorations();loadCoverPreview()}
+const metaFields=[["title",'标题 dc:title title-type="main"'],["subtitle",'副标题 dc:title title-type="edition"'],["author",'作者 dc:creator id="role" aut'],["language","语言 dc:language"],["publisher","出版 dc:publisher"],["date","出版日期 dc:date"]];
+const editGlyph='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16v4h4L20 8l-4-4L4 16zm10-10 4 4"/></svg>';
+function renderMetaPage(){const m=state.metadata||{};byId("meta").innerHTML=metaFields.map(([key,label])=>'<button class="host-meta-card" onclick="FileEditorNative.editMetaField(\''+key+'\')"><span class="host-meta-label">'+esc(label)+'</span><span class="host-meta-value"><span>'+esc(m[key]||"未设置")+'</span>'+editGlyph+'</span></button>').join("")}
+function openMetadata(path){const r=callJson(()=>api.getMetadata(path));if(!r.ok){toast(r.message);return}rememberTreeScroll();state.metadata=r.metadata;state.page="meta";renderAll();window.scrollTo(0,0)}
+function editMetaField(key){const item=metaFields.find(x=>x[0]===key);if(!item)return;state.metaField=key;showSheet('<h3>'+esc(item[1])+'</h3><textarea id="metaFieldValue" class="field" rows="3"></textarea><button class="primary" onclick="FileEditorNative.submitMetaField()">保存</button><button class="plain" onclick="FileEditorNative.hideSheet()">取消</button>');byId("metaFieldValue").value=state.metadata[key]||"";byId("metaFieldValue").focus()}
+function submitMetaField(){const key=state.metaField;const r=callJson(()=>api.saveMetadataField(state.metadata.opfPath,key,byId("metaFieldValue").value,state.metadata[key]||""));toast(r.message||"保存失败");if(r.ok){state.metadata=r.metadata;hideSheet();renderMetaPage()}}
+
 function collectMetaForm(){return{title:byId("metaTitle")?.value||"",author:byId("metaAuthor")?.value||"",subtitle:byId("metaSubtitle")?.value||"",publisher:byId("metaPublisher")?.value||"",maker:byId("metaMaker")?.value||"",series:byId("metaSeries")?.value||""}}
 function saveMeta(){const r=callJson(()=>api.saveMetadata(JSON.stringify(collectMetaForm())));toast(r.message||"已保存");if(r.ok&&r.metadata){state.metadata=r.metadata;renderMetaPage();loadCoverPreview();if(r.coverChanged)refresh([state.metadata.coverPath])}}
 function openTreePage(){state.page="tree";renderAll();window.scrollTo(0,0)}
@@ -1684,7 +1876,7 @@ function invalidateDecorations(paths){const invalid=new Set(changedPathsForRefre
 function renderTree(){const root=byId("tree");const keys=Object.keys(state.groups).filter(k=>!/^META-INF$/i.test(k)).sort();if(!keys.length){root.innerHTML='<div class="empty">这个图书目录暂时没有文件</div>';return}root.innerHTML=keys.map(k=>{const g=state.groups[k];const closed=!state.open[k];return '<section class="section '+(closed?'closed':'')+'"><div class="group-head"><button class="group-title" onclick="FileEditorNative.toggleGroup(\''+escAttr(k)+'\')">'+esc(g.name)+'</button><button class="group-icon" onclick="FileEditorNative.openAddSheet(\''+escAttr(g.path||'')+'\')">＋</button><button class="group-icon chev" onclick="FileEditorNative.toggleGroup(\''+escAttr(k)+'\')"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M6 9l6 6 6-6\"></path></svg></button></div>'+(closed?'':g.files.map(fileRow).join(''))+'</section>'}).join("")}
 function fileRow(f){const icon=f.kind==="image"&&f.preview?'<img class="thumb" src="'+f.preview+'">':'<div class="kind-icon kind-'+(f.kind||"other")+'" style="background:'+esc(f.color||"")+'">'+iconFor(f)+'</div>';return '<div class="file-row" data-path="'+escAttr(f.path)+'"><button onclick="FileEditorNative.openFile(\''+escAttr(f.path)+'\')">'+icon+'</button><button class="file-copy" onclick="FileEditorNative.openFile(\''+escAttr(f.path)+'\')"><div class="file-name">'+esc(f.stem||f.name)+'</div><div class="file-detail">'+esc(f.detail||f.sizeText)+'</div></button><button class="more" onclick="FileEditorNative.openActionSheet(\''+escAttr(f.path)+'\')">⋮</button></div>'}
 function iconFor(f){if(f.kind==="html")return "&lt;/&gt;";if(f.kind==="css")return "{}";if(f.kind==="xml")return f.name&&f.name.toLowerCase().includes("content")?"▤":"≡";if(f.kind==="font")return "T";return "•"}
-function escAttr(s){return String(s||"").replace(/\\/g,"\\\\").replace(/'/g,"\\'").replace(/\n/g," ")}
+function escAttr(s){return esc(String(s||"").replace(/\\/g,"\\\\").replace(/'/g,"\\'").replace(/\n/g," "))}
 function updateScopeCount(){const scope=byId("scope")?.value||"current";const count=scopeFiles(scope).length;byId("scopeCount").textContent=count+" 个文件"}
 function shouldDisableEditorWrap(file){const name=String(file?.name||"").toLowerCase();return name.endsWith(".opf")||name.startsWith("toc.")}
 function updateScopeUi(){const scope=byId("scope")?.value||"current";["current","html","all"].forEach(key=>{const el=byId("scope"+key.charAt(0).toUpperCase()+key.slice(1));if(el)el.classList.toggle("active",scope===key)})}
@@ -1693,8 +1885,14 @@ function setScope(scope){const input=byId("scope");if(!input||input.value===scop
 function updateEditorBottomInset(){const replace=byId("replace");const open=replace&&replace.classList.contains("open");const bottom=open?(replace.offsetHeight||0):0;document.documentElement.style.setProperty("--editor-bottom",bottom+"px");if(state.editing&&byId("text"))scheduleLayoutSync()}
 function updateMatchLine(){}
 function queueDecorations(){if(state.decorating)return;state.decorating=true;const jobs=state.files.filter(f=>(f.kind==="image"&&!f.preview)||(f.kind==="html"&&f.detail==="章节内容"));let index=0;function step(){const file=jobs[index++];if(!file){state.decorating=false;return}const res=callJson(()=>api.readDecoration(file.path));if(res.ok){const target=state.files.find(x=>x.path===res.path);if(target){if(res.detail)target.detail=res.detail;if(res.preview)target.preview=res.preview;const row=document.querySelector('[data-path="'+CSS.escape(res.path)+'"]');if(row){const copy=row.querySelector('.file-copy');if(copy){const detail=copy.querySelector('.file-detail');if(detail&&res.detail)detail.textContent=res.detail}if(res.preview){const first=row.querySelector('button');if(first)first.innerHTML='<img class="thumb" src="'+res.preview+'">'}}}}if(index<jobs.length)setTimeout(step,0);else state.decorating=false}setTimeout(step,0)}
-async function openFile(path,preserveSearch=false,invalidateSearchToken=true){if(state.editing&&state.editing.path!==path){if(!(await confirmLeaveEditor()))return}const f=state.files.find(x=>x.path===path);if(!f)return;rememberTreeScroll();if(invalidateSearchToken)state.openSearchToken++;if(f.kind==="image"){const r=callJson(()=>api.readDataUrl(path));if(r.ok){showPreview(f,'<div class="preview"><img src="'+r.dataUrl+'"></div>')}else toast(r.message);return}if(f.kind==="font"){const r=callJson(()=>api.readDataUrl(path));if(r.ok){showPreview(f,'<div class="font-preview" style="font-family:previewFont"><style>@font-face{font-family:previewFont;src:url('+r.dataUrl+')}</style><p>字体预览 ABC abc 12345</p><p>风起云涌，江湖夜雨十年灯。</p><p>我加载了怪谈游戏</p></div>')}else toast(r.message);return}if(!f.editable){toast("该文件类型暂不支持编辑");return}const r=callJson(()=>api.readText(path));if(!r.ok){toast(r.message);return}clearTimeout(state.highlightTimer);state.editing=f;state.content=r.content||"";state.dirty=false;state.renderVersion=0;state.layoutVersion=-1;state.layoutNodes=[];state.layoutLength=0;state.lineOffsetCacheText=null;state.lineOffsetCache=[0];state.lineRenderStart=-1;state.lineRenderEnd=-1;state.lineRenderCount=-1;if(!preserveSearch){state.matches=[];state.matchIndex=-1;state.searchResults=[];state.searchResultIndex=-1;state.searchDirty=true}else{state.matches=[];state.matchIndex=-1}byId("app").classList.add("editing");byId("editName").textContent=f.name;byId("editPath").textContent=f.path;byId("editorBody").className="code-wrap";byId("editorBody").innerHTML='<div id="lines" class="lines"><div id="lineCanvas" class="line-canvas"></div></div><div class="editor-stack"><pre id="highlight" class="highlight"></pre><div id="searchOverlay" class="search-overlay"><div id="searchCanvas" class="search-canvas"></div></div><textarea id="text" class="code-input" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea></div>';const text=byId("text");text.value=state.content;text.oninput=()=>{state.dirty=true;updateSaveState();state.matches=[];state.matchIndex=-1;state.searchDirty=true;state.lineOffsetCacheText=null;state.lineRenderStart=-1;state.lineRenderEnd=-1;state.lineRenderCount=-1;if(!preserveSearch){state.searchResults=[];state.searchResultIndex=-1}requestEditorSync()};text.onscroll=syncScroll;byId("searchBtn").disabled=false;wireSearchInputs();syncEditor();updateScopeCount();updateEditorBottomInset();updateSaveState()}
-function showPreview(f,html){state.editing=f;state.dirty=false;byId("app").classList.add("editing");byId("editName").textContent=f.name;byId("editPath").textContent=f.path;byId("editorBody").className="";byId("editorBody").innerHTML=html;byId("replace").classList.remove("open");byId("searchBtn").disabled=true;updateScopeCount();updateEditorBottomInset();updateSaveState()}
+async function openFile(path,preserveSearch=false,invalidateSearchToken=true,forceSource=false){if(state.editing&&state.editing.path!==path){if(!(await confirmLeaveEditor()))return}const f=state.files.find(x=>x.path===path);if(!f)return;rememberTreeScroll();if(invalidateSearchToken)state.openSearchToken++;if(f.kind==="image"){const r=callJson(()=>api.readDataUrl(path));if(r.ok){showPreview(f,'<div class="preview"><img src="'+r.dataUrl+'"></div>');wireImagePreview()}else toast(r.message);return}if(f.kind==="font"){const r=callJson(()=>api.readDataUrl(path));if(r.ok)showHostFont(f,r.dataUrl);else toast(r.message);return}if(f.kind==="css"&&!forceSource&&!preserveSearch){showHostCss(f);return}if(/\.opf$/i.test(f.name)&&!forceSource&&!preserveSearch){openMetadata(path);return}if(f.nativeEditor&&!forceSource&&!preserveSearch){const opened=callJson(()=>api.openNativeEditor(path));if(!opened.ok)toast(opened.message);return}if(!f.editable){toast("该文件类型暂不支持编辑");return}const r=callJson(()=>api.readText(path));if(!r.ok){toast(r.message);return}byId("app").classList.remove("previewing","css-preview");clearTimeout(state.highlightTimer);state.editing=f;state.content=r.content||"";state.textToken=r.token||"";state.dirty=false;state.renderVersion=0;state.layoutVersion=-1;state.layoutNodes=[];state.layoutLength=0;state.lineOffsetCacheText=null;state.lineOffsetCache=[0];state.lineRenderStart=-1;state.lineRenderEnd=-1;state.lineRenderCount=-1;if(!preserveSearch){state.matches=[];state.matchIndex=-1;state.searchResults=[];state.searchResultIndex=-1;state.searchDirty=true}else{state.matches=[];state.matchIndex=-1}byId("app").classList.add("editing");byId("editName").textContent=f.name;byId("editPath").textContent=f.path;byId("editorBody").className="code-wrap";byId("editorBody").innerHTML='<div id="lines" class="lines"><div id="lineCanvas" class="line-canvas"></div></div><div class="editor-stack"><pre id="highlight" class="highlight"></pre><div id="searchOverlay" class="search-overlay"><div id="searchCanvas" class="search-canvas"></div></div><textarea id="text" class="code-input" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea></div>';const text=byId("text");text.value=state.content;text.oninput=()=>{state.dirty=true;updateSaveState();state.matches=[];state.matchIndex=-1;state.searchDirty=true;state.lineOffsetCacheText=null;state.lineRenderStart=-1;state.lineRenderEnd=-1;state.lineRenderCount=-1;if(!preserveSearch){state.searchResults=[];state.searchResultIndex=-1}requestEditorSync()};text.onscroll=syncScroll;byId("searchBtn").disabled=false;wireSearchInputs();syncEditor();updateScopeCount();updateEditorBottomInset();updateSaveState()}
+const HOST_FONT_SAMPLES=[["中文简体 Simplified Chinese", "狐狸说：“重要的东西用眼睛是看不见的，只有用心才能看清。”"], ["中文繁体 Traditional Chinese", "狐狸說：“重要的東西用眼睛是看不見的，只有用心才能看清。”"], ["英语 English", "The fox said, \"What is essential is invisible to the eyes; only with the heart can one see clearly.\""], ["日语 Japanese", "狐は言った。「大切なものは目には見えない。心でしか見えない。」"], ["韩语 Korean", "여우가 말했다. \"중요한 것은 눈으로는 보이지 않는다. 오직 마음으로만 볼 수 있다.\""]];
+function showHostFont(f,dataUrl){const cards=HOST_FONT_SAMPLES.map(([language,sample])=>'<section class="host-font-card"><div class="host-font-language">'+esc(language)+'</div><p class="host-font-sample">'+esc(sample)+'</p></section>').join("");showPreview(f,'<div class="font-preview"><style>@font-face{font-family:previewFont;src:url('+dataUrl+');font-display:swap}</style>'+cards+'</div>')}
+function showHostCss(f){const result=callJson(()=>api.cssRules(f.path));let body;if(result.ok){body=(result.rules||[]).map(rule=>'<section class="host-css-rule"><h3>'+esc(rule.selector)+'</h3>'+(rule.rows||[]).map(row=>'<div class="host-css-row"><span class="host-css-description">'+esc(row.summary||row.name)+'<small>'+esc(row.name)+'</small></span><code>'+esc(row.value)+'</code></div>').join("")+'</section>').join("")||'<div class="empty">没有可显示的样式规则</div>'}else body='<div class="empty">'+esc(result.message||"宿主解析器不可用，可通过右上角编辑源码")+'</div>';showPreview(f,'<div class="host-css-preview">'+body+'</div>');byId("app").classList.add("css-preview")}
+function editCurrentSource(){const path=state.editing?.path;if(path)openFile(path,false,true,true)}
+function showPreview(f,html){byId("app").classList.add("previewing");state.editing=f;state.dirty=false;byId("app").classList.add("editing");byId("editName").textContent=f.name;byId("editPath").textContent=f.path;byId("editorBody").className="";byId("editorBody").innerHTML=html;byId("replace").classList.remove("open");byId("searchBtn").disabled=true;updateScopeCount();updateEditorBottomInset();updateSaveState()}
+function wireImagePreview(){const box=byId("editorBody").querySelector(".preview"),img=box?.querySelector("img");if(!img)return;let scale=1,x=0,y=0,lastDistance=0;const points=new Map();const draw=()=>{const mx=box.clientWidth*(scale-1)/2,my=box.clientHeight*(scale-1)/2;x=Math.max(-mx,Math.min(mx,x));y=Math.max(-my,Math.min(my,y));img.style.transform="translate("+x+"px,"+y+"px) scale("+scale+")"};box.onpointerdown=e=>{points.set(e.pointerId,[e.clientX,e.clientY]);box.setPointerCapture(e.pointerId);lastDistance=0};box.onpointermove=e=>{const previous=points.get(e.pointerId);if(!previous)return;points.set(e.pointerId,[e.clientX,e.clientY]);if(points.size===2){const [a,b]=[...points.values()];const d=Math.hypot(a[0]-b[0],a[1]-b[1]);if(lastDistance)scale=Math.max(1,Math.min(6,scale*d/lastDistance));lastDistance=d}else if(scale>1){x+=e.clientX-previous[0];y+=e.clientY-previous[1]}draw()};box.onpointerup=box.onpointercancel=e=>{points.delete(e.pointerId);lastDistance=0};box.ondblclick=()=>{scale=scale===1?2:1;x=0;y=0;draw()};box.onwheel=e=>{e.preventDefault();scale=Math.max(1,Math.min(6,scale*(e.deltaY>0?.9:1.1)));draw()}}
+
 function applyEditorWrapMode(){const stack=byId("editorBody")?.querySelector(".editor-stack");if(stack)stack.classList.toggle("no-wrap",shouldDisableEditorWrap(state.editing))}
 function syncEditor(){applyEditorWrapMode();syncLines(true);syncSearchHits();syncScroll();scheduleHighlight(120)}
 function requestEditorSync(){if(state.editorSyncFrame)return;state.editorSyncFrame=requestAnimationFrame(()=>{state.editorSyncFrame=0;syncLines(true);syncSearchHits();syncScroll();updateSearchStatus();scheduleHighlight(320)})}
@@ -1725,15 +1923,15 @@ function configureSearchMeasure(){const text=byId("text"),measure=byId("searchMe
 function measureSearchRects(start,end){const text=byId("text"),measure=configureSearchMeasure();if(!text||!measure)return[];const safeStart=Math.max(0,Math.min(start,text.value.length));const safeEnd=Math.max(safeStart,Math.min(end,text.value.length));const before=esc(text.value.slice(0,safeStart));const hitRaw=text.value.slice(safeStart,safeEnd)||" ";const after=esc(text.value.slice(safeEnd))||" ";measure.innerHTML=before+'<span id="searchMeasureHit">'+esc(hitRaw)+'</span>'+after;const mark=byId("searchMeasureHit");if(!mark)return[];const measureRect=measure.getBoundingClientRect();const pad=getBoxPadding(text);const rects=Array.from(mark.getClientRects()).filter(rect=>rect.width>0||rect.height>0);if(rects.length)return rects.map(rect=>({top:Math.max(0,rect.top-measureRect.top-pad.top),left:Math.max(0,rect.left-measureRect.left-pad.left),width:Math.max(2,rect.width),height:Math.max(pad.lineHeight,rect.height)}));return[{top:measureCaretTop(safeStart),left:0,width:2,height:pad.lineHeight}]}
 function syncSearchHits(){const canvas=byId("searchCanvas"),text=byId("text");if(!canvas||!text)return;const metrics=contentMetrics(text);canvas.style.width=Math.max(metrics.width,metrics.viewportWidth,2)+"px";canvas.style.height=Math.max(metrics.height,metrics.viewportHeight,metrics.pad.lineHeight)+"px";const current=state.matches[state.matchIndex];if(!current){canvas.innerHTML="";return}const html=measureSearchRects(current[0],current[1]).map(rect=>'<span class="search-hit current" style="top:'+rect.top+'px;left:'+rect.left+'px;width:'+rect.width+'px;height:'+rect.height+'px"></span>');canvas.innerHTML=html.join("")}
 function changedPathsForRefresh(paths){return Array.from(new Set((paths||[]).filter(Boolean)))}
-function persistCurrentFile(showToast=true){if(!state.editing||!byId("text"))return false;const currentPath=state.editing.path;const r=callJson(()=>api.writeText(currentPath,byId("text").value));if(showToast)toast(r.message||"已保存");if(!r.ok)return false;state.dirty=false;updateSaveState();const refreshPaths=changedPathsForRefresh([currentPath]);invalidateDecorations(refreshPaths);refresh(refreshPaths);return true}
+function persistCurrentFile(showToast=true){if(!state.editing||!byId("text"))return false;const currentPath=state.editing.path;const r=callJson(()=>api.writeTextVersioned?api.writeTextVersioned(currentPath,byId("text").value,state.textToken):api.writeText(currentPath,byId("text").value));if(showToast)toast(r.message||"已保存");if(!r.ok)return false;state.textToken=r.token||state.textToken;state.dirty=false;updateSaveState();const refreshPaths=changedPathsForRefresh([currentPath]);invalidateDecorations(refreshPaths);refresh(refreshPaths);return true}
 async function save(){if(!state.editing)return;if(!byId("text")){toast("预览文件无需保存");return}persistCurrentFile(true)}
 function showUnsavedConfirm(){const file=state.editing;if(!file)return Promise.resolve("discard");return new Promise(resolve=>{hideConfirm();const mask=document.createElement("div");mask.className="confirm-mask";mask.id="confirmMask";const card=document.createElement("div");card.className="confirm-card";card.id="confirmCard";card.innerHTML='<h3>保存当前文件修改？</h3><p><strong>'+esc(file.name)+'</strong> 还有未保存的内容。保存后会写回当前 EPUB 缓存，不保存会丢失这次修改。</p><div class="confirm-actions"><button class="cancel" id="confirmCancel">继续编辑</button><button class="plain" id="confirmDiscard">不保存</button><button class="primary" id="confirmSave">保存并返回</button></div>';document.body.appendChild(mask);document.body.appendChild(card);byId("confirmCancel").onclick=()=>{hideConfirm();resolve("cancel")};byId("confirmDiscard").onclick=()=>{hideConfirm();resolve("discard")};byId("confirmSave").onclick=()=>{hideConfirm();resolve("save")}})}
 function hideConfirm(){const mask=byId("confirmMask"),card=byId("confirmCard");if(mask)mask.remove();if(card)card.remove()}
 async function confirmLeaveEditor(){if(!(state.dirty&&byId("text")))return true;const action=await showUnsavedConfirm();if(action==="cancel")return false;if(action==="save")return persistCurrentFile(true);return true}
-function finishCloseEditor(){state.openSearchToken++;state.editing=null;state.dirty=false;updateSaveState();state.matches=[];state.matchIndex=-1;state.searchResults=[];state.searchResultIndex=-1;state.searchDirty=true;byId("app").classList.remove("editing");byId("replace").classList.remove("open");hideConfirm();updateEditorBottomInset();restoreTreeScroll()}
+function finishCloseEditor(){byId("app").classList.remove("previewing","css-preview");state.openSearchToken++;state.editing=null;state.dirty=false;updateSaveState();state.matches=[];state.matchIndex=-1;state.searchResults=[];state.searchResultIndex=-1;state.searchDirty=true;byId("app").classList.remove("editing");byId("replace").classList.remove("open");hideConfirm();updateEditorBottomInset();restoreTreeScroll();if(api.closeLegacyEditor)api.closeLegacyEditor()}
 async function closeEditor(){if(!(await confirmLeaveEditor()))return;finishCloseEditor()}
-function closeOrBack(){if(state.editing)closeEditor();else api.close()}
-function handleBack(){if(state.editing){closeEditor();return true}return false}
+function closeOrBack(){if(!handleBack())api.close()}
+function handleBack(){if(byId("sheet")){hideSheet();return true}if(state.editing){closeEditor();return true}if(state.page==="meta"){state.page="tree";renderAll();restoreTreeScroll();return true}return false}
 function toggleGroup(k){state.open[k]=!state.open[k];renderTree()}
 function toggleReplace(){const panel=byId("replace");panel.classList.toggle("open");byId("searchBtn").classList.toggle("active",panel.classList.contains("open"));wireSearchInputs();updateScopeCount();updateEditorBottomInset();if(!panel.classList.contains("open")){state.matches=[];state.matchIndex=-1;state.searchResults=[];state.searchResultIndex=-1;state.searchDirty=true;updateSearchStatus();const line=byId("matchLine");if(line)line.style.display="none"}}
 function wireSearchInputs(){["find","regex","textOnly"].forEach(id=>{const el=byId(id);if(el&&el.dataset.wired!=="1"){el.dataset.wired="1";el.oninput=()=>{state.searchDirty=true;updateSearchStatus()};el.onchange=()=>{state.searchDirty=true;updateSearchStatus()}}});updateScopeUi()}
@@ -1756,8 +1954,8 @@ function count(){if(state.searchDirty)buildMatches(false);const scope=byId("scop
 function replaceCurrent(){const text=byId("text");if(!text)return;if(state.searchDirty)buildMatches(false);const m=state.matches[state.matchIndex];if(!m)return;const rep=byId("repl").value;text.value=text.value.slice(0,m[0])+rep+text.value.slice(m[1]);state.dirty=true;updateSaveState();state.searchDirty=true;syncEditor();buildMatches(false)}
 function replaceInValue(value,pattern,rep){const ranges=findRanges(value,pattern);if(!ranges.length)return {value,count:0};let out="",last=0;ranges.forEach(r=>{out+=value.slice(last,r[0])+rep;last=r[1]});out+=value.slice(last);return {value:out,count:ranges.length}}
 function scopeFiles(scopeValue){const scope=scopeValue||byId("scope").value;if(scope==="current")return state.editing?[state.editing]:[];return state.files.filter(f=>f.editable&&(scope==="all"||f.kind==="html"))}
-function replaceAll(){const pattern=activePattern();if(!pattern)return;const rep=byId("repl").value;const scope=byId("scope").value;const files=scopeFiles(scope);if(!files.length)return;if(pattern.textOnly){toast("仅文本模式暂只支持查找定位");return}let changed=0,total=0;const changedPaths=[];files.forEach(f=>{let content;if(state.editing&&f.path===state.editing.path&&byId("text"))content=byId("text").value;else{const r=callJson(()=>api.readText(f.path));if(!r.ok)return;content=r.content||""}const next=replaceInValue(content,pattern,rep);if(!next.count)return;total+=next.count;changed++;changedPaths.push(f.path);if(state.editing&&f.path===state.editing.path&&byId("text")){byId("text").value=next.value;state.dirty=true;updateSaveState();state.searchDirty=true;syncEditor();buildMatches(false)}else callJson(()=>api.replaceText(f.path,next.value))});toast("已替换 "+total+" 处，涉及 "+changed+" 个文件");const refreshPaths=changedPathsForRefresh(changedPaths);invalidateDecorations(refreshPaths);refresh(refreshPaths)}
-function openActionSheet(path){const f=state.files.find(x=>x.path===path);if(!f)return;state.actionFile=f;const coverButton=f.kind==="image"?'<button class="plain" onclick="FileEditorNative.setCover(state.actionFile.path)">设为封面</button>':'';const bannerButton=f.kind==="image"?'<button class="plain" onclick="FileEditorNative.setBanner(state.actionFile.path)">设为横幅</button>':'';showSheet('<h3>'+esc(f.name)+'</h3><p>'+esc(f.path)+'</p><button class="primary" onclick="FileEditorNative.openFile(state.actionFile.path);hideSheet()">打开</button>'+coverButton+bannerButton+'<button class="plain" onclick="FileEditorNative.openRenameSheet()">重命名</button><button class="danger" onclick="FileEditorNative.deleteActionFile()">删除文件</button><button class="plain" onclick="FileEditorNative.hideSheet()">取消</button>')}
+function replaceAll(){const pattern=activePattern();if(!pattern)return;const rep=byId("repl").value;const scope=byId("scope").value;const files=scopeFiles(scope);if(!files.length)return;if(pattern.textOnly){toast("仅文本模式暂只支持查找定位");return}let changed=0,total=0,failed=0;const changedPaths=[];files.forEach(f=>{let content,token="";const active=state.editing&&f.path===state.editing.path&&byId("text");if(active)content=byId("text").value;else{const r=callJson(()=>api.readText(f.path));if(!r.ok){failed++;return}content=r.content||"";token=r.token||""}const next=replaceInValue(content,pattern,rep);if(!next.count)return;if(active){byId("text").value=next.value;state.dirty=true;updateSaveState();state.searchDirty=true;syncEditor();buildMatches(false)}else{const written=callJson(()=>api.writeTextVersioned?api.writeTextVersioned(f.path,next.value,token):api.replaceText(f.path,next.value));if(!written.ok){failed++;return}}total+=next.count;changed++;changedPaths.push(f.path)});toast("已替换 "+total+" 处，涉及 "+changed+" 个文件"+(failed?"；"+failed+" 个文件读取或保存失败，未计入成功数":""));const refreshPaths=changedPathsForRefresh(changedPaths);invalidateDecorations(refreshPaths);refresh(refreshPaths)}
+function openActionSheet(path){const f=state.files.find(x=>x.path===path);if(!f)return;state.actionFile=f;const legacyButton=f.editable?'<button class="plain" onclick="FileEditorNative.openFile(state.actionFile.path,false,true,true);FileEditorNative.hideSheet()">原编辑器 · 全书查找替换</button>':'';const coverButton=f.kind==="image"?'<button class="plain" onclick="FileEditorNative.setCover(state.actionFile.path)">设为封面</button>':'';const bannerButton=f.kind==="image"?'<button class="plain" onclick="FileEditorNative.setBanner(state.actionFile.path)">设为横幅</button>':'';showSheet('<h3>'+esc(f.name)+'</h3><p>'+esc(f.path)+'</p><button class="primary" onclick="FileEditorNative.openFile(state.actionFile.path);hideSheet()">打开</button>'+legacyButton+coverButton+bannerButton+'<button class="plain" onclick="FileEditorNative.openRenameSheet()">重命名</button><button class="danger" onclick="FileEditorNative.deleteActionFile()">删除文件</button><button class="plain" onclick="FileEditorNative.hideSheet()">取消</button>')}
 function openRenameSheet(){const f=state.actionFile;if(!f)return;showSheet('<h3>重命名文件</h3><p>'+esc(f.path)+'</p><input id="renameInput" class="field" value="'+esc(f.name)+'"><button class="primary" onclick="FileEditorNative.submitRename()">保存名称</button><button class="plain" onclick="FileEditorNative.hideSheet()">取消</button>');setTimeout(()=>byId("renameInput").focus(),80)}
 function submitRename(){const f=state.actionFile;const name=byId("renameInput").value;const r=callJson(()=>api.renameFile(f.path,name));toast(r.message);hideSheet();refresh()}
 function deleteActionFile(){const f=state.actionFile;if(!f)return;if(!confirm("删除 "+f.name+"？"))return;const r=callJson(()=>api.deleteFile(f.path));toast(r.message);hideSheet();refresh()}
@@ -1770,7 +1968,8 @@ function pickFile(){api.pickFile(state.addGroup||"");hideSheet();toast("请选�
 function onImportResult(raw){const r=JSON.parse(raw);toast(r.message||"导入完成");refresh()}
 function showSheet(html){hideSheet();const mask=document.createElement("div");mask.className="sheet-mask";mask.id="sheetMask";mask.onclick=hideSheet;const sheet=document.createElement("div");sheet.className="sheet";sheet.id="sheet";sheet.innerHTML=html;document.body.appendChild(mask);document.body.appendChild(sheet)}
 function hideSheet(){const a=byId("sheetMask"),b=byId("sheet");if(a)a.remove();if(b)b.remove()}
-window.FileEditorNative={refresh,openFile,closeEditor,closeOrBack,handleBack,toggleGroup,toggleReplace,findNext,findPrev,count,replaceCurrent,replaceAll,openActionSheet,openRenameSheet,submitRename,deleteActionFile,setCover,setBanner,openAddSheet,openNewTextSheet,createText,pickFile,onImportResult,hideSheet,save,setScope,saveMeta,openTreePage,copyUuid,armCoverPicker,pickCoverImage,onCoverResult};
+async function openLegacyPath(path,metadata){await refresh();if(metadata){state.page="meta";renderAll();return}const f=state.files.find(x=>x.path===path)||state.files.find(x=>x.editable);if(f){await openFile(f.path,false,true,true)}else openTreePage()}
+window.FileEditorNative={openLegacyPath,editCurrentSource,setTheme:applyTheme,openMetadata,editMetaField,submitMetaField,nativeSaved:(path)=>{refresh([path]);},refresh,openFile,closeEditor,closeOrBack,handleBack,toggleGroup,toggleReplace,findNext,findPrev,count,replaceCurrent,replaceAll,openActionSheet,openRenameSheet,submitRename,deleteActionFile,setCover,setBanner,openAddSheet,openNewTextSheet,createText,pickFile,onImportResult,hideSheet,save,setScope,saveMeta,openTreePage,copyUuid,armCoverPicker,pickCoverImage,onCoverResult};
 (function init(){watchTheme();const data=JSON.parse(api.initialData());state.title=data.title;state.status=data.status;state.metadata=data.metadata||{};state.files=data.files||[];renderAll()})();
 </script>
 </body>

@@ -1,10 +1,8 @@
 package com.reamicro.fix.hook
 
 import android.app.Activity
-import android.app.AlarmManager
 import android.app.AlertDialog
 import android.app.Dialog
-import android.app.PendingIntent
 import android.content.ContentValues
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -692,66 +690,6 @@ internal fun ReaMicroSettingsHook.restartHostAfterAccountSwitch(activity: Activi
         }.onFailure { fallbackError ->
             XposedBridge.log("$LOG_PREFIX fallback host refresh failed: ${fallbackError.stackTraceToString()}")
             showToast("\u8d26\u53f7\u5df2\u5207\u6362\uff0c\u8bf7\u624b\u52a8\u5237\u65b0\u6216\u91cd\u65b0\u8fdb\u5165\u9605\u5fae")
-        }
-    }
-}
-
-internal fun ReaMicroSettingsHook.scheduleHostRestartCommand(componentName: String): Boolean =
-    runCatching {
-        val command = buildString {
-            append("(sleep ")
-            append(ACCOUNT_RESTART_COMMAND_DELAY_SECONDS)
-            append("; am start -n ")
-            append(shellQuote(componentName))
-            append(" -a android.intent.action.MAIN -c android.intent.category.LAUNCHER ")
-            append("--activity-clear-task --activity-new-task >/dev/null 2>&1) &")
-        }
-        Runtime.getRuntime().exec(arrayOf("sh", "-c", command))
-        true
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX schedule host restart command failed: ${it.stackTraceToString()}")
-    }.getOrDefault(false)
-
-internal fun ReaMicroSettingsHook.shellQuote(value: String): String =
-    "'" + value.replace("'", "'\"'\"'") + "'"
-
-internal fun ReaMicroSettingsHook.scheduleHostRestart(alarmManager: AlarmManager?, pendingIntent: PendingIntent) {
-    if (alarmManager == null) {
-        pendingIntent.send()
-        return
-    }
-    val elapsedTriggerAt = SystemClock.elapsedRealtime() + ACCOUNT_RESTART_DELAY_MS
-    val wallTriggerAt = System.currentTimeMillis() + ACCOUNT_RESTART_DELAY_MS
-    runCatching {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            alarmManager.setExactAndAllowWhileIdle(
-                AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                elapsedTriggerAt,
-                pendingIntent,
-            )
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-            alarmManager.setExact(
-                AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                elapsedTriggerAt,
-                pendingIntent,
-            )
-        } else {
-            alarmManager.set(
-                AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                elapsedTriggerAt,
-                pendingIntent,
-            )
-        }
-    }.onFailure { exactError ->
-        XposedBridge.log("$LOG_PREFIX exact host restart alarm failed: ${exactError.stackTraceToString()}")
-        runCatching {
-            alarmManager.setAlarmClock(
-                AlarmManager.AlarmClockInfo(wallTriggerAt, pendingIntent),
-                pendingIntent,
-            )
-        }.onFailure { alarmClockError ->
-            XposedBridge.log("$LOG_PREFIX alarm clock host restart failed: ${alarmClockError.stackTraceToString()}")
-            pendingIntent.send()
         }
     }
 }

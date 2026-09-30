@@ -1,0 +1,9 @@
+{
+  "apiVersion": 1,
+  "id": "fanqie",
+  "name": "FanQie",
+  "entryClass": "com.reamicro.fix.external.source.FanQieSourceProvider",
+  "version": "5.5.16-compat4",
+  "reference": "大灰狼融合5.5.16(vip完全版).json",
+  "referenceSha256": "f93b7cc30901bf3df28a7270849c5643e2d88f773b30977088add27e906f0e71"
+}

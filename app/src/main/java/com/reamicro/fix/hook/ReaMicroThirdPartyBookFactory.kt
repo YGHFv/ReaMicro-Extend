@@ -32,7 +32,7 @@ class ReaMicroThirdPartyBookFactory(
             cover = result.coverUrl,
             publisher = result.displaySourceName,
             words = result.words,
-            detail = "",
+            detail = result.detailUrl,
             rating = 0.0,
             status = result.status.ifBlank { result.tags.joinToString(" / ") },
         )

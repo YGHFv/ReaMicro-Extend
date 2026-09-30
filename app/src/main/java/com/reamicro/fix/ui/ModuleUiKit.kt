@@ -171,7 +171,7 @@ internal class ModuleUiKit(private val context: Context) {
      */
     private fun buttonRoleOf(label: String): Role = when (label) {
         "清空", "停用", "取消" -> Role.Danger
-        "关闭", "刷新", "重排闹钟", "重算下次时刻" -> Role.Neutral
+        "关闭", "刷新", "重算下次时刻" -> Role.Neutral
         else -> Role.Primary
     }
 

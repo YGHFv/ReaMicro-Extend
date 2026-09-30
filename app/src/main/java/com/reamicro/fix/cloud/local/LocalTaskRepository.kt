@@ -26,7 +26,9 @@ internal fun localTaskFromJson(taskType: String, obj: JSONObject): LocalTask {
     return LocalTask(
         taskType = taskType,
         enabled = obj.optBoolean("enabled", false),
-        timeOfDay = obj.optString("timeOfDay", "00:05").ifBlank { "00:05" },
+        timeOfDay = obj.optString("timeOfDay", "00:05").ifBlank { "00:05" }.let {
+            if (taskType == AutoReadTimeLock.TASK_TYPE) AutoReadTimeLock.safeTime(it, obj.optInt("durationMinutes", 30)) else it
+        },
         durationMinutes = obj.optInt("durationMinutes", 30).coerceIn(1, 720),
         dailyDrawLimit = obj.optInt("dailyLimit", 3).coerceIn(0, 20),
         books = books,
@@ -86,7 +88,7 @@ internal fun nextLocalTaskAt(task: LocalTask, state: JSONObject, checkin: JSONOb
         if (pendingRewardDrawState(checkin, state, now) != null) return now
         if (!state.optBoolean("drawPending")) return null
     }
-    return task.nextRunAt.coerceAtLeast(1L)
+    return AutoReadTimeLock.clampNextAt(task, state, task.nextRunAt.coerceAtLeast(1L), now)
 }
 
 internal fun mergeLocalTaskSnapshot(current: JSONObject?, incoming: JSONObject): JSONObject {
@@ -108,7 +110,11 @@ internal fun rescheduleLocalTasks(store: LocalTaskRepository, now: Long): Int {
             val pendingClaim = if (task.taskType == "yeshe_checkin" &&
                 state.optString("claimCompletedDate") != state.optString("lastCheckinDate")
             ) state.optLong("claimDueAt") else 0L
-            val next = rescheduledNextRunAt(task.taskType, task.timeOfDay, task.nextRunAt.takeIf { it > 0L }, now, pendingClaim)
+            val candidate = if (task.taskType == AutoReadTimeLock.TASK_TYPE) {
+                val daily = AutoReadTimeLock.nextDailyAt(task.timeOfDay, task.durationMinutes, now)
+                minOf(task.nextRunAt.takeIf { it > 0L } ?: daily, daily).coerceAtLeast(now)
+            } else rescheduledNextRunAt(task.taskType, task.timeOfDay, task.nextRunAt.takeIf { it > 0L }, now, pendingClaim)
+            val next = AutoReadTimeLock.clampNextAt(task, state, candidate, now)
             if (next == task.nextRunAt) continue
             store.recordState(accountId, task.taskType, JSONObject().put("nextRunAt", next))
             updated++

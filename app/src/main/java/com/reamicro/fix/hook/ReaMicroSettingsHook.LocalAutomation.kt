@@ -18,19 +18,7 @@ import org.json.JSONObject
 
 private const val LOCAL_AUTOMATION_LOG_PREFIX = "[ReaMicroFix/LocalAutomation]"
 
-/**
- * 配置变更后统一下发镜像。
- *
- * 为什么要镜像：设置页在宿主进程写的是宿主的 prefs，而闹钟唤醒后执行任务的模块进程读的是
- * 自己的 prefs，不同步过去后台就是空配置（表现为"设了任务却从不自启"）。
- *
- * 为什么**不在这里执行任务、也不在这里排闹钟**：
- * - 执行：宿主与模块会同时发请求。实机见过保存配置那一刻就撞出「操作过于频繁，请稍后再重试」。
- *   保存配置只该改配置，跑不跑由模块自己的节奏决定。
- * - 排闹钟：阅微进程排出来的是阅微名下的**模糊**闹钟（没有精确闹钟授权），会与模块的精确闹钟
- *   并存；而 [com.reamicro.fix.cloud.api.NextWakeHint] 写在模块的 filesDir 下，宿主也写不进去。
- *   收下镜像的 `LocalTaskMirrorReceiver` 会以模块身份排程，两者同源。
- */
+/** Publish configuration only. Root scheduling requires explicit ROOT enhancement enablement. */
 private fun ReaMicroSettingsHook.publishLocalAutomationChange() {
     val appContext = activityProvider()?.applicationContext ?: return
     LocalTaskMirror.push(appContext, onComplete = ::reloadLocalAutomationState)
@@ -67,17 +55,6 @@ internal fun ReaMicroSettingsHook.renderLocalAutomationSettingsContent(innerPadd
                 },
             )
         }
-        val wakeReport = activityProvider()?.let {
-            com.reamicro.fix.cloud.api.CloudTaskWakeDiagnostics.inspect(it.applicationContext)
-        }
-        val utilityRows = listOf(
-            ActionRow(
-                key = "local_automation_wake",
-                title = "任务结果通知",
-                subtitle = wakeReport?.summary() ?: "检查通知与后台唤醒权限",
-                onClick = ::openLocalAutomationWakeDialog,
-            ),
-        )
         // 任务记录放在最下面：配置页要的「以配置为主」，记录属于事后回查。
         val historyRows = listOf(
             ActionRow(
@@ -92,9 +69,6 @@ internal fun ReaMicroSettingsHook.renderLocalAutomationSettingsContent(innerPadd
         }
         addLazyItem(lazyListScope, "local_automation_task_card".hashCode()) { itemComposer ->
             renderHostActionCard(taskRows, itemComposer)
-        }
-        addLazyItem(lazyListScope, "local_automation_utility_card".hashCode()) { itemComposer ->
-            renderHostActionCard(utilityRows, itemComposer)
         }
         addLazyItem(lazyListScope, "local_automation_history_card".hashCode()) { itemComposer ->
             renderHostActionCard(historyRows, itemComposer)
@@ -600,86 +574,7 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
     }
 }
 
-private fun ReaMicroSettingsHook.openLocalAutomationWakeDialog() {
-    val activity = activityProvider() ?: return
-    activity.runOnUiThread {
-        val colors = SettingsDialogColors(activity)
-        val dialog = Dialog(activity)
-        val card = settingsDialogCard(activity, colors)
-        card.addView(settingsDialogTitle(activity, "任务结果通知", colors))
-        val wakeStatus = TextView(activity).apply {
-            setTextColor(colors.body)
-            setPadding(24, 8, 24, 8)
-        }
-        val wakeActions = settingsDialogActions(activity)
-        card.addView(wakeStatus, apiServerRowParams(activity))
-        card.addView(wakeActions)
 
-        fun refreshWakeStatus() {
-            val diagnostics = com.reamicro.fix.cloud.api.CloudTaskWakeDiagnostics
-            val report = diagnostics.inspect(activity.applicationContext)
-            wakeStatus.text = buildString {
-                append(report.summary())
-                append('\n')
-                append(report.details().joinToString("\n"))
-                if (!report.healthy) append("\n本地任务仍会在唤醒时执行，权限只影响通知时效。")
-            }
-            wakeActions.removeAllViews()
-            if (!report.exactAlarmAllowed) {
-                wakeActions.addView(
-                    settingsDialogButton(activity, "允许精确闹钟", colors, SettingsDialogButtonRole.Neutral).apply {
-                        setOnClickListener {
-                            if (!diagnostics.launchFirstAvailable(activity, diagnostics.exactAlarmSettingsIntent(), diagnostics.moduleDetailsIntent())) {
-                                showToast("无法打开系统设置，请手动允许模块使用闹钟")
-                            }
-                        }
-                    },
-                    settingsDialogButtonParams(activity),
-                )
-            }
-            if (!report.batteryUnrestricted) {
-                wakeActions.addView(
-                    settingsDialogButton(activity, "放行电池优化", colors, SettingsDialogButtonRole.Neutral).apply {
-                        setOnClickListener {
-                            if (!diagnostics.launchFirstAvailable(activity, diagnostics.batteryOptimizationIntent(), diagnostics.moduleDetailsIntent())) {
-                                showToast("无法打开系统设置，请手动把模块耗电策略改为无限制")
-                            }
-                        }
-                    },
-                    settingsDialogButtonParams(activity),
-                )
-            }
-            if (!report.notificationAllowed) {
-                wakeActions.addView(
-                    settingsDialogButton(activity, "开启通知", colors, SettingsDialogButtonRole.Neutral).apply {
-                        setOnClickListener {
-                            if (!diagnostics.launchFirstAvailable(activity, diagnostics.notificationSettingsIntent(), diagnostics.moduleDetailsIntent())) {
-                                showToast("无法打开系统设置，请手动允许模块发送通知")
-                            }
-                        }
-                    },
-                    settingsDialogButtonParams(activity),
-                )
-            }
-            wakeActions.addView(
-                settingsDialogButton(activity, "重新检测", colors, SettingsDialogButtonRole.Neutral).apply {
-                    setOnClickListener { refreshWakeStatus() }
-                },
-                settingsDialogButtonParams(activity),
-            )
-            wakeActions.addView(
-                settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply {
-                    setOnClickListener { dialog.dismiss() }
-                },
-                settingsDialogButtonParams(activity),
-            )
-        }
-        refreshWakeStatus()
-        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, dismissOnThemeChange = true)
-    }
-}
-
-/** 互斥：关闭本地某类型任务。供云端启用路径调用，best-effort。 */
 internal fun ReaMicroSettingsHook.disableLocalAutomationTask(accountId: String, taskType: String) {
     val activity = activityProvider() ?: return
     runCatching {
