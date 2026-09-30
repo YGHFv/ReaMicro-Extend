@@ -31,8 +31,8 @@ tools/*
 !tools/split-hook.mjs
 !tools/split-config/
 !tools/gen-settings-contract-test.mjs
-!tools/build-ksu-module.py
-!tools/test-build-ksu-module.py
+!tools/build-module.py
+!tools/test-build-module.py
 !tools/move-packages.mjs
 decompiled/
 dex_tmp/
@@ -81,3 +81,8 @@ source-files/*
 .refactor_*.py
 .out_*.py
 .main.backup.py
+
+# Maintained build/regression scripts and source used by JVM tests.
+!tools/build-fanqie-source.py
+!tools/test-*.py
+!source-files/fanqie/

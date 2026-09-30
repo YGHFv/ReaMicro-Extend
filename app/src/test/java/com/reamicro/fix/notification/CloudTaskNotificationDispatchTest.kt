@@ -85,14 +85,10 @@ class CloudTaskNotificationDispatchTest {
     }
 
     @Test
-    fun `闹钟接收器类名指向模块包`() {
-        // 这个常量替代了原先的 Intent(context, Receiver::class)：在阅微进程里那种写法会
-        // 解析成阅微包名 + 模块类名，阅微 manifest 里没有该组件，闹钟永远投递不到。
-        assertEquals(
-            "com.reamicro.fix.cloud.api.CloudTaskHeartbeatReceiver",
-            com.reamicro.fix.cloud.api.CloudTaskWakeScheduler.heartbeatReceiverClassForTest,
-        )
-        assertEquals("com.reamicro.fix.CLOUD_TASK_HEARTBEAT", com.reamicro.fix.cloud.api.CloudTaskWakeScheduler.ACTION_WAKE)
+    fun `Root completion event targets the dedicated module receiver`() {
+        assertEquals("com.reamicro.fix/com.reamicro.fix.cloud.root.RootTaskSyncReceiver",
+            com.reamicro.fix.cloud.root.RootTaskRepository.SYNC_COMPONENT)
+        assertEquals("com.reamicro.fix.ROOT_TASK_SYNC", com.reamicro.fix.cloud.root.RootTaskRepository.SYNC_ACTION)
     }
 
     @Test

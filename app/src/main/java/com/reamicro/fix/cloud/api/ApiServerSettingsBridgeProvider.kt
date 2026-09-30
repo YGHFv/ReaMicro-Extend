@@ -38,7 +38,6 @@ class ApiServerSettingsBridgeProvider : ContentProvider() {
         val saved = persisted.enabled == settings.enabled &&
             persisted.baseUrl == settings.baseUrl.trim().removeSuffix("/") &&
             persisted.hostAccountId == settings.hostAccountId.trim()
-        if (saved) CloudTaskWakeScheduler.schedule(appContext)
         XposedBridge.log(
             "ReaMicro API settings mirror caller=$caller saved=$saved enabled=${persisted.enabled} " +
                 "baseUrl=${persisted.baseUrl.isNotBlank()}",

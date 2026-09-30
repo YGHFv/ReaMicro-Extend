@@ -46,27 +46,48 @@ val syncBundledSources by tasks.registering(Sync::class) {
     into(generatedBundledSourcesDir.map { it.dir("reamicro_sources") })
 }
 
-// 配套的 KSU 模块 ZIP 打进 APK 的 assets：用户点「使用 KSU」时由应用自己释放并用 ksud 安装，
+// 配套 Root 模块 ZIP 打进 APK assets，由当前 KernelSU / Magisk / APatch 管理器安装，
 // 不再需要去 GitHub Releases 手动下载（CI 仍会单独产出同一份 ZIP 供手动刷入）。
-val ksuModuleSourceDir = rootProject.layout.projectDirectory.dir("ksu/reamicro-automation")
-val ksuModuleVersion: String = Regex("^version=(.+)$", RegexOption.MULTILINE)
-    .find(ksuModuleSourceDir.file("module.prop").asFile.readText(Charsets.UTF_8))
+val rootModuleSourceDir = rootProject.layout.projectDirectory.dir("module/reamicro-automation")
+val rootModulePropText: String = rootModuleSourceDir.file("module.prop").asFile.readText(Charsets.UTF_8)
+val rootModuleVersion: String = Regex("^version=(.+)$", RegexOption.MULTILINE)
+    .find(rootModulePropText)
     ?.groupValues?.get(1)?.trim()
     .orEmpty()
-    .ifBlank { error("ksu/reamicro-automation/module.prop 缺少 version，无法生成内置 KSU 模块包") }
-val generatedKsuModuleDir = layout.buildDirectory.dir("generated/reamicroKsuModule")
-val generatedKsuModuleRoot = generatedKsuModuleDir.get().asFile
-val bundleKsuModule by tasks.registering(Zip::class) {
-    archiveFileName.set("ReaMicro-Automation-KSU-$ksuModuleVersion.zip")
-    destinationDirectory.set(generatedKsuModuleDir.map { it.dir("ksu") })
+    .ifBlank { error("module/reamicro-automation/module.prop 缺少 version，无法生成内置通用模块包") }
+// 内置模块的 versionCode：运行时用来判断已装模块是否落后于 APK 内置的这一份，决定要不要升级。
+val rootModuleVersionCode: Int = Regex("^versionCode=(\\d+)$", RegexOption.MULTILINE)
+    .find(rootModulePropText)
+    ?.groupValues?.get(1)?.trim()?.toIntOrNull()
+    ?: error("module/reamicro-automation/module.prop 缺少合法 versionCode")
+val generatedRootModuleDir = layout.buildDirectory.dir("generated/reamicroModule")
+val generatedRootModuleRoot = generatedRootModuleDir.get().asFile
+val bundleModule by tasks.registering(Zip::class) {
+    archiveFileName.set("ReaMicro-Automation-Root-$rootModuleVersion.zip")
+    destinationDirectory.set(generatedRootModuleDir.map { it.dir("module") })
+    // Changing the module version must not leave multiple ZIPs in APK assets.
+    doFirst {
+        destinationDirectory.get().asFile.listFiles()?.filter {
+            it.name.startsWith("ReaMicro-Automation-Root-") && it.extension == "zip" &&
+                it.name != archiveFileName.get()
+        }?.forEach { check(it.delete()) { "Cannot remove stale generated Root module: $it" } }
+    }
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
-    // 与 tools/build-ksu-module.py 同一份清单与权限：脚本 0755、module.prop 0644。
-    from(ksuModuleSourceDir) {
+    // 与 tools/build-module.py 同一份清单与权限：脚本 0755、module.prop 0644。
+    from(rootModuleSourceDir) {
         include("*.sh")
         filePermissions { unix("755") }
     }
-    from(ksuModuleSourceDir) {
+    from(rootModuleSourceDir) {
+        include("META-INF/com/google/android/update-binary")
+        filePermissions { unix("755") }
+    }
+    from(rootModuleSourceDir) {
+        include("META-INF/com/google/android/updater-script")
+        filePermissions { unix("644") }
+    }
+    from(rootModuleSourceDir) {
         include("module.prop")
         filePermissions { unix("644") }
     }
@@ -79,8 +100,10 @@ android {
 
     defaultConfig {
         applicationId = "com.reamicro.fix"
+        ndk { abiFilters += "arm64-v8a" }
         minSdk = 26
         targetSdk = 35
+        testInstrumentationRunner = "com.reamicro.fix.diagnostics.RootDeviceInstrumentation"
     versionCode = 70
     versionName = "2.3.8"
     }
@@ -99,6 +122,7 @@ android {
 
     buildTypes.configureEach {
         buildConfigField("long", "BUILD_TIME", "${System.currentTimeMillis()}L")
+        buildConfigField("int", "ROOT_MODULE_VERSION_CODE", "$rootModuleVersionCode")
     }
 
     signingConfigs {
@@ -126,20 +150,22 @@ android {
         }
     }
 
+    // Compile the exact external provider sources into unit tests, not into the app's main classes.
+    sourceSets["test"].java.srcDir(rootProject.file("source-files/fanqie/src"))
     sourceSets["main"].assets.srcDir(generatedBundledSourcesRoot)
-    sourceSets["main"].assets.srcDir(generatedKsuModuleRoot)
+    sourceSets["main"].assets.srcDir(generatedRootModuleRoot)
 }
 
 tasks.matching { task ->
     task.name.startsWith("merge", ignoreCase = false) && task.name.endsWith("Assets", ignoreCase = false)
 }.configureEach {
     dependsOn(syncBundledSources)
-    dependsOn(bundleKsuModule)
+    dependsOn(bundleModule)
 }
 
 tasks.matching { task -> task.name.contains("lint", ignoreCase = true) }.configureEach {
     dependsOn(syncBundledSources)
-    dependsOn(bundleKsuModule)
+    dependsOn(bundleModule)
 }
 
 // detekt 只做体积/复杂度基线度量，不参与构建成败判定。
@@ -165,6 +191,9 @@ tasks.withType<io.gitlab.arturbosch.detekt.Detekt>().configureEach {
 }
 
 dependencies {
+    implementation(project(":scripta-editor"))
+    // Module-owned native port of host 1.3 BookManager; same Material3 family as the host.
+    implementation("androidx.compose.material3:material3:1.5.0-alpha22")
     implementation("io.github.proify.lyricon:provider:0.1.70")
 
     // 模块主界面：miuix（HyperOS 风格 Compose UI 库）+ activity-compose 提供的 setContent。

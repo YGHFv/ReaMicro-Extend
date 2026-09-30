@@ -52,6 +52,7 @@ class AssociationSearchHook(
     )
 
     fun install() {
+        AssociationNetworkHook.install()
         hookUpdateUiState()
         hookSearchByThird()
         hookViewModelCleared()

@@ -35,6 +35,7 @@ class ReaderHook(
         logPrefix = LOG_PREFIX,
     )
 
+    internal val selectionEditSaving = java.util.concurrent.atomic.AtomicBoolean(false)
     internal var nativeSelectionHookInstalled: Boolean = false
     internal var currentSelectionControllerRef: WeakReference<Any>? = null
     internal var currentEpubRef: WeakReference<Any>? = null

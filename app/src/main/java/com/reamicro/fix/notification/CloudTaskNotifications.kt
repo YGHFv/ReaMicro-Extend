@@ -22,6 +22,7 @@ import com.reamicro.fix.logging.ModuleAndroidLog
  * 成熟做法——把消息投给模块自己的组件，由模块进程用模块的权限、渠道和图标发出。
  */
 object CloudTaskNotifications {
+    const val ACTION_OPEN_RECORDS = "com.reamicro.fix.OPEN_TASK_RECORDS"
     const val ACTION_POST = "com.reamicro.fix.CLOUD_TASK_NOTIFICATION"
     const val CHANNEL_ID = "reamicro_cloud_tasks"
     const val CHANNEL_NAME = "云端任务消息"
@@ -58,9 +59,9 @@ object CloudTaskNotifications {
      * 带 NEW_TASK + CLEAR_TOP：已在运行则复用并回到栈顶，触发 onResume 里的状态刷新。
      */
     private fun contentIntent(context: Context): PendingIntent {
-        val intent = Intent().apply {
+        val intent = Intent(ACTION_OPEN_RECORDS).apply {
             component = ComponentName(MODULE_PACKAGE_NAME, "$MODULE_PACKAGE_NAME.ui.ModuleMainActivity")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
         return PendingIntent.getActivity(
             context, 0, intent,

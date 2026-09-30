@@ -24,4 +24,16 @@
     <style name="ModuleTheme" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">#FFF4F5F7</item>
     </style>
+    <!-- Full-screen module Compose island: background draws behind system bars, controls consume insets. -->
+    <style name="EpubFullScreenDialog" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
 </resources>

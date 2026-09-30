@@ -1,4 +1,5 @@
 package com.reamicro.fix.hook
+import java.io.File
 
 import android.app.Activity
 import android.app.Dialog
@@ -311,34 +312,7 @@ internal fun ReaderHook.dictionaryImageVector(): Any? {
     }
 }
 
-internal fun ReaderHook.openNativeSelectionEditor() {
-    val activity = activityProvider() ?: return
-    if (!canEditReaderSelection()) return
-    val selection = currentNativeSelectionPayload()
-    val controller = selection.controller
-    val quote = selection.quote
-    if (quote.isBlank()) {
-        Toast.makeText(activity, "\u672a\u83b7\u53d6\u5230\u9009\u4e2d\u6587\u672c", Toast.LENGTH_SHORT).show()
-        return
-    }
-    activity.runOnUiThread {
-        showSelectionEditDialog(activity, quote) { edited ->
-            if (edited == quote) {
-                Toast.makeText(activity, "\u6587\u672c\u672a\u4fee\u6539", Toast.LENGTH_SHORT).show()
-                return@showSelectionEditDialog
-            }
-            val result = runCatching { writeSelectionTextBack(quote, edited) }
-                .onFailure { XposedBridge.log("$LOG_PREFIX selection edit save failed: ${it.stackTraceToString()}") }
-                .getOrDefault(false)
-            if (result) {
-                callNoArg(controller, "clearSelection")
-                Toast.makeText(activity, "\u5df2\u4fdd\u5b58\u5230 EPUB", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(activity, "\u672a\u5728\u5f53\u524d EPUB \u6587\u4ef6\u4e2d\u627e\u5230\u552f\u4e00\u5339\u914d\u6587\u672c", Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-}
+internal fun ReaderHook.openNativeSelectionEditor() = openAnchoredSelectionEditor()
 
 internal fun ReaderHook.openNativeSelectionDictionary() {
     val activity = activityProvider() ?: return
@@ -431,17 +405,18 @@ internal fun ReaderHook.selectionOffsetInDocument(text: String, quote: String): 
     return -1
 }
 
-internal fun ReaderHook.showSelectionEditDialog(activity: Activity, text: String, onSave: (String) -> Unit) {
+internal fun ReaderHook.showSelectionEditDialog(
+    activity: Activity, text: String, onSave: (String, ReaderSelectionEditDialog) -> Unit,
+): ReaderSelectionEditDialog {
     val colors = DialogColors(activity)
     val dialog = Dialog(activity)
     val density = activity.resources.displayMetrics.density
     fun dp(value: Int): Int = (value * density).toInt()
     val editor = createThoughtStyleEditor(activity, text, colors, ::dp)
-    val save = thoughtStyleSaveButton(activity, colors, ::dp).apply {
-        setOnClickListener {
-            dialog.dismiss()
-            onSave(editor.text?.toString().orEmpty())
-        }
+    val save = thoughtStyleSaveButton(activity, colors, ::dp)
+    val handle = ReaderSelectionEditDialog(dialog, editor, save)
+    save.setOnClickListener {
+        if (!handle.saving) onSave(editor.text?.toString().orEmpty(), handle)
     }
     val inputCard = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
@@ -486,7 +461,7 @@ internal fun ReaderHook.showSelectionEditDialog(activity: Activity, text: String
     dialog.setCanceledOnTouchOutside(true)
     dialog.setOnKeyListener { _, keyCode, event ->
         if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
-            dialog.dismiss()
+            if (!handle.saving) dialog.dismiss()
             true
         } else {
             false
@@ -505,6 +480,7 @@ internal fun ReaderHook.showSelectionEditDialog(activity: Activity, text: String
         setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
     focusEditorAndShowKeyboard(activity, editor)
+    return handle
 }
 
 internal fun ReaderHook.showDictionaryDialog(
@@ -679,8 +655,5 @@ internal fun ReaderHook.showDictionaryPresetPicker(
     }
 }
 
-internal fun ReaderHook.writeSelectionTextBack(oldText: String, newText: String): Boolean {
-    val files = candidateCurrentTextFiles()
-    if (files.isEmpty()) return false
-    return files.any { file -> replaceUniqueTextInFile(file, oldText, newText) }
-}
+// Selection writes are exclusively handled by openAnchoredSelectionEditor:
+// the source chapter and offsets must come from the captured host CFI.

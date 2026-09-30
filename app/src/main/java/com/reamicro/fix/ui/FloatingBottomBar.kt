@@ -1,4 +1,5 @@
 package com.reamicro.fix.ui
+import androidx.compose.ui.graphics.luminance
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseOut
@@ -206,7 +207,7 @@ fun FloatingBottomBar(
     isBlurEnabled: Boolean = true,
     content: @Composable RowScope.((Int) -> Unit) -> Unit
 ) {
-    val isInDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val isInDark = MiuixTheme.colorScheme.surface.luminance() < 0.5f
     val pillShape = remember { CircleShape }
     val accentColor = MiuixTheme.colorScheme.primary
     val tabContentColor = MiuixTheme.colorScheme.onSurface

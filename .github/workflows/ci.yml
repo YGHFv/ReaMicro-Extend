@@ -5,12 +5,18 @@ on:
   push:
     branches:
       - main
-    # 模块本体或 KSU 脚本变更时构建配套 APK 和 ZIP；服务端单独变更由 Docker workflow 负责。
+    # 模块本体或 通用模块脚本变更时构建配套 APK 和 ZIP；服务端单独变更由 Docker workflow 负责。
     paths:
       - "app/**"
-      - "ksu/**"
-      - "tools/build-ksu-module.py"
-      - "tools/test-build-ksu-module.py"
+      - "module/**"
+      - "tools/build-module.py"
+      - "tools/test-build-module.py"
+      - "tools/test-module-lifecycle.py"
+      - "tools/test-root-enhancement.py"
+      - "tools/test-miuix-integration.py"
+      - "tools/test-*.py"
+      - "third_party/**"
+      - "source-files/**"
       - "gradle/**"
       - "gradle.properties"
       - "gradlew"
@@ -27,7 +33,7 @@ permissions:
 
 jobs:
   build:
-    name: Build APK and KSU module
+    name: Build APK and companion module
     runs-on: ubuntu-latest
 
     steps:
@@ -58,7 +64,8 @@ jobs:
         run: |
           export ANDROID_HOME="$RUNNER_TEMP/android-sdk"
           mkdir -p "$ANDROID_HOME/cmdline-tools"
-          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o "$RUNNER_TEMP/android-commandline-tools.zip"
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-16111833_latest.zip -o "$RUNNER_TEMP/android-commandline-tools.zip"
+          echo "0877a1d048fe4a24efe2eff536ca4223f7adeb58648bb81909d33c446918cfa8  $RUNNER_TEMP/android-commandline-tools.zip" | sha256sum -c -
           unzip -q "$RUNNER_TEMP/android-commandline-tools.zip" -d "$ANDROID_HOME/cmdline-tools"
           mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
@@ -68,19 +75,30 @@ jobs:
 
       - name: Install Android SDK packages
         run: |
-          yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses
-          sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          # CLI 23 supports the Android 37 minor-version repository format.
+          # Its compatibility sdkmanager accepts licenses during installation.
+          sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
+          test -f "$ANDROID_HOME/platforms/android-37.0/android.jar"
 
       - name: Make Gradle executable
         run: chmod +x ./gradlew
 
       - name: Test
-        run: ./gradlew :app:testDebugUnitTest
+        run: ./gradlew :app:testDebugUnitTest :scripta-editor:testDebugUnitTest
 
-      - name: Test KSU module packaging
+      - name: Test companion module packaging
         run: |
-          python3 tools/test-build-ksu-module.py
-          for script in ksu/reamicro-automation/*.sh; do
+          python3 tools/test-build-module.py
+          python3 tools/test-module-lifecycle.py
+          python3 tools/test-root-enhancement.py
+          python3 tools/test-miuix-integration.py
+          python3 tools/test-root-entry.py
+          python3 tools/test-root-panel.py
+          python3 tools/test-root-wording.py
+          python3 tools/test-root-source-audit.py
+          python3 tools/test-about-page-layout.py
+          python3 tools/test-final-238.py
+          for script in module/reamicro-automation/*.sh; do
             sh -n "$script"
           done
 
@@ -129,11 +147,11 @@ jobs:
             echo "APK_VARIANT=debug" >> "$GITHUB_ENV"
           fi
 
-      - name: Build KSU module
+      - name: Build companion module
         run: |
-          python3 tools/build-ksu-module.py
+          python3 tools/build-module.py
           mkdir -p artifacts
-          cp outputs/ReaMicro-Automation-KSU-*.zip artifacts/
+          cp outputs/ReaMicro-Automation-Root-*.zip artifacts/
 
       - name: Prepare CI APK artifact
         run: |
@@ -162,11 +180,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload CI KSU module
+      - name: Upload CI companion module
         uses: actions/upload-artifact@v5
         with:
-          name: ReaMicro-Automation-ci-ksu
-          path: artifacts/ReaMicro-Automation-KSU-*.zip
+          name: ReaMicro-Automation-ci-module
+          path: artifacts/ReaMicro-Automation-Root-*.zip
           if-no-files-found: error
           retention-days: 14
 
@@ -184,11 +202,17 @@ jobs:
           else
             TITLE="${VERSION_NAME} · CI #${GITHUB_RUN_NUMBER}"
           fi
-          gh release create "$TAG" artifacts/*.apk artifacts/*.apk.sha256 artifacts/ReaMicro-Automation-KSU-*.zip \
-            --target "$GITHUB_SHA" \
-            --title "$TITLE" \
-            --notes "CI build ${VERSION_NAME} (versionCode ${VERSION_CODE}) from ${GITHUB_SHA}. Includes the matching APK and the experimental KSU module ZIP. Install the APK before enabling the KSU module." \
-            --prerelease
+          NOTES_FILE="module-repo/release-${VERSION_NAME}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            RELEASE_TITLE="$(head -n 1 "$NOTES_FILE" | sed 's/^# *//')"
+            [ -z "$RELEASE_TITLE" ] || TITLE="$RELEASE_TITLE"
+            tail -n +3 "$NOTES_FILE" > "$RUNNER_TEMP/reamicro-release-notes.md"
+            NOTES_ARGS=(--notes-file "$RUNNER_TEMP/reamicro-release-notes.md")
+          else
+            NOTES_ARGS=(--notes "CI build ${VERSION_NAME} (versionCode ${VERSION_CODE}) from ${GITHUB_SHA}. Includes the matching APK and companion module ZIP.")
+          fi
+          gh release create "$TAG" artifacts/*.apk artifacts/*.apk.sha256 artifacts/ReaMicro-Automation-Root-*.zip \
+            --target "$GITHUB_SHA" --title "$TITLE" "${NOTES_ARGS[@]}" --prerelease
 
       # 把签名 APK 同步到 LSPosed 模块仓库（Xposed-Modules-Repo）并建 release，避免每次手动上传附件。
       # secret MODULE_REPO_TOKEN 必须是「经典 PAT（classic）」：
@@ -200,7 +224,7 @@ jobs:
       # 只在版本号变化时发布：模块仓库已有 <versionCode>-<versionName> 这条 release 就跳过；
       # 需要覆盖同版本时，先删掉模块仓库里那条 release（连同 tag），再重跑本 workflow。
       - name: Publish to LSPosed module repo
-        if: github.ref == 'refs/heads/main'
+        if: github.repository == 'YGHFv/ReaMicro-Extend' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.MODULE_REPO_TOKEN }}
           MODULE_REPO: Xposed-Modules-Repo/io.github.YGHFv.ReaMicroExtend

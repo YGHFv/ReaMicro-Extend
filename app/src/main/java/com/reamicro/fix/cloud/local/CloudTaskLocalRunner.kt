@@ -378,7 +378,19 @@ object CloudTaskLocalRunner {
         .put("lastDrawResult", items.joinToString("、") { it.optString("name") })
         .put("lastDrawAt", System.currentTimeMillis())
 
-    private fun runAutoRead(task: JSONObject, request: JSONObject, credential: JSONObject, checkpoint: (JSONObject) -> Unit): Outcome {
+    internal fun runAutoRead(
+        task: JSONObject, request: JSONObject, credential: JSONObject,
+        checkpoint: (JSONObject) -> Unit = {},
+        clock: () -> Long = System::currentTimeMillis,
+    ): Outcome {
+        val now = clock()
+        val durationMinutes = request.optInt("durationMinutes", 30).coerceIn(1, 720)
+        val dailyLimit = request.optInt("dailyLimitMinutes", 720).coerceIn(1, 1_440)
+        val today = AutoReadTimeLock.recordDate(now)
+        val localDay = java.time.Instant.ofEpochMilli(now).atZone(ZoneId.systemDefault()).toLocalDate()
+        val usedToday = AutoReadTimeLock.usedMinutes(task, now)
+        if (usedToday >= dailyLimit) return Outcome("success", "今日已达到 ${dailyLimit} 分钟上限", JSONObject(task.toString()))
+        AutoReadTimeLock.deferredOutcome(durationMinutes, task, now, dailyLimit)?.let { return it }
         val baseUrl = credential.optString("baseUrl").ifBlank { return Outcome("failed", "阅微服务器地址为空") }
         val token = credential.optString("token").ifBlank { return Outcome("paused", "阅微登录凭据无效") }
         val configuredBooks = request.optJSONArray("books") ?: JSONArray()
@@ -397,11 +409,6 @@ object CloudTaskLocalRunner {
                 ?: recent.optJSONArray("list")
                 ?: JSONArray()
         }
-        val durationMinutes = request.optInt("durationMinutes", 30).coerceIn(1, 720)
-        val dailyLimit = request.optInt("dailyLimitMinutes", 720).coerceIn(1, 1_440)
-        val today = LocalDate.now(ZoneId.of("Asia/Shanghai")).toString()
-        val usedToday = if (task.optString("dailyReadDate") == today) task.optInt("dailyReadMinutes", 0).coerceAtLeast(0) else 0
-        if (usedToday >= dailyLimit) return Outcome("success", "今日已达到 ${dailyLimit} 分钟上限")
         val rotation = task.optInt("bookRotation", 0).coerceAtLeast(0) % books.length().coerceAtLeast(1)
         var completedBooks = 0
         var completedMinutes = 0
@@ -413,6 +420,14 @@ object CloudTaskLocalRunner {
             val book = books.optJSONObject((rotation + offset) % books.length()) ?: continue
             val bookId = book.optLong("bookId", if (usesRecentBooks) 0L else book.optLong("cloudBookId", 0L))
             if (bookId <= 0L) continue
+            val beforeSubmit = clock()
+            if (AutoReadTimeLock.recordDate(beforeSubmit) != today ||
+                java.time.Instant.ofEpochMilli(beforeSubmit).atZone(ZoneId.systemDefault()).toLocalDate() != localDay) {
+                state.put("nextRunAtOverride", beforeSubmit + 60_000L)
+                return Outcome("paused", "已跨日期，自动阅读将按新一天的真实时间重新检查", state, notify = false)
+            }
+            // Recheck after network calls and between books; force/retries cannot over-report.
+            AutoReadTimeLock.deferredOutcome(durationMinutes, state, beforeSubmit, dailyLimit)?.let { return it }
             val payload = JSONObject().put("list", JSONArray().put(
                 JSONObject()
                     .put("bookId", bookId)
@@ -837,7 +852,16 @@ object CloudTaskLocalRunner {
      * 效果类型是游戏侧的枚举，直接显示 MERCHANT_PROFIT_BONUS 这种值用户看不懂，按已知类型翻译。
      */
     internal fun blessingEffectText(effectType: String, effectValue: String): String = when (effectType.trim().uppercase()) {
+        // 行商运签的 5 个效果类型：文案逐字照抄宿主 TravelingMerchantSheetKt.merchantBlessingEffectText
+        // （smali 取证 2.3.2），格式统一为「中文说明 + 数值%」。行商 trip 的 JSON 只回
+        // blessingEffectType/Value 而没有 description，所以这里要自己按类型翻译；求签接口
+        // （get/pray-taoist-blessing）另有 description 现成文本，走 blessingDetail 那条路。
+        "MERCHANT_DISASTER_REDUCTION" -> "行商灾害概率降低 $effectValue%"
         "MERCHANT_PROFIT_BONUS" -> "商事盈利收益率提升 $effectValue%"
+        "MERCHANT_LOSS_REDUCTION" -> "商事亏损降低 $effectValue%"
+        "MERCHANT_DURATION_REDUCTION" -> "行商耗时缩短 $effectValue%"
+        "MERCHANT_ENCOUNTER_BONUS" -> "行商奇遇概率提升 $effectValue%"
+        // 每日轶闻签的效果类型（非行商）：宿主是用签自带的 description 展示，这里作兜底翻译。
         "LORE_THRESHOLD_BONUS" -> "下一次每日轶闻：绿色及以上概率提升 $effectValue 个百分点"
         "" -> ""
         else -> "$effectType +$effectValue"
@@ -907,6 +931,9 @@ object CloudTaskLocalRunner {
      * get-user-materials 响应里，品质只能按游戏内的档位静态写死，配置页才有着色。
      */
     private val PROHIBITED_PAWN_PROP_QUALITIES = mapOf(
+        // 夺宝（琬琰）、传承（欹器）与招募（青圭）同为红色稀有消耗品，配置页一并按红色着色与排序。
+        "17" to "RED",
+        "18" to "RED",
         "name:青圭" to "RED",
     )
 
@@ -1070,14 +1097,28 @@ object CloudTaskLocalRunner {
         return PawnCatalogFetch(catalog, errors.takeIf { it.isNotEmpty() }?.joinToString("；"))
     }
 
-    /** 行商城池选项：code 是落库值，requiredTransportType 决定哪些车马能去（与车马互斥）。 */
+    /** 行商城池选项：code 是落库值。宿主 TravelingMerchantCity 同名字段。 */
     internal data class MerchantCityOption(
         val code: String,
         val label: String,
+        /**
+         * 车马需求的**显示**依据（HORSE=需要马车，SHIP=需要船只，空=无需舆蓁）。
+         * 真正的通行校验按 [routeType] 推导（见 hostExpectedTransportType），宿主
+         * TravelingMerchantSheet 的 MerchantLoadout 就这么分——此字段只用于文案。
+         */
         val requiredTransportType: String,
+        /**
+         * 路线类型（LAND=陆路→期望 HORSE，其余水路→期望 SHIP）。宿主用它推导有效性与耗时，
+         * 而不是 requiredTransportType。空串按非 LAND（SHIP）处理。
+         */
+        val routeType: String,
         /** 不打车马加成的基础耗时（分钟）——宿主 TravelingMerchantCity 同名字段。 */
         val baseDurationMinutes: Long,
     )
+
+    /** 宿主按 routeType 推导城池期望的车马类型：LAND→HORSE，其余→SHIP。 */
+    internal fun hostExpectedTransportType(routeType: String): String =
+        if (routeType.trim() == "LAND") "HORSE" else "SHIP"
 
     /**
      * 行商车马选项：transportType 与城池的 requiredTransportType 配对（宿主行商准备页
@@ -1099,6 +1140,8 @@ object CloudTaskLocalRunner {
         val transports: List<MerchantTransportOption>,
         val activeCityCode: String,
         val activeTransportId: Long,
+        /** 不带车马（transportId=0）时的本金上限——宿主 GetTravelingMerchantRes.noTransportCapacity。 */
+        val noTransportCapacity: Long,
         val error: String?,
     )
 
@@ -1130,6 +1173,7 @@ object CloudTaskLocalRunner {
                         code = code,
                         label = city.optString("name").trim().ifBlank { code },
                         requiredTransportType = city.optString("requiredTransportType").trim(),
+                        routeType = city.optString("routeType").trim(),
                         baseDurationMinutes = city.optLong("baseDurationMinutes", 0L),
                     )
                 }
@@ -1149,6 +1193,7 @@ object CloudTaskLocalRunner {
             },
             activeCityCode = trip?.optString("cityCode").orEmpty().trim(),
             activeTransportId = trip?.optLong("transportId", 0L) ?: 0L,
+            noTransportCapacity = data.optLong("noTransportCapacity", 0L),
             error = null,
         )
     }

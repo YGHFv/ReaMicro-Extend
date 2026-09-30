@@ -84,29 +84,33 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
     override fun get(accountId: String, taskType: String): LocalTask? =
         list(accountId).firstOrNull { it.taskType == taskType }
 
-    /** 保存（新建或更新）一条任务的配置。保存时刷新加密 token，重置 nextRunAt 让其尽快执行。 */
+    /** 保存（新建或更新）一条任务的配置。保存时刷新加密 token；自动阅读按有效时刻安排，其余任务保留立即调度。 */
     fun saveTask(accountId: String, task: LocalTask, token: String) {
         if (accountId.isBlank()) return
         editAccount(accountId) { root, tasks ->
             val existing = tasks.optJSONObject(task.taskType)
             val merged = writeTaskConfig(task)
             merged.put(KEY_CONFIG_UPDATED_AT, maxOf(System.currentTimeMillis(), (existing?.optLong(KEY_CONFIG_UPDATED_AT) ?: 0L) + 1L))
-            // 保留运行时状态：仅在启用切换或首次创建时重排 nextRunAt。
+            // 保留运行时进度，随后按任务类型重排 nextRunAt。
             if (existing != null) {
                 for (stateKey in RUNTIME_STATE_KEYS) {
                     if (existing.has(stateKey)) merged.put(stateKey, existing.get(stateKey))
                 }
             }
             if (task.enabled) {
-                // 启用时立即安排一次执行（行商任务会在执行内部再自行排到 endTime）。
-                merged.put(KEY_NEXT_RUN_AT, System.currentTimeMillis())
+                // 自动阅读按有效时间安排，不能因保存配置而立即上报数小时阅读。
+                val now = System.currentTimeMillis()
+                val next = if (task.taskType == AutoReadTimeLock.TASK_TYPE) {
+                    AutoReadTimeLock.nextDailyAt(task.timeOfDay, task.durationMinutes, now)
+                } else now
+                merged.put(KEY_NEXT_RUN_AT, next)
             } else {
                 merged.put(KEY_NEXT_RUN_AT, 0L)
             }
             tasks.put(task.taskType, merged)
             if (token.isNotBlank()) root.put(KEY_TOKEN, encrypt(token))
         }
-        syncKsuConfiguration()
+        syncRootConfiguration()
     }
 
     /** 切换启用状态，不改动其它配置。 */
@@ -116,11 +120,19 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             val obj = tasks.optJSONObject(taskType) ?: JSONObject().put(KEY_TASK_TYPE, taskType)
             obj.put(KEY_CONFIG_UPDATED_AT, maxOf(System.currentTimeMillis(), obj.optLong(KEY_CONFIG_UPDATED_AT) + 1L))
             obj.put(KEY_ENABLED, enabled)
-            obj.put(KEY_NEXT_RUN_AT, if (enabled) System.currentTimeMillis() else 0L)
+            val now = System.currentTimeMillis()
+            val next = when {
+                !enabled -> 0L
+                taskType == AutoReadTimeLock.TASK_TYPE -> AutoReadTimeLock.nextDailyAt(
+                    obj.optString(KEY_TIME_OF_DAY, "00:05"), obj.optInt(KEY_DURATION_MINUTES, 30), now,
+                )
+                else -> now
+            }
+            obj.put(KEY_NEXT_RUN_AT, next)
             tasks.put(taskType, obj)
             if (enabled && token.isNotBlank()) root.put(KEY_TOKEN, encrypt(token))
         }
-        syncKsuConfiguration()
+        syncRootConfiguration()
     }
 
     /** 写回运行时状态（下次执行时间、最近消息、每日计数等）。state 为要合并的键值。 */
@@ -151,24 +163,6 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         }
         return state
     }
-
-    /** 所有账号中「已启用任务」的最近一次待执行时间，供闹钟排程取 min。0 表示无。 */
-    fun earliestNextRunAt(): Long {
-        var earliest = Long.MAX_VALUE
-        val now = System.currentTimeMillis()
-        for (accountId in storedAccountIds()) {
-            val checkin = runtimeState(accountId, "yeshe_checkin")
-            for (task in list(accountId)) {
-                val next = nextLocalTaskAt(task, runtimeState(accountId, task.taskType), checkin, now) ?: continue
-                if (next in 1 until earliest) earliest = next
-            }
-        }
-        return if (earliest == Long.MAX_VALUE) 0L else earliest
-    }
-
-    /** 是否存在任意账号的任意已启用本地任务。 */
-    fun hasEnabledTasks(): Boolean =
-        storedAccountIds().any { accountId -> list(accountId).any { it.enabled } }
 
     fun recoverPendingAutomationTasks(now: Long = System.currentTimeMillis()) {
         for (accountId in storedAccountIds()) {
@@ -201,8 +195,8 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
      */
     fun rescheduleEnabledTasks(now: Long = System.currentTimeMillis()): Int {
         val context = contextProvider()
-        if (context != null && com.reamicro.fix.cloud.ksu.KsuTaskBridge.isEnabled(context)) {
-            return com.reamicro.fix.cloud.ksu.KsuTaskBridge.reschedule(context)
+        if (context != null && com.reamicro.fix.cloud.root.RootTaskBridge.isEnabled(context)) {
+            return com.reamicro.fix.cloud.root.RootTaskBridge.reschedule(context)
         }
         return rescheduleLocalTasks(this, now)
     }
@@ -271,7 +265,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             clearLocalTaskRecordsBefore(root, maxOf(System.currentTimeMillis(), root.optLong("recordsClearedAt") + 1L))
         }
         val context = contextProvider() ?: return
-        if (context.packageName == LocalTaskMirror.MODULE_PACKAGE) syncKsuConfiguration()
+        if (context.packageName == LocalTaskMirror.MODULE_PACKAGE) syncRootConfiguration()
         else LocalTaskMirror.push(context)
     }
 
@@ -310,7 +304,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             if (token.isNotBlank()) root.put(KEY_TOKEN, encrypt(token))
             clearLocalTaskRecordsBefore(root, recordsClearedAt)
         }
-        syncKsuConfiguration()
+        syncRootConfiguration()
     }
 
     fun snapshotPayload(): JSONObject {
@@ -361,14 +355,18 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         return JSONObject().put(KEY_ACCOUNTS, accounts)
     }
 
-    private fun syncKsuConfiguration() {
-        contextProvider()?.let { com.reamicro.fix.cloud.ksu.KsuTaskBridge.requestSync(it) }
+    private fun syncRootConfiguration() {
+        contextProvider()?.let { context ->
+            com.reamicro.fix.cloud.root.RootTaskBridge.requestSync(context)
+        }
     }
 
     private fun writeTaskConfig(task: LocalTask): JSONObject = JSONObject()
         .put(KEY_TASK_TYPE, task.taskType)
         .put(KEY_ENABLED, task.enabled)
-        .put(KEY_TIME_OF_DAY, task.timeOfDay)
+        .put(KEY_TIME_OF_DAY, if (task.taskType == AutoReadTimeLock.TASK_TYPE) {
+            AutoReadTimeLock.safeTime(task.timeOfDay, task.durationMinutes)
+        } else task.timeOfDay)
         .put(KEY_DURATION_MINUTES, task.durationMinutes)
         .put(KEY_DAILY_DRAW_LIMIT, task.dailyDrawLimit)
         .put(KEY_BOOKS, JSONArray(task.books.map { JSONObject().put("bookId", it.bookId).put("name", it.name) }))

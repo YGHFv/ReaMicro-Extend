@@ -23,13 +23,18 @@ internal class LocalTaskEngine(
             }.filter { (key, task) ->
                 key !in processed && if (requested != null) key == requested else
                     task.enabled && (task.taskType != "yeshe_draw_card" || store.runtimeState(key.accountId, task.taskType).optBoolean("drawPending")) &&
-                        (force || task.nextRunAt <= now)
+                        (force || AutoReadTimeLock.clampNextAt(
+                            task, store.runtimeState(key.accountId, task.taskType), task.nextRunAt, now,
+                        ) <= now)
             }
             val (key, task) = candidates.minByOrNull { it.second.nextRunAt } ?: break
             processed += key
             val token = store.token(key.accountId)
             val stateInput = store.runtimeState(key.accountId, task.taskType)
-            val outcome = if (token.isBlank()) {
+            val timeLock = if (task.taskType == AutoReadTimeLock.TASK_TYPE) {
+                AutoReadTimeLock.deferredOutcome(task.durationMinutes, stateInput, now)
+            } else null
+            val outcome = timeLock ?: if (token.isBlank()) {
                 CloudTaskLocalRunner.Outcome("paused", "阅微登录凭据缺失，请重新打开阅微同步登录", stateInput)
             } else runCatching {
                 val credential = JSONObject().put("baseUrl", CloudTaskLocalRunner.REAMICRO_BASE_URL).put("token", token)
@@ -46,7 +51,10 @@ internal class LocalTaskEngine(
             val state = JSONObject(outcome.state.toString())
             val override = state.optLong("nextRunAtOverride")
             state.remove("nextRunAtOverride")
-            state.put("nextRunAt", nextLocalRunAt(task.taskType, task.timeOfDay, outcome.result, override, finished))
+            val candidate = if (task.taskType == AutoReadTimeLock.TASK_TYPE && override <= 0L && outcome.result == "success") {
+                AutoReadTimeLock.nextDailyAt(task.timeOfDay, task.durationMinutes, finished)
+            } else nextLocalRunAt(task.taskType, task.timeOfDay, outcome.result, override, finished)
+            state.put("nextRunAt", AutoReadTimeLock.clampNextAt(task, state, candidate, finished))
                 .put("lastMessage", outcome.message).put("lastRunAt", finished)
             if (task.taskType == "yeshe_draw_card") state.put("drawPending", outcome.result != "success")
             val record = LocalTaskRecord(finished, task.taskType, outcome.result, outcome.message, outcome.detail.toString())
