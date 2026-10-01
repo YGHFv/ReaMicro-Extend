@@ -299,7 +299,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             tasks.keys().forEach { taskType ->
                 val incoming = tasks.optJSONObject(taskType) ?: return@forEach
                 val current = existing.optJSONObject(taskType)
-                existing.put(taskType, mergeMirroredTask(current, incoming, System.currentTimeMillis()).put(KEY_TASK_TYPE, taskType))
+                existing.put(taskType, mergeMirroredTask(taskType, current, incoming, System.currentTimeMillis()).put(KEY_TASK_TYPE, taskType))
             }
             if (token.isNotBlank()) root.put(KEY_TOKEN, encrypt(token))
             clearLocalTaskRecordsBefore(root, recordsClearedAt)
@@ -503,7 +503,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             KEY_BLESSING_TYPE,
         )
 
-        internal fun mergeMirroredTask(current: JSONObject?, incoming: JSONObject, now: Long): JSONObject {
+        internal fun mergeMirroredTask(taskType: String, current: JSONObject?, incoming: JSONObject, now: Long): JSONObject {
             if (current != null && incoming.optLong(KEY_CONFIG_UPDATED_AT) <= current.optLong(KEY_CONFIG_UPDATED_AT)) {
                 return JSONObject(current.toString())
             }
@@ -514,7 +514,16 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             }
             merged.put(KEY_CONFIG_UPDATED_AT, incoming.optLong(KEY_CONFIG_UPDATED_AT))
             if (changed || !merged.has(KEY_NEXT_RUN_AT)) {
-                merged.put(KEY_NEXT_RUN_AT, if (merged.optBoolean(KEY_ENABLED)) now else 0L)
+                // 镜像只接纳配置，不信任对端的运行时 nextRunAt；自动阅读按保存的每日时刻重排。
+                // taskType 必须取外层任务键：首次镜像的 JSON 未必包含 taskType 字段。
+                val next = when {
+                    !merged.optBoolean(KEY_ENABLED) -> 0L
+                    taskType == AutoReadTimeLock.TASK_TYPE -> AutoReadTimeLock.nextDailyAt(
+                        merged.optString(KEY_TIME_OF_DAY, "00:05"), merged.optInt(KEY_DURATION_MINUTES, 30), now,
+                    )
+                    else -> now
+                }
+                merged.put(KEY_NEXT_RUN_AT, next)
             }
             return merged
         }

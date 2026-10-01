@@ -6,6 +6,9 @@ package com.reamicro.fix.ui.effect
 import android.annotation.SuppressLint
 import android.os.Build
 import androidx.annotation.RequiresApi
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -18,7 +21,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 internal fun Modifier.bgEffectDraw(
-    painter: BgEffectPainter,
+    painter: BgEffectPainter?,
     preset: BgEffectConfig.Config,
     deviceType: DeviceType,
     isDarkTheme: Boolean,
@@ -43,7 +46,7 @@ internal fun Modifier.bgEffectDraw(
 
 @SuppressLint("ModifierNodeInspectableProperties")
 private data class BgEffectElement(
-    val painter: BgEffectPainter,
+    val painter: BgEffectPainter?,
     val preset: BgEffectConfig.Config,
     val deviceType: DeviceType,
     val isDarkTheme: Boolean,
@@ -85,7 +88,7 @@ private data class BgEffectElement(
 }
 
 private class BgEffectNode(
-    private var painter: BgEffectPainter,
+    private var painter: BgEffectPainter?,
     private var preset: BgEffectConfig.Config,
     private var deviceType: DeviceType,
     private var isDarkTheme: Boolean,
@@ -99,20 +102,28 @@ private class BgEffectNode(
     DrawModifierNode {
 
     private var animationJob: Job? = null
+    private var revealJob: Job? = null
     private var animTime: Float = 0f
     private var startOffset: Float = 0f
+    private var revealAlpha: Float = 1f
+    private var drewFallback: Boolean = false
 
     override fun onAttach() {
-        if (playing) startAnimation()
+        syncPlayback()
     }
 
     override fun onDetach() {
         animationJob?.cancel()
         animationJob = null
+        revealJob?.cancel()
+        revealJob = null
+        // A detached page must not replay a half-finished reveal when it comes back.
+        revealAlpha = 1f
+        drewFallback = false
     }
 
     fun update(
-        painter: BgEffectPainter,
+        painter: BgEffectPainter?,
         preset: BgEffectConfig.Config,
         deviceType: DeviceType,
         isDarkTheme: Boolean,
@@ -123,6 +134,8 @@ private class BgEffectNode(
         colorStage: () -> Float,
         alpha: () -> Float,
     ) {
+        val needsReveal = effectBackground && painter != null &&
+            (this.painter == null || !this.effectBackground) && drewFallback
         this.painter = painter
         this.preset = preset
         this.deviceType = deviceType
@@ -133,16 +146,51 @@ private class BgEffectNode(
         this.colorStage = colorStage
         this.alpha = alpha
 
-        if (this.playing != playing) {
-            this.playing = playing
-            if (playing) {
-                startAnimation()
-            } else {
-                animationJob?.cancel()
-                animationJob = null
-            }
+        this.playing = playing
+        if (!effectBackground || painter == null) {
+            revealJob?.cancel()
+            revealJob = null
+            revealAlpha = 1f
+        } else if (needsReveal) {
+            drewFallback = false
+            if (isAttached) startReveal() else revealAlpha = 1f
         }
+        syncPlayback()
         invalidateDraw()
+    }
+
+    private fun syncPlayback() {
+        val shouldPlay = isAttached && playing && effectBackground &&
+            painter != null && revealAlpha >= 1f
+        if (shouldPlay) {
+            if (animationJob?.isActive != true) startAnimation()
+        } else {
+            animationJob?.cancel()
+            animationJob = null
+        }
+    }
+
+    private fun startReveal() {
+        revealJob?.cancel()
+        animationJob?.cancel()
+        animationJob = null
+        revealAlpha = 0f
+        revealJob = coroutineScope.launch {
+            // Only needed if a fallback frame was already drawn before preparation finished.
+            // Fade the effect, not the surface, cards, text, or the whole page. Normal prepared
+            // entries display their static effect immediately and never repeat this transition.
+            animate(
+                initialValue = 0f,
+                targetValue = 1f,
+                animationSpec = tween(durationMillis = 160, easing = LinearOutSlowInEasing),
+            ) { value, _ ->
+                revealAlpha = value.coerceIn(0f, 1f)
+                invalidateDraw()
+            }
+            revealAlpha = 1f
+            revealJob = null
+            syncPlayback()
+        }
     }
 
     private fun startAnimation() {
@@ -165,20 +213,23 @@ private class BgEffectNode(
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     override fun ContentDrawScope.draw() {
         drawRect(surface)
-        if (effectBackground) {
-            val alphaValue = alpha()
+        val effectPainter = painter
+        if (effectBackground && effectPainter != null) {
+            val alphaValue = (alpha() * revealAlpha).coerceIn(0f, 1f)
             if (alphaValue > 0f) {
                 val drawHeight = if (isFullSize) size.height * 0.8f else size.height * 0.5f
 
-                painter.updateResolution(size.width, size.height)
-                painter.updateBoundIfNeeded(drawHeight, size.height, size.width)
-                painter.updatePresetIfNeeded(deviceType, isDarkTheme)
-                painter.updateColors(preset, colorStage())
-                painter.updateAnimTime(animTime)
-                painter.updatePointsAnim(animTime, preset)
+                effectPainter.updateResolution(size.width, size.height)
+                effectPainter.updateBoundIfNeeded(drawHeight, size.height, size.width)
+                effectPainter.updatePresetIfNeeded(deviceType, isDarkTheme)
+                effectPainter.updateColors(preset, colorStage())
+                effectPainter.updateAnimTime(animTime)
+                effectPainter.updatePointsAnim(animTime, preset)
 
-                drawRect(painter.brush, alpha = alphaValue)
+                drawRect(effectPainter.brush, alpha = alphaValue)
             }
+        } else {
+            drewFallback = true
         }
         drawContent()
     }

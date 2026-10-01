@@ -17,6 +17,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import android.Manifest
 import android.app.ActivityManager
+import android.app.UiModeManager
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.ApplicationInfo
@@ -111,6 +112,7 @@ import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -324,13 +326,14 @@ class ModuleMainActivity : ComponentActivity() {
     private val recordsNavigationRequest = mutableIntStateOf(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        ModuleSplashScreen.install(this, savedInstanceState != null)
+        // Let the system/OEM own splash exit and gesture interruption; no app-owned splash copy.
         setTheme(com.reamicro.fix.R.style.ModuleTheme)
         super.onCreate(savedInstanceState)
         ModuleLogBuffer.attach(this)
         tab.intValue = savedInstanceState?.getInt(STATE_TAB, TAB_RECORDS) ?: TAB_RECORDS
         themeMode.intValue = uiPrefInt(KEY_THEME_MODE).coerceIn(THEME_FOLLOW_SYSTEM, THEME_DARK)
-        // 窗口底色跟着深浅色走：首帧之前系统栏区域显示的就是它（透明会让部分 ROM 露黑边）。
+        syncApplicationNightMode(themeMode.intValue)
+        // 窗口底色与所选 miuix surface 一致，首帧前也不露出另一种白/黑。
         applyPredictiveBack(uiPrefBoolean(KEY_PREDICTIVE_BACK))
         // 进界面时对齐一次桌面图标：恢复被进程中断的切换，并把桌面图标被重置回默认（例如某些
         // 环境下组件状态被清成 manifest 默认）的情况纠回用户偏好。restore 内部做失败回滚，
@@ -852,23 +855,18 @@ class ModuleMainActivity : ComponentActivity() {
                                 !pagerState.isScrollInProgress && pagerState.settledPage == TAB_ABOUT
                         }
                     }
-                    // Avoid first-use shader compilation in the middle of the first incoming swipe.
-                    // Once activated, keep the same painter and last frame across subsequent switches.
-                    var aboutEffectReady by remember { mutableStateOf(false) }
-                    LaunchedEffect(aboutPlaying) {
-                        if (aboutPlaying) aboutEffectReady = true
-                    }
+                    // Preloaded pages prepare a static background before the first incoming swipe.
+                    // Paging/pausing stops only its motion, never removes the effect or card backdrop.
                     val aboutBackdrop = rememberLayerBackdrop()
                     com.reamicro.fix.ui.effect.BgEffectBackground(
                         dynamicBackground = aboutPlaying,
-                        effectBackground = aboutEffectReady,
                         modifier = Modifier.fillMaxSize().graphicsLayer(),
                         bgModifier = Modifier.layerBackdrop(aboutBackdrop),
                         isFullSize = true,
                     ) {
                         CompositionLocalProvider(
                             com.reamicro.fix.ui.effect.LocalAboutBackdrop provides
-                                if (blurSupported && aboutEffectReady) aboutBackdrop else null,
+                                if (blurSupported) aboutBackdrop else null,
                         ) { scrollContent() }
                     }
                 } else {
@@ -1508,6 +1506,7 @@ class ModuleMainActivity : ComponentActivity() {
         languageContext.value = ModuleLanguage.localizedContext(this, appLanguage.intValue)
     }
 
+    // Locale and uiMode changes update Compose in place; no Activity restart or extra splash.
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         updateLanguageContext()
@@ -1542,12 +1541,34 @@ class ModuleMainActivity : ComponentActivity() {
         liquidGlass.value = enabled
     }
 
-    /** 主题分段：跟随系统 / 日间 / 夜间。窗口底色一起改，避免切到夜间时状态栏底下还是白的。 */
+    /** 主题分段：跟随系统 / 日间 / 夜间，同时对齐窗口与后续冷启动的系统开屏。 */
     private fun setThemeMode(mode: Int) {
         val value = mode.coerceIn(THEME_FOLLOW_SYSTEM, THEME_DARK)
         writeUiPrefInt(KEY_THEME_MODE, value)
         themeMode.intValue = value
+        syncApplicationNightMode(value)
         window?.setBackgroundDrawable(ColorDrawable(if (resolveDark(value)) DARK_WINDOW_BG else LIGHT_WINDOW_BG))
+    }
+
+    /**
+     * Android 12+ draws the starting window before this process can read UI_PREFS.
+     * Persist an app-only override so the next cold start uses the same night resources.
+     * MODE_NIGHT_AUTO clears that override and follows the system; it does not change
+     * the device-wide night mode. API 26-30 keep the system-selected starting window.
+     */
+    private fun syncApplicationNightMode(mode: Int) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val nightMode = when (mode) {
+            THEME_LIGHT -> UiModeManager.MODE_NIGHT_NO
+            THEME_DARK -> UiModeManager.MODE_NIGHT_YES
+            else -> UiModeManager.MODE_NIGHT_AUTO
+        }
+        runCatching {
+            getSystemService(UiModeManager::class.java)?.setApplicationNightMode(nightMode)
+        }.onFailure { error ->
+            // An OEM service failure must not prevent the Compose theme from working.
+            ModuleAndroidLog.legacy(LOG_TAG, "splash night mode sync failed: ${error.javaClass.simpleName}")
+        }
     }
 
     private fun setPagerGestureMode(mode: Int) {
@@ -2007,6 +2028,11 @@ class ModuleMainActivity : ComponentActivity() {
                 title = "Scripta",
                 summary = uiText(R.string.about_scripta_credit),
                 onClick = { openUrl("https://github.com/YuKongA/scripta") },
+            )
+            ArrowPreference(
+                title = "齊伋體 qiji-font",
+                summary = uiText(R.string.about_qiji_font_credit),
+                onClick = { openUrl("https://github.com/LingDong-/qiji-font") },
             )
         }
     }
@@ -2948,9 +2974,9 @@ class ModuleMainActivity : ComponentActivity() {
         val TAB_TITLE_RES = listOf(R.string.tab_records, R.string.tab_tasks, R.string.tab_settings, R.string.tab_about)
         val TAB_ICONS = listOf(MiuixIcons.Recent, MiuixIcons.Tasks, MiuixIcons.Settings, MiuixIcons.Info)
 
-        /** 窗口底色：首帧之前系统栏区域显示的颜色，跟着深浅色走（透明会让部分 ROM 露黑边）。 */
-        val LIGHT_WINDOW_BG = android.graphics.Color.WHITE
-        val DARK_WINDOW_BG = android.graphics.Color.BLACK
+        /** Match Scaffold's actual surface, not Colors.background or the platform defaults. */
+        val LIGHT_WINDOW_BG = lightColorScheme().surface.toArgb()
+        val DARK_WINDOW_BG = darkColorScheme().surface.toArgb()
 
         // 编辑器内部键只用于临时状态；显示标签走资源，切换语言不会改变键。
         const val FIELD_TIME = "timeOfDay"

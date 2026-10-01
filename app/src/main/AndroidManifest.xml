@@ -136,7 +136,7 @@
         <activity
             android:name=".ui.ModuleMainActivity"
             android:launchMode="singleTop"
-            android:configChanges="locale|layoutDirection"
+            android:configChanges="locale|layoutDirection|uiMode"
             android:enabled="true"
             android:exported="true"
             android:label="@string/module_name"

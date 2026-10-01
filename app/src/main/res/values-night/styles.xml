@@ -1,13 +1,14 @@
 <resources>
     <!--
-      深色模式下的模块主题（系统开启深色时自动生效）。
-      配色与 ModuleDialogTheme 的深色回退值保持一致，避免窗口底色与页面内部配色不同色。
+      深色模式下的模块主题，由当前应用的 uiMode 选择。
+      配色与 miuix darkColorScheme().surface 保持一致，避免开屏、窗口和页面底色不同。
     -->
     <style name="ModuleTheme" parent="android:style/Theme.Material.NoActionBar">
-        <item name="android:windowBackground">#FF111318</item>
+        <item name="android:windowBackground">@color/module_window_background</item>
     </style>
 
-    <!-- Starting-window themes: device defaults; no background overrides. -->
-    <!-- Selected by system night configuration, not the app preference. -->
-    <style name="Theme.App.StartingBase" parent="android:style/Theme.DeviceDefault.NoActionBar" />
+    <!-- Android 12+ also applies the app night-mode override persisted by ModuleMainActivity. -->
+    <style name="Theme.App.StartingBase" parent="android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/module_window_background</item>
+    </style>
 </resources>

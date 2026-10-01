@@ -57,10 +57,7 @@ internal object DiscoverState {
         private set
 
     /** 已加载书单的缓存，键是「源 id + 分类 key」，避免来回切标签重复请求。 */
-    private val cache = ConcurrentHashMap<String, CachedBooks>()
-
-    /** 单个分类的已加载结果：书单 + 翻到第几页 + 还有没有下一页。 */
-    private class CachedBooks(val state: DiscoverLoadState.Loaded, val page: Int, val hasMore: Boolean)
+    private val cache = ConcurrentHashMap<String, DiscoverBookPage>()
 
     /** 当前分类是否还有下一页（仅 Loaded 态有意义）。 */
     @Volatile
@@ -71,9 +68,6 @@ internal object DiscoverState {
     @Volatile
     var loadingMore: Boolean = false
         private set
-
-    /** 每个分类已翻到的页码。 */
-    private val loadedPages = ConcurrentHashMap<String, Int>()
 
     /** 防止过期请求的结果覆盖新选择：每次选择递增，回调时比对。 */
     private val requestToken = AtomicInteger(0)
@@ -131,6 +125,8 @@ internal object DiscoverState {
 
     /** 会话结束时清掉缓存，避免书源更新后一直读到旧书单。 */
     fun invalidate() {
+        requestToken.incrementAndGet()
+        loadingMore = false
         cache.clear()
         version += 1
     }
@@ -142,6 +138,8 @@ internal object DiscoverState {
      * 不必占用加载线程池。
      */
     fun refreshSources(context: Context?) {
+        requestToken.incrementAndGet()
+        loadingMore = false
         restoreLayout(context)
         restoreFilters(context)
         restoreSelection(context)
@@ -171,11 +169,16 @@ internal object DiscoverState {
         // 否则页面停在 Idle 只会一直显示「正在加载…」。
         if (cached == null && current != DiscoverSelection.NONE && (changed || state == DiscoverLoadState.Idle)) {
             load(current, context)
+        } else {
+            fillGridBatch(context)
         }
     }
 
     /** 选中某个分类；已有缓存就直接用，否则发起加载。每次选择都持久化。 */
     fun select(sourceId: String, kindTitle: String, context: Context?) {
+        // 即使目标已有缓存，也要让旧分类正在补齐的后台请求失效。
+        requestToken.incrementAndGet()
+        loadingMore = false
         val next = DiscoverSelection(sourceId, kindTitle)
         selection = next
         persistSelection(context)
@@ -184,6 +187,7 @@ internal object DiscoverState {
             state = cached.state
             hasMore = cached.hasMore
             bump()
+            fillGridBatch(context)
             return
         }
         load(next, context)
@@ -339,6 +343,8 @@ internal object DiscoverState {
     /** 切换书单排布并持久化；值没变时不触发重组。 */
     fun setLayout(context: Context?, next: DiscoverLayout) {
         if (next == layout) return
+        requestToken.incrementAndGet()
+        loadingMore = false
         layout = next
         val app = context?.applicationContext
         if (app != null) {
@@ -350,6 +356,21 @@ internal object DiscoverState {
             }
         }
         bump()
+        if (state is DiscoverLoadState.Loading) {
+            load(selection, context)
+        } else {
+            fillGridBatch(context)
+        }
+    }
+
+    /** 列表切到网格或恢复列表缓存时，自动补到下一个 21 本边界。 */
+    private fun fillGridBatch(context: Context?) {
+        val loaded = state as? DiscoverLoadState.Loaded ?: return
+        if (layout == DiscoverLayout.GRID && hasMore &&
+            loaded.books.size % DISCOVER_GRID_BATCH_SIZE != 0
+        ) {
+            loadMore(context)
+        }
     }
 
     /** 列表 ⇄ 网格互切，返回切换后的排布。 */
@@ -401,73 +422,68 @@ internal object DiscoverState {
         val kind = resolveKind(source, target.kindTitle) ?: return
         val key = selectionKey(target)
         val token = requestToken.incrementAndGet()
+        val grid = layout == DiscoverLayout.GRID
         state = DiscoverLoadState.Loading
         hasMore = false
         loadingMore = false
-        loadedPages.remove(key)
         bump()
         executor.execute {
-            val result = runCatching { DiscoverRepository.loadBooks(source.source, kind, page = 1) }
-                .getOrElse { DiscoverLoadState.Failed(it.message.orEmpty().ifBlank { it.javaClass.simpleName }) }
-            if (token != requestToken.get()) return@execute
-            val loaded = result as? DiscoverLoadState.Loaded
-            if (loaded != null) {
-                // 返回非空就默认还有下一页；真翻到空页时「加载更多」会把 hasMore 收掉。
-                cache[key] = CachedBooks(loaded, 1, loaded.books.isNotEmpty())
-                loadedPages[key] = 1
+            val result = loadDiscoverBookPage(
+                grid = grid,
+                isCancelled = { token != requestToken.get() },
+                fetch = { page -> DiscoverRepository.loadBooks(source.source, kind, page) },
+            ) ?: return@execute
+            if (token != requestToken.get() || selection != target) return@execute
+            val page = result.page
+            if (result.error != null && page.books.isEmpty()) {
+                state = DiscoverLoadState.Failed(result.error)
+                hasMore = false
+            } else {
+                // 包括预取但尚未展示的书和真实书源页码，切分类后也不会丢失。
+                cache[key] = page
+                state = page.state
+                hasMore = page.hasMore
             }
-            // 用户可能已经切走了，只在选择未变时把结果吐给 UI；缓存照旧留着。
-            if (selection == target) {
-                state = result
-                hasMore = loaded != null && loaded.books.isNotEmpty()
-                bump()
-            }
+            bump()
         }
     }
 
     /**
-     * 加载当前分类的下一页并追加到书单。
-     *
-     * Legado 的发现页是滚动到底自动翻页，那需要 LazyListState（反射拿不到），所以翻页入口
-     * 做成书单末尾的「加载更多」行。失败时保持已加载内容不变，用户可以再点。
+     * 网格追加一批 21 本（补齐当前批次），列表追加一页。
+     * 先用缓冲中的书，不足时才继续请求原始书源页；失败保留进度供下次重试。
      */
     fun loadMore(context: Context?) {
         val target = selection
         if (target == DiscoverSelection.NONE || loadingMore || !hasMore) return
-        val loaded = state as? DiscoverLoadState.Loaded ?: return
+        if (state !is DiscoverLoadState.Loaded) return
         val source = sources.firstOrNull { it.source.id == target.sourceId } ?: return
         val kind = resolveKind(source, target.kindTitle) ?: return
         val key = selectionKey(target)
-        val nextPage = (loadedPages[key] ?: 1) + 1
+        val current = cache[key] ?: return
         val token = requestToken.incrementAndGet()
+        val grid = layout == DiscoverLayout.GRID
         loadingMore = true
         bump()
         executor.execute {
-            val more = runCatching { DiscoverRepository.loadBooks(source.source, kind, page = nextPage) }
-                .getOrElse { DiscoverLoadState.Failed(it.message.orEmpty().ifBlank { it.javaClass.simpleName }) }
+            val result = loadDiscoverBookPage(
+                current = current,
+                grid = grid,
+                isCancelled = { token != requestToken.get() },
+                fetch = { page -> DiscoverRepository.loadBooks(source.source, kind, page) },
+            ) ?: return@execute
+            // 过期请求不能覆盖新分类的缓存，也不能清掉新请求的 loadingMore。
+            if (token != requestToken.get() || selection != target) return@execute
+            val page = result.page
+            cache[key] = page
+            state = page.state
+            hasMore = page.hasMore
             loadingMore = false
-            val fresh = more as? DiscoverLoadState.Loaded
-            if (fresh != null && fresh.books.isNotEmpty()) {
-                val merged = DiscoverLoadState.Loaded((loaded.books + fresh.books).distinctBy { it.key })
-                cache[key] = CachedBooks(merged, nextPage, true)
-                loadedPages[key] = nextPage
-                if (token == requestToken.get() && selection == target) {
-                    state = merged
-                    hasMore = true
-                    bump()
-                    // 定位日志：发现页「加载更多」若再闪退，看 logcat 里本行与崩溃的先后，
-                    // 能区分死在状态写入前还是随后的组合/应用阶段。logAlways 防「简洁日志」吞掉。
-                    com.reamicro.fix.xposed.XposedBridge.logAlways(
-                        "[ReaMicro] discover loadMore applied page=$nextPage total=${merged.books.size}",
-                    )
-                }
-                return@execute
-            }
-            // 空页或失败：空页把入口收掉；失败保持 hasMore，用户可再点重试。
-            if (fresh != null && token == requestToken.get() && selection == target) {
-                hasMore = false
-                bump()
-            }
+            bump()
+            com.reamicro.fix.xposed.XposedBridge.logAlways(
+                "[ReaMicro] discover loadMore applied page=${page.sourcePage} " +
+                    "total=${page.visibleCount} buffered=${page.books.size - page.visibleCount}" +
+                    (result.error?.let { " error=$it" } ?: ""),
+            )
         }
     }
 

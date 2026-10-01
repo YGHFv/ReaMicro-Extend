@@ -14,13 +14,14 @@ import kotlin.math.sin
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
 internal class BgEffectPainter {
 
-    val runtimeShader by lazy {
-        RuntimeShader(OS3_BG_FRAG).also {
-            initStaticUniforms(it)
-        }
+    // Constructed on a worker before publication by BgEffectBackground. Do not defer shader
+    // creation to the first draw, and never mutate this instance from the worker after handoff.
+    val runtimeShader = RuntimeShader(OS3_BG_FRAG).also {
+        initStaticUniforms(it)
     }
 
-    val brush: Brush get() = runtimeShader.asBrush()
+    // Android's mutable RuntimeShader keeps uniform updates visible through this cached brush.
+    val brush: Brush = runtimeShader.asBrush()
 
     private val resolution = FloatArray(2)
     private val bound = FloatArray(4)

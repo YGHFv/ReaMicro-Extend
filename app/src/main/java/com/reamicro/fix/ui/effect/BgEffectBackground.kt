@@ -3,17 +3,24 @@
 
 package com.reamicro.fix.ui.effect
 
+import android.util.Log
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.isActive
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.graphicsLayer
@@ -33,17 +40,30 @@ fun BgEffectBackground(
     alpha: () -> Float = { 1f },
     content: @Composable BoxScope.() -> Unit,
 ) {
+    val surface = MiuixTheme.colorScheme.surface
     if (!isRuntimeShaderSupported()) {
-        Box(modifier = modifier, content = content)
+        Box(modifier = modifier.background(surface), content = content)
         return
     }
     Box(
         modifier = modifier,
     ) {
-        val surface = MiuixTheme.colorScheme.surface
         val deviceType = if ((LocalConfiguration.current.screenWidthDp >= 600)) DeviceType.PAD else DeviceType.PHONE
         val isDarkTheme = (MiuixTheme.colorScheme.surface.luminance() < 0.5f)
-        val painter = remember { BgEffectPainter() }
+        var painter by remember { mutableStateOf<BgEffectPainter?>(null) }
+        LaunchedEffect(Unit) {
+            // Preloading starts this work even when the page is not playing. The new painter
+            // stays private to this worker until construction completes; only then can draw()
+            // mutate its uniforms. Cancellation on disposal prevents publishing a stale result.
+            painter = withContext(Dispatchers.Default) {
+                try {
+                    BgEffectPainter()
+                } catch (error: RuntimeException) {
+                    Log.w("ReaMicroAbout", "Unable to prepare the about background", error)
+                    null // Keep the current theme surface, never a white loading layer.
+                }
+            }
+        }
 
         val preset = remember(deviceType, isDarkTheme) {
             BgEffectConfig.get(deviceType, isDarkTheme)
@@ -51,8 +71,8 @@ fun BgEffectBackground(
 
         val colorStage = remember { Animatable(0f) }
 
-        LaunchedEffect(dynamicBackground, effectBackground, preset) {
-            if (!dynamicBackground || !effectBackground) return@LaunchedEffect
+        LaunchedEffect(dynamicBackground, effectBackground, preset, painter) {
+            if (!dynamicBackground || !effectBackground || painter == null) return@LaunchedEffect
             val animatesColors = preset.colors1 !== preset.colors2 || preset.colors2 !== preset.colors3
             if (!animatesColors) return@LaunchedEffect
 

@@ -1,0 +1,4 @@
+<resources>
+    <!-- miuix 0.9.4 darkColorScheme().surface; keep XML in sync when upgrading miuix. -->
+    <color name="module_window_background">#FF000000</color>
+</resources>

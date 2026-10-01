@@ -71,7 +71,7 @@ internal class RootTaskRepository(
                     val targetTasks = target.optJSONObject("tasks") ?: JSONObject().also { target.put("tasks", it) }
                     sourceTasks.keys().forEach { taskType ->
                         val config = sourceTasks.optJSONObject(taskType) ?: return@forEach
-                        targetTasks.put(taskType, LocalTaskStore.mergeMirroredTask(targetTasks.optJSONObject(taskType), config, System.currentTimeMillis()))
+                        targetTasks.put(taskType, LocalTaskStore.mergeMirroredTask(taskType, targetTasks.optJSONObject(taskType), config, System.currentTimeMillis()))
                     }
                     val token = source.optString("token")
                     if (token.isNotBlank()) target.put("token", token)

@@ -47,8 +47,8 @@ internal data class DiscoverBook(
 /**
  * 书单的两种排布。
  *
- * 只影响 [DiscoverBook] 列表的渲染方式：列表是「封面 + 书名 + 作者 + 标签」的通栏行，
- * 网格是三列等宽封面块。选择结果按上下文持久化（见 `DiscoverState`）。
+ * 列表是「封面 + 书名 + 作者 + 标签」的通栏行，按书源原始页加载；
+ * 网格是三列等宽封面块，每批展示 21 本。选择结果按上下文持久化（见 `DiscoverState`）。
  */
 internal enum class DiscoverLayout {
     /** 通栏行，信息更全，适合追更。 */

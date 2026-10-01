@@ -10,8 +10,10 @@ on:
       - "app/**"
       - "module/**"
       - "tools/build-module.py"
+      - "tools/export-bundled-module.py"
       - "third_party/**"
       - "source-files/**"
+      - "config/detekt/**"
       - "gradle/**"
       - "gradle.properties"
       - "gradlew"
@@ -83,6 +85,28 @@ jobs:
           for script in module/reamicro-automation/*.sh; do
             sh -n "$script"
           done
+      # 与旧版一致：只生成体积/复杂度报告，不因检查结果阻断 APK 构建。
+      - name: Detekt (report only)
+        continue-on-error: true
+        run: ./gradlew :app:detekt
+      - name: Upload detekt HTML report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          path: app/build/reports/detekt/detekt.html
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Upload detekt text report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          path: app/build/reports/detekt/detekt.txt
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug
       - name: Build release APK
@@ -104,11 +128,6 @@ jobs:
             echo "RELEASE_SIGNING_ENABLED=false" >> "$GITHUB_ENV"
           fi
           ./gradlew :app:assembleRelease
-      - name: Build companion module
-        run: |
-          python3 tools/build-module.py
-          mkdir -p artifacts
-          cp outputs/ReaMicro-Automation-Root-*.zip artifacts/
 
       - name: Prepare and verify APK artifacts
         run: |
@@ -139,28 +158,42 @@ jobs:
           python3 -c 'import sys, zipfile; apks = [zipfile.ZipFile(p) for p in sys.argv[1:]]; required = {"AndroidManifest.xml", "resources.arsc", "classes.dex"}; assert all(required.issubset(z.namelist()) and z.testzip() is None for z in apks), "Invalid APK contents"' "artifacts/$DEBUG_APK" "artifacts/$RELEASE_APK"
           "$ANDROID_HOME/build-tools/37.0.0/aapt2" dump badging "artifacts/$RELEASE_APK" > /dev/null
           (cd artifacts && sha256sum "$DEBUG_APK" > "$DEBUG_APK.sha256" && sha256sum "$RELEASE_APK" > "$RELEASE_APK.sha256")
+      # 发布的 ZIP 直接提取自 APK，并检查 debug/release 内置 ZIP 字节完全一致。
+      - name: Export and verify bundled companion module
+        run: python3 tools/export-bundled-module.py --output artifacts artifacts/*.apk
+      # v7 原文件上传：不额外套 ZIP。每步只上传一个文件，下载名就是原文件名。
       - name: Upload debug APK
         uses: actions/upload-artifact@v7
         with:
-          name: ReaMicro-Extend-debug
-          path: |
-            artifacts/*-debug.apk
-            artifacts/*-debug.apk.sha256
+          archive: false
+          path: artifacts/*-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload debug APK checksum
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          path: artifacts/*-debug.apk.sha256
           if-no-files-found: error
           retention-days: 14
       - name: Upload release APK
         uses: actions/upload-artifact@v7
         with:
-          name: ReaMicro-Extend-release
-          path: |
-            artifacts/*-release*.apk
-            artifacts/*-release*.apk.sha256
+          archive: false
+          path: artifacts/*-release*.apk
           if-no-files-found: error
           retention-days: 14
-      - name: Upload CI companion module
+      - name: Upload release APK checksum
         uses: actions/upload-artifact@v7
         with:
-          name: ReaMicro-Automation-ci-module
+          archive: false
+          path: artifacts/*-release*.apk.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload CI companion module (directly flashable ZIP)
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
           path: artifacts/ReaMicro-Automation-Root-*.zip
           if-no-files-found: error
           retention-days: 14

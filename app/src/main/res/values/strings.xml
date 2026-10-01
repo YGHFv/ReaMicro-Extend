@@ -364,4 +364,5 @@
     <string name="root_tasks_disabled">自动任务未启用</string>
     <string name="root_task_unknown">尚未检测</string>
     <string name="root_task_unavailable">暂不可用，请检查权限或模块</string>
+    <string name="about_qiji_font_credit">开屏页字体</string>
 </resources>

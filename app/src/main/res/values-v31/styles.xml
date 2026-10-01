@@ -1,6 +1,7 @@
 <resources>
-    <!-- Only the foreground is supplied; the framework resolves its default background. -->
+    <!-- Match the content surface while preserving the existing splash foreground. -->
     <style name="Theme.App.Starting" parent="@style/Theme.App.StartingBase">
+        <item name="android:windowSplashScreenBackground">@color/module_window_background</item>
         <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_splash_foreground</item>
     </style>
 </resources>

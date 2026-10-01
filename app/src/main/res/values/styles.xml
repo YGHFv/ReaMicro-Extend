@@ -1,7 +1,7 @@
 <resources>
     <!--
       application 默认主题，供非主界面组件使用。
-      主界面冷启动另用独立的 Theme.App.Starting，背景沿用手机 DeviceDefault 默认值；
+      主界面冷启动另用独立的 Theme.App.Starting，背景与 miuix Scaffold 的 surface 对齐；
       Android 12+ 开屏提供柳梢青前景；桌面图标仍按用户选择的 launcher 别名显示。
     -->
     <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
@@ -17,12 +17,12 @@
     </style>
 
     <!--
-      模块主界面的主题。浅色版本在这里，深色版本在 values-night/styles.xml——两个资源目录按系统的
-      深浅色自动切换，于是窗口底色跟着系统走；页面内部的配色由 ModuleDialogTheme.palette() 依据
-      uiMode 推导，同样跟随系统。窗口底色写死颜色是为了避免启动瞬间闪一下系统默认白/黑。
+      模块主界面的窗口底色与 miuix Scaffold 的 surface 对齐。
+      浅色版本在这里，深色版本在 values-night；Android 12+ 的应用日夜覆盖由
+      ModuleMainActivity 同步给系统，使后续冷启动与应用内选择保持一致。
     -->
     <style name="ModuleTheme" parent="android:style/Theme.Material.Light.NoActionBar">
-        <item name="android:windowBackground">#FFF4F5F7</item>
+        <item name="android:windowBackground">@color/module_window_background</item>
     </style>
     <!-- Full-screen module Compose island: background draws behind system bars, controls consume insets. -->
     <style name="EpubFullScreenDialog" parent="android:style/Theme.Material.Light.NoActionBar">
@@ -37,8 +37,9 @@
         <item name="android:backgroundDimEnabled">false</item>
     </style>
 
-    <!-- Starting-window themes: device defaults; no background overrides. -->
-    <!-- Device defaults only; let the ROM supply the background. No app palette or fixed color. -->
-    <style name="Theme.App.StartingBase" parent="android:style/Theme.DeviceDefault.Light.NoActionBar" />
+    <!-- The platform starting window shares miuix Scaffold's surface color. -->
+    <style name="Theme.App.StartingBase" parent="android:style/Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:windowBackground">@color/module_window_background</item>
+    </style>
     <style name="Theme.App.Starting" parent="@style/Theme.App.StartingBase" />
 </resources>

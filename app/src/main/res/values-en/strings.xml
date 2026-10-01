@@ -364,4 +364,5 @@
     <string name="root_tasks_disabled">Automatic tasks disabled</string>
     <string name="root_task_unknown">Not checked</string>
     <string name="root_task_unavailable">Unavailable; check permission or module</string>
+    <string name="about_qiji_font_credit">Splash screen font</string>
 </resources>
