@@ -140,7 +140,7 @@
             android:enabled="true"
             android:exported="true"
             android:label="@string/module_name"
-            android:theme="@style/ModuleTheme">
+            android:theme="@style/Theme.App.Starting">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="de.robv.android.xposed.category.MODULE_SETTINGS" />

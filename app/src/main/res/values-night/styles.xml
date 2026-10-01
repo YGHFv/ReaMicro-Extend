@@ -6,4 +6,8 @@
     <style name="ModuleTheme" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:windowBackground">#FF111318</item>
     </style>
+
+    <!-- Starting-window themes: device defaults; no background overrides. -->
+    <!-- Selected by system night configuration, not the app preference. -->
+    <style name="Theme.App.StartingBase" parent="android:style/Theme.DeviceDefault.NoActionBar" />
 </resources>

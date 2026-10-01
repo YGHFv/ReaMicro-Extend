@@ -1,0 +1,7 @@
+<resources>
+    <!-- Only the foreground is supplied; the framework resolves its default background. -->
+    <style name="Theme.App.Starting" parent="@style/Theme.App.StartingBase">
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_splash_foreground</item>
+        <item name="android:windowSplashScreenBehavior">icon_preferred</item>
+    </style>
+</resources>

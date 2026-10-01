@@ -324,8 +324,10 @@ class ModuleMainActivity : ComponentActivity() {
     private val recordsNavigationRequest = mutableIntStateOf(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        ModuleLogBuffer.attach(this)
+        ModuleSplashScreen.install(this, savedInstanceState != null)
+        setTheme(com.reamicro.fix.R.style.ModuleTheme)
         super.onCreate(savedInstanceState)
+        ModuleLogBuffer.attach(this)
         tab.intValue = savedInstanceState?.getInt(STATE_TAB, TAB_RECORDS) ?: TAB_RECORDS
         themeMode.intValue = uiPrefInt(KEY_THEME_MODE).coerceIn(THEME_FOLLOW_SYSTEM, THEME_DARK)
         // 窗口底色跟着深浅色走：首帧之前系统栏区域显示的就是它（透明会让部分 ROM 露黑边）。
@@ -337,7 +339,7 @@ class ModuleMainActivity : ComponentActivity() {
         updateLanguageContext()
         window?.setBackgroundDrawable(ColorDrawable(if (resolveDark(themeMode.intValue)) DARK_WINDOW_BG else LIGHT_WINDOW_BG))
         ModuleAndroidLog.legacy(LOG_TAG, "module main ui opened")
-        refresh()
+        // onResume refreshes the local snapshot before first draw; do not read it twice here.
         consumeNavigationIntent(intent)
         setContent {
             val localizedContext = uiContext

@@ -1,8 +1,8 @@
 <resources>
     <!--
-      application 级主题。已完全移除自定义启动页（SplashScreen）配置：
-      启动图标由系统按当前生效的 launcher 别名（用户所选配色那套）显示，不再有任何固定遮罩。
-      windowBackground 仅留一层纯底色，避免冷启动首帧闪系统默认背景。
+      application 默认主题，供非主界面组件使用。
+      主界面冷启动另用独立的 Theme.App.Starting，背景沿用手机 DeviceDefault 默认值；
+      Android 12+ 开屏提供柳梢青前景；桌面图标仍按用户选择的 launcher 别名显示。
     -->
     <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@android:color/white</item>
@@ -36,4 +36,9 @@
         <item name="android:windowSoftInputMode">adjustResize</item>
         <item name="android:backgroundDimEnabled">false</item>
     </style>
+
+    <!-- Starting-window themes: device defaults; no background overrides. -->
+    <!-- Device defaults only; let the ROM supply the background. No app palette or fixed color. -->
+    <style name="Theme.App.StartingBase" parent="android:style/Theme.DeviceDefault.Light.NoActionBar" />
+    <style name="Theme.App.Starting" parent="@style/Theme.App.StartingBase" />
 </resources>

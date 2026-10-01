@@ -210,5 +210,6 @@ sdk.dir=C:/Users/<name>/AppData/Local/Android/Sdk
 - [KernelSU](https://github.com/tiann/KernelSU)：界面与特效参考。
 - [Miuix](https://github.com/miuix-kotlin-multiplatform/miuix)：界面组件库。
 - [Scripta](https://github.com/YuKongA/scripta)：代码编辑器。
+- [齊伋體 qiji-font](https://github.com/LingDong-/qiji-font)：开屏页字体。
 
 本项目使用上述项目的相关代码与组件时，遵守各自的许可证，并保留相应的版权与许可声明。
