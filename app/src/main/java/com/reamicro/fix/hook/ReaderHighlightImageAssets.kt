@@ -4,14 +4,16 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import com.reamicro.fix.R
+import com.reamicro.fix.reader.HighlightImageLimits
 import com.reamicro.fix.xposed.XposedBridge
 import java.io.File
+import java.io.InputStream
 import java.util.zip.ZipFile
 
 internal object ReaderHighlightImageAssets {
     private const val MODULE_PACKAGE_NAME = "com.reamicro.fix"
     private const val RAINBOW_GLASS_ASSET = "reader_highlight/rainbow_glass.png"
-    private val loggedFailures = HashSet<String>()
+    private val loggedFailures = LinkedHashSet<String>()
     @Volatile private var moduleApkPath: String? = null
 
     fun configure(moduleApkPath: String?) {
@@ -39,7 +41,7 @@ internal object ReaderHighlightImageAssets {
             return null
         }
         val assetBitmap = runCatching {
-            moduleContext.assets.open(assetName).use(BitmapFactory::decodeStream)
+            decodeCheckedStream { moduleContext.assets.open(assetName) }
         }.onFailure {
             logFailure("asset-open|$assetName|${it.javaClass.name}|${it.message}", "$logPrefix highlight asset open failed: asset://$assetName ${it.message}")
         }.getOrNull()
@@ -68,7 +70,7 @@ internal object ReaderHighlightImageAssets {
                 val entry = zip.getEntry(entryName) ?: return@use null.also {
                     logFailure("asset-apk-entry-missing|$entryName", "$logPrefix highlight asset missing in APK: $entryName")
                 }
-                zip.getInputStream(entry).use(BitmapFactory::decodeStream)
+                decodeCheckedStream { zip.getInputStream(entry) }
             }
         }.onFailure {
             logFailure("asset-apk-open|$assetName|${it.javaClass.name}|${it.message}", "$logPrefix highlight asset APK open failed: asset://$assetName ${it.message}")
@@ -85,11 +87,40 @@ internal object ReaderHighlightImageAssets {
             logFailure("file-missing|$path", "$logPrefix highlight image file missing: $path")
             return null
         }
-        return BitmapFactory.decodeFile(file.absolutePath).also {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, options)
+        if (!HighlightImageLimits.accepts(options.outWidth, options.outHeight)) {
+            logFailure("file-size|$path|${file.lastModified()}", "$logPrefix highlight image rejected: ${options.outWidth}x${options.outHeight} $path")
+            return null
+        }
+        return BitmapFactory.decodeFile(file.absolutePath, decodeOptions()).also {
             if (it == null) {
                 logFailure("file-decode-null|${file.absolutePath}|${file.lastModified()}", "$logPrefix highlight image decode returned null: ${file.absolutePath}")
             }
         }
+    }
+
+    fun validateImageBytes(bytes: ByteArray) {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+        HighlightImageLimits.requireValid(options.outWidth, options.outHeight)
+    }
+
+    fun validateImageStream(input: InputStream) {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeStream(input, null, options)
+        HighlightImageLimits.requireValid(options.outWidth, options.outHeight)
+    }
+
+    private fun decodeCheckedStream(open: () -> InputStream): Bitmap? {
+        open().use(::validateImageStream)
+        return open().use { BitmapFactory.decodeStream(it, null, decodeOptions()) }
+    }
+
+    private fun decodeOptions() = BitmapFactory.Options().apply {
+        // 不缩放图片，保留九切片坐标和 NinePatch 元数据；按 ARGB_8888 估算像素上限。
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+        inScaled = false
     }
 
     private fun moduleContext(context: Context?): Context? {
@@ -111,6 +142,7 @@ internal object ReaderHighlightImageAssets {
     private fun logFailure(key: String, message: String) {
         synchronized(loggedFailures) {
             if (!loggedFailures.add(key)) return
+            while (loggedFailures.size > 128) loggedFailures.iterator().run { next(); remove() }
         }
         XposedBridge.log(message)
     }

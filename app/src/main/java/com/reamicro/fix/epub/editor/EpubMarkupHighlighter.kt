@@ -11,16 +11,18 @@ internal class EpubMarkupHighlighter : SyntaxHighlighter {
     override val blockComment = BlockComment("<!--", "-->")
     private data class State(val mode: Int, val quote: Char? = null, val tagName: Boolean = false) : LineState
 
-    override fun highlightLine(text: String, entryState: LineState?): LineHighlight {
+    override fun highlightLine(text: String, entryState: LineState?): LineHighlight =
+        scanLine(text, entryState, collectSpans = text.length <= 8192)
 
-        if (text.length > 8192) return LineHighlight(emptyList(), null)
+    private fun scanLine(text: String, entryState: LineState?, collectSpans: Boolean): LineHighlight {
+        // 长行省略着色结果，但必须扫描到行尾以保留注释、CDATA 和引号状态。
         val spans = ArrayList<HighlightSpan>()
         var mode = (entryState as? State)?.mode ?: 0
         var quote = (entryState as? State)?.quote
         var tagName = (entryState as? State)?.tagName ?: false
         var index = 0
         fun span(start: Int, end: Int, type: TokenType) {
-            if (end > start) spans += HighlightSpan(start, end, type)
+            if (collectSpans && end > start) spans += HighlightSpan(start, end, type)
         }
         while (index < text.length) {
             val start = index
@@ -37,7 +39,7 @@ internal class EpubMarkupHighlighter : SyntaxHighlighter {
                 mode = 0
             } else if (mode == 1) {
                 if (quote != null) {
-                    val end = text.indexOf(quote!!, index)
+                    val end = text.indexOf(quote, index)
                     if (end < 0) {
                         span(index, text.length, TokenType.String)
                         return LineHighlight(spans, State(mode, quote, tagName))
@@ -67,7 +69,7 @@ internal class EpubMarkupHighlighter : SyntaxHighlighter {
                             index++
                         } else {
                             while (index < text.length && !text[index].isWhitespace() &&
-                                text[index] !in charArrayOf('>', '/', '=', '\'', '"', '?')) index++
+                                text[index] !in ">/=\'\"?") index++
                             if (index == start) index++
                             span(start, index, if (tagName) TokenType.Tag else TokenType.Property)
                             tagName = false
@@ -83,8 +85,10 @@ internal class EpubMarkupHighlighter : SyntaxHighlighter {
                     tagName = true
                 }
                 text[index] == '&' -> {
-                    val end = text.indexOf(';', index + 1)
-                    if (end in (index + 1)..minOf(text.lastIndex, index + 16)) {
+                    val limit = minOf(text.lastIndex, index + 16)
+                    var end = index + 1
+                    while (end <= limit && text[end] != ';') end++
+                    if (end <= limit) {
                         index = end + 1
                         span(start, index, TokenType.Escape)
                     } else index++
@@ -94,4 +98,7 @@ internal class EpubMarkupHighlighter : SyntaxHighlighter {
         }
         return LineHighlight(spans, if (mode == 0) null else State(mode, quote, tagName))
     }
+
+    override fun stateAfterLine(text: String, entryState: LineState?): LineState? =
+        scanLine(text, entryState, collectSpans = false).exitState
 }

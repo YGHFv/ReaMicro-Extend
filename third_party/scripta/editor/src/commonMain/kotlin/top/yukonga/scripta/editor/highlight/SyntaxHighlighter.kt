@@ -33,4 +33,8 @@ interface SyntaxHighlighter {
     val blockComment: BlockComment? get() = null
 
     fun highlightLine(text: String, entryState: LineState?): LineHighlight
+
+    // 超长行可以只扫描状态；默认仍保证跨行语法状态正确。
+    fun stateAfterLine(text: String, entryState: LineState?): LineState? =
+        highlightLine(text, entryState).exitState
 }

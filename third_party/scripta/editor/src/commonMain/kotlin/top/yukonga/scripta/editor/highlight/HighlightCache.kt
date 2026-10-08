@@ -45,7 +45,7 @@ class HighlightCache(
     private fun lexLine(line: Int, getLine: (Int) -> String): LineHighlight {
         val text = getLine(line)
         val entry = entryFor(line)
-        if (text.length > maxLexedLineLength) return LineHighlight(emptyList(), entry)
+        if (text.length > maxLexedLineLength) return LineHighlight(emptyList(), highlighter.stateAfterLine(text, entry))
         return highlighter.highlightLine(text, entry)
     }
 

@@ -69,3 +69,13 @@ source-files/*
 /app/src/main/java/com/reamicro/fix/online/OnlineSourceScriptCompat.kt
 .ruff_cache/
 artifacts/
+
+# 本地审计、验证和操作记录不纳入公开仓库。
+/.local-reports/
+/tools/highlight-tests/
+/tools/run-highlight-regression.py
+/source-files/fanqie/README.md
+/source-files/fanqie/tests/
+/tools/run-fanqie-regression.py
+*.local.md
+*.audit.md

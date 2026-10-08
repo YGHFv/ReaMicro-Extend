@@ -618,7 +618,7 @@ val READER_HIGHLIGHT_CROSS_PARAGRAPH_TYPES: Set<ReaderHighlightRuleType> = setOf
 object ReaderHighlightBookContext {
     @Volatile var bookKey: String = ""
     @Volatile var bookTitle: String = ""
-    @Volatile private var runtimeVersion: Long = 0L
+    private val runtimeVersion = java.util.concurrent.atomic.AtomicLong()
     @Volatile var refreshRequester: ((String) -> Unit)? = null
 
     fun update(bookKey: String, bookTitle: String) {
@@ -626,10 +626,10 @@ object ReaderHighlightBookContext {
         this.bookTitle = bookTitle
     }
 
-    fun version(): Long = runtimeVersion
+    fun version(): Long = runtimeVersion.get()
 
     fun bumpVersion(source: String, requestRefresh: Boolean = true) {
-        runtimeVersion += 1
+        runtimeVersion.incrementAndGet()
         if (requestRefresh) refreshRequester?.invoke(source)
     }
 }

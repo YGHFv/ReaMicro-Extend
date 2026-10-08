@@ -21,9 +21,23 @@ class XposedModuleSettings(
     @Volatile private var cachedDialogueHighlightSettingsAtMs: Long = 0L
     @Volatile private var cachedHighlightSettings: ReaderHighlightSettingsSnapshot? = null
     @Volatile private var cachedHighlightSettingsAtMs: Long = 0L
+    private val highlightConfigCache = HighlightConfigCache<ReaderHighlightSettingsSnapshot>()
+    @Volatile private var observedPrefs: SharedPreferences? = null
+    private val preferenceHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val notifyPreferenceChange = Runnable { ReaderHighlightBookContext.refreshRequester?.invoke("highlight-preferences") }
+    private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        cachedSnapshot = null
+        cachedFontSettings = null
+        if (HighlightPreferencePolicy.affectsReader(key)) {
+            ReaderHighlightBookContext.bumpVersion("highlight-preferences", requestRefresh = false)
+            preferenceHandler.removeCallbacks(notifyPreferenceChange)
+            preferenceHandler.post(notifyPreferenceChange)
+        }
+    }
     @Volatile private var lastLogKey: String = ""
 
     fun attachContext(context: Context) {
+        highlightConfigCache.clear()
         attachedContext = context.applicationContext ?: context
         cachedSnapshot = null
         cachedAtMs = 0L
@@ -325,12 +339,18 @@ class XposedModuleSettings(
         )
     }
 
+    @Synchronized
     fun highlightSettings(): ReaderHighlightSettingsSnapshot {
         val now = System.currentTimeMillis()
-        cachedHighlightSettings
-            ?.takeIf { now - cachedHighlightSettingsAtMs < CACHE_WINDOW_MS }
-            ?.let { return it }
         val prefs = prefs() ?: return ReaderHighlightSettingsSnapshot()
+        val input = listOf(
+            ModuleSettings.KEY_READER_HIGHLIGHT_STYLES, ModuleSettings.KEY_READER_HIGHLIGHT_RULES,
+            ModuleSettings.KEY_READER_HIGHLIGHT_DEFAULT_LIGHT_STYLE_ID, ModuleSettings.KEY_READER_HIGHLIGHT_DEFAULT_DARK_STYLE_ID,
+            ModuleSettings.KEY_READER_HIGHLIGHT_BOOK_GLOBAL_RULES, ModuleSettings.KEY_READER_DIALOGUE_HIGHLIGHT_COLOR,
+            ModuleSettings.KEY_READER_DIALOGUE_HIGHLIGHT_FONT,
+        ).map { prefs.getString(it, null) }
+        // 比较实际配置而非时间，备份恢复、迁移和不同入口写入也不会永久命中旧快照。
+        return highlightConfigCache.get(input) {
         val color = normalizeHighlightColor(
             prefs.getString(
                 ModuleSettings.KEY_READER_DIALOGUE_HIGHLIGHT_COLOR,
@@ -352,7 +372,7 @@ class XposedModuleSettings(
             styles,
             ModuleSettings.DEFAULT_READER_HIGHLIGHT_DARK_STYLE_ID,
         )
-        return ReaderHighlightSettingsSnapshot(
+        ReaderHighlightSettingsSnapshot(
             styles = styles,
             rules = readHighlightRules(prefs, defaultLightStyleId, defaultDarkStyleId),
             defaultLightStyleId = defaultLightStyleId,
@@ -361,6 +381,7 @@ class XposedModuleSettings(
         ).also {
             cachedHighlightSettings = it
             cachedHighlightSettingsAtMs = now
+        }
         }
     }
 
@@ -609,7 +630,8 @@ class XposedModuleSettings(
     }
 
     private fun notifyReaderHighlightChanged(source: String) {
-        ReaderHighlightBookContext.bumpVersion(source)
+        // setter 立即失效标记；同一批 SharedPreferences 通知统一安排最终刷新。
+        ReaderHighlightBookContext.bumpVersion(source, requestRefresh = false)
     }
 
     private fun putExclusiveRotationBase(key: String, enabled: Boolean) {
@@ -627,7 +649,15 @@ class XposedModuleSettings(
 
     private fun prefs(): SharedPreferences? {
         val context = contextProvider() ?: attachedContext ?: return null
-        return context.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = context.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE)
+        if (observedPrefs !== prefs) synchronized(this) {
+            if (observedPrefs !== prefs) {
+                observedPrefs?.unregisterOnSharedPreferenceChangeListener(preferenceListener)
+                prefs.registerOnSharedPreferenceChangeListener(preferenceListener)
+                observedPrefs = prefs
+            }
+        }
+        return prefs
     }
 
     private fun readSnapshot(prefs: SharedPreferences): ModuleSettingsSnapshot {

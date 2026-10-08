@@ -1163,7 +1163,7 @@ internal fun ReaMicroSettingsHook.importReaderHighlightStyleFromUri(activity: Ac
             },
         )
     }.onFailure {
-        showToast("\u5bfc\u5165\u9ad8\u4eae\u6837\u5f0f\u5931\u8d25")
+        showToast(it.message ?: "\u5bfc\u5165\u9ad8\u4eae\u6837\u5f0f\u5931\u8d25")
         XposedBridge.log("$LOG_PREFIX import highlight style failed: ${it.stackTraceToString()}")
     }
 }
@@ -1292,6 +1292,8 @@ internal fun ReaMicroSettingsHook.copyHighlightNinePatchUri(activity: Activity, 
     if (!rawName.endsWith(".png", ignoreCase = true)) {
         error("\u8bf7\u9009\u62e9 PNG \u56fe\u7247")
     }
+    activity.contentResolver.openInputStream(uri)?.use(ReaderHighlightImageAssets::validateImageStream)
+        ?: error("\u65e0\u6cd5\u8bfb\u53d6\u56fe\u7247")
     val target = if (rawName.endsWith(".9.png", ignoreCase = true)) {
         uniqueHighlightNinePatchFile(activity, sanitizeNinePatchFileName(rawName))
     } else {
@@ -1317,8 +1319,10 @@ internal fun ReaMicroSettingsHook.restoreHighlightNinePatchFromJson(activity: Ac
     val encoded = item.optString("base64")
     if (encoded.isBlank()) return null
     val name = sanitizeHighlightImageFileName(item.optString("name").ifBlank { "highlight.png" })
+    val bytes = Base64.decode(encoded, Base64.DEFAULT)
+    ReaderHighlightImageAssets.validateImageBytes(bytes)
     val target = uniqueHighlightImageFile(activity, name)
-    target.writeBytes(Base64.decode(encoded, Base64.DEFAULT))
+    target.writeBytes(bytes)
     return target.absolutePath
 }
 
@@ -1334,10 +1338,12 @@ internal fun ReaMicroSettingsHook.uniqueHighlightNinePatchFile(activity: Activit
     return target
 }
 
-internal fun ReaMicroSettingsHook.writeReaderHighlightImage(activity: Activity, bytes: ByteArray, displayName: String): File =
-    uniqueHighlightImageFile(activity, sanitizeHighlightImageFileName(displayName)).apply {
+internal fun ReaMicroSettingsHook.writeReaderHighlightImage(activity: Activity, bytes: ByteArray, displayName: String): File {
+    ReaderHighlightImageAssets.validateImageBytes(bytes)
+    return uniqueHighlightImageFile(activity, sanitizeHighlightImageFileName(displayName)).apply {
         writeBytes(bytes)
     }
+}
 
 internal fun ReaMicroSettingsHook.sanitizeHighlightImageFileName(name: String): String {
     val cleaned = safeDownloadName(name)
@@ -1454,7 +1460,7 @@ internal fun ReaMicroSettingsHook.openReaderHighlightRuleDialog(rule: ReaderHigh
                 patternInput.visibility = if (draft.needsPattern) View.VISIBLE else View.GONE
                 patternInput.hint = when (selectedType) {
                     ReaderHighlightRuleType.FixedText -> "\u56fa\u5b9a\u6587\u672c\uff0c\u4f8b\u5982\uff1a\u91cd\u8981"
-                    ReaderHighlightRuleType.Regex -> "\u6b63\u5219\u8868\u8fbe\u5f0f\uff0c\u4f8b\u5982\uff1a\\d{4}-\\d{2}-\\d{2}"
+                    ReaderHighlightRuleType.Regex -> com.reamicro.fix.reader.ReaderHighlightRegex.HELP
                     ReaderHighlightRuleType.Range -> "\u533a\u95f4\u754c\u5b9a\u7b26\uff0c\u4f8b\u5982\uff1a\u3010\u3011"
                     else -> "\u5339\u914d\u5185\u5bb9"
                 }
@@ -1488,6 +1494,13 @@ internal fun ReaMicroSettingsHook.openReaderHighlightRuleDialog(rule: ReaderHigh
             card.addView(settingsDialogButtonRow(activity, buttons))
             finishButton.setOnClickListener {
                 val draft = rule.copy(type = selectedType)
+                if (selectedType == ReaderHighlightRuleType.Regex) {
+                    val error = com.reamicro.fix.reader.ReaderHighlightRegex.validationError(patternInput.text?.toString()?.trim().orEmpty())
+                    if (error != null) {
+                        showToast(error)
+                        return@setOnClickListener
+                    }
+                }
                 settings.setReaderHighlightRule(
                     rule.copy(
                         name = if (builtInRule) {
@@ -1730,7 +1743,7 @@ internal fun ReaMicroSettingsHook.importExternalHighlight(activity: Activity, by
             },
         )
     }.onFailure {
-        showToast("导入高亮样式失败")
+        showToast(it.message ?: "导入高亮样式失败")
         XposedBridge.log("$LOG_PREFIX external highlight import failed: ${it.stackTraceToString()}")
     }
 }

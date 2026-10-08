@@ -179,6 +179,7 @@ tasks.withType<io.gitlab.arturbosch.detekt.Detekt>().configureEach {
 
 dependencies {
     implementation(project(":scripta-editor"))
+    implementation("com.google.re2j:re2j:1.8")
 
     implementation("androidx.compose.material3:material3:1.5.0-alpha22")
     implementation("io.github.proify.lyricon:provider:0.1.70")

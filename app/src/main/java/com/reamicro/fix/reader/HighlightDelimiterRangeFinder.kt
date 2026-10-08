@@ -24,55 +24,41 @@ object HighlightDelimiterRangeFinder {
         if (open.isEmpty() || close.isEmpty()) return emptyList()
         val separatorLimit = maxParagraphs.coerceAtLeast(1) - 1
         val ranges = ArrayList<IntRange>()
+        val nestable = open != close
+        var start = -1
+        var separators = 0
+        var skippedOpen = -1
         var index = 0
         while (index < text.length) {
-            val start = text.indexOf(open, index)
-            if (start < 0) break
-            val matched = findPair(text, start, open, close, separatorLimit)
-            if (matched == null) {
-
+            if (start < 0) {
+                start = text.indexOf(open, index)
+                if (start < 0) break
                 index = start + open.length
+                separators = 0
+                skippedOpen = -1
                 continue
             }
-            ranges.add(matched)
-            index = matched.last
-        }
-        return ranges
-    }
-
-    private fun findPair(
-        text: String,
-        openStart: Int,
-        open: String,
-        close: String,
-        separatorLimit: Int,
-    ): IntRange? {
-        val nestable = open != close
-        var start = openStart
-        while (true) {
-            val contentStart = start + open.length
-            var separators = 0
-            var index = contentStart
-            var restart = -1
-            while (index < text.length) {
-                if (text[index] == '\n') {
-                    separators++
-                    if (separators > separatorLimit) return null
-                    index++
-                    continue
-                }
-
-                if (text.startsWith(close, index) && (nestable || index > contentStart)) {
-                    return start..(index + close.length)
-                }
-                if (nestable && text.startsWith(open, index)) {
-                    restart = index
-                    break
-                }
+            if (text[index] == '\n') {
+                if (skippedOpen < 0 && open.startsWith('\n') && text.startsWith(open, index)) skippedOpen = index
+                if (++separators > separatorLimit) {
+                    start = -1
+                    // 换行开符在旧语义中优先算分段；超出上限后仍可作为下一次匹配起点。
+                    index = if (skippedOpen >= 0) skippedOpen else index + 1
+                } else index++
+            } else if (text.startsWith(close, index) && (nestable || index > start + open.length)) {
+                index += close.length
+                ranges.add(start..index)
+                start = -1
+            } else if (nestable && text.startsWith(open, index)) {
+                // 嵌套时沿用最近开符；失败后不再回扫已经检查过的后缀。
+                start = index
+                index += open.length
+                separators = 0
+                skippedOpen = -1
+            } else {
                 index++
             }
-            if (restart < 0) return null
-            start = restart
         }
+        return ranges
     }
 }
