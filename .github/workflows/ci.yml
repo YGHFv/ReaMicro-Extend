@@ -196,15 +196,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="ci-${VERSION_NAME}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
-          if [ "$RELEASE_SIGNING_ENABLED" = "true" ]; then
-            TITLE="${VERSION_NAME} · CI #${GITHUB_RUN_NUMBER} signed"
-          else
-            TITLE="${VERSION_NAME} · CI #${GITHUB_RUN_NUMBER}"
-          fi
+          TITLE="阅微补全计划 ${VERSION_NAME} · CI #${GITHUB_RUN_NUMBER}"
           NOTES_FILE="module-repo/release-${VERSION_NAME}.md"
           if [ -f "$NOTES_FILE" ]; then
-            RELEASE_TITLE="$(head -n 1 "$NOTES_FILE" | sed 's/^# *//')"
-            [ -z "$RELEASE_TITLE" ] || TITLE="$RELEASE_TITLE"
             tail -n +3 "$NOTES_FILE" > "$RUNNER_TEMP/reamicro-release-notes.md"
             NOTES_ARGS=(--notes-file "$RUNNER_TEMP/reamicro-release-notes.md")
           else
