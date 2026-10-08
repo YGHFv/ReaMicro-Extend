@@ -7,6 +7,8 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.json.*;
 
 public final class FanQieSourceProvider implements BookAssociationSearchProvider {
@@ -21,6 +23,13 @@ public final class FanQieSourceProvider implements BookAssociationSearchProvider
         thread.setDaemon(true);
         return thread;
     });
+    private static final ThreadPoolExecutor DETAILS = new ThreadPoolExecutor(3, 3, 0L, TimeUnit.MILLISECONDS,
+        new ArrayBlockingQueue<>(50), runnable -> {
+            Thread thread = new Thread(runnable, "ReaMicroFanQieDetails");
+            thread.setDaemon(true);
+            return thread;
+        });
+    private static final Pattern PAGE_STATE = Pattern.compile("window\\.__INITIAL_STATE__\\s*=\\s*");
     interface Transport {
         String get(String url, int connectTimeout, int readTimeout) throws Exception;
     }
@@ -42,7 +51,7 @@ public final class FanQieSourceProvider implements BookAssociationSearchProvider
         int count = Math.min(limit, 50);
         try {
             List<BookSearchResult> direct = parseNovelSearch(transport.get(novelSearchUrl(query), 1800, 3000), count);
-            if (!direct.isEmpty()) return direct;
+            if (!direct.isEmpty()) return fillMissingWords(direct);
         } catch (Exception ignored) { }
         if (Thread.currentThread().isInterrupted()) return Collections.emptyList();
         List<BookSearchResult> results = searchMirrors(query, count);
@@ -74,6 +83,87 @@ public final class FanQieSourceProvider implements BookAssociationSearchProvider
         return "https://novel.snssdk.com/api/novel/channel/homepage/search/search/v1/"
             + "?device_platform=android&parent_enterfrom=novel_channel_search.tab.&offset=0&aid=1967&q="
             + SourceUtils.encode(query);
+    }
+
+    private List<BookSearchResult> fillMissingWords(List<BookSearchResult> books) {
+        List<BookSearchResult> result = new ArrayList<>(books);
+        Map<Future<BookSearchResult>, Integer> pending = new LinkedHashMap<>();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(1600);
+        try {
+            // 搜索接口不返回字数；只补缺失项，限制并发、队列和总等待时间，失败保留原结果。
+            for (int i = 0; i < books.size() && !Thread.currentThread().isInterrupted(); i++) {
+                BookSearchResult book = books.get(i);
+                if (!book.getWords().isEmpty()) continue;
+                String id = book.getSourceBookId().replaceFirst("^番茄:", "");
+                if (!id.matches("[0-9]{5,24}")) continue;
+                try {
+                    pending.put(DETAILS.submit(() -> {
+                        if (Thread.currentThread().isInterrupted() || System.nanoTime() >= deadline) return book;
+                        try {
+                            String words = fetchWords(id, deadline);
+                            if (!words.isEmpty()) return new BookSearchResult(
+                                book.getTitle(), book.getAuthor(), book.getSource(), book.getSourceBookId(),
+                                book.getCoverUrl(), book.getDetailUrl(), book.getIntro(), words,
+                                book.getStatus(), book.getDisplaySourceName(), book.getTags());
+                        } catch (Exception ignored) { }
+                        return book;
+                    }), i);
+                } catch (RejectedExecutionException busy) {
+                    break;
+                }
+            }
+            for (Map.Entry<Future<BookSearchResult>, Integer> entry : pending.entrySet()) {
+                Future<BookSearchResult> future = entry.getKey();
+                long wait = Math.max(0L, deadline - System.nanoTime());
+                try {
+                    result.set(entry.getValue(), future.get(wait, TimeUnit.NANOSECONDS));
+                } catch (ExecutionException | TimeoutException | CancellationException ignored) { }
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } finally {
+            for (Future<BookSearchResult> future : pending.keySet()) {
+                future.cancel(true);
+                DETAILS.remove((Runnable) future);
+            }
+        }
+        return result;
+    }
+
+    private String fetchWords(String id, long deadline) {
+        try {
+            String words = parsePageWords(transport.get("https://fanqienovel.com/page/" + id, 600, 900), id);
+            if (!words.isEmpty()) return words;
+        } catch (Exception ignored) { }
+        if (Thread.currentThread().isInterrupted() || System.nanoTime() >= deadline) return "";
+        try {
+            // 部分出版书没有官网页面，回退到参考源的详情接口；不传送账户或本地书籍数据。
+            String body = transport.get("http://81.70.223.143:6897/detail?book_id=" + id, 500, 700);
+            return parseDetailWords(body, id);
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    static String parseDetailWords(String body, String expectedId) throws JSONException {
+        JSONObject root = new JSONObject(body);
+        if (!"0".equals(root.optString("code"))) return "";
+        JSONObject data = root.optJSONObject("data");
+        if (data == null || !expectedId.equals(SourceUtils.first(data, "book_id"))) return "";
+        String words = SourceUtils.first(data, "word_number");
+        return words.matches("[0-9]+") ? SourceUtils.words(words) : "";
+    }
+
+    static String parsePageWords(String body, String expectedId) throws JSONException {
+        Matcher state = PAGE_STATE.matcher(body);
+        if (!state.find()) return "";
+        Object value = new JSONTokener(body.substring(state.end())).nextValue();
+        if (!(value instanceof JSONObject)) return "";
+        JSONObject page = ((JSONObject) value).optJSONObject("page");
+        // 必须核对书籍编号，避免错误页或推荐书目的字数混入搜索结果。
+        if (page == null || !expectedId.equals(SourceUtils.first(page, "bookId"))) return "";
+        String words = SourceUtils.first(page, "wordNumber");
+        return words.matches("[0-9]+") ? SourceUtils.words(words) : "";
     }
 
     static List<BookSearchResult> parseNovelSearch(String body, int limit) throws JSONException {
@@ -239,6 +329,7 @@ public final class FanQieSourceProvider implements BookAssociationSearchProvider
 
     static List<String> tags(JSONObject row) {
         LinkedHashSet<String> result = new LinkedHashSet<>();
+        addTag(result, SourceUtils.first(row, "category"));
         Object raw = row.opt("tags");
         if (raw instanceof JSONArray) {
             JSONArray array = (JSONArray) raw;

@@ -3,7 +3,7 @@
   "id": "fanqie",
   "name": "FanQie",
   "entryClass": "com.reamicro.fix.external.source.FanQieSourceProvider",
-  "version": "2026.10.08-cover1",
+  "version": "2026.10.08-cover2",
   "reference": "番茄.json",
   "referenceSha256": "0cd20cbc4f1a65bcfe15967980371e725bb145b1314736663673bfc2f3d8130a"
 }
