@@ -4,7 +4,6 @@ import java.io.IOException
 
 internal enum class RootAccessState { GRANTED, UNAVAILABLE, DENIED, NOT_ROOT, TIMEOUT, ERROR }
 
-/** Evidence from this application's own su child, never a manager-package/file heuristic. */
 internal data class RootAccessReport(
     val state: RootAccessState,
     val executable: String = "",
@@ -16,7 +15,6 @@ internal data class RootAccessReport(
 internal class RootAccessException(val report: RootAccessReport) :
     IllegalStateException("Root ${report.state}: ${report.detail}")
 
-/** Only this read-only probe may try another executable. Never replay a mutating command. */
 internal class RootAccessProbe(
     private val execute: (ProcessBuilder, Long) -> RootCommandResult,
 ) {
@@ -24,9 +22,11 @@ internal class RootAccessProbe(
         val deadline = System.nanoTime() + timeoutSeconds * 1_000_000_000L
         val unavailable = mutableListOf<String>()
         for (path in candidates.distinct()) {
-            val remaining = (deadline - System.nanoTime()) / 1_000_000_000L
+            val nanos = deadline - System.nanoTime()
+
+            val remaining = if (nanos <= 0L) 0L else (nanos - 1L) / 1_000_000_000L + 1L
             if (remaining <= 0) return RootAccessReport(RootAccessState.TIMEOUT, path, "授权检测超时；请确认授权弹窗后重试")
-            // Do NOT File.exists()/canExecute(): KernelSU's su entry can be virtual.
+
             val result = try {
                 execute(ProcessBuilder(path, "-c", PROBE), remaining.coerceAtLeast(1))
             } catch (_: RootCommandTimeout) {
@@ -56,7 +56,7 @@ internal class RootAccessProbe(
 
     companion object {
         const val MARKER = "REAMICRO_UID="
-        // Only id is run here; no /data access, module installation or /proc scan.
+
         val PROBE = """uid=${'$'}(/system/bin/id -u 2>/dev/null) || uid=${'$'}(id -u) || exit 71
 printf 'REAMICRO_UID=%s\n' "${'$'}uid"
 [ "${'$'}uid" = 0 ]"""

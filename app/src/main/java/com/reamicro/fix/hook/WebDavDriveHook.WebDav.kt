@@ -4,7 +4,6 @@ import android.app.Activity
 import android.app.Dialog
 import android.content.Context
 import android.graphics.Color
-import android.graphics.Path
 import android.graphics.drawable.ColorDrawable
 import android.os.Handler
 import android.os.Looper
@@ -26,8 +25,6 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import com.reamicro.fix.R
-import com.reamicro.fix.logging.ModuleLogLevel
-import com.reamicro.fix.logging.legacyModuleLogLevel
 import com.reamicro.fix.cloud.webdav.CloudDownloadCancelledException
 import com.reamicro.fix.cloud.webdav.CancellableWebDavDownload
 import com.reamicro.fix.cloud.webdav.WebDavBackupSnapshot
@@ -40,10 +37,8 @@ import java.io.File
 import java.lang.ref.WeakReference
 import java.net.URI
 import java.net.URL
-import java.util.Locale
 import java.util.UUID
 import javax.xml.parsers.DocumentBuilderFactory
-import kotlin.math.max
 import org.w3c.dom.Element
 import com.reamicro.fix.hook.webdav.*
 import com.reamicro.fix.online.search.homeCloudSearchResults
@@ -62,12 +57,6 @@ import com.reamicro.fix.cloud.webdav.parentWebDavPath
 import com.reamicro.fix.cloud.webdav.webDavPrefs
 import com.reamicro.fix.logging.logWebDav
 
-// WebDavDriveHook 的 WebDAV 协议与账号簇。
-//
-// PROPFIND/MKCOL/MOVE/DELETE/GET/PUT、Alist 兼容、凭据与浏览目录读写、登录与授权。
-//
-// 从 WebDavDriveHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun WebDavDriveHook.canShowWebDavEntry(): Boolean =
     settingsProvider().canRunWebDavCloud
 
@@ -231,7 +220,7 @@ internal fun WebDavDriveHook.enqueueWebDavDownload(workerManager: Any, book: Any
             throwIfWebDavDownloadCancelled(token)
             setTrackedWorkState(tracker, id, "Running", 78, null, null, name)
             val platformFile = platformFile(localFile)
-            // 同本地书库：冲突判定前移，用户选「取消导入」时按独立副本落地、导完自动删除。
+
             ModuleImportPrecheck.precheck(localFile, sourceUrl)
             rememberPendingWebDavImport(platformFile, localFile, sourceUrl, sourceSize?.toLong())
             setTrackedWorkState(tracker, id, "Running", 90, null, null, name)
@@ -1069,13 +1058,8 @@ internal fun WebDavDriveHook.webDavDownload(path: String, outputFile: File, onPr
     outputFile.parentFile?.mkdirs()
     val normalizedPath = normalizeWebDavPath(path)
 
-    // 先按原路径尝试标准 GET（+ href 兜底）。浏览产生的路径命中此路。
     if (tryWebDavGetWithHref(credentials, normalizedPath, outputFile, onProgress)) return
 
-    // OpenList/AList 场景：搜索走 fs API 返回的路径带挂载点前缀（如 /OnedriveE5/书库/...），
-    // 而 WebDAV dav 端点的命名空间根即挂载内容（路径为 /书库/...，无挂载前缀），标准 GET 必 404。
-    // 浏览已证明剥掉挂载前缀的路径可用，故这里逐段剥掉开头前缀重试——与具体挂载点名无关，
-    // 直接复用浏览验证过的 WebDAV 命名空间。
     val segments = normalizedPath.trim('/').split('/').filter { it.isNotBlank() }
     val maxStrip = minOf(2, segments.size - 1).coerceAtLeast(0)
     for (strip in 1..maxStrip) {
@@ -1087,7 +1071,6 @@ internal fun WebDavDriveHook.webDavDownload(path: String, outputFile: File, onPr
         }
     }
 
-    // 最后再尝试 AList fs/get 取 raw_url 直链（部分部署 WebDAV 与 fs 命名空间无法互通时的兜底）。
     outputFile.delete()
     if (webDavRemoteClient.tryAlistDownloadFallback(credentials, normalizedPath, outputFile, onProgress)) {
         logWebDav("GET 404 recovered via AList raw_url path=$normalizedPath")
@@ -1098,9 +1081,6 @@ internal fun WebDavDriveHook.webDavDownload(path: String, outputFile: File, onPr
     error("WebDAV GET failed: HTTP 404")
 }
 
-// 执行单条路径的 WebDAV GET；404 时用 PROPFIND 父目录 + 骨架匹配拿到服务器原始 href 再下，
-// 兼容文件名含全角括号/空白/省略号等重新编码不一致的情况。成功返回 true，
-// 404 且无法通过 href 兜底恢复时返回 false（供上层继续尝试剥前缀），其它错误抛出。
 internal fun WebDavDriveHook.tryWebDavGetWithHref(
     credentials: WebDavCredentials,
     candidatePath: String,
@@ -1125,13 +1105,11 @@ internal fun WebDavDriveHook.tryWebDavGetWithHref(
     }
 }
 
-// host app 渲染列表时会把长文件名截断成带 "..." 或 "…" 的显示名并污染 CloudBook.path。
-// 这里用 PROPFIND 列出父目录，按骨架字符模糊匹配真实条目，返回其原始 href。
 internal fun WebDavDriveHook.resolveWebDavHref(truncatedPath: String): String? {
     val parent = parentWebDavPath(truncatedPath)
     val truncatedName = truncatedPath.substringAfterLast('/')
     if (truncatedName.isBlank()) return null
-    // 兼容 ASCII "..." 与中文省略号 "…"
+
     val ellipsisIndex = truncatedName.indexOf("...")
     val singleEllipsisIndex = truncatedName.indexOf('…')
     val splitIndex = when {
@@ -1139,18 +1117,15 @@ internal fun WebDavDriveHook.resolveWebDavHref(truncatedPath: String): String? {
         singleEllipsisIndex >= 0 -> singleEllipsisIndex
         else -> -1
     }
-    // 无省略号时（如全角括号/空格等编码差异导致的 404），退化为整名骨架精确匹配：
-    // prefix=整名骨架、suffix 空，仍能命中服务器上编码不同但字符等价的原始条目。
+
     val prefix = if (splitIndex < 0) truncatedName else truncatedName.substring(0, splitIndex)
     val suffix = if (splitIndex < 0) "" else truncatedName.substring(splitIndex + if (ellipsisIndex >= 0) 3 else 1)
-    // 请求名与服务器名之间存在大量等价字符差异（全角/半角括号、各种空白、"…"/"..."、
-    // 省略号位置的空格等），精确 startsWith/endsWith 极易失配。改用「骨架字符」比较：
-    // 剥离所有标点、空白、省略号后只保留核心字符（中英文数字），再比对前后缀骨架。
+
     val prefixSkeleton = skeletonForMatch(prefix)
     val suffixSkeleton = skeletonForMatch(suffix)
     val entries = runCatching { listWebDav(parent) }.getOrNull().orEmpty()
         .filterNot { it.isDirectory }
-    // 整名场景优先取骨架完全相等的条目，避免误命中同前缀的更长文件名。
+
     val match = entries.firstOrNull { entry ->
         entry.name.isNotBlank() && skeletonForMatch(entry.name) == prefixSkeleton && suffixSkeleton.isEmpty()
     } ?: entries.firstOrNull { entry ->
@@ -1162,7 +1137,7 @@ internal fun WebDavDriveHook.resolveWebDavHref(truncatedPath: String): String? {
         logWebDav("truncated resolve miss name=$truncatedName pre=$prefixSkeleton suf=$suffixSkeleton candidates=${entries.joinToString("|") { it.name }}")
         return null
     }
-    // 返回 PROPFIND 原始 href（保留服务器原始百分号编码），供绝对 URL 下载使用。
+
     val href = match.rawHref.ifBlank { match.path }
     logWebDav("truncated resolve hit name=${match.name} path=${match.path} hasHref=${match.rawHref.isNotBlank()}")
     return href
@@ -1229,13 +1204,6 @@ internal fun WebDavDriveHook.rememberCleartextHost(requestUrl: String) {
     }
 }
 
-/**
- * WebDAV 全屏自绘页的系统栏图标明暗。
- *
- * 浅色页面要 LIGHT_STATUS_BAR / LIGHT_NAVIGATION_BAR 换深色图标；深色页面必须把这两位清掉，
- * 否则默认的浅色图标会被当成深色图标画在深色底上而看不见。先清后按需置，避免宿主
- * 原有 flag 把它带进来。layoutInScreen 对应登录页「内容铺到系统栏下」的既有行为。
- */
 internal fun webDavSystemUiVisibility(old: Int, dark: Boolean, layoutInScreen: Boolean): Int {
     val lightMask = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
     var flags = old and lightMask.inv()
@@ -1246,10 +1214,6 @@ internal fun webDavSystemUiVisibility(old: Int, dark: Boolean, layoutInScreen: B
     return flags
 }
 
-/**
- * API 30+ 走 WindowInsetsController 重述一次系统栏外观（systemUiVisibility 的 LIGHT_* 已废弃）。
- * 与 ReaderHook.applyFullTextSearchSystemBarAppearance 同一写法。
- */
 internal fun applyWebDavSystemBarAppearance(window: Window, dark: Boolean) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
     val lightBars = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
@@ -1359,7 +1323,7 @@ internal fun WebDavDriveHook.createWebDavAuthIntroView(
         setTextColor(colors.titleText)
         textSize = 18f
         gravity = Gravity.CENTER
-        typeface = android.graphics.Typeface.SERIF
+        typeface = EmbeddedHostUi.uiTypeface(context) ?: android.graphics.Typeface.SERIF
         includeFontPadding = false
         layoutParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1401,7 +1365,7 @@ internal fun WebDavDriveHook.createWebDavAuthIntroView(
     }
     val button = Button(activity).apply {
         text = "前往登录"
-        setTextColor(Color.WHITE)
+        setTextColor(colors.actionText)
         textSize = 16f
         isAllCaps = false
         includeFontPadding = false
@@ -1443,8 +1407,7 @@ internal fun WebDavDriveHook.showWebDavLoginPage() {
     activity.runOnUiThread {
         webDavLoginDialog?.takeIf { it.isShowing }?.dismiss()
         val colors = WebDavPageColors(activity)
-        // themeResId=0 保持沿用宿主 Activity 主题（浅色下与历史行为一致），深色才显式换深色主题，
-        // 否则 EditText 光标 / 选择色仍是浅色主题那一套。
+
         val dialog = Dialog(
             activity,
             if (colors.dark) android.R.style.Theme_Material_NoActionBar else 0,
@@ -1608,7 +1571,7 @@ internal fun WebDavDriveHook.createWebDavLoginContent(
         text = WEBDAV_TITLE
         setTextColor(colors.brandTitle)
         textSize = 28f
-        typeface = android.graphics.Typeface.SERIF
+        typeface = EmbeddedHostUi.uiTypeface(context) ?: android.graphics.Typeface.SERIF
         includeFontPadding = false
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1621,7 +1584,7 @@ internal fun WebDavDriveHook.createWebDavLoginContent(
         text = "欢迎登录 WebDAV 账号"
         setTextColor(colors.primaryText)
         textSize = 26f
-        typeface = android.graphics.Typeface.SERIF
+        typeface = EmbeddedHostUi.uiTypeface(context) ?: android.graphics.Typeface.SERIF
         includeFontPadding = true
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1653,11 +1616,11 @@ internal fun WebDavDriveHook.createWebDavLoginContent(
     }
     val submit = Button(context).apply {
         text = "授权并登录"
-        setTextColor(Color.WHITE)
+        setTextColor(colors.actionText)
         textSize = 16f
         isEnabled = false
         isAllCaps = false
-        typeface = android.graphics.Typeface.SERIF
+        typeface = EmbeddedHostUi.uiTypeface(context) ?: android.graphics.Typeface.SERIF
         includeFontPadding = false
         minHeight = 0
         minWidth = 0
@@ -1740,7 +1703,7 @@ internal fun WebDavDriveHook.webDavEditText(
         setHintTextColor(colors.hintText)
         setTextColor(colors.primaryText)
         textSize = 16f
-        typeface = android.graphics.Typeface.SERIF
+        typeface = EmbeddedHostUi.uiTypeface(context) ?: android.graphics.Typeface.SERIF
         includeFontPadding = false
         inputType = inputTypeValue
         setSingleLine(true)
@@ -1863,11 +1826,3 @@ internal fun WebDavDriveHook.importWebDavDownloadedBook(
         ),
     )
 }
-
-/**
- * 定位宿主 BookshelfRepository 的 epub 版 importBook 方法，兼容新旧签名。
- * 2.2.0：importBook(PlatformFile, Path, Opf, String, Long, Continuation) 共 6 参。
- * 2.3.0：新增进度回调 importBook(PlatformFile, Path, Opf, String, Long, Function1<Int,Unit>, Continuation) 共 7 参。
- * 方法名精确匹配（importTxtBook / importBook$default / importBook$lambda 名称均不同），
- * 要求末参为 Continuation，取参数最少者，避免旧写法 size==6 在 2.3.0 匹配失败。
- */

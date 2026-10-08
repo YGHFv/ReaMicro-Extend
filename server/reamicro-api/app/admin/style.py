@@ -1,15 +1,3 @@
-"""后台样式表。
-
-集中在这里而不是散在各视图里，保证所有页面外观一致。几条约定：
-
-- **状态徽标只走 `.tone-*` 五种语义色调**（见 `labels.status_tone`）。不要把原始枚举值
-  当类名——新增一个枚举值就会渲染成无样式的灰块，而且不报错、很难发现。
-- **间距用 `--gap-*` 变量和 `.stack` / `.mt` / `.mb` 等语义类**，不要写内联 style，
-  否则同一种间距会在各处漂移。
-- 深色模式跟随系统 `prefers-color-scheme`，靠覆盖 `:root` 变量实现，不复制一份规则。
-"""
-
-# 设计令牌。深浅两套只换变量值，规则本身共用。
 _TOKENS = """
 :root{
   --bg:#f4f7fb; --surface:#fff; --surface-2:#fafbfc; --surface-3:#f8fafc;
@@ -95,7 +83,7 @@ _SURFACES = """
 .notice,.secret{padding:var(--gap-4);margin-bottom:var(--gap-4);border-radius:var(--radius)}
 .notice{background:var(--ok-bg);color:var(--ok-fg);border-color:transparent}
 .secret{background:var(--warn-bg);color:var(--warn-fg);border-color:transparent;white-space:pre-wrap}
-/* auto-fit：卡片数量变化时不用改 CSS，也不用内联覆盖列数 */
+
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
   gap:var(--gap-3);margin-bottom:var(--gap-4)}
 .stats>div{padding:16px 18px}
@@ -200,7 +188,7 @@ _TONES = """
 .tone-info{background:var(--info-bg);color:var(--info-fg)}
 """
 
-# 语义间距类，替代散落的内联 style。
+
 _UTILITIES = """
 .stack{display:flex;flex-direction:column;gap:var(--gap-3)}
 .mt{margin-top:var(--gap-2)}
@@ -293,7 +281,7 @@ ADMIN_STYLE = "".join(
     )
 )
 
-# 登录与初始化页：无侧栏，但配色和控件与后台同源。
+
 ADMIN_AUTH_STYLE = "".join(
     part.strip() for part in (_TOKENS, _BASE, _SURFACES, _FORMS, _BUTTONS, _TONES, _UTILITIES)
 ) + """

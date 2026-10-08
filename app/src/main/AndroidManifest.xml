@@ -12,6 +12,7 @@
 
     <queries>
         <package android:name="app.zhendong.reamicro" />
+        <package android:name="app.zhendong.reamicro.fix" />
         <package android:name="com.reamicro.fix" />
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
@@ -28,7 +29,7 @@
         android:theme="@style/AppTheme"
         android:enableOnBackInvokedCallback="false"
         android:usesCleartextTraffic="true">
-        <!-- Root/shell completion only. Do not let ordinary apps repeatedly trigger su/config sync. -->
+
         <receiver android:name=".cloud.root.RootTaskSyncReceiver" android:exported="true"
             android:permission="android.permission.DUMP">
             <intent-filter>
@@ -40,18 +41,6 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
-        <meta-data
-            android:name="xposedmodule"
-            android:value="true" />
-        <meta-data
-            android:name="xposeddescription"
-            android:resource="@string/module_description" />
-        <meta-data
-            android:name="xposedminversion"
-            android:value="102" />
-        <meta-data
-            android:name="xposedscope"
-            android:resource="@array/xposed_scope" />
         <meta-data
             android:name="lyricon_module"
             android:value="true" />
@@ -71,7 +60,8 @@
         <provider
             android:name=".cloud.api.ApiServerSettingsBridgeProvider"
             android:authorities="com.reamicro.fix.api-settings"
-            android:exported="true" />
+            android:exported="true"
+            android:grantUriPermissions="true" />
 
         <receiver
             android:name=".notification.OnlineCompletionNotificationReceiver"
@@ -91,12 +81,6 @@
                 <action android:name="com.reamicro.fix.CLOUD_TASK_NOTIFICATION" />
             </intent-filter>
         </receiver>
-
-
-
-
-
-
 
         <receiver
             android:name=".cloud.local.LocalTaskMirrorReceiver"
@@ -343,7 +327,6 @@
             android:exported="true"
             android:noHistory="true"
             android:theme="@style/NoDisplayTheme" />
-
 
         <service
             android:name=".notification.OnlineCompletionNotificationService"

@@ -1,6 +1,7 @@
 package com.reamicro.fix.hook
 
 import android.app.Activity
+import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.settings.XposedModuleSettings
 import com.reamicro.fix.xposed.XC_MethodHook
@@ -45,7 +46,7 @@ class ReaderFontCompletionHook(
     }
 
     private fun hookReaderViewModel() {
-        runCatching {
+        HookInstallReport.install("ReaderFontCompletionHook", "hookReaderViewModel") {
             val readerViewModelClass = cls(READER_VIEW_MODEL_CLASS)
             XposedBridge.hookAllConstructors(readerViewModelClass, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
@@ -57,13 +58,11 @@ class ReaderFontCompletionHook(
                     XposedBridge.log("$LOG_PREFIX font completion reader captured: bookId=$bookId")
                 }
             })
-            XposedBridge.hookAllMethods(readerViewModelClass, "onCleared", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val active = activeReader ?: return
-                    if (active.viewModelRef.get() !== param.thisObject) return
-                    activeReader = null
-                }
-            })
+            hookViewModelCleared(readerViewModelClass) { viewModel ->
+                val active = activeReader ?: return@hookViewModelCleared
+                if (active.viewModelRef.get() !== viewModel) return@hookViewModelCleared
+                activeReader = null
+            }
             val applyConfig = readerViewModelClass.declaredMethods.firstOrNull {
                 it.name == APPLY_EPUB_CONFIG_METHOD && it.parameterTypes.size == 1
             } ?: error("$APPLY_EPUB_CONFIG_METHOD not found")
@@ -82,8 +81,6 @@ class ReaderFontCompletionHook(
                 }
             })
             XposedBridge.log("$LOG_PREFIX font completion ReaderViewModel hook installed")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX font completion ReaderViewModel hook failed: ${it.stackTraceToString()}")
         }
     }
 
@@ -139,19 +136,17 @@ class ReaderFontCompletionHook(
                     val list = param.result as? List<*> ?: return
                     if (list.isEmpty()) return
                     val config = settings.fontSettings()
-                    param.result = list.mapIndexed { index, pair ->
-                        val first = when (index) {
-                            0 -> "宋体"
-                            1 -> "楷体"
-                            else -> callMethod(pair, "getFirst")?.toString().orEmpty()
-                        }
-                        val second = callMethod(pair, "getSecond") ?: return@mapIndexed pair
-                        val mapped = when (index) {
-                            0 -> config.songMapping
-                            1 -> config.kaiMapping
+                    if (config.songMapping.isBlank() && config.kaiMapping.isBlank()) return
+                    param.result = list.map { pair ->
+                        val label = callMethod(pair, "getFirst")?.toString().orEmpty()
+                        val mapped = when {
+                            isSongFamilyName(label) -> config.songMapping
+                            isKaiFamilyName(label) -> config.kaiMapping
                             else -> ""
                         }
-                        kotlinPair(mappedLabel(first, mapped), resolveFontFamily(mapped) ?: second)
+                        if (mapped.isBlank()) pair else resolveFontFamily(mapped)?.let { family ->
+                            kotlinPair(mappedLabel(label, mapped), family)
+                        } ?: pair
                     }
                 }
             })
@@ -188,6 +183,7 @@ class ReaderFontCompletionHook(
 
     private fun isSongFamilyName(name: String): Boolean {
         val normalized = normalizedFamilyName(name)
+        if (normalized.contains("sans")) return false
         return normalized in SONG_FAMILY_KEYS || SONG_FAMILY_KEYS.any { normalized.contains(it) }
     }
 
@@ -230,7 +226,7 @@ class ReaderFontCompletionHook(
             bookEmbeddedFonts = (callMethod(config, "getBookEmbeddedFonts") as? Number)?.toInt() ?: 0,
             embeddedFonts = callMethod(config, "getEmbeddedFonts") as? Boolean ?: true,
             buildInFonts = callMethod(config, "getBuildInFonts") as? Boolean ?: true,
-            // 阅微 2.3.0 新增字段，读取原值以便透传
+
             paragraphSpacing = (callMethod(config, "getParagraphSpacing") as? Number)?.toInt() ?: 0,
             letterSpacing = (callMethod(config, "getLetterSpacing") as? Number)?.toInt() ?: 0,
             boldFont = callMethod(config, "getBoldFont") as? Boolean ?: false,
@@ -238,9 +234,7 @@ class ReaderFontCompletionHook(
 
     private fun newReaderEpubConfig(value: ResolvedTypeSetting): Any {
         val configClass = cls(READER_EPUB_CONFIG_CLASS)
-        // 阅微 2.3.0 起 ReaderEpubConfig 为 11 参：
-        // (family, textSize, lineHeight, paragraphSpacing, letterSpacing, padding,
-        //  globalEmbeddedFonts, bookEmbeddedFonts, embeddedFonts, buildInFonts, boldFont)
+
         runCatching {
             configClass
                 .getDeclaredConstructor(
@@ -274,7 +268,6 @@ class ReaderFontCompletionHook(
                 )
         }.getOrNull()?.let { return it }
 
-        // 旧版 8 参兼容
         runCatching {
             configClass
                 .getDeclaredConstructor(
@@ -300,7 +293,6 @@ class ReaderFontCompletionHook(
                 )
         }.getOrNull()?.let { return it }
 
-        // 最旧版 6 参兼容
         return configClass
             .getDeclaredConstructor(
                 String::class.java,
@@ -323,17 +315,19 @@ class ReaderFontCompletionHook(
 
     private fun resolveFontFamily(selection: String): Any? {
         if (selection.isBlank()) return null
+        val resolvedFile = if (isBuiltinFontSelection(selection)) null else resolveFontFile(selection) ?: return null
+        val cacheKey = com.reamicro.fix.epub.editor.FontSelectionResolution.cacheKey(selection, resolvedFile)
         synchronized(fontFamilyCache) {
-            fontFamilyCache[selection]?.let { return it }
+            fontFamilyCache[cacheKey]?.let { return it }
         }
         if (isBuiltinFontSelection(selection)) {
             return resolveBuiltinFontFamily(selection)?.also { family ->
                 synchronized(fontFamilyCache) {
-                    fontFamilyCache[selection] = family
+                    fontFamilyCache[cacheKey] = family
                 }
             }
         }
-        val file = resolveFontFile(selection) ?: return null
+        val file = resolvedFile ?: return null
         return runCatching {
             val provider = staticObject(FONT_PROVIDER_CLASS, "INSTANCE")
             val normal = fontWeight("getNormal")
@@ -348,7 +342,7 @@ class ReaderFontCompletionHook(
                 it.name == "FontFamily" && it.parameterTypes.size == 1 && List::class.java.isAssignableFrom(it.parameterTypes[0])
             }.invoke(null, fonts) ?: return null
             synchronized(fontFamilyCache) {
-                fontFamilyCache[selection] = family
+                fontFamilyCache[cacheKey] = family
             }
             family
         }.onFailure { logResolveFontFamilyFailure(selection, it) }.getOrNull()
@@ -418,18 +412,9 @@ class ReaderFontCompletionHook(
         )
     }
 
-    private fun resolveFontFile(selection: String): File? {
-        val direct = File(selection)
-        if (direct.isFile && isFontFileName(direct.name)) return direct
-        val name = direct.name
-        if (!isFontFileName(name)) return null
-        val root = activityProvider()?.filesDir ?: return null
-        return fontDirectories(root)
-            .asSequence()
-            .flatMap { it.listFiles()?.asSequence() ?: emptySequence() }
-            .firstOrNull { it.isFile && it.name == name && isFontFileName(it.name) }
-    }
-
+    private fun resolveFontFile(selection: String): File? =
+        com.reamicro.fix.epub.editor.FontSelectionResolution.file(selection,
+            activityProvider()?.filesDir?.let(::fontDirectories).orEmpty())
     private fun fontDirectories(filesDir: File): List<File> {
         val dirs = filesDir.listFiles()
             ?.filter { it.isDirectory && it.name.toLongOrNull() != null }
@@ -541,7 +526,7 @@ class ReaderFontCompletionHook(
         val bookEmbeddedFonts: Int,
         val embeddedFonts: Boolean,
         val buildInFonts: Boolean,
-        // 阅微 2.3.0 ReaderEpubConfig 新增字段，透传保留原值
+
         val paragraphSpacing: Int = 0,
         val letterSpacing: Int = 0,
         val boldFont: Boolean = false,

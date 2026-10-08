@@ -17,7 +17,7 @@ def load_builder():
         "reamicro_module_builder", Path(__file__).with_name("build-module.py")
     )
     module = importlib.util.module_from_spec(spec)
-    # Avoid __pycache__ in the source tree.
+
     exec(compile(Path(spec.origin).read_bytes(), spec.origin, "exec"), module.__dict__)
     return module
 

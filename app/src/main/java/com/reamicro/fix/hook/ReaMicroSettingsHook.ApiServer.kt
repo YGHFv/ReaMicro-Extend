@@ -251,7 +251,7 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
         card.addView(credentialSpinner, apiServerRowParams(activity))
         val currentAccount = TextView(activity).apply {
             setTextColor(colors.body)
-            // 宿主账号可能没有昵称，label 是空串而不是 null，必须用 ifBlank 兜底否则界面上一片空白。
+
             text = currentCredential?.let { "将自动上传当前阅微登录：${it.label.ifBlank { "阅微账号" }}（账号 ${it.accountId}）" }
                 ?: "当前未检测到阅微登录，请先在阅微登录账号"
             setPadding(24, 8, 24, 8)
@@ -295,7 +295,6 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
             applyCredentialTasks(credentialSpinner.selectedItemPosition)
         }
 
-        // 读取云端凭据与任务。上传成功后必须再跑一次，否则下拉框会一直停在"当前账号尚未上传凭据"。
         fun reloadCloudConfig(notice: String? = null) {
             Thread {
                 runCatching {
@@ -344,7 +343,7 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
                         manager.saveAutomation("yeshe_draw_card", draw.isChecked, credentialId, time.text.toString())
                         manager.saveAutomation("cloud_auto_read", read.isChecked, credentialId, time.text.toString(), readRequest)
                     }.onSuccess {
-                        // 上传成功后立刻重新拉取，界面才会从"尚未上传凭据"变成真实凭据。
+
                         activity.runOnUiThread { reloadCloudConfig("阅微凭据与任务配置已同步") }
                     }.onFailure { error ->
                         activity.runOnUiThread {
@@ -438,7 +437,6 @@ internal fun ReaMicroSettingsHook.openApiPackageManagementDialog() {
     }
 }
 
-// 上传本地书源和关联源到服务器内容库。服务器已有同名同域的源时只关联，不覆盖服务器内容。
 internal fun ReaMicroSettingsHook.openApiLibraryUploadDialog() {
     val activity = activityProvider() ?: return
     activity.runOnUiThread {
@@ -493,7 +491,7 @@ internal fun ReaMicroSettingsHook.openApiLibraryUploadDialog() {
                         ).mapNotNull { (kind, label) ->
                             pending.count { it.kind == kind }.takeIf { it > 0 }?.let { "$it 个$label" }
                         }
-                        // 图片会内嵌进高亮样式包，先让用户知道本次上传包含图片数据。
+
                         val localAssets = pending.count { it.usesLocalAssets }
                         status.text = when {
                             !loadedPolicy.allowed -> loadedPolicy.reason.ifBlank { "服务器未允许当前账号上传内容库" }
@@ -542,7 +540,6 @@ internal fun ReaMicroSettingsHook.openApiLibraryUploadDialog() {
     }
 }
 
-// 把本地书源和关联源与服务器内容库比对，名称和域名一致的视为同一个源并全量关联。
 internal fun ReaMicroSettingsHook.openApiLibraryLinkDialog() {
     val activity = activityProvider() ?: return
     activity.runOnUiThread {
@@ -793,6 +790,7 @@ internal fun ReaMicroSettingsHook.apiServerEdit(
         setHintTextColor(colors.body)
         setPadding(24, 8, 24, 8)
         background = settingsRoundedRect(colors.field, settingsDp(activity, 8), colors.border)
+        EmbeddedHostUi.thoughtInput(this)
     }
 
 private fun ReaMicroSettingsHook.apiServerAuthAdapter(activity: android.app.Activity, modes: List<ApiAuthMode>): ArrayAdapter<String> =
@@ -855,7 +853,6 @@ internal fun apiServerRowParams(activity: android.app.Activity): LinearLayout.La
         android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
     ).apply { bottomMargin = activity.resources.displayMetrics.density.times(8).toInt() }
 
-// 关于补全页"构建版本"的来源：版本号 + 构建时间。
 internal fun ReaMicroSettingsHook.moduleBuildInfo(): Pair<String, String> {
     val version = com.reamicro.fix.BuildConfig.VERSION_NAME
     val buildTime = runCatching {
@@ -866,7 +863,6 @@ internal fun ReaMicroSettingsHook.moduleBuildInfo(): Pair<String, String> {
     return version to buildTime
 }
 
-// 关于补全页"构建版本"连续点击 6 次后弹出的调试模式解锁确认。
 internal fun ReaMicroSettingsHook.confirmApiDebugUnlock() {
     val activity = activityProvider() ?: return
     activity.runOnUiThread {

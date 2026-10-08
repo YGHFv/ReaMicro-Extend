@@ -1,6 +1,5 @@
 package com.reamicro.fix.settings
 
-/** 在线补全成书可配置的五类样式。 */
 enum class OnlineEpubStyleKind(val id: String, val title: String) {
     Title("title", "标题样式"),
     Header("header", "头图样式"),
@@ -14,52 +13,35 @@ enum class OnlineEpubStyleKind(val id: String, val title: String) {
     }
 }
 
-/**
- * 一条成书样式配置。
- *
- * [css] 存完整 CSS 文本，编辑器再用 [OnlineEpubCssBlocks] 按选择器拆成可分别填写的段落；
- * 这样既能容纳 `::before`、修饰类等无法归入固定分段的写法，也不必为每类样式定死结构。
- */
 data class OnlineEpubStyle(
     val id: String,
     val kind: OnlineEpubStyleKind,
     val name: String,
     val description: String = "",
     val css: String = "",
-    /** 字体文件绝对路径 / 内置 family 名 / 空串表示跟随全局。 */
+
     val fontFamily: String = "",
-    /**
-     * 字体文件是否随书嵌入。
-     *
-     * 默认只声明字体名、调用设备本地字体：嵌入会让每本书大出几 MB，而多数场景阅微本机就有该字体。
-     */
+
     val embedFont: Boolean = false,
-    /** 样式关联的本地图片：分割样式的装饰图、头图样式的原图。 */
+
     val assetPath: String = "",
-    /**
-     * 这条样式需要的正文结构。
-     *
-     * 菱形转场、文字转场、图片转场的 CSS 挂在各自的修饰类上，只换 CSS 不换结构选了也不生效，
-     * 所以成书与预览都按它渲染；为空时用该类别的默认结构。
-     */
+
     val markup: String = "",
-    /** 头图样式的蒙版 asset 名与样板尺寸，随内置样式生成，用户样式为空。 */
+
     val maskAsset: String = "",
     val sampleWidth: Int = 0,
     val sampleHeight: Int = 0,
     val builtIn: Boolean = false,
 ) {
-    /** 分割样式引用了图片选择器，或头图样式，都需要用户指定一张图片。 */
+
     val needsAsset: Boolean
         get() = kind == OnlineEpubStyleKind.Header ||
             (kind == OnlineEpubStyleKind.Transition && css.contains(".te-divider-img"))
 
-    /** 只有标题与卷标承载正文之外的成段文字，其余类别不提供字体设置。 */
     val supportsFont: Boolean
         get() = kind == OnlineEpubStyleKind.Title || kind == OnlineEpubStyleKind.Volume
 }
 
-/** 头图套用范围。 */
 enum class OnlineEpubHeaderScope(val id: String, val title: String) {
     Off("off", "关闭"),
     EveryChapter("every_chapter", "每章"),
@@ -72,13 +54,11 @@ enum class OnlineEpubHeaderScope(val id: String, val title: String) {
     }
 }
 
-/** 一段可独立填写的 CSS：[selector] 为选择器，[declarations] 为花括号内的声明。 */
 data class OnlineEpubCssBlock(
     val selector: String,
     val declarations: String,
 )
 
-/** 各类样式的默认选中项、预览片段与新建骨架。 */
 object OnlineEpubStyleDefaults {
     fun defaultStyleId(kind: OnlineEpubStyleKind): String =
         when (kind) {
@@ -89,11 +69,9 @@ object OnlineEpubStyleDefaults {
             OnlineEpubStyleKind.Header -> "header-standard-edge"
         }
 
-    /** 新建自定义样式时预置的选择器骨架，让用户直接分段填写。 */
     fun blankCss(kind: OnlineEpubStyleKind): String =
         OnlineEpubCssBlocks.compose(selectors(kind).map { OnlineEpubCssBlock(it, "") })
 
-    /** 该类样式的标准接口选择器，用于分段编辑的默认分段。 */
     fun selectors(kind: OnlineEpubStyleKind): List<String> =
         when (kind) {
             OnlineEpubStyleKind.Title -> listOf(".te-chapter-title", ".te-chapter-number", ".te-chapter-name")
@@ -104,7 +82,6 @@ object OnlineEpubStyleDefaults {
             OnlineEpubStyleKind.Header -> listOf(".te-header-figure", ".te-header-image", ".te-header-caption")
         }
 
-    /** 分段切换器上显示的短标签，未知选择器回退为选择器本身。 */
     fun sectionLabel(kind: OnlineEpubStyleKind, selector: String): String =
         when (selector) {
             ".te-chapter-title", ".te-volume-title" -> "整体"
@@ -118,12 +95,6 @@ object OnlineEpubStyleDefaults {
             else -> selector.substringBefore(',').trim().removePrefix(".").ifBlank { selector }
         }
 
-    /**
-     * 弹窗预览用的正文片段，结构与成书完全一致，便于所见即所得。
-     *
-     * @param assetUrl 分割图 / 头图的实际地址，为空时用内置占位图。
-     * @param markup 该样式自带的正文结构；为空时用该类别的默认结构。
-     */
     fun previewBody(kind: OnlineEpubStyleKind, assetUrl: String = "", markup: String = ""): String {
         val image = assetUrl.takeIf { it.isNotBlank() } ?: PREVIEW_IMAGE
         val custom = markup.trim().takeIf { it.isNotBlank() }?.let { bindMarkupImage(it, image) }
@@ -150,7 +121,6 @@ object OnlineEpubStyleDefaults {
         }
     }
 
-    /** 把 markup 里指向 EPUB 内部的图片路径换成预览可加载的地址。 */
     fun bindMarkupImage(markup: String, imageUrl: String): String =
         markup.replace(MARKUP_IMAGE_SRC) { match -> """src="$imageUrl"""" }
 
@@ -160,7 +130,6 @@ object OnlineEpubStyleDefaults {
 
     private val MARKUP_IMAGE_SRC = Regex("""src="[^"]*"""")
 
-    /** 选了装饰图就预览图片转场，否则预览文字转场。 */
     private fun transitionPreviewMark(assetUrl: String): String =
         if (assetUrl.isBlank()) {
             """<p class="te-divider-line fg1">※※※</p>"""
@@ -172,7 +141,6 @@ object OnlineEpubStyleDefaults {
         """<p class="te-paragraph">夜色沉入城市边缘，风从旧站台吹过，带着潮湿的铁锈味。</p>""" +
             """<p class="te-paragraph">她合上手中的书，抬头看见远处灯塔亮起，像一枚缓慢落下的星。</p>"""
 
-    /** 预览占位图：内联 SVG，避免打包位图资源。 */
     private const val PREVIEW_IMAGE =
         "data:image/svg+xml;charset=utf-8," +
             "%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20320%20180'%3E" +
@@ -181,11 +149,6 @@ object OnlineEpubStyleDefaults {
             "%3Ccircle%20cx%3D'252'%20cy%3D'46'%20r%3D'20'%20fill%3D'%23efe9dc'%2F%3E%3C%2Fsvg%3E"
 }
 
-/**
- * CSS 文本与选择器分段之间的互转。
- *
- * 只做顶层规则的粗粒度切分，够配置界面按段编辑即可；解析不出结构时调用方回退到整段编辑。
- */
 object OnlineEpubCssBlocks {
     fun parse(css: String): List<OnlineEpubCssBlock> {
         val blocks = ArrayList<OnlineEpubCssBlock>()
@@ -210,7 +173,6 @@ object OnlineEpubCssBlocks {
                 if (body.isEmpty()) "${block.selector} {\n}" else "${block.selector} {\n${body.prependIndent("  ")}\n}"
             }
 
-    /** 替换指定选择器的声明块；选择器不存在时追加一段。 */
     fun replace(css: String, selector: String, declarations: String): String {
         val blocks = parse(css).toMutableList()
         val index = blocks.indexOfFirst { it.selector == selector }
@@ -222,7 +184,6 @@ object OnlineEpubCssBlocks {
         return compose(blocks)
     }
 
-    /** 找到与 [open] 处 `{` 配对的 `}`，找不到返回 -1。 */
     private fun matchBrace(css: String, open: Int): Int {
         var depth = 0
         var index = open

@@ -5,19 +5,19 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 
 public final class XposedHelpers {
     private XposedHelpers() {
     }
 
     public static Class<?> findClass(String className, ClassLoader classLoader) throws ClassNotFoundException {
-        if (classLoader != null) {
-            return Class.forName(className, false, classLoader);
-        }
-        return Class.forName(className);
+        return Class.forName(className, false,
+                classLoader != null ? classLoader : XposedHelpers.class.getClassLoader());
     }
 
     public static XposedInterface.HookHandle findAndHookMethod(
@@ -70,15 +70,12 @@ public final class XposedHelpers {
     public static Object callMethod(Object target, String methodName, Object... args) throws Exception {
         if (target == null) throw new IllegalArgumentException("target must not be null");
         Class<?> clazz = target instanceof Class<?> ? (Class<?>) target : target.getClass();
-        Method method = findMethodBestMatch(clazz, methodName, args);
+        Method method = findMethodBestMatch(clazz, methodName, target instanceof Class<?>, args);
         return method.invoke(target instanceof Class<?> ? null : target, args);
     }
 
     public static Object callStaticMethod(Class<?> clazz, String methodName, Object... args) throws Exception {
-        Method method = findMethodBestMatch(clazz, methodName, args);
-        if (!Modifier.isStatic(method.getModifiers())) {
-            throw new IllegalArgumentException(methodName + " is not static");
-        }
+        Method method = findMethodBestMatch(clazz, methodName, true, args);
         return method.invoke(null, args);
     }
 
@@ -129,41 +126,85 @@ public final class XposedHelpers {
     }
 
     public static Method findMethodExact(Class<?> clazz, String methodName, Class<?>... parameterTypes) {
-        Class<?> current = clazz;
-        while (current != null) {
+        Method method = findExactOrNull(clazz, methodName, parameterTypes);
+        if (method == null) throw new NoSuchMethodError(clazz.getName() + "#" + methodName);
+        method.setAccessible(true);
+        return method;
+    }
+
+    private static Method findExactOrNull(Class<?> clazz, String name, Class<?>[] types) {
+        for (Class<?> current = clazz; current != null; current = current.getSuperclass()) {
             try {
-                Method method = current.getDeclaredMethod(methodName, parameterTypes);
-                method.setAccessible(true);
-                return method;
+                return current.getDeclaredMethod(name, types);
             } catch (NoSuchMethodException ignored) {
-                current = current.getSuperclass();
+
             }
         }
-        throw new NoSuchMethodError(clazz.getName() + "#" + methodName);
+        try {
+            return clazz.getMethod(name, types);
+        } catch (NoSuchMethodException ignored) {
+            return null;
+        }
     }
 
     public static Method findMethodBestMatch(Class<?> clazz, String methodName, Object... args) {
-        Method best = null;
+        return findMethodBestMatch(clazz, methodName, false, args);
+    }
+
+    private static Method findMethodBestMatch(Class<?> clazz, String name, boolean staticOnly, Object[] args) {
+
+        if (args.length == 0) {
+            Method exact = findExactOrNull(clazz, name, new Class<?>[0]);
+            if (exact != null && !exact.isBridge() && (!staticOnly || Modifier.isStatic(exact.getModifiers()))) {
+                exact.setAccessible(true);
+                return exact;
+            }
+        }
+        List<Method> best = new ArrayList<>();
         int bestScore = Integer.MAX_VALUE;
-        for (Method method : allMethods(clazz)) {
-            if (!method.getName().equals(methodName) || method.getParameterTypes().length != args.length) {
-                continue;
-            }
-            Class<?>[] parameterTypes = method.getParameterTypes();
-            if (!parametersMatch(parameterTypes, args)) {
-                continue;
-            }
-            int score = distanceScore(parameterTypes, args);
+        for (Method method : matchingMethods(clazz, name, args.length, staticOnly)) {
+            int score = distanceScore(method.getParameterTypes(), args);
+            if (score == Integer.MAX_VALUE || score > bestScore) continue;
             if (score < bestScore) {
-                best = method;
+                best.clear();
                 bestScore = score;
             }
+            best.add(method);
         }
-        if (best == null) {
-            throw new NoSuchMethodError(clazz.getName() + "#" + methodName);
+        if (best.isEmpty()) throw new NoSuchMethodError(clazz.getName() + "#" + name);
+        Method selected = mostSpecific(best);
+        if (selected == null) throw new IllegalArgumentException("ambiguous method: " + clazz.getName() + "#" + name);
+        selected.setAccessible(true);
+        return selected;
+    }
+
+    private static Method mostSpecific(List<Method> methods) {
+        for (Method candidate : methods) {
+            boolean dominates = true;
+            for (Method other : methods) {
+                if (candidate != other && !moreSpecific(candidate.getParameterTypes(), other.getParameterTypes())) {
+                    dominates = false;
+                    break;
+                }
+            }
+            if (dominates) return candidate;
         }
-        best.setAccessible(true);
-        return best;
+        return null;
+    }
+
+    private static boolean moreSpecific(Class<?>[] first, Class<?>[] second) {
+        for (int i = 0; i < first.length; i++) {
+            Class<?> a = first[i], b = second[i];
+            if (a == b) continue;
+            if (a.isPrimitive() && b.isPrimitive()) {
+                if (!canWiden(boxed(a), b)) return false;
+            } else if (!a.isPrimitive() && !b.isPrimitive()) {
+                if (!b.isAssignableFrom(a)) return false;
+            } else if (a.isPrimitive() || a != boxed(b)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static Class<?> resolveParameterType(Object value, ClassLoader classLoader) {
@@ -178,52 +219,62 @@ public final class XposedHelpers {
         throw new IllegalArgumentException("unsupported parameter type: " + value);
     }
 
-    private static List<Method> allMethods(Class<?> clazz) {
-        List<Method> result = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        Class<?> current = clazz;
-        while (current != null) {
+    private static Collection<Method> matchingMethods(Class<?> clazz, String name, int count, boolean staticOnly) {
+        Map<List<Class<?>>, Method> result = new LinkedHashMap<>();
+        for (Class<?> current = clazz; current != null; current = current.getSuperclass()) {
             for (Method method : current.getDeclaredMethods()) {
-                String key = method.getName() + signature(method.getParameterTypes());
-                if (seen.add(key)) {
-                    result.add(method);
-                }
-            }
-            current = current.getSuperclass();
-        }
-        return result;
-    }
-
-    private static boolean parametersMatch(Class<?>[] parameterTypes, Object[] args) {
-        for (int i = 0; i < parameterTypes.length; i++) {
-            Object arg = args[i];
-            if (arg == null) continue;
-            if (!boxed(parameterTypes[i]).isAssignableFrom(boxed(arg.getClass()))) {
-                return false;
+                if (method.getName().equals(name)) addMatching(result, method, count, staticOnly);
             }
         }
-        return true;
+        for (Method method : clazz.getMethods()) {
+            if (method.getDeclaringClass().isInterface() && method.getName().equals(name)) {
+                addMatching(result, method, count, staticOnly);
+            }
+        }
+        return result.values();
     }
 
-    private static int distanceScore(Class<?>[] parameterTypes, Object[] args) {
+    private static void addMatching(Map<List<Class<?>>, Method> result, Method method,
+                                    int count, boolean staticOnly) {
+        if (method.getParameterCount() != count ||
+                (staticOnly && !Modifier.isStatic(method.getModifiers()))) return;
+
+        List<Class<?>> key = Arrays.asList(method.getParameterTypes());
+        Method previous = result.get(key);
+        if (previous == null || (previous.getDeclaringClass() == method.getDeclaringClass() &&
+                previous.isBridge() && !method.isBridge())) result.put(key, method);
+    }
+
+    private static int distanceScore(Class<?>[] types, Object[] args) {
         int score = 0;
-        for (int i = 0; i < parameterTypes.length; i++) {
+        for (int i = 0; i < types.length; i++) {
+            Class<?> type = types[i];
             Object arg = args[i];
             if (arg == null) {
-                score += 1;
-            } else if (!boxed(parameterTypes[i]).equals(boxed(arg.getClass()))) {
-                score += 1;
+                if (type.isPrimitive()) return Integer.MAX_VALUE;
+                score++;
+            } else if (boxed(type) == arg.getClass()) {
+
+            } else if (!type.isPrimitive() && type.isInstance(arg)) {
+                score++;
+            } else if (type.isPrimitive() && canWiden(arg.getClass(), type)) {
+
+                score += types.length + 1;
+            } else {
+                return Integer.MAX_VALUE;
             }
         }
         return score;
     }
 
-    private static String signature(Class<?>[] parameterTypes) {
-        StringBuilder builder = new StringBuilder("(");
-        for (Class<?> type : parameterTypes) {
-            builder.append(type.getName()).append(';');
+    private static boolean canWiden(Class<?> from, Class<?> to) {
+        if (from == Byte.class && to == Short.TYPE) return true;
+        if (from == Byte.class || from == Short.class || from == Character.class) {
+            return to == Integer.TYPE || to == Long.TYPE || to == Float.TYPE || to == Double.TYPE;
         }
-        return builder.append(')').toString();
+        if (from == Integer.class) return to == Long.TYPE || to == Float.TYPE || to == Double.TYPE;
+        if (from == Long.class) return to == Float.TYPE || to == Double.TYPE;
+        return from == Float.class && to == Double.TYPE;
     }
 
     private static Class<?> boxed(Class<?> type) {

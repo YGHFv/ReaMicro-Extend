@@ -6,7 +6,6 @@ import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** 某一时刻的成书样式配置：内置库与用户改写合并后的全部样式，以及各类当前选中项。 */
 data class OnlineEpubStyleSettings(
     val styles: List<OnlineEpubStyle> = OnlineEpubStyleLibrary.BUILT_INS,
     val selection: Map<OnlineEpubStyleKind, String> = emptyMap(),
@@ -23,16 +22,10 @@ data class OnlineEpubStyleSettings(
         return styles.firstOrNull { it.id == id } ?: byKind(kind).firstOrNull()
     }
 
-    /** 头图是否真正参与成书：范围没关且已选好图。 */
     val headerEnabled: Boolean
         get() = headerScope != OnlineEpubHeaderScope.Off &&
             selected(OnlineEpubStyleKind.Header)?.assetPath?.isNotBlank() == true
 
-    /**
-     * 用编辑中的草稿样式覆盖同 id 项并选中它。
-     *
-     * 供配置弹窗预览使用：预览注入的 CSS 与这份设置写出的成书 CSS 完全一致。
-     */
     fun withDraft(style: OnlineEpubStyle): OnlineEpubStyleSettings {
         val replaced = styles.filterNot { it.id == style.id } + style
         return copy(
@@ -42,12 +35,6 @@ data class OnlineEpubStyleSettings(
     }
 }
 
-/**
- * 在线补全成书样式的持久化。
- *
- * 内置样式不落盘，只有用户新建或改写过的样式写进 SharedPreferences，读取时按 id 覆盖内置库；
- * 这样内置样式随模块升级自动更新，用户的改动也不会丢。
- */
 object OnlineEpubStyleStore {
     fun read(context: Context?): OnlineEpubStyleSettings {
         context ?: return OnlineEpubStyleSettings()
@@ -57,7 +44,7 @@ object OnlineEpubStyleStore {
         val merged = LinkedHashMap<String, OnlineEpubStyle>()
         OnlineEpubStyleLibrary.BUILT_INS.forEach { merged[it.id] = it }
         overrides.forEach { style ->
-            // 改写过的内置样式保留 builtIn 标记，删除按钮据此隐藏。
+
             merged[style.id] = style.copy(builtIn = merged[style.id]?.builtIn ?: false)
         }
         removed.forEach(merged::remove)
@@ -78,7 +65,6 @@ object OnlineEpubStyleStore {
             .commit()
     }
 
-    /** 新建或改写一条样式。 */
     fun save(context: Context?, style: OnlineEpubStyle) {
         context ?: return
         val prefs = context.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE)
@@ -91,11 +77,6 @@ object OnlineEpubStyleStore {
             .commit()
     }
 
-    /**
-     * 删除一条样式。
-     *
-     * 内置样式无法真正从库里去掉，改为记进删除名单；再次保存同 id 会自动从名单中移除。
-     */
     fun remove(context: Context?, styleId: String) {
         context ?: return
         val prefs = context.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE)
@@ -108,7 +89,6 @@ object OnlineEpubStyleStore {
             .commit()
     }
 
-    /** 丢弃某条内置样式的改写记录与删除标记，恢复内置库里的原样。 */
     fun resetToBuiltIn(context: Context?, styleId: String) {
         context ?: return
         val prefs = context.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE)
@@ -145,11 +125,6 @@ object OnlineEpubStyleStore {
             .put("sampleWidth", style.sampleWidth)
             .put("sampleHeight", style.sampleHeight)
 
-    /**
-     * 导出用 JSON：把关联图片以 base64 内嵌，别人导入后开箱即用。
-     *
-     * 字体因体积过大只导出选择路径，导入方没有同名字体时会回退到跟随全局。
-     */
     fun exportJson(style: OnlineEpubStyle): JSONObject {
         val json = styleJson(style)
         val asset = File(style.assetPath.trim())
@@ -180,11 +155,6 @@ object OnlineEpubStyleStore {
         )
     }
 
-    /**
-     * 导入一条样式：内嵌的图片会还原到 [assetDir]，并把 assetPath 指向还原后的文件。
-     *
-     * 没有内嵌图片时保留原 assetPath，本机恰好存在同路径文件就仍然可用。
-     */
     fun importStyle(json: JSONObject, assetDir: File): OnlineEpubStyle? {
         val style = styleFromJson(json) ?: return null
         val data = json.optString("assetData").takeIf { it.isNotBlank() } ?: return style

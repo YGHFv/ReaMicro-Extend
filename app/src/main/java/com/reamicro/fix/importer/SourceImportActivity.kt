@@ -11,13 +11,6 @@ import android.widget.Toast
 import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.logging.ModuleAndroidLog
 
-/**
- * 接管 .json 文件的「打开方式」入口。
- *
- * 模块自身进程无法直接写入阅微私有存储，因此这里只读取被打开的 JSON 内容，
- * 然后拉起阅微主进程并通过自定义 extra 传递 payload，真正的导入由阅微进程内的
- * hook（ReaMicroSettingsHook.hookExternalSourceImportIntent）完成。
- */
 class SourceImportActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -36,7 +29,7 @@ class SourceImportActivity : Activity() {
     private fun handleImportIntent(intent: Intent?) {
         val uri = resolveUri(intent)
         if (uri == null) {
-            // 桌面图标或部署验证可能无参数启动此透明入口；没有导入 Intent 时应静默结束。
+
             return
         }
         val bytes = runCatching {

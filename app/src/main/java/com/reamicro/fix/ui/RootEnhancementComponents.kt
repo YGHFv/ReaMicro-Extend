@@ -20,7 +20,6 @@ import top.yukonga.miuix.kmp.preference.SwitchPreference
 
 internal enum class RootEnhancementAction { ENABLE, DISABLE, UNINSTALL }
 
-/** Root operations use the shared task-configuration dialog, not a bottom sheet. */
 @Composable
 internal fun RootEnhancementDialog(
     show: Boolean, title: String, onClose: () -> Unit,
@@ -148,6 +147,6 @@ private fun taskSummary(status: RootModuleStatus?, enabled: Boolean): String = w
     !enabled -> stringResource(R.string.root_tasks_disabled)
     status == null -> stringResource(R.string.root_task_unknown)
     status.moduleResource() != R.string.root_module_ready -> stringResource(R.string.root_task_unavailable)
-    // Preserve the observation time: simply viewing a cached result does not age its activity record.
+
     else -> stringResource(status.stateResource(enabled, status.checkedAt))
 }

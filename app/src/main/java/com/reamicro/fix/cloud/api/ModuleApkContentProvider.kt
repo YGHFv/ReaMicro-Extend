@@ -7,7 +7,6 @@ import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import java.io.File
 
-/** 给系统 APK 安装器提供受限的 content:// APK URI。 */
 class ModuleApkContentProvider : android.content.ContentProvider() {
     override fun onCreate(): Boolean = true
 

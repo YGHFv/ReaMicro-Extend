@@ -1,24 +1,18 @@
 package com.reamicro.fix.online.epub
 
-import android.content.Context
 import com.reamicro.fix.online.epub.OnlineChapterImageMarkup
 import com.reamicro.fix.online.search.decodeOnlineHtmlEntities
 import com.reamicro.fix.online.epub.onlineEpubImageManifestItem
-import com.reamicro.fix.online.epub.mergeOnlineEpubImageManifest
 import com.reamicro.fix.online.epub.OnlineEpubImageManifestItem
 import com.reamicro.fix.online.epub.stableOnlineImageFileStem
 import com.reamicro.fix.cloud.webdav.OnlineDownloadedChapter
-import com.reamicro.fix.online.download.OnlineOnDemandMetadata
-import com.reamicro.fix.online.download.OnlineOnDemandMetadataCodec
 import com.reamicro.fix.online.epub.OnlineChapterHeadingMarkup
 import com.reamicro.fix.online.epub.OnlineBodyMarkup
 import com.reamicro.fix.online.epub.OnlineEpubFontEmbedder
 import com.reamicro.fix.online.epub.OnlineEpubFontFace
 import com.reamicro.fix.online.epub.OnlineEpubStyleCss
-import com.reamicro.fix.online.epub.OnlineHeaderImageComposer
 import com.reamicro.fix.settings.OnlineEpubStyleKind
 import com.reamicro.fix.settings.OnlineEpubStyleSettings
-import com.reamicro.fix.settings.OnlineEpubStyleStore
 import com.reamicro.fix.online.epub.OnlineVolumeHeadingMarkup
 import java.io.File
 import java.net.URLEncoder
@@ -26,17 +20,8 @@ import java.util.Locale
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
-import kotlin.math.max
 import com.reamicro.fix.hook.webdav.*
 
-// 在线补全的 EPUB 生成引擎。
-//
-// 把下载好的章节写成标准 EPUB：章节 xhtml、分卷页、toc.ncx、content.opf、封面页、
-// 默认样式与字体嵌入。
-//
-// 这些函数不依赖 hook 实例，也不碰宿主类——「不依赖」是编译器验证过的结论：
-// 已移除的一次性生成工具 逐个去掉接收者后整仓仍能编译。因此它们可以直接
-// 用 JVM 单测覆盖。
 internal fun existingOnlineChapterImageHrefs(
     bookDir: File,
     chapter: OnlineDownloadedChapter,
@@ -96,7 +81,6 @@ internal fun onlineCompletionFontFaces(
     return result
 }
 
-/** 分割样式选中的装饰图，成书时固定写成 Images/divider.<ext>。 */
 internal fun onlineCompletionDividerImage(settings: OnlineEpubStyleSettings): Pair<File, String>? {
     val style = settings.selected(OnlineEpubStyleKind.Transition) ?: return null
     if (!style.needsAsset) return null
@@ -105,13 +89,6 @@ internal fun onlineCompletionDividerImage(settings: OnlineEpubStyleSettings): Pa
     return file to "divider.$extension"
 }
 
-/**
- * 头图：把用户选的原图按样式蒙版合成后，固定写成 Images/header.png（全书一份）。
- *
- * 蒙版从模块 assets 读取，与高亮图片走同一套 asset:// 机制。
- */
-
-/** 装饰图在 manifest 里的登记项，与正文插图共用 Images 目录。 */
 internal fun onlineCompletionDecorManifestItems(decor: OnlineEpubDecor): List<OnlineEpubImageManifestItem> =
     listOfNotNull(decor.dividerImageHref, decor.headerImageHref)
         .map { it.substringAfterLast('/') }
@@ -134,7 +111,7 @@ internal fun migrateOnlineCompletionChapterStyle(
             "<link rel=\"stylesheet\" type=\"text/css\" href=\"../Styles/default.css\"/></head>",
         )
     }
-    // 先整体改写旧的 div.te-chapter-heading 双层结构：其序号在 h1 之外，只看 h1 内容拆不出来。
+
     result = OnlineChapterHeadingMarkup.migrateLegacyHeadingBlock(result)
     result = ONLINE_COMPLETION_CHAPTER_HEADING_HTML_REGEX.replace(result) { match ->
         val attributes = match.groupValues[1]
@@ -152,7 +129,7 @@ internal fun migrateOnlineCompletionChapterStyle(
         "<h1$nextAttributes><span class=\"te-chapter-name\">$content</span></h1>"
     }
     result = OnlineBodyMarkup.migrateLegacyBody(result)
-    // 早期下载的章节里省略号还是普通 <p>，历史分割线的结构也未必对得上当前样式，这里一并改写。
+
     result = OnlineBodyMarkup.migrateTransitions(
         html = result,
         isDivider = { text -> ONLINE_DIVIDER_LINE_REGEX.matches(text) },
@@ -173,7 +150,7 @@ internal fun chapterXhtml(
         .map { it.trim() }
         .filter { it.isNotBlank() }
         .toList())
-    // 转场只认前后都有正文的省略号段，连续多段合并成一条；首尾的孤立省略号保持原样。
+
     val plan = OnlineBodyMarkup.planTransitions(
         bodyLines.map { line ->
             OnlineChapterImageMarkup.markerUrl(line) == null && ONLINE_DIVIDER_LINE_REGEX.matches(line)
@@ -326,7 +303,6 @@ internal fun splitChapterHeading(title: String): List<String> {
 internal fun defaultOnlineChapterHrefs(count: Int): List<String> =
     (1..count).map { order -> "Text/chapter_${order.toString().padStart(4, '0')}.xhtml" }
 
-/** 目录里连续同卷名的章节归为一卷，用于生成卷首页。 */
 internal fun onlineVolumeSegments(chapters: List<OnlineDownloadedChapter>): List<OnlineVolumeSegment> {
     val segments = ArrayList<OnlineVolumeSegment>()
     var index = 0
@@ -351,7 +327,6 @@ internal fun onlineVolumeSegments(chapters: List<OnlineDownloadedChapter>): List
 internal fun onlineVolumeHref(order: Int): String =
     "Text/volume_${order.toString().padStart(4, '0')}.xhtml"
 
-/** 卷首页文档：仿起点单独成页，序号与卷名自动分行。 */
 internal fun volumeXhtml(volumeTitle: String, decor: OnlineEpubDecor = OnlineEpubDecor()): String {
     val heading = OnlineVolumeHeadingMarkup.parse(volumeTitle)
     val body = if (heading.number.isNotBlank() && heading.title.isNotBlank()) {

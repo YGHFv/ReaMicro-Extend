@@ -3,12 +3,6 @@ package com.reamicro.fix.association.network;
 import java.net.URI;
 import java.net.URL;
 
-/**
- * Per-request HTTP opt-in used only by the bundled FanQie association transport.
- * Hosts, ports and paths come from that request, not a module-maintained allowlist.
- * No global host cache, inheritance to workers, wildcard policy or TLS exception.
- * Callers must keep the scope open until the response is consumed, then close it.
- */
 public final class AssociationNetworkScope {
     private static final ThreadLocal<URI> REQUEST = new ThreadLocal<>();
     private AssociationNetworkScope() {}
@@ -32,13 +26,11 @@ public final class AssociationNetworkScope {
             && uri.getRawFragment() == null;
     }
 
-    /** The platform policy only supplies a hostname; the active URL was checked at begin(). */
     public static boolean allowsHost(String host) {
         URI request = REQUEST.get();
         return request != null && request.getHost().equalsIgnoreCase(host);
     }
 
-    /** Android URLConnection's pre-connect filter supplies the full URL. */
     public static boolean allowsUrl(URL url) {
         URI request = REQUEST.get();
         try { return request != null && url != null && request.equals(url.toURI()); }

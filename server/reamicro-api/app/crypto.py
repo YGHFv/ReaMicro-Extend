@@ -1,15 +1,8 @@
-"""密钥派生、对称加密与口令哈希。
-
-同步密钥等敏感值用服务器 SECRET_KEY 派生的密钥加密后落盘；密文带密钥 ID，
-轮换 SECRET_KEY 时可识别旧密文并重新加密（见 app.backups.rotate_secret_key）。
-"""
 import base64
 import hashlib
 import hmac
 import json
-import os
 import secrets
-from datetime import datetime, timezone
 from typing import Any
 
 from app import runtime
@@ -64,7 +57,7 @@ def password_matches(password: str, encoded: str) -> bool:
 
 
 def generate_long_secret(byte_length: int = 48) -> str:
-    """生成适合 API Key 或初始密码的 URL 安全随机值。"""
+
     return secrets.token_urlsafe(max(32, byte_length))
 
 

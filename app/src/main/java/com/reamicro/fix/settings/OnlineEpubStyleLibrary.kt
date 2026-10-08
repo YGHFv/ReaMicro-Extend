@@ -1,11 +1,5 @@
 package com.reamicro.fix.settings
 
-/**
- * 在线补全成书样式的内置样式库。
- *
- * 内容移植自 TEpub-Editor 的 epubStyleLibrary.ts（由 tools/gen-epub-styles.mjs 生成，请勿手改），
- * 卷标样式由章节标题样式派生：选择器换成卷首页接口。
- */
 internal object OnlineEpubStyleLibrary {
     val BUILT_INS: List<OnlineEpubStyle> = listOf(
         OnlineEpubStyle(

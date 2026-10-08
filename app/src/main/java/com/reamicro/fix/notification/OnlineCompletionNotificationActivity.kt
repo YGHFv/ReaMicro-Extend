@@ -103,7 +103,7 @@ class OnlineCompletionNotificationActivity : Activity() {
             Notification.Builder(context)
         }
         builder
-            .setSmallIcon(R.drawable.ic_notification_reamicro)
+            .setReaMicroSmallIcon()
             .setContentTitle(onlineCompletionDownloadTitle(progress, text))
             .setContentText(onlineCompletionDownloadText(title, text))
             .setStyle(Notification.BigTextStyle().bigText(onlineCompletionDownloadBigText(title, text, progress)))

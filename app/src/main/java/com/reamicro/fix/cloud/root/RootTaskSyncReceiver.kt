@@ -8,7 +8,6 @@ import android.os.Looper
 import com.reamicro.fix.logging.ModuleAndroidLog
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Root's completion event only. No AlarmManager, JobScheduler, boot timer, or fallback engine. */
 class RootTaskSyncReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         if (intent?.action != RootTaskRepository.SYNC_ACTION || !RootTaskBridge.isEnabled(context)) return

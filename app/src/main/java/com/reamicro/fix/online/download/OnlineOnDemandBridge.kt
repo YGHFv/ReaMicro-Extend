@@ -114,7 +114,6 @@ internal object OnlineOnDemandBridge {
 
     private fun normalizeHref(value: String): String =
         value.trim()
-            .substringBefore('#')
             .replace('\\', '/')
             .removePrefix("OEBPS/")
             .removePrefix("./")

@@ -21,7 +21,6 @@ import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Base64
@@ -61,15 +60,6 @@ import org.json.JSONObject
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
-// 设置页的支撑簇。
-//
-// 反射调用宿主 Compose 构件、取宿主主题色与排版、日志导出、以及各类小工具。
-//
-// 从 ReaMicroSettingsHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的
-// 结果重新缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
-// 设置页 LazyColumn 构建函数是 R8 生成的 synthetic lambda，名称会随阅微版本变化。
-// 2.1 是 "SettingsScreen$lambda$0$0$1$0"，2.2 是 "SettingsScreen$lambda$0$1$0$0"。
-// 这里按稳定签名解析：首参是宿主 NavGraphScope，末参是 Compose LazyListScope。
 internal fun ReaMicroSettingsHook.resolveSettingsListBuilderMethod(): Method {
     val settingsClass = cls(SETTINGS_SCREEN_CLASS)
     val lazyListScopeClass = cls(LAZY_LIST_SCOPE_CLASS)
@@ -204,7 +194,6 @@ internal fun ReaMicroSettingsHook.collectModuleLog(): String {
     return builder.toString()
 }
 
-/** CSS 输入是逐字触发的，合并 250ms 内的多次输入再刷新预览。 */
 internal fun ReaMicroSettingsHook.schedulePreviewRefresh(preview: WebView, refresh: () -> Unit) {
     preview.removeCallbacks(pendingOnlineEpubPreviewRefresh)
     pendingOnlineEpubPreviewRefresh = Runnable { runCatching(refresh) }
@@ -1257,7 +1246,7 @@ internal fun ReaMicroSettingsHook.isGenericReaderBookTitle(value: String): Boole
 internal fun ReaMicroSettingsHook.consumeExternalSourceImportIntent(activity: Activity, intent: Intent?) {
     intent ?: return
     val payload = intent.getStringExtra(EXTRA_IMPORT_PAYLOAD) ?: return
-    // 只消费一次，避免旋转/重复 onCreate 反复导入
+
     intent.removeExtra(EXTRA_IMPORT_PAYLOAD)
     val displayName = intent.getStringExtra(EXTRA_IMPORT_NAME) ?: "imported.json"
     val bytes = runCatching { Base64.decode(payload, Base64.NO_WRAP) }.getOrNull()
@@ -1285,7 +1274,7 @@ internal fun ReaMicroSettingsHook.importExternalJson(activity: Activity, bytes: 
 }
 
 internal fun ReaMicroSettingsHook.detectExternalImportKind(bytes: ByteArray): ExternalImportKind {
-    // Reeden 高亮包（RED\1 magic）
+
     if (bytes.size >= 4 && bytes[0] == 'R'.code.toByte() && bytes[1] == 'E'.code.toByte() &&
         bytes[2] == 'D'.code.toByte() && bytes[3] == 1.toByte()
     ) {
@@ -1314,12 +1303,6 @@ internal fun ReaMicroSettingsHook.queryDisplayName(activity: Activity, uri: Uri)
             if (cursor.moveToFirst()) cursor.getString(0) else null
         }
 
-/**
- * 读取宿主 `PaddingValues` 单边的 dp 值。
- *
- * `Dp` 是 inline class，Kotlin 编译后**返回 `Dp` 的函数名会带 `-hash` 后缀**
- * （如 `calculateTopPadding-D9Ej5fM`），因此按前缀匹配而不是全名相等。
- */
 @Volatile
 private var pageInsetsLogged = false
 
@@ -1333,13 +1316,6 @@ private fun paddingValuesSideDp(paddings: Any, prefix: String): Double? =
             ?.toDouble()
     }.getOrNull()
 
-/**
- * 注入页统一容器 modifier：`fillMaxSize` + 内边距 + 水平 16dp。
- *
- * [extendBottom] 打开「真沉浸」：底部**不再消费**系统导航栏 inset，内容一直铺到屏幕最底，
- * 系统手势条（小白条）半透明浮在内容上——与宿主阅读页一致。关闭时按宿主 Scaffold 给的
- * `innerPaddings` 全量留白，内容在导航栏上缘被裁断、底部露出一条容器底色（即「颜色沉浸」）。
- */
 internal fun ReaMicroSettingsHook.pageModifier(innerPaddings: Any, extendBottom: Boolean = false): Any {
     val filled = method(SIZE_KT_CLASS, FILL_MAX_SIZE_DEFAULT_METHOD, 4).invoke(
         null,
@@ -1349,7 +1325,7 @@ internal fun ReaMicroSettingsHook.pageModifier(innerPaddings: Any, extendBottom:
         null,
     )
     val padded = if (extendBottom) {
-        // 只保留顶部（状态栏 + 宿主顶栏）内边距，底部交给系统手势条浮在内容上。
+
         val topDp = paddingValuesSideDp(innerPaddings, "calculateTopPadding")
         if (!pageInsetsLogged) {
             pageInsetsLogged = true
@@ -1361,7 +1337,7 @@ internal fun ReaMicroSettingsHook.pageModifier(innerPaddings: Any, extendBottom:
             null,
             filled,
             udp(0.0),
-            udp(topDp ?: 0.0),
+            (topDp ?: 0.0).toFloat(),
             udp(0.0),
             udp(0.0),
         )
@@ -1565,7 +1541,6 @@ internal fun ReaMicroSettingsHook.bumpAccountListVersion() {
         ?.invoke(state, value + 1)
 }
 
-// 关于补全页"构建版本"行的版本号状态，解锁调试模式后 bump 触发页面重组。
 internal fun ReaMicroSettingsHook.aboutVersionState(): Any {
     aboutVersionUiState?.let { return it }
     return mutableState(0).also { aboutVersionUiState = it }
@@ -1582,13 +1557,11 @@ internal fun ReaMicroSettingsHook.bumpAboutVersion() {
         ?.invoke(state, value + 1)
 }
 
-// 关于补全页"构建版本"行显示文本：版本号 + 构建时间。
 internal fun ReaMicroSettingsHook.moduleBuildVersionLine(): String {
     val (versionName, buildTime) = moduleBuildInfo()
     return "v$versionName${if (buildTime.isNotBlank()) " · $buildTime" else ""}"
 }
 
-// 关于补全页"构建版本"行点击计数，连续 6 次触发调试模式解锁确认。
 internal fun ReaMicroSettingsHook.registerAboutVersionTap() {
     aboutVersionTapCount += 1
     if (aboutVersionTapCount >= 6) {

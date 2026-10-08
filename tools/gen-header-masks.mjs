@@ -1,7 +1,3 @@
-// 从 TEpub-Editor 的头图样板图提取 alpha 通道，生成模块用的头图蒙版。
-// 样板图本身有上百万像素的彩色内容，但套用时只用得到透明度，所以只保留 alpha 存成灰度 PNG，
-// 体积从 ~17MB 降到 ~800KB。
-// 用法: node tools/gen-header-masks.mjs <epub-style-library 资源目录> <输出目录>
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { deflateSync, inflateSync } from "node:zlib";
@@ -12,8 +8,6 @@ if (!sourceDir || !outputDir) {
   process.exit(1);
 }
 
-// 样式 id -> 样板图文件名。与 epubStyleLibrary.ts 里 headerTemplateSamples 的映射保持一致，
-// template-* 优先于 sample-*（TEpub 的 templateDataUrl || sampleDataUrl）。
 const MASKS = {
   "header-template-bottom-fade": "sample-character-gallery.png",
   "header-template-torn-edge": "sample-sword-duel.png",
@@ -50,7 +44,6 @@ function chunk(type, data) {
   return Buffer.concat([length, body, crc]);
 }
 
-/** 解析 PNG 到 {width,height,alpha:Uint8Array}，只支持 8-bit RGBA/灰度+alpha 非隔行图。 */
 function readPngAlpha(file) {
   const buf = readFileSync(file);
   let offset = 8;
@@ -90,7 +83,7 @@ function readPngAlpha(file) {
     pos += 1;
     raw.copy(line, 0, pos, pos + stride);
     pos += stride;
-    // PNG 逐行滤波还原
+
     for (let x = 0; x < stride; x += 1) {
       const a = x >= channels ? line[x - channels] : 0;
       const b = prev[x];
@@ -117,7 +110,6 @@ function readPngAlpha(file) {
   return { width, height, alpha: out };
 }
 
-/** 把灰度数据写成 8-bit greyscale PNG。 */
 function writeGreyPng(target, width, height, grey) {
   const raw = Buffer.alloc((width + 1) * height);
   for (let y = 0; y < height; y += 1) {

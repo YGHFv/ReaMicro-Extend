@@ -9,7 +9,6 @@ import androidx.lifecycle.LifecycleRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 
-/** Module-owned owners: never cast the host's separately loaded Lifecycle/Compose classes. */
 internal class ModuleComposeOwner(private val activity: Activity, private val onHostDestroyed: () -> Unit = {}) :
     LifecycleOwner, SavedStateRegistryOwner, Application.ActivityLifecycleCallbacks {
     private val registry = LifecycleRegistry(this)
@@ -17,8 +16,12 @@ internal class ModuleComposeOwner(private val activity: Activity, private val on
     override val lifecycle: Lifecycle get() = registry
     override val savedStateRegistry get() = saved.savedStateRegistry
     private var closed = false
+    private var started = false
 
     fun start() {
+        check(!closed) { "Compose owner is already closed" }
+        if (started) return
+        started = true
         saved.performAttach()
         saved.performRestore(null)
         registry.currentState = Lifecycle.State.CREATED
@@ -29,7 +32,10 @@ internal class ModuleComposeOwner(private val activity: Activity, private val on
         if (closed) return
         closed = true
         activity.application.unregisterActivityLifecycleCallbacks(this)
-        registry.currentState = Lifecycle.State.DESTROYED
+
+        if (registry.currentState != Lifecycle.State.INITIALIZED) {
+            registry.currentState = Lifecycle.State.DESTROYED
+        }
     }
     override fun onActivityResumed(a: Activity) { if (a === activity && !closed) registry.currentState = Lifecycle.State.RESUMED }
     override fun onActivityPaused(a: Activity) { if (a === activity && !closed) registry.currentState = Lifecycle.State.STARTED }
@@ -38,6 +44,6 @@ internal class ModuleComposeOwner(private val activity: Activity, private val on
         if (a === activity) { close(); onHostDestroyed() }
     }
     override fun onActivityCreated(a: Activity, state: Bundle?) = Unit
-    override fun onActivityStarted(a: Activity) = Unit
+    override fun onActivityStarted(a: Activity) { if (a === activity && !closed) registry.currentState = Lifecycle.State.STARTED }
     override fun onActivitySaveInstanceState(a: Activity, state: Bundle) = Unit
 }

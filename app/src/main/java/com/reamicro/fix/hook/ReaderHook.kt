@@ -16,10 +16,6 @@ import java.lang.ref.WeakReference
 import java.util.concurrent.ConcurrentHashMap
 import com.reamicro.fix.hook.reader.*
 
-/**
- * Reader-surface hooks: selection actions, dictionary lookup, full-text search, and
- * defensive compatibility fixes for host reader regressions.
- */
 class ReaderHook(
     internal val classLoader: ClassLoader,
     internal val activityProvider: () -> Activity?,
@@ -27,7 +23,7 @@ class ReaderHook(
     internal val settings: XposedModuleSettings? = null,
     internal val isActivityResumedProvider: () -> Boolean = { true },
 ) {
-    // Compose 反射互操作的共用实现，避免各 hook 各存一份逐渐漂移的副本。
+
     internal val composeInterop = ComposeInterop(
         classLoader = classLoader,
         resolveClass = classLoader::loadClass,
@@ -36,20 +32,33 @@ class ReaderHook(
     )
 
     internal val selectionEditSaving = java.util.concurrent.atomic.AtomicBoolean(false)
+    internal val selectionEditPreparing = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile internal var selectionPagerTarget: ReaderSelectionPagerTarget? = null
+    @Volatile internal var selectionWindow: ReaderSelectionWindow? = null
+    @Volatile internal var selectionWindowHookInstalled = false
     internal var nativeSelectionHookInstalled: Boolean = false
     internal var currentSelectionControllerRef: WeakReference<Any>? = null
-    internal var currentEpubRef: WeakReference<Any>? = null
-    internal var currentPageRef: WeakReference<Any>? = null
-    // 强引用镜像：currentEpubRef/currentPageRef 是弱引用，会被 GC 随机回收，
-    // 导致 canShowReaderSearchEntry() 判定失败、宿主弹"暂无法搜索当前书籍"。
-    // 阅读会话期间用强引用持有当前 epub/page，防止被回收；退出阅读/切书时清空避免泄漏。
-    internal var currentEpubStrong: Any? = null
-    internal var currentPageStrong: Any? = null
-    internal var currentViewModelRef: WeakReference<Any>? = null
+    @Volatile internal var currentEpubRef: WeakReference<Any>? = null
+    @Volatile internal var currentPageRef: WeakReference<Any>? = null
+
+    @Volatile internal var currentEpubStrong: Any? = null
+    @Volatile internal var currentPageStrong: Any? = null
+    @Volatile internal var currentViewModelRef: WeakReference<Any>? = null
     internal var currentSessionRef: WeakReference<Any>? = null
     internal var searchPageDialogRef: WeakReference<Dialog>? = null
-    internal var searchMenuButtonRef: WeakReference<View>? = null
-    internal var searchMenuButtonActivityRef: WeakReference<Activity>? = null
+    internal var searchNavigationView: ReaderSearchNavigationBar? = null
+    @Volatile internal var searchNavigationState: SearchState? = null
+    @Volatile internal var pendingSearchReturnCaptures = 0
+    internal var dispatchingSearchJump = false
+    internal var searchPaintEpoch: ReaderSearchPaintEpoch? = null
+    @Volatile internal var searchPaintUnavailable = false
+    internal var searchNavigator: ReaderSearchNavigator? = null
+    @Volatile internal var searchSourceBuilder: HostSearchIndexBuilder? = null
+    internal val searchDocumentCache = SearchDocumentCache()
+    internal val searchWorker = LatestSearchWorker("ReaMicroFullTextSearch")
+    internal var searchScrollBridge: ReaderSearchScrollBridge? = null
+    internal var searchPageBridge: ReaderSearchPageBridge? = null
+    internal var currentScrollElement: Any? = null
     internal var searchNavigationBarRef: WeakReference<View>? = null
     internal var searchNavigationBarActivityRef: WeakReference<Activity>? = null
     internal var searchOverlayThemeCallbacks: ComponentCallbacks2? = null
@@ -85,60 +94,54 @@ class ReaderHook(
     internal val onDemandPrefetchInFlight = ConcurrentHashMap.newKeySet<String>()
     internal val onDemandPrefetchRetryCount = ConcurrentHashMap<String, Int>()
     internal val onDemandRefreshPending = ConcurrentHashMap.newKeySet<String>()
-    internal val onDemandRefreshInFlight = ConcurrentHashMap.newKeySet<String>()
+    internal val onDemandRefreshCoordinator = ReaderRefreshCoordinator()
+    @Volatile internal var onDemandSpineTable: ReaderOnDemandSpineTable? = null
+    @Volatile internal var onDemandVisibleRefreshKey: String? = null
+    @Volatile internal var onDemandVisibleBusyRetries = 0
+    @Volatile internal var onDemandVisibleSlot: Int? = null
+    @Volatile internal var onDemandJumpLease: ReaderRefreshCoordinator.Lease? = null
     @Volatile internal var lastRestoredReadAloudProgressKey: String = ""
     @Volatile internal var lastReadAloudProgressSyncAtMs: Long = 0L
     @Volatile internal var pendingReaderHighlightSheet: ReaderHighlightSheetRequest? = null
-    // 高亮页面（ReaderHighlightScreen）的 onBack 回调（Function0），点击"补全计划"时先关闭高亮页
-    // 再打开阅读页底部的高亮规则 sheet，避免 sheet 被高亮页盖住。
+
     @Volatile internal var readerHighlightScreenBackRef: WeakReference<Any>? = null
     internal val composeMethodCache = HashMap<String, Method>()
-    /** dp→px 换算结果缓存，见 cachedUdp。进程内 density 不变，值不会过期。 */
+
     internal val udpValueCache = HashMap<Int, Float>()
-    /** callNoArg 的无参方法缓存，key 为「类名#方法名」，null 值表示该类没有这个方法。 */
+
     internal val noArgMethodCache = HashMap<String, Method?>()
     internal val renderingHighlightScreenEntry = ThreadLocal.withInitial { false }
     internal val highlightScreenEntryInjected = ThreadLocal.withInitial { false }
 
-    // Rendering hooks run on the host reader pipeline. ThreadLocal keeps the current page
-    // available to downstream text/cfi hooks without leaking it across concurrent renders.
     internal val renderingEpubPage = ThreadLocal<Any?>()
     @Volatile internal var lastCatalogContext: CatalogContext? = null
     @Volatile internal var lastSearchState: SearchState? = null
     @Volatile internal var activeSearchNavigation: SearchNavigationState? = null
     @Volatile internal var currentVisiblePageSignature: String? = null
     @Volatile internal var currentVisiblePageNumber: Int? = null
-    // Statistics 在翻页、重组与预布局时会对同一页高频重复派发；只处理首次可见状态，
-    // 避免在主线程重复反射、预取和日志写入而导致翻页卡顿。
+
     @Volatile internal var lastHandledReaderStatisticsKey: String = ""
     @Volatile internal var lastOnDemandPrefetchSpineKey: String = ""
-    // onDemandPageLocation 每次翻页都要对全章节 href 做归一化（逐章图书几千条字符串处理，
-    // 发生在主线程）。元数据文件未变时结果恒定，按「文件指纹 + 章数」做单条目缓存。
+
     @Volatile internal var onDemandNormalizedHrefsCache: Pair<String, List<String>>? = null
     @Volatile internal var searchIndexState: SearchIndexState? = null
-    @Volatile internal var searchIndexBuildingKey: String? = null
     @Volatile internal var searchStateGeneration: Long = 0L
     @Volatile internal var searchRunSeq: Long = 0L
-    @Volatile internal var activeSearchJobKey: String? = null
     @Volatile internal var activeSearchPageToken: Long = 0L
     @Volatile internal var activeSearchPageUpdate: ((SearchState, Boolean) -> Unit)? = null
     @Volatile internal var readerBottomMenuVisible: Boolean = false
-    @Volatile internal var searchRenderState: SearchRenderState? = null
     @Volatile internal var cachedThemeColors: ThemeColors? = null
+    @Volatile internal var readerSearchTheme: StructureHost232Colors.Snapshot? = null
+    @Volatile internal var activeSearchHighlightSession: ReaderSearchHighlightSession? = null
     @Volatile internal var activeSearchHighlightId: Long? = null
     @Volatile internal var activeSearchHighlightMark: Any? = null
-    @Volatile internal var activeSearchHighlightVisibleId: Long? = null
-    @Volatile internal var activeSearchHighlightPageSignature: String? = null
-    @Volatile internal var activeSearchHighlightPageNumber: Int? = null
-    // 高亮在某页渲染被拒时按页签名记录方向（true=目标在该页之后）。
-    // 渲染先于 Statistics 上报，不能用「渲染页==当前可见页」判定（签名时序错位），
-    // 所以按页签名存，纠错时拿当前可见页签名来查。
-    // 由 createSearchHighlightContentOverlay 写入，每次 apply/clear 高亮时清空。
-    internal val activeSearchHighlightRejections = ConcurrentHashMap<String, Boolean>()
     @Volatile internal var activeSearchHighlightRenderLogId: Long? = null
     @Volatile internal var activeSearchHighlightRenderLogCount: Int = 0
     @Volatile internal var pendingSearchOriginRestore: Boolean = false
     @Volatile internal var scrollCrashMarkerOwnedByThisProcess: Boolean = false
+    @Volatile internal var scrollCrashRecoveryInitialized: Boolean = false
+    @Volatile internal var scrollCrashRecoveryPending: Boolean = false
+    internal val scrollCrashRecoveryInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile internal var catalogDumpLoggedForKey: String? = null
     @Volatile internal var lastReaderHighlightBookIdentity: String = ""
 
@@ -149,7 +152,7 @@ class ReaderHook(
             } ?: refreshReaderHighlightWindow(source)
         }
         ensureReadAloudHighlightReceiver()
-        // 逐个登记安装结果，宿主升级后靠启动汇总定位掉线的 hook。
+
         HookInstallReport.installAll(
             FEATURE_ID,
             listOf(
@@ -157,6 +160,7 @@ class ReaderHook(
                 "scrollPagerCrashGuard" to ::hookScrollPagerCrashGuard,
                 "nativeSelection" to ::installNativeSelectionHooks,
                 "readerViewModel" to ::hookReaderViewModel,
+                "searchJumpBridge" to { ReaderSearchJumpBridge(this).install() },
                 "readerCatalog" to ::hookReaderCatalog,
                 "readerBottomBar" to ::hookReaderBottomBar,
                 "inlineSearchIcon" to ::hookInlineSearchIcon,
@@ -177,8 +181,11 @@ class ReaderHook(
         val runningUnderPressure = level in
             ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW..ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
         if (runningUnderPressure || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
-            resetFullTextSearchState("trim memory level=$level", removeOverlays = false)
+
+            searchDocumentCache.clear()
+            searchIndexState = null
             cachedThemeColors = null
+            readerSearchTheme = null
         }
         when {
             level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND ->
@@ -193,7 +200,9 @@ class ReaderHook(
         releaseReaderMemory("system low memory", releaseEpub = true)
     }
 
-    @Volatile internal var nextIconIsDarkLightToggle = false
+    internal val readerBottomBarDepth = ThreadLocal.withInitial { 0 }
+    internal var readerInlineSearchClick: Any? = null
+    @Volatile internal var currentSearchPagerMode: Int? = null
     @Volatile internal var nextIconIsReaderBack = false
     @Volatile internal var nextIconIsAutoPage = false
 

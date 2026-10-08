@@ -51,8 +51,6 @@ internal object OnlineParagraphCommentInjectionPlanner {
         val normalizedText = normalizedTextWithSourceMap(text)
         if (normalizedText.text.isBlank()) return null
 
-        // ContentDom 会把 EPUB 的每个 <p> 拆成独立实例，因此不能要求一整个章节文本里存在完整段落。
-        // 先匹配段评文本被当前 ContentDom 文本包含的情况，再保留章节级文本的顺序匹配作为回退。
         var normalizedSearchFrom = 0
         val planned = comments
             .asSequence()
@@ -69,7 +67,7 @@ internal object OnlineParagraphCommentInjectionPlanner {
                 }
                 var matchedEnd = index + paragraph.length
                 if (index < 0 && paragraph.endsWith(normalizedText.text)) {
-                    // 段落被宿主拆分时，仅接受段尾片段，确保图标仍追加在原段落的末尾。
+
                     index = paragraph.length - normalizedText.text.length
                     matchedEnd = normalizedText.text.length
                 }

@@ -3,12 +3,6 @@ package com.reamicro.fix.online
 import org.json.JSONArray
 import org.json.JSONObject
 
-/**
- * 在线书源使用的轻量 JSONPath 兼容器。
- *
- * 只实现当前书源规则所需的字段、数组下标、通配符和递归下降语义，
- * 但递归下降后必须继续执行剩余路径，不能把 `$..name[*].*` 截断成 `$..name`。
- */
 internal object OnlineJsonPathCompat {
     fun values(node: Any?, rawRule: String): List<Any?> {
         val rule = rawRule.trim()

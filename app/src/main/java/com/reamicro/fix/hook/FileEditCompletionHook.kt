@@ -24,7 +24,7 @@ class FileEditCompletionHook(
     private val settingsProvider: () -> ModuleSettingsSnapshot = { ModuleSettingsSnapshot() },
     private val fontSettingsProvider: () -> FontSettingsSnapshot = { FontSettingsSnapshot() },
 ) {
-    // Compose 反射互操作的共用实现，避免各 hook 各存一份逐渐漂移的副本。
+
     private val composeInterop = ComposeInterop(
         classLoader = classLoader,
         resolveClass = ::cls,
@@ -34,11 +34,17 @@ class FileEditCompletionHook(
 
     private val methodCache = HashMap<String, Method>()
     private val activityResultHookedClasses = HashSet<String>()
-    private val activeBook = ThreadLocal<Any?>()
-    private val activeBookDepth = ThreadLocal.withInitial { 0 }
     private val injectingRow = ThreadLocal.withInitial { false }
 
     fun install() {
+
+        runCatching {
+            XposedBridge.hookAllConstructors(cls(HostClasses.Host.BOOKSHELF_REPOSITORY), object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    ReaMicroBookMetadataSync.rememberBookshelfRepository(param.thisObject)
+                }
+            })
+        }.onFailure { XposedBridge.log("$LOG_PREFIX bookshelf capture failed: $it") }
         hookBookDetailsTitleAuthorItem()
         hookBookDetailsSyncSizeItem()
         hookActivityResultFor(Activity::class.java)
@@ -193,12 +199,7 @@ class FileEditCompletionHook(
         bookIdentifierRawText(book)
 
     private fun bookIdentifierRawText(book: Any): String =
-        callString(book, "getUuid").trim()
-            .takeIf { it.isUuidOrMd5Identifier() }
-            .orEmpty()
-
-    private fun String.isUuidOrMd5Identifier(): Boolean =
-        UUID_IDENTIFIER_REGEX.matches(this) || MD5_IDENTIFIER_REGEX.matches(this)
+        BookIdentifierText.display(callString(book, "getUuid"))
 
     private fun syncSizeValueText(book: Any): String =
         formatFileSize(callLong(book, "getSize")).replace(" ", "")
@@ -228,135 +229,6 @@ class FileEditCompletionHook(
             .onFailure { XposedBridge.log("$LOG_PREFIX callback invoke failed: ${it.stackTraceToString()}") }
     }
 
-    private fun hookBookLocalSheet() {
-        runCatching {
-            val sheetClass = cls(BOOK_LOCAL_SHEET_CLASS)
-            sheetClass.declaredMethods
-                .filter { method ->
-                    (method.name == BOOK_LOCAL_SHEET_METHOD && method.parameterTypes.size == 5) ||
-                        (method.name == BOOK_LOCAL_SHEET_CONTENT_METHOD &&
-                            method.parameterTypes.firstOrNull()?.name == BOOK_CLASS)
-                }
-                .forEach { method ->
-                    method.isAccessible = true
-                    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            activeBookDepth.set((activeBookDepth.get() ?: 0) + 1)
-                            activeBook.set(param.args?.getOrNull(0))
-                        }
-
-                        override fun afterHookedMethod(param: MethodHookParam) {
-                            val nextDepth = ((activeBookDepth.get() ?: 0) - 1).coerceAtLeast(0)
-                            activeBookDepth.set(nextDepth)
-                            if (nextDepth == 0) activeBook.set(null)
-                        }
-                    })
-                }
-            XposedBridge.log("$LOG_PREFIX file edit BookLocalSheet hook installed")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX file edit BookLocalSheet hook failed: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun hookFileBackup() {
-        runCatching {
-            val sheetClass = cls(BOOK_LOCAL_SHEET_CLASS)
-            val methods = sheetClass.declaredMethods.filter {
-                it.name == FILE_BACKUP_METHOD && it.parameterTypes.size == 5
-            }
-            if (methods.isEmpty()) error("FileBackup composable not found")
-            methods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (injectingRow.get() == true) return
-                        if (!settingsProvider().canUseFileEdit) return
-                        val book = activeBook.get() ?: return
-                        val composer = param.args?.getOrNull(3) ?: return
-                        injectingRow.set(true)
-                        runCatching {
-                            renderHostDivider(composer)
-                            renderFileEditRow(book, composer)
-                        }.onFailure {
-                            XposedBridge.log("$LOG_PREFIX file edit row render failed: ${it.stackTraceToString()}")
-                        }
-                        injectingRow.set(false)
-                    }
-                })
-            }
-            XposedBridge.log("$LOG_PREFIX file edit FileBackup hook installed: ${methods.size}")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX file edit FileBackup hook failed: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun renderFileEditRow(book: Any, composer: Any) {
-        val modifier = paddingModifier(
-            clickableModifier(modifierInstance(), "OpenFileEdit") {
-                openFileEditor(book)
-            },
-            start = 18,
-            top = 16,
-            end = 12,
-            bottom = 16,
-        )
-        val content = functionProxy("FileEditRowContent", FUNCTION3_CLASS) { args ->
-            val rowScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
-            val innerComposer = args.getOrNull(1) ?: return@functionProxy targetUnit()
-            editImageVector()?.let { image ->
-                renderIcon(
-                    image = image,
-                    modifier = sizeModifier(
-                        paddingModifier(
-                            modifierInstance(),
-                            start = 0,
-                            top = 0,
-                            end = 16,
-                            bottom = 0,
-                        ),
-                        20,
-                    ),
-                    tint = colorScheme(innerComposer).longMethod("getOnBackground"),
-                    composer = innerComposer,
-                )
-            }
-            renderPrimaryText(
-                text = "\u6587\u4ef6\u7f16\u8f91",
-                modifier = rowWeightModifier(rowScope, modifierInstance()),
-                composer = innerComposer,
-            )
-            renderSecondarySingleLineText(
-                text = "\u56fe\u4e66\u7ed3\u6784",
-                composer = innerComposer,
-            )
-            navigateNextImageVector()?.let { image ->
-                renderIcon(
-                    image = image,
-                    modifier = paddingModifier(
-                        modifierInstance(),
-                        start = 0,
-                        top = 2,
-                        end = 0,
-                        bottom = 0,
-                    ),
-                    tint = colorScheme(innerComposer).longMethod("getSurfaceContainerHighest"),
-                    composer = innerComposer,
-                )
-            }
-            targetUnit()
-        }
-        method(ROW_KT_CLASS, ROW_METHOD, 7).invoke(
-            null,
-            modifier,
-            arrangementStart(),
-            alignmentCenterVertically(),
-            content,
-            composer,
-            384,
-            0,
-        )
-    }
-
     private fun openFileEditor(book: Any) {
         val activity = activityProvider() ?: return
         val open = open@{
@@ -368,14 +240,17 @@ class FileEditCompletionHook(
             }
             XposedBridge.log("$LOG_PREFIX file edit open root=${root.absolutePath}")
             hookActivityResultFor(activity.javaClass)
-            EpubWebEditorPanel(
+            runCatching { EpubBookPanel(
                 activity = activity,
                 root = root,
                 bookTitle = callString(book, "getTitle").ifBlank { "\u56fe\u4e66\u6587\u4ef6" },
                 book = book,
                 settingsProvider = settingsProvider,
                 fontSettingsProvider = fontSettingsProvider,
-            ).show()
+            ).show() }.onFailure {
+                XposedBridge.log("$LOG_PREFIX structure open failed: ${it.stackTraceToString()}")
+                Toast.makeText(activity, "图书结构打开失败：${it.message}", Toast.LENGTH_LONG).show()
+            }
         }
         if (Looper.myLooper() == Looper.getMainLooper()) {
             open()
@@ -407,7 +282,8 @@ class FileEditCompletionHook(
                             val requestCode = param.args?.getOrNull(0) as? Int ?: return
                             val resultCode = param.args?.getOrNull(1) as? Int ?: return
                             val data = param.args?.getOrNull(2) as? Intent
-                            EpubWebEditorPanel.dispatchActivityResult(activity, requestCode, resultCode, data)
+                            EpubBookPanel.dispatchActivityResult(activity, requestCode, resultCode, data)
+
                         }
                     })
                     XposedBridge.log("$LOG_PREFIX file edit ActivityResult hook installed: ${target.name}")
@@ -420,90 +296,21 @@ class FileEditCompletionHook(
     }
 
     private fun resolveBookRoot(activity: Activity, book: Any): File? {
-        val filesDir = activity.filesDir ?: return null
+
         val uid = callLong(book, "getUid")
         val uuid = callString(book, "getUuid").trim()
-        val candidates = buildList {
-            if (uid >= 0L && uuid.isNotBlank()) {
-                add(File(File(File(filesDir, uid.toString()), "books"), uuid))
-            }
-            if (uuid.isNotBlank()) {
-                filesDir.listFiles()
-                    ?.filter { it.isDirectory && it.name.toLongOrNull() != null }
-                    ?.mapTo(this) { File(File(it, "books"), uuid) }
-            }
-            uriFile(callString(book, "getUri"))?.let { uriFile ->
-                add(if (uriFile.isDirectory) uriFile else uriFile.parentFile ?: uriFile)
-            }
-        }
-        return candidates
-            .mapNotNull { runCatching { it.canonicalFile }.getOrNull() }
-            .firstOrNull { it.isDirectory }
-    }
-
-    private fun uriFile(value: String): File? {
-        val trimmed = value.trim()
-        if (trimmed.isBlank()) return null
-        return when {
-            trimmed.startsWith("file://") -> File(android.net.Uri.parse(trimmed).path ?: return null)
-            else -> File(trimmed)
-        }
-    }
-
-    private fun renderPrimaryText(text: String, modifier: Any?, composer: Any) {
-        method(TEXT_KT_CLASS, TEXT_METHOD, 22).invoke(
-            null,
-            text,
-            modifier,
-            colorScheme(composer).longMethod("getOnBackground"),
-            null,
-            0L,
-            null,
-            null,
-            null,
-            0L,
-            null,
-            null,
-            0L,
-            0,
-            false,
-            0,
-            0,
-            null,
-            typography(composer).method0("getLabelLarge"),
-            composer,
-            0,
-            0,
-            TEXT_DEFAULT_MASK_WITH_MODIFIER,
-        )
-    }
-
-    private fun renderSecondarySingleLineText(text: String, composer: Any) {
-        method(TEXT_KT_CLASS, TEXT_METHOD, 22).invoke(
-            null,
-            text,
-            null,
-            themeOnBackgroundVariant(composer),
-            null,
-            0L,
-            null,
-            null,
-            null,
-            0L,
-            null,
-            null,
-            0L,
-            textOverflowEllipsis(),
-            false,
-            1,
-            0,
-            null,
-            typography(composer).method0("getBodyMedium"),
-            composer,
-            0,
-            24960,
-            TEXT_SECONDARY_SINGLE_LINE_MASK,
-        )
+        if (uid < 0L || uuid.isBlank() || uuid == "." || uuid == ".." ||
+            uuid.any { it == '/' || it == '\\' }) return null
+        val repository = ReaMicroBookMetadataSync.currentBookshelfRepository()
+        val booksDir = runCatching {
+            val storage = repository?.javaClass?.getMethod("getUserStorage")?.invoke(repository)
+            storage?.javaClass?.getMethod("userBooksDir", java.lang.Long::class.java)
+                ?.invoke(storage, java.lang.Long.valueOf(uid))?.toString()?.let(::File)
+        }.getOrNull() ?: File(File(activity.filesDir, uid.toString()), "books")
+        val parent = booksDir.canonicalFile
+        val root = File(parent, uuid).canonicalFile
+        if (root.parentFile != parent || !root.isDirectory) return null
+        return root
     }
 
     private fun renderDetailsText(
@@ -564,26 +371,6 @@ class FileEditCompletionHook(
                     ?: error("$ICON_KT_CLASS.$ICON_METHOD ImageVector overload not found")
             }
         }
-
-    private fun renderHostDivider(composer: Any) {
-        simpleDividerMethod().invoke(
-            null,
-            method(PADDING_KT_CLASS, PADDING_ABSOLUTE_DEFAULT_METHOD, 7).invoke(
-                null,
-                modifierInstance(),
-                udp(54),
-                0f,
-                0f,
-                0f,
-                14,
-                null,
-            ),
-            0L,
-            composer,
-            0,
-            2,
-        )
-    }
 
     private fun renderDetailsCard(
         lazyItemScope: Any,
@@ -743,15 +530,6 @@ class FileEditCompletionHook(
         )
     }
 
-    private fun renderVerticalSpacer(height: Int, composer: Any) {
-        method(SPACER_KT_CLASS, SPACER_METHOD, 3).invoke(
-            null,
-            heightModifier(modifierInstance(), height),
-            composer,
-            0,
-        )
-    }
-
     private fun renderFixedWidthSpacer(width: Int, composer: Any) {
         method(SPACER_KT_CLASS, SPACER_METHOD, 3).invoke(
             null,
@@ -772,9 +550,6 @@ class FileEditCompletionHook(
             14,
             null,
         )
-
-    private fun heightModifier(baseModifier: Any, height: Int): Any =
-        method(SIZE_KT_CLASS, HEIGHT_METHOD, 2).invoke(null, baseModifier, udp(height))
 
     private fun widthModifier(baseModifier: Any, width: Int): Any =
         method(SIZE_KT_CLASS, WIDTH_METHOD, 2).invoke(null, baseModifier, udp(width))
@@ -935,14 +710,6 @@ class FileEditCompletionHook(
             }
         }
 
-    private fun composableLambda(key: Int, functionClassName: String, block: (Array<Any?>?) -> Any?): Any =
-        method(COMPOSABLE_LAMBDA_KT_CLASS, COMPOSABLE_LAMBDA_METHOD, 3).invoke(
-            null,
-            key,
-            true,
-            functionProxy("Composable$key", functionClassName, block),
-        )
-
     private fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any =
         composeInterop.functionProxy(name, functionClassName, block)
 
@@ -1087,7 +854,5 @@ class FileEditCompletionHook(
         const val FILE_EDIT_SUPPORTING_KEY = 0x524D4702
         const val FILE_EDIT_LEADING_KEY = 0x524D4703
         const val FILE_EDIT_TRAILING_KEY = 0x524D4704
-        val UUID_IDENTIFIER_REGEX = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-        val MD5_IDENTIFIER_REGEX = Regex("^[0-9a-fA-F]{32}$")
     }
 }

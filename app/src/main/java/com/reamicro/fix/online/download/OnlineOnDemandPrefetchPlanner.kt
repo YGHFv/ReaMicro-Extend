@@ -1,7 +1,7 @@
 package com.reamicro.fix.online.download
 
 internal object OnlineOnDemandPrefetchPlanner {
-    // 阅读中只预取下一章；目录跳转完成后由 Statistics 统一触发，避免同一时刻并发请求邻近章节。
+
     val READING_OFFSETS = listOf(1)
     val CATALOG_NEIGHBOR_OFFSETS = emptyList<Int>()
 
@@ -11,28 +11,27 @@ internal object OnlineOnDemandPrefetchPlanner {
     fun catalogNeighborTargets(targetIndex: Int, chapterCount: Int): List<Int> =
         targets(targetIndex, chapterCount, CATALOG_NEIGHBOR_OFFSETS)
 
-    /** EPUB CFI 的 itemref 步进为 2：/6/2 是第 1 章，/6/12 是第 6 章。 */
-    fun chapterIndexFromCfi(rawCfi: String, chapterCount: Int): Int? {
-        if (chapterCount <= 0) return null
-        val itemRefStep = Regex("""epubcfi\(/\d+/(\d+)""")
-            .find(rawCfi)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.toIntOrNull()
-            ?: return null
-        if (itemRefStep < 2 || itemRefStep % 2 != 0) return null
-        return (itemRefStep / 2 - 1).takeIf { it in 0 until chapterCount }
+    fun itemRefIndexFromCfi(rawCfi: String): Int? {
+        val step = Regex("""^epubcfi\(/\d+/(\d+)(?=[/\[),!])""")
+            .find(rawCfi)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: return null
+        return step.takeIf { it >= 0 && it % 2 == 0 }
     }
 
-    fun hostSpineIndexFromCfi(rawCfi: String): Int? {
-        val itemRefStep = Regex("""epubcfi\(/\d+/(\d+)""")
-            .find(rawCfi)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.toIntOrNull()
-            ?: return null
-        return (itemRefStep - 2).takeIf { it >= 0 && itemRefStep % 2 == 0 }
+    fun itemRefPositions(indices: List<Int>): Map<Int, Int> {
+        val positions = linkedMapOf<Int, Int>()
+        val ambiguous = mutableSetOf<Int>()
+        indices.forEachIndexed { position, index ->
+            if (index < 0 || index % 2 != 0 || index in ambiguous) return@forEachIndexed
+            if (positions.putIfAbsent(index, position) != null) {
+                positions.remove(index)
+                ambiguous += index
+            }
+        }
+        return positions
     }
+
+    fun hostSpinePositionFromCfi(rawCfi: String, positions: Map<Int, Int>): Int? =
+        itemRefIndexFromCfi(rawCfi)?.let(positions::get)
 
     private fun targets(anchorIndex: Int, chapterCount: Int, offsets: List<Int>): List<Int> {
         if (anchorIndex < 0 || chapterCount <= 0 || anchorIndex >= chapterCount) return emptyList()

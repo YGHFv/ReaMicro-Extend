@@ -28,12 +28,6 @@ import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
-// 在线源与关联补全源的设置簇。
-//
-// 书源导入、启用停用、登录授权（含 trxs 类源的 JS 登录适配）。
-//
-// 从 ReaMicroSettingsHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的
-// 结果重新缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaMicroSettingsHook.onlineSourceSubtitle(source: OnlineSourceEntry): String {
     val tags = mutableListOf<String>()
     val loginFields = OnlineSourceAuth.loginFields(source)
@@ -63,7 +57,7 @@ internal fun ReaMicroSettingsHook.onlineSourceSubtitle(source: OnlineSourceEntry
         tags += "今日 $used/$limit 章"
     }
     tags += if (source.preferOnDemandLoading) "逐章加载" else "整本下载"
-    // 段评功能暂停，不再展示「段评已开/已关」标签。
+
     return tags.joinToString(" · ")
 }
 
@@ -867,8 +861,7 @@ internal fun ReaMicroSettingsHook.addOnlineSourceDownloadPolicyInputs(
     container.addView(requestsPerSecondInput)
     container.addView(dailyChapterLimitInput)
     container.addView(preferOnDemandLoading)
-    // 段评功能没做完，先不给开关。paragraphCommentsEnabled 传 null，保存时按关处理
-    // （saveOnlineSourceDownloadPolicy 里 ?: false），解析与注入代码保持原样等后续继续做。
+
     return OnlineSourcePolicyInputs(
         requestsPerSecond = requestsPerSecondInput,
         dailyChapterLimit = dailyChapterLimitInput,
@@ -988,47 +981,17 @@ internal fun ReaMicroSettingsHook.bumpOnlineSourceVersion() {
         ?.invoke(state, value + 1)
 }
 
-/** [discoverVersionValue] 是否已经把「后台状态变化 → 推一次重组」的钩子挂到 DiscoverState 上。 */
 @Volatile
 private var discoverRefreshRegistered = false
 
-// 「发现」页的刷新信号。数据在 com.reamicro.fix.discover.DiscoverState 里（后台线程加载），
-// 这里只负责把它推给 Compose：读取该 state 的 value 建立依赖，值变化即触发重组。
 internal fun ReaMicroSettingsHook.discoverVersionState(): Any {
     discoverVersionUiState?.let { return it }
     return mutableState(0).also { discoverVersionUiState = it }
 }
 
-/**
- * 把 DiscoverState.version 同步到 Compose state，并返回当前值。
- *
- * ## 为什么**只读不写**
- *
- * 这里曾经在组合期间补写 `setValue`（「读的时候发现 version 变了就顺手推进」）。
- * 组合期间写状态本身就会排入一次额外的 apply，在 LazyList 子组合进行到一半时更危险；
- * 改成「只在帧间（主线程 post）推进」之后行为更可预测。
- *
- * ⚠ 但这**不是**发现页 `加载更多` 两次连点闪退的根因。那个崩溃的真正原因已在
- * [ReaMicroSettingsHook.Discover.kt] 的 `renderDiscoverGridRow` 上查实并修复：
- * 同一 Row 内子节点种类从 `Spacer` 变成格子的 `Column`，导致宿主 gapbuffer 的
- * `PostInsertNodeFixup` 用「槽位下标」去调 `insertBottomUp`，而真实孩子数更少 →
- * `MutableVector.add` 数组拷贝长度变负（实机取证 `idx=4 size=2`，
- * 父 Row 只有 `[Column 354x626, Column 355x0]` 两个孩子）。
- *
- * 推进重组由 [DiscoverState.onChanged] → 主线程 post `setValue` 负责（帧间执行）；
- * 本函数只负责读值建立依赖 + 同步观测版本。哪怕 post 还没到、本次组合读到旧值，
- * post 落地后会再推一次重组收敛，不会停帧。
- */
 internal fun ReaMicroSettingsHook.discoverVersionValue(): Int {
     val state = discoverVersionState()
 
-    // ★ 注册「后台状态变化 → 推一次重组」的钩子（只注册一次）。
-    //
-    // DiscoverState.version 是普通 @Volatile 字段，Compose 追踪不到；只靠组合期间比对版本号，
-    // 后台加载完成后再没有任何东西会触发下一次组合 —— 页面会永远停在第一帧的「正在加载…」，
-    // 切标签也毫无反应（实测就是这两个现象）。
-    // 这里把 Compose 的 MutableState 交给 DiscoverState：它每次 bump 都回调过来，
-    // 我们在主线程把该 State 的值 +1，写值即触发重组，UI 再去读最新的 sources/state。
     if (!discoverRefreshRegistered) {
         discoverRefreshRegistered = true
         val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -1038,20 +1001,11 @@ internal fun ReaMicroSettingsHook.discoverVersionValue(): Int {
     }
 
     val composeValue = (state.method0("getValue") as? Number)?.toInt() ?: 0
-    // 只同步观测版本，绝不在这里 setValue（原因见函数头注释）。
+
     discoverObservedVersion = com.reamicro.fix.discover.DiscoverState.version
     return composeValue
 }
 
-/**
- * 在主线程推一次发现页重组（写 `discoverVersionState` 的 value）。
- *
- * 唯一的写入口：[DiscoverState.onChanged] 的主线程 post，以及自证探针延迟到帧间后的调用。
- * 组合期间一律不写：把写状态排进 LazyList 的子组合中间会让 apply 顺序更难推理。
- *
- * 判据用 `Looper.getMainLooper() == Looper.myLooper()`：本模块跑在 LSPosed 进程内，
- * 直接读 `Looper.myLooper()` 可能触发未初始化的 sThreadLocal 而抛 `RuntimeException`。
- */
 internal fun ReaMicroSettingsHook.signalDiscoverRefresh() {
     val mainLooper = runCatching { android.os.Looper.getMainLooper() }.getOrNull() ?: return
     @Suppress("DEPRECATION")

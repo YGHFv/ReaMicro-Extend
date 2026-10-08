@@ -1,17 +1,12 @@
 package com.reamicro.fix.hook
 
-import android.content.Context
 import com.reamicro.fix.online.epub.OnlineChapterImageMarkup
-import com.reamicro.fix.online.search.decodeOnlineHtmlEntities
 import com.reamicro.fix.online.epub.onlineEpubImageManifestItem
 import com.reamicro.fix.online.epub.mergeOnlineEpubImageManifest
-import com.reamicro.fix.online.epub.OnlineEpubImageManifestItem
 import com.reamicro.fix.online.epub.stableOnlineImageFileStem
 import com.reamicro.fix.cloud.webdav.OnlineDownloadedChapter
 import com.reamicro.fix.online.download.OnlineOnDemandMetadata
 import com.reamicro.fix.online.download.OnlineOnDemandMetadataCodec
-import com.reamicro.fix.online.epub.OnlineChapterHeadingMarkup
-import com.reamicro.fix.online.epub.OnlineBodyMarkup
 import com.reamicro.fix.online.epub.OnlineEpubFontEmbedder
 import com.reamicro.fix.online.epub.OnlineEpubFontFace
 import com.reamicro.fix.online.epub.OnlineEpubStyleCss
@@ -19,14 +14,8 @@ import com.reamicro.fix.online.epub.OnlineHeaderImageComposer
 import com.reamicro.fix.settings.OnlineEpubStyleKind
 import com.reamicro.fix.settings.OnlineEpubStyleSettings
 import com.reamicro.fix.settings.OnlineEpubStyleStore
-import com.reamicro.fix.online.epub.OnlineVolumeHeadingMarkup
 import java.io.File
-import java.net.URLEncoder
-import java.util.Locale
-import java.util.zip.CRC32
-import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
-import kotlin.math.max
 import com.reamicro.fix.hook.webdav.*
 import com.reamicro.fix.online.epub.onlineCoverExtFromMime
 import com.reamicro.fix.online.epub.onlineCoverExtFromBytes
@@ -55,13 +44,6 @@ import com.reamicro.fix.online.download.onlineCompletionFailedChaptersJson
 import com.reamicro.fix.online.download.onlineCompletionChapterFile
 import com.reamicro.fix.logging.logWebDav
 
-// WebDavDriveHook 的在线补全 EPUB 生成簇。
-//
-// 把下载好的章节写成标准 EPUB：章节 xhtml、分卷页、toc.ncx、content.opf、封面、
-// 默认样式与字体嵌入、正文图片本地化。
-//
-// 从 WebDavDriveHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun WebDavDriveHook.localizeOnlineChapterImages(
     bookDir: File,
     target: OnlineDownloadTarget,
@@ -123,7 +105,7 @@ internal fun WebDavDriveHook.writeOnlineCompletionEpub(
 ) {
     ZipOutputStream(file.outputStream().buffered()).use { zip ->
         val styleSettings = OnlineEpubStyleStore.read(currentApplicationContext() ?: currentContext())
-        // mimetype 必须是 EPUB 包里的第一个条目，字体等其它条目一律排在其后。
+
         writeStoredTextZipEntry(zip, "mimetype", "application/epub+zip")
         val fontFaces = writeOnlineCompletionFontEntries(zip, styleSettings)
         writeTextZipEntry(
@@ -223,19 +205,12 @@ internal fun WebDavDriveHook.writeOnlineCompletionDefaultStyle(bookDir: File) {
     styleFile.writeText(onlineCompletionDefaultCss(root), Charsets.UTF_8)
 }
 
-/**
- * 按用户选中的成书样式拼装 default.css，并把样式选用的字体嵌入书目录。
- *
- * 读不到 Context 时回退到内置默认样式，保证下载流程不因设置不可用而中断。
- */
-
 internal fun WebDavDriveHook.onlineCompletionDefaultCss(bookDir: File?): String {
     val settings = OnlineEpubStyleStore.read(currentApplicationContext() ?: currentContext())
     val fontFaces = bookDir?.let { embedOnlineCompletionFonts(it, settings) }.orEmpty()
     return OnlineEpubStyleCss.build(settings, fontFaces)
 }
 
-/** 收集参与成书的样式所选字体，去重后写入书目录并登记到 manifest。 */
 internal fun WebDavDriveHook.embedOnlineCompletionFonts(
     bookDir: File,
     settings: OnlineEpubStyleSettings,
@@ -272,7 +247,6 @@ internal fun WebDavDriveHook.embedOnlineCompletionFonts(
     return embedded
 }
 
-/** 整本下载时把样式所选字体直接写进 EPUB 包，返回样式 id 到字体的映射。 */
 internal fun WebDavDriveHook.writeOnlineCompletionFontEntries(
     zip: ZipOutputStream,
     settings: OnlineEpubStyleSettings,
@@ -294,12 +268,6 @@ internal fun WebDavDriveHook.writeOnlineCompletionFontEntries(
     return embedded
 }
 
-/**
- * 参与成书的样式里选中的字体文件，key 为样式 id。
- *
- * 「仅声明字体名」模式不复制文件，因此不出现在结果里，CSS 侧会退回写裸 family 名。
- */
-
 internal fun WebDavDriveHook.onlineCompletionHeaderImage(settings: OnlineEpubStyleSettings): ByteArray? {
     if (!settings.headerEnabled) return null
     val style = settings.selected(OnlineEpubStyleKind.Header) ?: return null
@@ -313,12 +281,6 @@ internal fun WebDavDriveHook.onlineCompletionHeaderImage(settings: OnlineEpubSty
         logWebDav("online completion header compose failed: ${error.message.orEmpty()}")
     }.getOrNull().also { mask?.recycle() }
 }
-
-/**
- * 解析本次成书要用的装饰资源，并交给 [writeImage] 落地。
- *
- * 整本下载写 zip 条目、增量更新写书目录，落地方式不同但选图与合成逻辑一致。
- */
 
 internal fun WebDavDriveHook.resolveOnlineCompletionDecor(
     settings: OnlineEpubStyleSettings,
@@ -350,7 +312,6 @@ internal fun WebDavDriveHook.resolveOnlineCompletionDecor(
     )
 }
 
-/** 书目录侧的装饰资源：图片直接落到 OEBPS/Images 并登记 manifest。 */
 internal fun WebDavDriveHook.onlineCompletionBookDirDecor(bookDir: File): OnlineEpubDecor {
     val settings = OnlineEpubStyleStore.read(currentApplicationContext() ?: currentContext())
     val root = bookDir.canonicalFile
@@ -417,7 +378,6 @@ internal fun WebDavDriveHook.syncOnlineCompletionDefaultStyle(bookDir: File): Bo
     return changed
 }
 
-/** 把卷首页写入已导入的书目录，并清理卷数变少后残留的旧卷首页。 */
 internal fun WebDavDriveHook.writeOnlineCompletionVolumePages(
     bookDir: File,
     chapters: List<OnlineDownloadedChapter>,

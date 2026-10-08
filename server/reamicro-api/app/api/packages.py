@@ -1,14 +1,7 @@
-"""内容包的读取、下载与模块上传。
-
-模块上传遵循"同名同域只关联、不覆盖"：服务器已有同名同域的源时只回关联信息，
-不改服务器内容，避免任何白名单用户改动共享内容库。唯一例外是上传者自己创建的
-高亮样式，允许再次上传更新内容，以便补充图片等资源。
-"""
-
 from typing import Any
 
-from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request, UploadFile, File, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPBasicCredentials
 
 from app import runtime
@@ -64,7 +57,7 @@ router = APIRouter()
 
 
 def _highlight_style_image(body: bytes) -> dict[str, Any] | None:
-    """提取高亮样式的内嵌图片描述；旧版或无图样式返回 None。"""
+
     try:
         root = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
@@ -121,7 +114,7 @@ async def module_upload_policy_endpoint(
     check_request_auth(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
     enforce_api_scope(request, x_reamicro_api_key)
     policy = module_upload_policy(load_config(), x_reamicro_host_account_id)
-    # 带上配额用量，模块在上传前就能显示"还能传几个"，不用先撞墙再看报错。
+
     _, _, usage = check_upload_quota(str(x_reamicro_host_account_id or ""))
     return response({**policy, **usage})
 
@@ -213,9 +206,8 @@ async def module_upload_package(request: Request, owner: str = Depends(module_up
                 {"uploaded": True, "linked": True, "package": module_package_summary(manifest, kind)},
                 message="高亮样式已更新并关联",
             )
-        # 名称与地址各命中一项即视为同一个源：不覆盖服务器内容，只回关联信息供后续更新。
-        # 同时把本次带来的新名称与新地址并入清单——源改名或换域名后，
-        # 集合里同时留着新旧两套，用旧信息的客户端也不会失联。
+
+
         matched = absorb_match_hints(kind, existing, parsed)
         reason = MATCH_REASON_LABELS.get(str(existing.get("_matchReason", "")), "名称与地址匹配")
         audit_event(
@@ -228,8 +220,8 @@ async def module_upload_package(request: Request, owner: str = Depends(module_up
             {"uploaded": False, "linked": True, "package": module_package_summary(matched, kind)},
             message=f"服务器已存在同一个源（{reason}），已自动关联",
         )
-    # 配额只拦新建：上面命中已有内容包的路径已经 return，走到这里才是真的要建新包。
-    # 反过来若在关联前就拦，用户想更新自己的源会被自己的配额挡住。
+
+
     host_account_id = str(request.headers.get("X-ReaMicro-Host-Account-Id", "")).strip()
     allowed_by_quota, quota_reason, quota_usage = check_upload_quota(host_account_id)
     if not allowed_by_quota:
@@ -249,7 +241,7 @@ async def module_upload_package(request: Request, owner: str = Depends(module_up
     })
     package_id, existing_manifest = resolve_package_identity(kind, "", parsed["contentId"], metadata)
     if existing_manifest is not None:
-        # 标识命中旧包但名称或域名不同，同样只关联，避免模块改写他人内容。
+
         audit_event("module_upload_linked", actor=owner, success=True, metadata={"kind": kind, "packageId": package_id})
         return response(
             {"uploaded": False, "linked": True, "package": module_package_summary(existing_manifest, kind)},

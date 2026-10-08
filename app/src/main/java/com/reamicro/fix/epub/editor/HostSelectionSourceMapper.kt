@@ -3,11 +3,6 @@ package com.reamicro.fix.epub.editor
 import java.lang.reflect.Method
 import java.lang.reflect.InvocationTargetException
 
-/**
- * Uses the target APK's own Ksoup parser and NodeExt paths; never writes its serialized DOM.
- * readHtml in 2.3.2 normalizes self-closing non-void tags before HTML parsing. Track that
- * preprocessing separately, so original offsets/entities/attributes remain intact.
- */
 internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
     private val parserType = loader.loadClass("com.fleeksoft.ksoup.parser.Parser")
     private val companion = parserType.getField("Companion").get(null)
@@ -17,6 +12,58 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
     private val cfiCompanion = cfiType.getField("Companion").get(null)
     private val methods = HashMap<String, Method>()
 
+    private var reading: HostReadingContext? = null
+
+    fun bindReadingDocument(document: Any, controller: Any) {
+        fun field(target: Any, name: String) = target.javaClass.getDeclaredField(name)
+            .apply { isAccessible = true }.get(target)!!
+        val nodes = field(controller, "nodes") as Map<*, *>
+        val selection = invoke(controller, "getSelection") ?: error("选区已关闭")
+        val endpoints = listOf(invoke(selection, "getAnchor")!!, invoke(selection, "getFocus")!!)
+        val ids = endpoints.map { invoke(it, "getNodeId") as String }
+        val ordered = nodes.values.filterNotNull().sortedWith { a, b ->
+            numberComparison(invoke(a, "getCfi")!!, invoke(b, "getCfi")!!)
+        }
+        val indices = ids.map { id -> ordered.indexOfFirst { invoke(it, "getId") == id } }
+        require(indices.all { it >= 0 }) { "阅读页选区片段已失效" }
+        val slices = ordered.subList(indices.min(), indices.max() + 1).map { node ->
+            SelectionRenderedSlice(anchorPoint(invoke(node, "getCfi")!!),
+                invoke(invoke(node, "getText")!!, "getText") as String)
+        }
+        val window = loader.loadClass("org.epub.UIEpubWindow").getField("INSTANCE").get(null)
+        reading = HostReadingContext(document, invoke(document, "getEpubcfi")!!,
+            (invoke(field(document, "styleSheets"), "getRuleSets") as List<*>).toList(),
+            field(document, "dir") as String, invoke(document, "isFullScreen") as Boolean,
+            invoke(window, "getRootStyle")!!, slices)
+    }
+
+    fun bindSearchDocument(document: Any) {
+        fun field(name: String) = document.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(document)!!
+        val window = loader.loadClass("org.epub.UIEpubWindow").getField("INSTANCE").get(null)
+        reading = HostReadingContext(document, invoke(document, "getEpubcfi")!!,
+            (invoke(field("styleSheets"), "getRuleSets") as List<*>).toList(), field("dir") as String,
+            invoke(document, "isFullScreen") as Boolean, invoke(window, "getRootStyle")!!, emptyList())
+    }
+
+    fun checkReadingContext(document: Any? = null) {
+        val context = reading ?: error("缺少真实阅读页渲染上下文，未写入")
+        val window = loader.loadClass("org.epub.UIEpubWindow").getField("INSTANCE").get(null)
+        require((document == null || document === context.document) &&
+            invoke(window, "getRootStyle") === context.rootStyle) { "阅读页或排版设置已变化，请重新选择（未写入）" }
+    }
+
+    fun checkReadingDocuments(documents: Collection<*>) {
+        checkReadingContext()
+        val original = reading!!.document
+        require(documents.any { it === original }) { "章节渲染已更新，请重新选择（未写入）" }
+    }
+
+    fun verifyReadingSlices(map: SelectionSourceMap) {
+        val context = reading ?: error("缺少真实阅读页选区快照")
+        require(context.slices.isNotEmpty()) { "阅读页选区快照为空" }
+        context.slices.forEach { map.verifyRenderedSlice(it) }
+    }
+
     fun hostCfi(raw: String): Any = invoke(cfiCompanion, "create", raw) ?: error("宿主无法解析选区 CFI")
     fun point(cfi: Any): SelectionCfiPoint {
         val offset = invoke(cfi, "getOffset") ?: error("选区缺少字符位置")
@@ -24,10 +71,66 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
         return SelectionCfiPoint(
             number(invoke(cfi, "getSpine")!!, "getIndex"),
             number(invoke(cfi, "getItemref")!!, "getIndex"), steps,
-            number(offset, "getOffset"), number(offset, "getIndex"),
+            number(offset, "getOffset"), number(offset, "getIndex"), number(invoke(cfi, "getBody")!!, "getIndex"),
         )
     }
 
+    fun anchorPoint(cfi: Any): SelectionCfiPoint {
+        val offset = invoke(cfi, "getOffset")
+        val steps = (invoke(cfi, "getSteps") as? List<*>).orEmpty().map { number(it!!, "getIndex") }
+        return SelectionCfiPoint(
+            number(invoke(cfi, "getSpine")!!, "getIndex"),
+            number(invoke(cfi, "getItemref")!!, "getIndex"), steps,
+            offset?.let { number(it, "getOffset") } ?: 0,
+            offset?.let { number(it, "getIndex") } ?: 1, number(invoke(cfi, "getBody")!!, "getIndex"),
+        )
+    }
+
+    fun rangeOverlapsSelection(range: Any, start: Any, end: Any): Boolean {
+        val pageStart = invoke(range, "getStart") ?: return false
+        val pageEnd = invoke(range, "getEndExclusive") ?: return false
+        if (numberComparison(start, end) >= 0 || numberComparison(pageStart, pageEnd) >= 0) return false
+
+        return numberComparison(start, pageEnd) < 0 && numberComparison(end, pageStart) > 0
+    }
+    private fun numberComparison(left: Any, right: Any): Int =
+        (invoke(left, "compareTo", right) as Number).toInt()
+
+    fun viewportSourceOffset(source: SelectionSourceMap, cfi: Any): Int? {
+        val point = anchorPoint(cfi)
+        val bias = invoke(cfi, "getSideBias")
+        val afterNode = invoke(cfi, "getOffset") == null &&
+            bias != null && invoke(bias, "getAfter") == true
+        return if (afterNode) source.sourceOffsetAfterNode(point) else source.sourceOffset(point)
+    }
+    fun cfiForPoint(template: Any, point: SelectionCfiPoint): Any {
+        val stepType = loader.loadClass("org.epub.html.EpubCFI\$StepReference")
+        val idType = loader.loadClass("org.epub.html.EpubCFI\$IDAssertion")
+        val offsetType = loader.loadClass("org.epub.html.EpubCFI\$CharacterOffset")
+        val steps = point.steps.map { stepType.getConstructor(Int::class.javaPrimitiveType, idType).newInstance(it, null) }
+        val offset = offsetType.getConstructor(Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+            .newInstance(point.offsetIndex, point.offset)
+        val builder = invoke(invoke(template, "toBuilder")!!, "newBuilder")!!
+        require(number(invoke(template, "getSpine")!!, "getIndex") == point.spine &&
+            number(invoke(template, "getItemref")!!, "getIndex") == point.itemRef) { "CFI 章节身份不一致" }
+
+        invoke(builder, "body", stepType.getConstructor(Int::class.javaPrimitiveType, idType).newInstance(point.bodyIndex, null))
+        invoke(builder, "steps", steps)
+        invoke(builder, "offset", offset)
+
+        if (invoke(template, "getOffset") != null) {
+            val bias = invoke(template, "getSideBias")
+            if (bias != null) {
+                val translatedBias = bias.javaClass.getConstructor(
+                    Boolean::class.javaPrimitiveType, String::class.java,
+                ).newInstance(invoke(bias, "getBefore"), "")
+                invoke(builder, "sideBias", translatedBias)
+            }
+        }
+        val result = invoke(builder, "build")!!
+        require(this.point(result) == point) { "宿主 CFI 往返校验失败" }
+        return result
+    }
     fun map(source: String, baseUri: String): SelectionSourceMap {
         require(source.length <= 4_000_000) { "章节超过当前选区映射的安全范围，请使用图书结构编辑器" }
         val normalized = normalize.invoke(null, source) as String
@@ -35,6 +138,8 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
         val parser = invoke(companion, "htmlParser")!!
         invoke(parser, "setTrackPosition", true)
         val document = invoke(parser, "parseInput", normalized, baseUri)!!
+        reading?.let { return HostReadingProjection(this, loader, it).map(source, document, positions) }
+
         val body = invoke(document, "body")!!
         val nodeType = loader.loadClass("com.fleeksoft.ksoup.nodes.Node")
         val pathMethod = loader.loadClass("org.epub.utils.NodeExtKt").getMethod("getAllSteps", nodeType)
@@ -42,12 +147,24 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
         val starts = SelectionInts()
         val ends = SelectionInts()
         val anchors = linkedMapOf<String, Int>()
+        val textNodes = linkedMapOf<String, IntRange>()
+        val nodeEnds = hashMapOf<String, Int>()
         val groups = hashMapOf<String, String>()
         val groupEnds = hashMapOf<String, Int>()
         val structuralBreaks = hashSetOf<Int>()
+        val blockBreaks = hashSetOf<Int>()
         val entityCache = hashMapOf<String, String>()
         fun add(value: String, start: Int = -1, end: Int = -1) {
             for (c in value) { text.append(c); starts.add(start); ends.add(end) }
+        }
+        fun blockBreak() {
+            if (text.isEmpty()) return
+            if (text.last() != '\n') {
+                structuralBreaks += text.length
+                add("\n")
+            }
+
+            blockBreaks += text.lastIndex
         }
         fun key(node: Any): String {
             val steps = pathMethod.invoke(null, node) as List<*>
@@ -64,6 +181,8 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
             val nodeKey = key(node)
             if (name in ignored) return
             val block = name in blocks
+
+            if (block) blockBreak()
             val group = if (block) nodeKey else inheritedGroup
             anchors[nodeKey] = text.length
             groups[nodeKey] = group
@@ -82,6 +201,7 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
                         else {
                             text.append(mapped.text)
                             starts.addAll(mapped.starts); ends.addAll(mapped.ends)
+                            if (text.length > before) textNodes[nodeKey] = before until text.length
                         }
                     }
                 }
@@ -97,20 +217,18 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
                 }
             }
             if (block) {
-                if (text.length > before && text.last() != '\n') {
-                    structuralBreaks += text.length
-                    add("\n")
-                }
+                if (text.length > before) blockBreak()
                 groupEnds[group] = text.length
             }
+            nodeEnds[nodeKey] = text.length
         }
         visit(body, "0", 0)
         val runEnds = groups.mapValues { (_, group) -> groupEnds[group] ?: text.length }
-        return SelectionSourceMap(source, text.toString(), starts.toArray(), ends.toArray(), anchors, runEnds, structuralBreaks)
+        return SelectionSourceMap(source, text.toString(), starts.toArray(), ends.toArray(), anchors, runEnds, structuralBreaks, textNodes, nodeEnds, blockBreaks)
     }
 
     private fun number(target: Any, name: String) = (invoke(target, name) as Number).toInt()
-    private fun invoke(target: Any, name: String, vararg args: Any?): Any? {
+    internal fun invoke(target: Any, name: String, vararg args: Any?): Any? {
         val key = target.javaClass.name + "#" + name + args.joinToString { it?.javaClass?.name.orEmpty() }
         val method = methods.getOrPut(key) {
             target.javaClass.methods.firstOrNull { method ->
@@ -141,11 +259,11 @@ internal class SelectionInts {
         if (size == array.size) array = array.copyOf(array.size * 2)
         array[size++] = value
     }
+    fun removeLast() { require(size > 0); size-- }
     fun addAll(values: IntArray) { for (v in values) add(v) }
     fun toArray(): IntArray = array.copyOf(size)
 }
 
-/** Token-wise reproduction must equal the host preprocessing exactly, or mapping is refused. */
 internal class NormalizedSelectionPositions(
     private val original: String,
     private val normalized: String,

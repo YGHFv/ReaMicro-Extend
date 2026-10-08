@@ -3,9 +3,9 @@ import java.io.File
 import java.util.Properties
 
 plugins {
+    id("io.gitlab.arturbosch.detekt")
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("io.gitlab.arturbosch.detekt")
 }
 
 val bundledSourceFilesDir = rootProject.layout.projectDirectory.dir("source-files")
@@ -46,8 +46,6 @@ val syncBundledSources by tasks.registering(Sync::class) {
     into(generatedBundledSourcesDir.map { it.dir("reamicro_sources") })
 }
 
-// 配套 Root 模块 ZIP 打进 APK assets，由当前 KernelSU / Magisk / APatch 管理器安装，
-// 不再需要去 GitHub Releases 手动下载（CI 仍会单独产出同一份 ZIP 供手动刷入）。
 val rootModuleSourceDir = rootProject.layout.projectDirectory.dir("module/reamicro-automation")
 val rootModulePropText: String = rootModuleSourceDir.file("module.prop").asFile.readText(Charsets.UTF_8)
 val rootModuleVersion: String = Regex("^version=(.+)$", RegexOption.MULTILINE)
@@ -55,7 +53,7 @@ val rootModuleVersion: String = Regex("^version=(.+)$", RegexOption.MULTILINE)
     ?.groupValues?.get(1)?.trim()
     .orEmpty()
     .ifBlank { error("module/reamicro-automation/module.prop 缺少 version，无法生成内置通用模块包") }
-// 内置模块的 versionCode：运行时用来判断已装模块是否落后于 APK 内置的这一份，决定要不要升级。
+
 val rootModuleVersionCode: Int = Regex("^versionCode=(\\d+)$", RegexOption.MULTILINE)
     .find(rootModulePropText)
     ?.groupValues?.get(1)?.trim()?.toIntOrNull()
@@ -65,7 +63,7 @@ val generatedRootModuleRoot = generatedRootModuleDir.get().asFile
 val bundleModule by tasks.registering(Zip::class) {
     archiveFileName.set("ReaMicro-Automation-Root-$rootModuleVersion.zip")
     destinationDirectory.set(generatedRootModuleDir.map { it.dir("module") })
-    // Changing the module version must not leave multiple ZIPs in APK assets.
+
     doFirst {
         destinationDirectory.get().asFile.listFiles()?.filter {
             it.name.startsWith("ReaMicro-Automation-Root-") && it.extension == "zip" &&
@@ -74,7 +72,7 @@ val bundleModule by tasks.registering(Zip::class) {
     }
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
-    // 与 tools/build-module.py 同一份清单与权限：脚本 0755、module.prop 0644。
+
     from(rootModuleSourceDir) {
         include("*.sh")
         filePermissions { unix("755") }
@@ -95,7 +93,7 @@ val bundleModule by tasks.registering(Zip::class) {
 
 android {
     namespace = "com.reamicro.fix"
-    // miuix 0.9.4 → Compose 1.12.0 要求 compileSdk 37（允许高于 targetSdk，不影响运行时行为）。
+
     compileSdk = 37
 
     defaultConfig {
@@ -103,8 +101,8 @@ android {
         ndk { abiFilters += "arm64-v8a" }
         minSdk = 26
         targetSdk = 35
-    versionCode = 70
-    versionName = "2.3.8"
+        versionCode = 71
+        versionName = "2.3.9"
     }
 
     compileOptions {
@@ -114,8 +112,7 @@ android {
 
     buildFeatures {
         buildConfig = true
-        // 模块自己的主界面（ModuleMainActivity）用 miuix（Compose Multiplatform 库）绘制；
-        // 注入宿主的界面仍走反射，不参与 Compose。
+
         compose = true
     }
 
@@ -140,7 +137,7 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
         release {
-            // Missing release credentials must never fall back to a debug certificate.
+
             signingConfig = if (hasReleaseSigning) signingConfigs.getByName("release") else null
         }
     }
@@ -160,13 +157,11 @@ tasks.matching { task -> task.name.contains("lint", ignoreCase = true) }.configu
     dependsOn(bundleModule)
 }
 
-// detekt 只做体积/复杂度基线度量，不参与构建成败判定。
-// 用途：重构前后对比「单文件行数、单类成员数、超长方法数」是否收敛。
 detekt {
     buildUponDefaultConfig = true
     allRules = false
     config.setFrom(rootProject.files("config/detekt/detekt.yml"))
-    source.setFrom(files("src/main/java", "src/test/java"))
+    source.setFrom(files("src/main/java"))
     ignoreFailures = true
     parallel = true
 }
@@ -184,20 +179,17 @@ tasks.withType<io.gitlab.arturbosch.detekt.Detekt>().configureEach {
 
 dependencies {
     implementation(project(":scripta-editor"))
-    // Module-owned native port of host 1.3 BookManager; same Material3 family as the host.
+
     implementation("androidx.compose.material3:material3:1.5.0-alpha22")
     implementation("io.github.proify.lyricon:provider:0.1.70")
 
-    // 模块主界面：miuix（HyperOS 风格 Compose UI 库）+ activity-compose 提供的 setContent。
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.4")
     implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.4")
     implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.4")
 
-    // 顶栏/底栏的毛玻璃与悬浮底栏的液态玻璃（设置页「主题」里的开关）。
-    // 用 miuix 官方 blur 库（KernelSU 管理器同款），与 miuix-ui 同版本、同一家发布，不引入第三套图形栈。
     implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.4")
-    // 预测性返回要改 ApplicationInfo 的隐藏方法，Android 14+ 需要先放行隐藏 API。
+
     implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
 
     compileOnly("io.github.libxposed:api:102.0.0")

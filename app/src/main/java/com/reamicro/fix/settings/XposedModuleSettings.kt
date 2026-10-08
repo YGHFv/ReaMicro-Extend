@@ -131,6 +131,14 @@ class XposedModuleSettings(
         putBoolean(ModuleSettings.KEY_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED, enabled)
     }
 
+    fun setHostCrashUploadEnabled(enabled: Boolean): Boolean {
+        val saved = HostCrashUploadSettings.save(prefs(), enabled)
+        cachedSnapshot = null
+        cachedAtMs = 0L
+        if (!saved) XposedBridge.logError("ReaMicro privacy: failed to persist crash-upload switch")
+        return saved
+    }
+
     fun setConciseLogEnabled(enabled: Boolean) {
         ModuleLogState.conciseLogEnabled = enabled
         putBoolean(ModuleSettings.KEY_CONCISE_LOG_ENABLED, enabled)
@@ -228,13 +236,11 @@ class XposedModuleSettings(
         putString(ModuleSettings.KEY_PROFILE_BACKGROUND_IMAGE_URL, url.trim())
     }
 
-    /** 保存某深浅组的阅读背景图片池。 */
     fun setReaderBgImages(dark: Boolean, images: List<String>) {
         val key = if (dark) ModuleSettings.KEY_READER_BG_DARK_IMAGES else ModuleSettings.KEY_READER_BG_LIGHT_IMAGES
         putString(key, writeStringList(images.distinct()))
     }
 
-    /** 保存某深浅组当前选中的背景路径（空=无背景/默认主题）。 */
     fun setReaderBgCurrent(dark: Boolean, path: String) {
         val key = if (dark) ModuleSettings.KEY_READER_BG_DARK_CURRENT else ModuleSettings.KEY_READER_BG_LIGHT_CURRENT
         putString(key, path.trim())
@@ -371,7 +377,7 @@ class XposedModuleSettings(
         val sanitized = normalizeSavedHighlightStyle(style)
         val isExisting = current.styles.any { it.id == sanitized.id }
         val remaining = current.styles.filterNot { it.id == sanitized.id }
-        // 修改已有样式：置顶（新修改的在最上面）；新增/导入样式：追加到末尾（新导入的在最下面）。
+
         val next = if (isExisting) listOf(sanitized) + remaining else remaining + sanitized
         putString(ModuleSettings.KEY_READER_HIGHLIGHT_STYLES, encodeHighlightStyles(next))
         notifyReaderHighlightChanged("highlight-style")
@@ -781,6 +787,7 @@ class XposedModuleSettings(
             readerDialogueHighlightEnabled = readerDialogueHighlightEnabled,
             readerSelectionHighlightEnabled = readerSelectionHighlightEnabled,
             readerHighlightPerformanceLogEnabled = readerHighlightPerformanceLogEnabled,
+            hostCrashUploadEnabled = HostCrashUploadSettings.uploadsAllowed(prefs),
             conciseLogEnabled = conciseLogEnabled,
             inlineSearchIconEnabled = inlineSearchIconEnabled,
             fontEnabled = prefs.getBoolean(
@@ -1280,7 +1287,7 @@ class XposedModuleSettings(
                             pattern = item.optString("pattern"),
                             bookKey = item.optString("bookKey"),
                             bookTitle = item.optString("bookTitle"),
-                            // 老数据没有这个字段，缺省不跨段，与本次改动前的行为一致。
+
                             allowCrossParagraph = item.optBoolean("allowCrossParagraph", false),
                         ),
                     )
@@ -1413,6 +1420,7 @@ class XposedModuleSettings(
             XposedBridge.log(
                 "ReaMicro LSP settings from reamicro-settings: " +
                     "module=${snapshot.moduleEnabled}, " +
+                    "hostCrashUploadEnabled=${snapshot.hostCrashUploadEnabled}, " +
                     "association=${snapshot.associationEnabled}, " +
                     "manualEdit=${snapshot.associationManualEditEnabled}, " +
                     "unlink=${snapshot.associationUnlinkEnabled}, " +

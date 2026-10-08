@@ -37,15 +37,14 @@ data class OnlineSourceEntry(
     val variableComment: String = "",
     val packageId: String = "",
     val aliases: Set<String> = emptySet(),
-    /** Legado 协议里的发现页地址（`exploreUrl`），供「发现」页拉取分类书单。 */
+
     val exploreUrl: String = "",
-    /** 发现页分类条目的展示规则 JSON（`ruleExplore`），键与 Legado 一致。 */
+
     val ruleExplore: String = "",
 ) {
     val hasLoginConfig: Boolean
         get() = loginUrl.isNotBlank() || loginUi.isNotBlank() || loginCheckJs.isNotBlank()
 
-    /** 是否具备可展示的发现页配置。 */
     val hasExplore: Boolean
         get() = exploreUrl.isNotBlank()
 
@@ -204,10 +203,6 @@ object OnlineSourceStore {
         return OnlineSourceDownloadPolicyStore.attach(context, parsed.copy(fileName = target.name))
     }
 
-    /**
-     * 安装服务器书源包。包 ID 负责版本更新，书源 ID 独立保持稳定；若本机已有旧 ID，
-     * 首次接管时继续沿用旧 ID，避免已下载图书、登录凭据和下载策略失联。
-     */
     fun importPackageBytes(
         context: Context,
         bytes: ByteArray,
@@ -226,11 +221,6 @@ object OnlineSourceStore {
         return importBytes(context, payload, displayName, "api:$packageId")
     }
 
-    /**
-     * 把服务器内容包标识就地写回本地书源文件，不改动书源规则本身。
-     * 写入后 [importPackageBytes] 能通过 packageId 找到这份本地源，
-     * 后续服务器更新会覆盖同一个文件而不是新建一条重复书源。
-     */
     fun linkPackage(
         context: Context,
         sourceId: String,
@@ -256,10 +246,6 @@ object OnlineSourceStore {
         }.getOrDefault(false)
     }
 
-    /**
-     * 该书源在本机记录过的名称集合。服务器按"任一名称命中"匹配，
-     * 所以改过名的源要把旧名一起带上，否则关联会断。
-     */
     fun knownNames(context: Context?, sourceId: String): Set<String> {
         context ?: return emptySet()
         val file = sourceDir(context).listFiles()
@@ -417,7 +403,7 @@ object OnlineSourceStore {
             require(array.length() == 1) { "一次最多导入一个在线源" }
             array.optJSONObject(0) ?: error("在线源格式不正确")
         } else JSONObject(text)
-        // 名称集合累积保留：服务器和本机各自记过的名字都留着，改名后仍能互相匹配。
+
         val existingNames = buildSet {
             val array = root.optJSONArray("reamicroSourceNames")
             if (array != null) for (index in 0 until array.length()) {

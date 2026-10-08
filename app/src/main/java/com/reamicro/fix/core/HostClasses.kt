@@ -1,17 +1,7 @@
 package com.reamicro.fix.core
 
-/**
- * 宿主与框架的类名常量集中定义。
- *
- * 本模块所有功能都靠反射调用宿主类，宿主一升级、类名一变，功能就静默失效。
- * 此前这些类名以字符串字面量散落在二十多个文件里，排查一次回归要满仓 grep 且容易漏。
- *
- * 约定：任何宿主类名（`app.zhendong.*`）或框架类名只在这里出现一次，各 hook 通过
- * 引用本对象的常量拿到类名。宿主升级时，改这一个文件即可。
- */
 object HostClasses {
 
-    /** Kotlin 运行时。 */
     object Kotlin {
         const val DEFAULT_CONSTRUCTOR_MARKER = "kotlin.jvm.internal.DefaultConstructorMarker"
         const val FUNCTION0 = "kotlin.jvm.functions.Function0"
@@ -29,7 +19,6 @@ object HostClasses {
         const val KOTLIN_UNIT = "kotlin.Unit"
     }
 
-    /** Compose 运行时（含 compose-resources）。 */
     object Compose {
         const val ALIGNMENT = "androidx.compose.ui.Alignment"
         const val ALPHA_KT = "androidx.compose.ui.draw.AlphaKt"
@@ -117,7 +106,6 @@ object HostClasses {
         const val WINDOW_INSETS_KT = "androidx.compose.foundation.layout.WindowInsetsKt"
     }
 
-    /** AndroidX（非 Compose）。 */
     object AndroidX {
         const val BACK_HANDLER_KT = "androidx.activity.compose.BackHandlerKt"
         const val LOAD_STATES = "androidx.paging.LoadStates"
@@ -128,7 +116,6 @@ object HostClasses {
         const val REMEMBER_NAVIGATION_EVENT_STATE_KT = "androidx.navigationevent.compose.RememberNavigationEventStateKt"
     }
 
-    /** 阅微宿主。 */
     object Host {
         const val ABOUT_SCREEN = "app.zhendong.reamicro.ui.setting.AboutScreenKt"
         const val ACCOUNT_SECURITY_SCREEN = "app.zhendong.reamicro.ui.setting.AccountSecurityScreenKt"
@@ -175,7 +162,6 @@ object HostClasses {
         const val EPUB_CONTAINER_KT = "app.zhendong.reamicro.ui.reader.components.EpubContainerKt"
         const val EPUB_FILE_MANAGER = "app.zhendong.reamicro.arch.EpubFileManager"
         const val EPUB_PAGE = "app.zhendong.reamicro.data.epub.EpubPage"
-        const val FILE_FOLDER_ICON = "app.zhendong.reamicro.arch.icons.colored.FileFolderKt"
         const val FILE_SOURCE = "app.zhendong.reamicro.arch.FileSource"
         const val FOOTER = "app.zhendong.reamicro.arch.components.item.FooterKt"
         const val HOME_SCREEN = "app.zhendong.reamicro.ui.home.HomeScreenKt"
@@ -197,7 +183,7 @@ object HostClasses {
         const val POST_USER_BOOK_REQ = "app.zhendong.reamicro.data.res.book.PostUserBookReq"
         const val PREF_KEYS = "app.zhendong.reamicro.constants.PrefKeys"
         const val PROFILE_SCREEN = "app.zhendong.reamicro.ui.profile.ProfileScreenKt"
-        // 「我的」页社区卡片（里程碑/笔记/同步/书院/同好/野社），「发现」按钮注入点。
+
         const val PROFILE_COMMUNITY = "app.zhendong.reamicro.ui.profile.components.CommunityKt"
         const val PROFILE_DIVIDER = "app.zhendong.reamicro.arch.components.DividerKt"
         const val READER_BOTTOM_BAR = "app.zhendong.reamicro.ui.reader.components.ReaderBottomBarKt"
@@ -241,7 +227,6 @@ object HostClasses {
         const val YUN115_ICON = "app.zhendong.reamicro.arch.icons.colored.Yun115Kt"
     }
 
-    /** 宿主 EPUB 引擎。 */
     object Epub {
         const val ANNOTATED_STRING_EXT = "org.epub.utils.AnnotatedStringExtKt"
         const val COMMENT_ANNOTATION = "org.epub.ui.CommentAnnotation"
@@ -254,7 +239,6 @@ object HostClasses {
         const val UI_EPUB_WINDOW = "org.epub.UIEpubWindow"
     }
 
-    /** 宿主内置的第三方库。 */
     object ThirdParty {
         const val OKHTTP_ANDROID10_PLATFORM = "okhttp3.internal.platform.Android10Platform"
         const val OKHTTP_ANDROID_PLATFORM = "okhttp3.internal.platform.AndroidPlatform"

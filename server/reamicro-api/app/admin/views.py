@@ -1,11 +1,3 @@
-"""后台各分区的 HTML 拼装。
-
-admin_page 是分区分发器：概览、全部内容、按类型分区、云端任务、服务器设置、
-子管理员与安全。每个分区的表格与表单拆成独立函数，便于单独测试与改动。
-
-历史坑：内容表格曾被误缩进在概览分支里，导致除概览外六个分区都是空页——
-所以 test_admin_pages 专门断言每个分区都要渲染出 <table>。
-"""
 import html
 import json
 from datetime import datetime, timezone
@@ -13,9 +5,7 @@ from typing import Any
 
 from app import runtime
 from app.admin.format import (
-    _admin_datetime,
     _admin_digest_label,
-    _admin_duration_label,
     _admin_size_label,
     _admin_time_detail,
     _admin_time_label,
@@ -28,18 +18,14 @@ from app.config_store import (
     api_key_auth_configured,
     bounded_config_int,
     infer_auth_mode,
-    load_config,
-    module_upload_kinds,
 )
-from app.crypto import api_key_digest, decrypt_secret
+from app.crypto import decrypt_secret
 from app.labels import (
     status_badge,
     status_tone,
-    _admin_action_label,
     _admin_channel_label,
     _admin_health_label,
     _admin_kind_label,
-    _admin_metadata_label,
     _admin_owner_label,
     _admin_result_label,
     _admin_status_label,
@@ -48,10 +34,9 @@ from app.labels import (
 )
 from app.retention import data_usage
 from app.rule_check import DEFAULT_PROBE_QUERY, RULE_STATUS_LABELS, stored_rule_check
-from app.source_check import STATUS_LABELS, STATUS_OK, STATUS_SLOW, STATUS_UNREACHABLE, stored_health
+from app.source_check import STATUS_LABELS, STATUS_OK, STATUS_SLOW, stored_health
 from app.packages import (
     _admin_package_records,
-    package_dependency_status,
     package_match_domains,
 )
 from app.scheduler import task_credential_id
@@ -79,12 +64,10 @@ ADMIN_PERMISSION_LABELS = {
     "security:write": "轮换密钥等安全操作",
 }
 
-# 权限键的事实来源在 app.security；这里只负责配中文说明。
+
 ADMIN_ASSIGNABLE_PERMISSIONS = [
     (key, ADMIN_PERMISSION_LABELS.get(key, key)) for key in SECURITY_ASSIGNABLE_PERMISSIONS
 ]
-
-
 
 
 def api_key_public_records(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -97,7 +80,7 @@ def api_key_public_records(config: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _admin_task_detail(task: dict[str, Any]) -> str:
-    """将任务内部配置转换为后台可读的简短说明。"""
+
     task_type = str(task.get("taskType", ""))
     schedule = task.get("schedule") if isinstance(task.get("schedule"), dict) else {}
     time_of_day = str(schedule.get("timeOfDay", "")).strip()
@@ -133,7 +116,7 @@ def _admin_task_detail(task: dict[str, Any]) -> str:
 
 
 def _admin_result_items(items: Any) -> str:
-    """渲染通知物品；品质只用于文字颜色，不额外显示枚举值。"""
+
     if not isinstance(items, list):
         return ""
     supported = {"red", "orange", "gold", "yellow", "purple", "blue", "green", "grey", "gray"}
@@ -166,7 +149,7 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
         status_value = str(item.get("status", "published"))
         source = _admin_owner_label(item.get("uploadOwner", "")) if item.get("uploadOwner") else "后台上传"
         domains = "、".join(sorted(package_match_domains(item)))
-        # 上次检测结果直接读清单缓存，渲染列表不会触发任何网络请求。
+
         health = stored_health(item)
         health_status = health["status"]
         health_class = status_tone(health_status)
@@ -177,7 +160,7 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
         reachable = sum(1 for r in health["results"] if r.get("status") in (STATUS_OK, STATUS_SLOW))
         if health["results"]:
             health_detail += f" · {reachable}/{len(health['results'])} 个地址可用"
-        # 规则检测结果同样读清单缓存，渲染不触发网络请求。
+
         rule = stored_rule_check(item)
         rule_detail = _admin_time_label(rule["checkedAt"], "从未检测") if rule["checkedAt"] else "从未检测"
         if rule["matched"]:
@@ -226,7 +209,7 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
 
 
 def _admin_release_panel() -> str:
-    """模块 Release 同步状态。此前后台看不到同步结果和失败原因。"""
+
     esc = lambda value: html.escape(str(value), quote=True)
     metadata: dict[str, Any] = {}
     release_path = runtime.RELEASE_ROOT / "latest.json"
@@ -269,7 +252,7 @@ def _admin_release_panel() -> str:
 
 
 def _admin_settings_content(config: dict[str, Any], actor: dict[str, Any], csrf_html: str) -> str:
-    """服务器设置分区。所有可配置项都在界面上可见可改，不再依赖隐藏字段保值。"""
+
     esc = lambda value: html.escape(str(value), quote=True)
     newline = "\n"
     selected_mode = str(config.get("authMode") or infer_auth_mode(config))
@@ -365,11 +348,11 @@ def _admin_settings_content(config: dict[str, Any], actor: dict[str, Any], csrf_
 
 
 def _admin_overview_stats(config: dict[str, Any], records: list[dict[str, Any]]) -> str:
-    """概览统计卡片：内容库、任务、模块在线和服务器配置要点。"""
+
     esc = lambda value: html.escape(str(value), quote=True)
     tasks = load_tasks()
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    # 按规范归属去重，同一个阅微账号的多条历史心跳只算一台设备。
+
     online = len({
         canonical_owner_of(str(item.get("owner", "")))
         for item in load_presence().values()
@@ -401,11 +384,11 @@ def _admin_overview_stats(config: dict[str, Any], records: list[dict[str, Any]])
 
 
 def _admin_presence_panel() -> str:
-    """模块在线状态与离线消息队列。此前后台完全看不到这两类数据。"""
+
     esc = lambda value: html.escape(str(value), quote=True)
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     presence_rows = []
-    # 按规范归属再去重一次：即使存量数据还没被启动迁移折叠，同一个阅微账号也只显示最近一行。
+
     deduped: dict[str, dict[str, Any]] = {}
     for item in load_presence().values():
         if not isinstance(item, dict):
@@ -464,7 +447,7 @@ def _admin_presence_panel() -> str:
 
 
 def _admin_subadmin_table(config: dict[str, Any], csrf_html: str) -> str:
-    """子管理员列表，带重置密码、启用停用和删除操作。"""
+
     esc = lambda value: html.escape(str(value), quote=True)
     accounts = config.get("adminAccounts", {})
     rows = []
@@ -517,7 +500,7 @@ def _admin_subadmin_table(config: dict[str, Any], csrf_html: str) -> str:
 
 
 def _admin_api_key_table(config: dict[str, Any], csrf_html: str) -> str:
-    """API Key 列表与创建、吊销操作。密钥明文只在创建时显示一次。"""
+
     esc = lambda value: html.escape(str(value), quote=True)
     rows = []
     for record in api_key_public_records(config):
@@ -560,7 +543,7 @@ def _admin_api_key_table(config: dict[str, Any], csrf_html: str) -> str:
 
 
 def _admin_snapshot_table(config: dict[str, Any], actor: dict[str, Any], csrf_html: str) -> str:
-    """服务器快照列表，带下载、校验和（仅主管理员）恢复操作。"""
+
     esc = lambda value: html.escape(str(value), quote=True)
     is_primary = actor.get("role") == "primary"
     rows = []
@@ -608,7 +591,7 @@ def _admin_snapshot_table(config: dict[str, Any], actor: dict[str, Any], csrf_ht
 
 
 def _admin_security_content(config: dict[str, Any], actor: dict[str, Any], csrf_html: str) -> str:
-    """安全分区：子管理员、API Key、快照、密钥轮换和审计入口。"""
+
     esc = lambda value: html.escape(str(value), quote=True)
     is_primary = actor.get("role") == "primary"
     permissions = set(actor.get("permissions", []))
@@ -657,7 +640,7 @@ def _admin_security_content(config: dict[str, Any], actor: dict[str, Any], csrf_
 
 
 def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] | None = None, secret_notice: str = "", section: str = "overview", query: str = "", page: int = 1) -> str:
-    """分类管理后台，保留原有写入路由并提供统一内容列表入口。"""
+
     merge_duplicate_credentials()
     merge_duplicate_tasks()
     esc = lambda value: html.escape(str(value), quote=True)
@@ -766,10 +749,10 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
         clear_button = (
             f"<a class='button subtle' href='{admin_section_path(section)}'>清除搜索</a>" if query.strip() else ""
         )
-        # 内容表格对概览、全部内容和各类型分区都要渲染，此前被误缩进导致分区页只有标题。
-        # 长列表分页：一次渲染上千个内容包会让页面无法使用。
+
+
         page_items, page_info = paginate(visible, page)
-        # 批量操作只在具体类型分区提供：跨类型批量容易误操作，且检测会打太多站点。
+
         check_head = "<th class='col-check'></th>" if can_packages and section in runtime.PACKAGE_KINDS else ""
         batch_bar = ""
         if can_packages and section in runtime.PACKAGE_KINDS and page_items:
@@ -789,7 +772,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
                 f"<span class='hint-tight'>已发布内容需先下架才能删除</span>"
                 f"</form>"
             )
-        # 批量检测只对具体类型分区提供：全部内容一起检测会打太多站点。
+
         batch_check = ""
         if can_packages and section in runtime.PACKAGE_KINDS:
             batch_check = (
@@ -845,7 +828,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
                 f"<option value='http'>通用 HTTPS 请求</option></select></label>"
                 f"<label class='task-field' data-task-types='yeshe_checkin,cloud_auto_read'>每日执行时间<input name='time_of_day' type='time' value='00:05'></label>"
                 f"<label class='task-field' data-task-types='yeshe_checkin,yeshe_draw_card,cloud_auto_read'>同步密钥<select name='credential_id'>{credential_options}</select></label>"
-                # 非 http 任务的归属跟随所选同步密钥，这里只作为 http 任务的兜底归属。
+
                 f"<label class='task-field' data-task-types='http'>任务所有者<input name='owner' value='admin'></label>"
                 f"<label class='task-field' data-task-types='yeshe_draw_card'>每日抽卡上限<input name='daily_limit' type='number' min='0' max='20' value='3'><small>0 表示抽完全部彩筹</small></label>"
                 f"<label class='task-field' data-task-types='cloud_auto_read'>阅读时长（分钟）<input name='duration_minutes' type='number' min='1' max='720' value='30'></label>"
@@ -878,10 +861,7 @@ def admin_page(config: dict[str, Any], message: str = "", actor: dict[str, Any] 
 
 
 def _admin_retention_panel(config: dict[str, Any], actor: dict[str, Any]) -> str:
-    """数据占用与手动清理。
 
-    列出各类数据的当前占用，便于判断阈值配得是否合适——光有阈值看不出离上限还有多远。
-    """
     esc = lambda value: html.escape(str(value), quote=True)
     usage = data_usage()
     rows = "".join(

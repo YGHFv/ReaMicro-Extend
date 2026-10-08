@@ -8,7 +8,6 @@ internal data class OnlineEpubImageManifestItem(
     val mimeType: String,
 )
 
-/** 使用图片 URL 生成稳定文件名，避免增量写入时因顺序变化而丢失章节引用。 */
 internal fun stableOnlineImageFileStem(url: String): String {
     val digest = MessageDigest.getInstance("SHA-256").digest(url.toByteArray(Charsets.UTF_8))
     return "online_img_" + digest.take(10).joinToString("") { "%02x".format(it.toInt() and 0xff) }
@@ -27,7 +26,6 @@ internal fun onlineEpubImageManifestItem(fileName: String): OnlineEpubImageManif
     return OnlineEpubImageManifestItem(safeName, mimeType)
 }
 
-/** 将宿主解包目录中的正文图片补回 OPF manifest，已有条目保持不变。 */
 internal fun mergeOnlineEpubImageManifest(
     original: String,
     images: Collection<OnlineEpubImageManifestItem>,

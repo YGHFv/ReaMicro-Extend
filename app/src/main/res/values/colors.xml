@@ -1,4 +1,4 @@
 <resources>
-    <!-- miuix 0.9.4 lightColorScheme().surface; keep XML in sync when upgrading miuix. -->
+
     <color name="module_window_background">#FFF7F7F7</color>
 </resources>

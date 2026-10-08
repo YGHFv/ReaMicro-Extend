@@ -25,19 +25,11 @@ import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.xposed.XposedHelpers
 import java.lang.ref.WeakReference
 
-/**
- * Single Xposed entry point for the ReaMicro host process.
- *
- * Keep feature hooks installed from here so activity tracking, settings snapshots, and
- * optional external feature APIs all share the same host Activity reference.
- */
 class ReaMicroHookEntry {
     private var currentActivityRef: WeakReference<Activity>? = null
     @Volatile private var currentActivityResumed: Boolean = false
     private val moduleSettings = XposedModuleSettings { currentActivityRef?.get() }
 
-    // 每个功能 hook 都要这两个 provider；此前 17 处各写一遍同样的 lambda，
-    // 收成字段后既少一份重复，也保证所有 hook 拿到的是同一个 Activity 视图。
     private val activityProvider: () -> Activity? = { currentActivityRef?.get() }
     private val settingsProvider: () -> ModuleSettingsSnapshot = moduleSettings::snapshot
     private val installedFeatureIds = linkedSetOf<String>()
@@ -47,11 +39,10 @@ class ReaMicroHookEntry {
     private val heartbeatRunnable = object : Runnable {
         override fun run() {
             val activity = currentActivityRef?.get()
-            if (activity != null) {
+            if (activity != null && currentActivityResumed) {
                 val appContext = activity.applicationContext
                 CloudTaskNotificationPoller.poll(appContext, source = "foreground-heartbeat")
-                // 本地自动任务不在阅微进程里跑：宿主与模块各跑一遍会让两边状态分叉、请求互相撞车
-                // （实机见过「操作过于频繁」）。这里只把配置交给模块进程。
+
                 com.reamicro.fix.cloud.local.LocalTaskMirror.push(appContext)
                 heartbeatHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS)
             }
@@ -164,8 +155,7 @@ class ReaMicroHookEntry {
             globalTypefaceProvider = globalFontHook::globalAndroidTypeface,
         )
         installFeature("WebDavDriveHook", webDavDriveHook::install)
-        // 「我的」页社区卡片：书院行改「书院 ｜ 发现」。数据侧通过 WebDavDriveHook.activeInstance
-        // 复用在线书源请求管线，故排在它之后安装。
+
         installFeature("DiscoverCardHook") {
             DiscoverCardHook(classLoader).install()
         }
@@ -182,22 +172,10 @@ class ReaMicroHookEntry {
         logHookInstallReport()
     }
 
-    /**
-     * 安装一个功能 hook 并登记结果。
-     *
-     * 单个功能的构造或 install 抛异常时不再中断后续功能的安装——此前一个功能挂掉
-     * 会连带后面所有功能一起消失，而日志里只有一行栈。
-     */
     private fun installFeature(feature: String, block: () -> Unit) {
         HookInstallReport.install(ENTRY_FEATURE_ID, feature, block)
     }
 
-    /**
-     * 打印 hook 安装汇总。宿主升级后对比这一行即可定位掉线的 hook。
-     *
-     * 用 logAlways 而不是普通 log：这里还在 handleLoadedPackage 里，设置尚未 attach，
-     * 「简洁日志」标志仍是默认的 true，普通 INFO 日志会被整条吞掉。
-     */
     private fun logHookInstallReport() {
         XposedBridge.logAlways("$LOG_PREFIX ${HookInstallReport.summaryLine()}")
         HookInstallReport.failureDetails().forEach { detail ->
@@ -240,17 +218,16 @@ class ReaMicroHookEntry {
         readerDialogueHighlightHook: ReaderDialogueHighlightHook,
         bookDetailsAssociationActionHook: BookDetailsAssociationActionHook,
     ) {
-        runCatching {
+        HookInstallReport.install(ENTRY_FEATURE_ID, "mainActivityCreate") {
             val mainActivityClass = XposedHelpers.findClass("app.zhendong.reamicro.MainActivity", classLoader)
-            // Most feature hooks need a live Activity for Compose state, storage, and toasts.
-            // Capture it both before and after onCreate so early hooks and post-create work
-            // can use the same settings context.
+
             XposedHelpers.findAndHookMethod(
                 mainActivityClass,
                 "onCreate",
                 Bundle::class.java,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!mainActivityClass.isInstance(param.thisObject)) return
                         val activity = param.thisObject as? Activity ?: return
                         currentActivityRef = WeakReference(activity)
                         currentActivityResumed = false
@@ -271,13 +248,14 @@ class ReaMicroHookEntry {
                         CloudTaskNotificationPoller.poll(activity.applicationContext)
                         val appContext = activity.applicationContext
                         com.reamicro.fix.migration.LegacyAndroidWakeCleanup.runForHost(appContext)
-                        // 仅同步配置；本地自动调度只由已明确开启的 ROOT增强承担。
+
                         com.reamicro.fix.cloud.local.LocalTaskMirror.push(appContext)
                         startForegroundHeartbeat()
                         XposedBridge.log("$LOG_PREFIX MainActivity.onCreate hooked")
                     }
 
                     override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!mainActivityClass.isInstance(param.thisObject)) return
                         val activity = param.thisObject as? Activity ?: return
                         currentActivityRef = WeakReference(activity)
                         currentActivityResumed = false
@@ -286,12 +264,13 @@ class ReaMicroHookEntry {
                     }
                 },
             )
-            runCatching {
+            HookInstallReport.install(ENTRY_FEATURE_ID, "mainActivityResume") {
                 XposedHelpers.findAndHookMethod(
                     mainActivityClass,
                     "onResume",
                     object : XC_MethodHook() {
                         override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!mainActivityClass.isInstance(param.thisObject)) return
                             val activity = param.thisObject as? Activity ?: return
                             currentActivityRef = WeakReference(activity)
                             currentActivityResumed = true
@@ -305,27 +284,8 @@ class ReaMicroHookEntry {
                         }
                     },
                 )
-            }.onFailure {
-                XposedBridge.log("$LOG_PREFIX MainActivity does not override onResume; using onCreate ref only")
             }
-            runCatching {
-                XposedHelpers.findAndHookMethod(
-                    mainActivityClass,
-                    "onPause",
-                    object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            val activity = param.thisObject as? Activity ?: return
-                            if (currentActivityRef?.get() === activity) {
-                                currentActivityResumed = false
-                            }
-                        }
-                    },
-                )
-            }.onFailure {
-                XposedBridge.log("$LOG_PREFIX MainActivity does not override onPause; background state may be conservative")
-            }
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook MainActivity: ${it.stackTraceToString()}")
+
         }
     }
 
@@ -362,7 +322,11 @@ class ReaMicroHookEntry {
                 override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
                 override fun onActivityStarted(activity: Activity) = Unit
                 override fun onActivityResumed(activity: Activity) = Unit
-                override fun onActivityPaused(activity: Activity) = Unit
+                override fun onActivityPaused(activity: Activity) {
+                    if (currentActivityRef?.get() !== activity) return
+                    currentActivityResumed = false
+                    heartbeatHandler.removeCallbacks(heartbeatRunnable)
+                }
                 override fun onActivityStopped(activity: Activity) = Unit
                 override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
 

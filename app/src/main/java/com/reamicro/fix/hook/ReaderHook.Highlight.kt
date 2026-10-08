@@ -12,12 +12,6 @@ import com.reamicro.fix.settings.ReaderHighlightBookContext
 import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.hook.reader.*
 
-// 阅读页高亮簇。
-//
-// 向宿主 Mark 体系注入模块高亮、刷新高亮窗口。
-//
-// 从 ReaderHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaderHook.canHighlightReaderSelection(): Boolean =
     settingsProvider().canHighlightReaderSelection
 
@@ -139,8 +133,7 @@ internal fun ReaderHook.createReaderMark(
         val now = System.currentTimeMillis()
         val bookId = (callNoArg(lastCatalogContext?.book, "getId") as? Number)?.toLong() ?: 0L
         val constructors = markClass.declaredConstructors.onEach { it.isAccessible = true }
-        // Host Mark gained cloudId in rm2-a11. Try the new constructor first and fall back so
-        // one module build can still run against older compatible hosts.
+
         val newCtor = constructors.firstOrNull { ctor ->
             val params = ctor.parameterTypes
             params.size == 14 &&
@@ -238,7 +231,7 @@ internal fun ReaderHook.transientHighlightResolvedMarkId(mark: Any): Long? {
 }
 
 internal fun ReaderHook.activeTransientHighlightMarks(): List<Any> =
-    listOfNotNull(activeSearchHighlightMark, activeReadAloudHighlightMark)
+    listOfNotNull(activeSearchHighlightMark?.takeIf { currentSearchPaintSession() != null }, activeReadAloudHighlightMark)
 
 internal fun ReaderHook.currentHighlightBookIdentity(): Pair<String, String>? {
     currentUiStateBook()?.let { book ->

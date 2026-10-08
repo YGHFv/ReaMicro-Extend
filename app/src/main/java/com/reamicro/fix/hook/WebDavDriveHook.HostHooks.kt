@@ -32,12 +32,6 @@ import com.reamicro.fix.cloud.webdav.parentWebDavPath
 import com.reamicro.fix.cloud.webdav.syntheticWebDavBookEntry
 import com.reamicro.fix.logging.logWebDav
 
-// WebDavDriveHook 的宿主 hook 安装簇。
-//
-// 所有 hookXxx()：只负责挂到宿主方法上，具体实现在其它簇。
-//
-// 从 WebDavDriveHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun WebDavDriveHook.hookOnlineCompletionBookRowDuration() {
     runCatching {
         val bookRowInfo = cls(BOOK_ROW_INFO_CLASS).declaredMethods.first {
@@ -161,8 +155,6 @@ internal fun WebDavDriveHook.hookOnlineCompletionBookLocalSheet() {
     }
 }
 
-// The book local sheet's top-left source tag is FileSource.queryName(book.uri); for online-source books the uri is a
-// detail URL so it renders as "网址链接". Rewrite that label (and only it) to the resolved online source name (e.g. 晚风里).
 internal fun WebDavDriveHook.hookOnlineCompletionBookSourceLabel() {
     if (onlineCompletionSourceLabelHooked) return
     runCatching {
@@ -349,10 +341,7 @@ internal fun WebDavDriveHook.hookHomeCloudResultListRenderContext() {
         XposedBridge.hookMethod(method, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 val type = (param.args?.getOrNull(1) as? Number)?.toInt() ?: return
-                // Compose 重组时会直接重新调用 CloudResultList 方法（绕过 addHomeWebDavSearchSection
-                // 里 withWebDavIcon{}/pushLocalLibraryIcon() 的调用点包裹），导致标题图标 getYun115
-                // 在 depth=0 下透传原始 115 图标——即"展开后概率变 115、折叠仍是 115"。
-                // 在方法 hook 里按稳定的 type 参数设 depth，初次合成与重组都覆盖。
+
                 when {
                     isOnlineCompletionRenderType(type) -> {
                         pushOnlineCompletionCloudTitle(onlineCompletionTitleForType(type))
@@ -450,27 +439,6 @@ internal fun WebDavDriveHook.hookWebDavYun115Icon() {
         XposedBridge.log("$LOG_PREFIX WebDAV 115 icon replacement hook installed")
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX failed to hook WebDAV 115 icon replacement: ${it.stackTraceToString()}")
-    }
-}
-
-internal fun WebDavDriveHook.hookWebDavFileFolderIcon() {
-    runCatching {
-        val method = cls(FILE_FOLDER_ICON_CLASS).declaredMethods.first {
-            it.name == FILE_FOLDER_ICON_METHOD && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if ((localLibraryCloudScreenDepth.get() ?: 0) > 0) {
-                    getNativeAndroidOsVector()?.let { param.result = it }
-                    return
-                }
-                if ((webDavCloudScreenDepth.get() ?: 0) <= 0) return
-                getComposeWebDavVector()?.let { param.result = it }
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX WebDAV folder icon hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV folder icon: ${it.stackTraceToString()}")
     }
 }
 
@@ -1461,11 +1429,7 @@ internal fun WebDavDriveHook.hookHomeSearchResultWebDavSection() {
                         }
                     }
                 }
-                // 关键：把我们的补全条目（OnlineSearchGroup，非 host CloudBook 类型）
-                // 以及任何 host 原生无法渲染的空/异类条目从 map 中剔除，避免 host 原生
-                // CloudResultList 对其做 list.get(0) 触发 IndexOutOfBounds 崩溃
-                // （不同 host 版本容忍度不同，2.1.0 会直接崩）。我们自有的 footer hook
-                // 仍会从 sections 里正常渲染补全结果。
+
                 sanitizeHostCloudSearchResults(param, map)
                 if (sections.isEmpty()) return
                 val intentReceiver = param.args?.getOrNull(3) ?: return
@@ -1509,13 +1473,6 @@ internal fun WebDavDriveHook.hookHomeSearchResultWebDavSection() {
         XposedBridge.log("$LOG_PREFIX failed to hook WebDAV home search result: ${it.stackTraceToString()}")
     }
 }
-
-/**
- * 把 host 原生 CloudResultList 无法安全渲染的条目从 cloudSearchResults map 中剔除，
- * 再回写到方法参数，避免 host 自身对我们注入的补全条目（OnlineSearchGroup）做
- * list.get(0) 触发 IndexOutOfBounds（v2.1.0 等版本会直接崩溃）。
- * 补全结果由我们自己的 footer hook 从 sections 渲染，因此剔除不影响展示。
- */
 
 internal fun WebDavDriveHook.hookHomeSearchTapCancellation() {
     runCatching {
@@ -1618,8 +1575,7 @@ internal fun WebDavDriveHook.hookNativeCloudDownloadCancellation() {
 internal fun WebDavDriveHook.hookWebDavImportBookSource() {
     runCatching {
         val repositoryClass = cls(BOOKSHELF_REPOSITORY_CLASS)
-        // 2.2.0 importBook 6 参、2.3.0 起 7 参（新增进度回调）。按方法名 + 末参 Continuation 匹配，
-        // 兼容新旧签名；hook 内只改 args[3]=url、args[4]=size，两下标在新版仍不变。
+
         (repositoryClass.methods.asSequence() + repositoryClass.declaredMethods.asSequence())
             .distinct()
             .filter {
@@ -1870,39 +1826,22 @@ internal fun WebDavDriveHook.hookCloudStorageWebDavTitle() {
     }
 }
 
-internal fun WebDavDriveHook.hookCloudStorageWebDavScreenScope() {
+internal fun WebDavDriveHook.hookCloudStorageWebDavRefresh() {
     runCatching {
         val method = cls(CLOUD_STORAGE_SCREEN_CLASS).declaredMethods.first {
             it.name == CLOUD_STORAGE_SCREEN_METHOD && it.parameterTypes.size == 4
         }.apply { isAccessible = true }
         XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val type = (param.args?.getOrNull(1) as? Number)?.toInt() ?: return
-                when (type) {
-                    BACKUP_TYPE_WEBDAV -> webDavCloudScreenDepth.set((webDavCloudScreenDepth.get() ?: 0) + 1)
-                    BACKUP_TYPE_LOCAL_LIBRARY -> localLibraryCloudScreenDepth.set((localLibraryCloudScreenDepth.get() ?: 0) + 1)
-                }
-            }
-
             override fun afterHookedMethod(param: MethodHookParam) {
                 val type = (param.args?.getOrNull(1) as? Number)?.toInt() ?: return
-                when (type) {
-                    BACKUP_TYPE_WEBDAV -> {
-                        val next = (webDavCloudScreenDepth.get() ?: 0) - 1
-                        if (next <= 0) webDavCloudScreenDepth.remove() else webDavCloudScreenDepth.set(next)
-                        refreshCloudStorageScreen(type)
-                    }
-                    BACKUP_TYPE_LOCAL_LIBRARY -> {
-                        val next = (localLibraryCloudScreenDepth.get() ?: 0) - 1
-                        if (next <= 0) localLibraryCloudScreenDepth.remove() else localLibraryCloudScreenDepth.set(next)
-                        refreshCloudStorageScreen(type)
-                    }
+                if (type == BACKUP_TYPE_WEBDAV || type == BACKUP_TYPE_LOCAL_LIBRARY) {
+                    refreshCloudStorageScreen(type)
                 }
             }
         })
-        XposedBridge.log("$LOG_PREFIX WebDAV cloud storage screen scope hook installed")
+        XposedBridge.log("$LOG_PREFIX WebDAV cloud storage refresh hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV cloud storage screen scope: ${it.stackTraceToString()}")
+        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV cloud storage refresh: ${it.stackTraceToString()}")
     }
 }
 
@@ -2019,7 +1958,6 @@ internal fun WebDavDriveHook.hookWebDavCloudTap() {
     }
 }
 
-// 阅微 2.3.2 为 enqueueDownload 新增可选下载目录参数；旧版仍是单参数。
 private fun WebDavDriveHook.workerEnqueueDownloadMethods(): List<java.lang.reflect.Method> =
     (cls(WORKER_MANAGER_CLASS).methods.asSequence() + cls(WORKER_MANAGER_CLASS).declaredMethods.asSequence())
         .distinct()
@@ -2277,9 +2215,7 @@ internal fun WebDavDriveHook.hookWebDavAccountAuthFlow() {
 
 internal fun WebDavDriveHook.hookWebDavAccountTopBarTitle() {
     runCatching {
-        // AppTopBar 的签名与方法名都随宿主版本变：2.3.0 beta 参数重排 + 新增 Function3 尾随槽（8→9 参），
-        // 2.3.1 beta 又加了 contentColor: Color，使 JVM 方法名 mangling 成 AppTopBar-cd68TDI。
-        // 因此按基础名（容忍后缀）+ 首参 String + Composable 尾参形状定位，hook 仅改 args[0]（title 仍是首个 String 参）。
+
         val candidates = cls(APP_TOP_BAR_CLASS).declaredMethods
         val method = composeInterop.findComposableMethod(
             candidates = candidates,

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <string name="epub_structure_metadata">元数据</string>
+    <string name="epub_structure_toc">目录结构</string>
+    <string name="epub_structure_css">层叠样式表</string>
+    <string name="epub_structure_font">字体</string>
+    <string name="epub_structure_image">图片</string>
+    <string name="epub_structure_cover">封面</string>
+    <string name="epub_structure_bookmarks">书签文件</string>
+    <string name="epub_structure_container">容器文件</string>
+    <string name="epub_structure_content">%1$s内容</string>
+    <string name="epub_structure_unknown_file">未知文件</string>
+    <string name="epub_structure_unknown_format">未知格式%1$s</string>
+    <string name="epub_structure_unsupported">暂未支持预览此格式</string>
+    <string name="epub_structure_editor_title">编辑</string>
+    <string name="epub_structure_editor_confirm">确认修改</string>
+    <string name="epub_structure_search_title">搜索文件</string>
+    <string name="epub_structure_search_hint">输入文件名、内容名、章节名或相对路径</string>
+    <string name="epub_structure_search_confirm">跳转</string>
+    <string name="epub_structure_search_empty">没有匹配的文件</string>
+    <string name="epub_structure_search_ambiguous">有多个匹配，请选择下方文件或输入完整路径</string>
+    <string name="epub_structure_search_count">找到 %1$d 个文件</string>
+    <string name="epub_structure_identifier">标识</string>
+    <string name="epub_structure_banner">横幅</string>
+</resources>

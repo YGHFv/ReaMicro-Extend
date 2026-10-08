@@ -8,7 +8,6 @@ import java.util.*;
 import java.util.concurrent.*;
 import org.json.*;
 
-/** Association/search subset of the user-supplied DaHuiLang 5.5.16 rules. */
 public final class FanQieSourceProvider implements BookAssociationSearchProvider {
     static final String REFERENCE_VERSION = "5.5.16";
     static final String[] HOSTS = {
@@ -71,8 +70,7 @@ public final class FanQieSourceProvider implements BookAssociationSearchProvider
         try {
             return parseResponse(transport.get(searchUrl(host, query), 1800, 6000), limit, host);
         } catch (Exception error) {
-            // Formerly every failure silently looked like "no matching book".
-            // Log only endpoint/stage/error, never query strings, credentials or response bodies.
+
             System.err.println("ReaMicroFanQie search transport " + host + ": " + error.getClass().getSimpleName()
                 + (String.valueOf(error.getMessage()).contains("Cleartext") ? " (host cleartext policy rejected HTTP)" : ""));
             return Collections.emptyList();
@@ -102,7 +100,7 @@ public final class FanQieSourceProvider implements BookAssociationSearchProvider
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
         } catch (ExecutionException ignored) {
-            // A failing mirror does not make an invented book/result.
+
         } finally {
             for (Future<?> future : pending) future.cancel(true);
         }
@@ -166,7 +164,7 @@ public final class FanQieSourceProvider implements BookAssociationSearchProvider
     static String normalizeBookId(String raw) {
         String id = raw == null ? "" : raw.trim();
         if (id.matches("[0-9]{5,24}")) return id;
-        // 5.5.16 returns unpadded Base64 IDs. Decode only an actual decimal book ID.
+
         if (id.length() >= 8 && id.length() <= 64) {
             for (Base64.Decoder decoder : new Base64.Decoder[] {Base64.getDecoder(), Base64.getUrlDecoder()}) {
                 try {
@@ -178,7 +176,7 @@ public final class FanQieSourceProvider implements BookAssociationSearchProvider
         return id;
     }
     static String detailUrl(String id, String raw, String host) {
-        // Association detail links must be browser/host-usable, not Legado's data URL + request options.
+
         if (id.matches("[0-9]{5,24}")) return "https://fanqienovel.com/page/" + id;
         return SourceUtils.httpUrl(raw, host);
     }

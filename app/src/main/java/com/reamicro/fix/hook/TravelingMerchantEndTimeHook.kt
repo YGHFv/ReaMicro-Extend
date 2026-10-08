@@ -58,7 +58,6 @@ class TravelingMerchantEndTimeHook(
                 val args = param.args ?: return
                 if (args.getOrNull(DURATION_TEXT_ARGUMENT_INDEX) !is String) return
 
-                // 只替换“计程”的显示参数，不改写行商数据对象及其任何进度字段。
                 args[DURATION_TEXT_ARGUMENT_INDEX] = formatTravelingMerchantEndTime(endTimeSeconds)
             }
         })

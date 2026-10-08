@@ -7,26 +7,9 @@ import java.security.MessageDigest
 import java.util.Base64
 import org.json.JSONObject
 
-/**
- * 高亮样式内容包的字段编解码。上传与安装共用这一份定义。
- *
- * **样式本身不区分深色浅色**。深浅只存在于另外两层：
- * - 高亮规则各自带 `styleId` 与 `darkStyleId`，决定深浅主题下引用哪个样式；
- * - 默认样式设置有 `defaultLightStyleId` 与 `defaultDarkStyleId`。
- *
- * `ReaderHighlightStyle` 里的 `dark*` 字段是该设定移除前的历史残留，设置界面不再写入，
- * 恒为默认值（`darkUsesLight = true`，即深色跟随浅色）。所以内容包**不携带**这些字段：
- * 传了也没有意义，还会让人误以为样式能自带深色外观。
- */
 private const val PAYLOAD_SCHEMA_VERSION = 2
 private const val HIGHLIGHT_IMAGE_MIME = "image/png"
 
-/**
- * 从内容包 JSON 还原样式。[fallbackId] 用于 JSON 里没写 id 的情况。
- *
- * [assetDir] 由内容包安装器传入；载荷带图片时会先还原到该目录，再把本机路径写入样式。
- * 传 null 用于只解析字段的场景，旧版不带图片的载荷仍可直接读取。
- */
 internal fun readHighlightStylePayload(
     styleRoot: JSONObject,
     fallbackId: String,
@@ -42,16 +25,10 @@ internal fun readHighlightStylePayload(
         ninePatchPath = restoreHighlightStyleImage(styleRoot.optJSONObject("ninePatchFile"), assetDir)
             ?: styleRoot.optString("ninePatchPath"),
         ninePatchSlice = styleRoot.optString("ninePatchSlice"),
-        // dark* 一律留默认值：样式不带深色外观，深浅由规则和默认样式设置决定。
+
     )
 }
 
-/**
- * 把本机样式编码成内容包 JSON。
- *
- * 九宫格图片路径是本机绝对路径，不能直接上传；图片文件会以 base64 内嵌到
- * `ninePatchFile`，下载端再还原成本机路径。
- */
 internal fun writeHighlightStylePayload(style: ReaderHighlightStyle): ByteArray {
     val styleJson = JSONObject()
         .put("id", style.id)
@@ -68,7 +45,6 @@ internal fun writeHighlightStylePayload(style: ReaderHighlightStyle): ByteArray 
         .toByteArray(Charsets.UTF_8)
 }
 
-/** 该样式是否包含可随内容包上传的本机图片。 */
 internal fun highlightStyleUsesLocalAssets(style: ReaderHighlightStyle): Boolean =
     File(style.ninePatchPath).isFile
 

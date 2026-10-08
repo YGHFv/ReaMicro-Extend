@@ -4,13 +4,6 @@ import java.net.URLEncoder
 import org.json.JSONArray
 import org.json.JSONObject
 
-/**
- * “起点限免（同人小说网）”书源的受控脚本适配。
- *
- * 该源通过 jsLib 的 getApiUrl/requestApiUrl 生成全部请求，并依赖 source.getVariable() 中的
- * Bearer Token。模块不直接执行带 Java/Packages 权限的任意书源脚本，只复现该源实际使用的
- * URL、响应解包和目录转换语义。
- */
 object OnlineSourceTrxsCompat {
     private const val DEFAULT_API_BASE = "https://www.trxs666.com"
     private val supportedTypes = setOf("novel", "comic", "audio")

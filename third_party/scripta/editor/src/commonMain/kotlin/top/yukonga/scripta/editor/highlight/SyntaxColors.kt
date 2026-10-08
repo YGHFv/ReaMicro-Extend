@@ -9,10 +9,6 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 
-/**
- * 单个 token 类型的渲染样式：颜色必选，粗细 / 斜体 / 装饰线可选（null = 不覆盖基础文本样式）。
- * 粗斜体只影响常规行——它们与基础样式共用同一次测量布局，命中测试自洽；网格快路径本就不走高亮。
- */
 @Immutable
 data class TokenStyle(
     val color: Color,
@@ -28,12 +24,6 @@ data class TokenStyle(
     )
 }
 
-/**
- * 语法高亮配色：[TokenType] → [TokenStyle] 的完整映射，每个语义类型一个可自定义的槽位。
- * 插件只产出类型、不产出样式——换主题不用换插件。扁平 [Immutable] data class，
- * 与 [top.yukonga.scripta.editor.EditorColors] 同法保持稳定 Compose 输入。
- * 后加的槽位一律带默认值（取深色预设值），既有调用点不随枚举扩张而破坏。
- */
 @Immutable
 data class SyntaxColors(
     val comment: TokenStyle,
@@ -79,7 +69,7 @@ data class SyntaxColors(
     }
 
     companion object {
-        /** 深色底默认配色。 */
+
         val Dark = SyntaxColors(
             comment = TokenStyle(Color(0xFF6A9955)),
             key = TokenStyle(Color(0xFF9CDCFE)),
@@ -94,7 +84,6 @@ data class SyntaxColors(
             directive = TokenStyle(Color(0xFFC586C0)),
         )
 
-        /** 浅色底默认配色。 */
         val Light = SyntaxColors(
             comment = TokenStyle(Color(0xFF008000)),
             key = TokenStyle(Color(0xFF0451A5)),
@@ -119,11 +108,6 @@ data class SyntaxColors(
     }
 }
 
-/**
- * 把着色段落到 [AnnotatedString]（越界段钳到内容内）；无段时不建 builder。
- * [colorOnly]：只落颜色、丢弃粗细/斜体/装饰线——网格长行的等宽算术假设基础字宽，
- * 颜色不改度量而字重可能改，故其切片测量走此模式。
- */
 fun highlightedText(
     content: String,
     spans: List<HighlightSpan>,

@@ -2,16 +2,8 @@ package com.reamicro.fix.hook.reader
 
 import com.reamicro.fix.core.HostClasses
 
-// ReaderHook 与其外移出去的扩展函数共用的常量。
-//
-// 原先是 ReaderHook 的 companion object 成员。功能簇拆成同包扩展函数后，
-// companion 的 private 成员对扩展函数不可见，因此提升为子包顶层 internal 声明，
-// 由各簇文件通过包级 star import 引用。companion 里的函数没有搬——它们是给其它
-// hook 调用的对外入口。
 internal const val FEATURE_ID = "ReaderHook"
 internal const val READER_VIEW_MODEL_CLASS = HostClasses.Host.READER_VIEW_MODEL
-internal const val ON_DEMAND_CACHE_LOCK_RETRIES = 20
-internal const val ON_DEMAND_CACHE_LOCK_RETRY_MS = 100L
 internal const val ON_DEMAND_PREFETCH_429_RETRIES = 2
 internal const val ON_DEMAND_PREFETCH_429_RETRY_MS = 10_000L
 internal const val READER_UI_INTENT_CLASS = HostClasses.Host.READER_UI_INTENT
@@ -57,8 +49,6 @@ internal const val SCROLL_CRASH_PENDING_KEY = "scroll_crash_pending"
 internal const val KOTLIN_FUNCTION0_CLASS = HostClasses.Kotlin.FUNCTION0
 internal const val KOTLIN_FUNCTION1_CLASS = HostClasses.Kotlin.FUNCTION1
 internal const val KOTLIN_FUNCTION3_CLASS = HostClasses.Kotlin.FUNCTION3
-internal const val DARK_MODE_ICON_CLASS = HostClasses.Compose.DARK_MODE_ICON
-internal const val LIGHT_MODE_ICON_CLASS = HostClasses.Compose.LIGHT_MODE_ICON
 internal const val ARROW_BACK_ICON_CLASS = HostClasses.Compose.ARROW_BACK_ICON
 internal const val SEARCH_ICON_CLASS = HostClasses.Compose.SEARCH_ICON
 internal const val KOTLIN_UNIT_CLASS = HostClasses.Kotlin.KOTLIN_UNIT
@@ -112,15 +102,12 @@ internal const val MAX_MATCHES_PER_FILE = 200
 internal const val SEARCH_SNIPPET_RADIUS = 16
 internal const val SEARCH_CJK_SNIPPET_RADIUS = 7
 internal const val SEARCH_SNIPPET_EXTRA_RADIUS = 3
-internal const val SEARCH_EMIT_BATCH = 24
-internal const val SEARCH_EMIT_INTERVAL_MS = 320L
+internal const val SEARCH_EMIT_INTERVAL_MS = 120L
 internal const val SEARCH_NAV_BAR_TAG = 0x524d5331
-internal const val SEARCH_MENU_BUTTON_TAG = 0x524d5333
 internal const val READ_ALOUD_MENU_BUTTON_TAG = 0x524d5334
-internal const val SEARCH_MENU_BUTTON_SIZE_DP = 44
-internal const val SEARCH_MENU_BUTTON_RIGHT_MARGIN_DP = 28
+internal const val READ_ALOUD_MENU_BUTTON_SIZE_DP = 44
 internal const val READ_ALOUD_MENU_BUTTON_RIGHT_MARGIN_DP = 84
-internal const val SEARCH_MENU_BUTTON_BOTTOM_MARGIN_DP = 166
+internal const val READ_ALOUD_MENU_BUTTON_BOTTOM_MARGIN_DP = 166
 internal const val READ_ALOUD_SEGMENT_TARGET_CHARS = 160
 internal const val READ_ALOUD_SEGMENT_MAX_CHARS = 260
 internal const val READ_ALOUD_INITIAL_SEGMENTS = 24
@@ -139,13 +126,6 @@ internal const val READ_ALOUD_PROGRESS_MAX_AGE_MS = 7L * 24L * 60L * 60L * 1000L
 internal const val EPUB_PAGE_CONTENT = 0
 internal const val SEARCH_NAVIGATION_READER_BOTTOM_MARGIN_DP = 8
 internal const val SEARCH_NAVIGATION_MENU_BOTTOM_MARGIN_DP = 190
-// 跳转纠错的两档检查时机。实测宿主跳到未排版章节要走 1→2→3 页渐进布局（~2.8s），
-// 760/1250ms 都在目标页渲染出来之前，纠错只能拿到「目标未知」；
-// 方向提示（可见页渲染被拒时记录）也要等可见页渲染完才存在，故窗口拉长到 1.4s/3s。
-internal const val SEARCH_JUMP_SINGLE_CORRECTION_DELAY_MS = 1_400L
-internal const val SEARCH_JUMP_SINGLE_CORRECTION_FALLBACK_DELAY_MS = 3_000L
-// 可见页被拒/上报后触发即时纠错的短延迟（给渲染与签名同步留一点余量）
-internal const val SEARCH_JUMP_TRIGGER_CHECK_DELAY_MS = 120L
 internal const val SEARCH_HIGHLIGHT_OFFSET_TOLERANCE = 8
 internal const val SEARCH_ORIGIN_PREFS = "reamicro_search_origin"
 internal const val SEARCH_ORIGIN_KEY_TIMESTAMP = "timestamp"

@@ -24,6 +24,7 @@ internal object ModuleDialogTheme {
     }
 
     fun palette(context: Context): Palette {
+        EmbeddedHostUi.snapshot(context)?.let { return fromHost(it) }
         val darkHint = inferDarkMode(context)
         val theme = runCatching { ApiThemeStore.palette(context, darkHint) }.getOrNull()
         if (theme != null &&
@@ -53,6 +54,15 @@ internal object ModuleDialogTheme {
         }
         return fallbackPalette(context, darkHint)
     }
+
+    internal fun fromHost(native: StructureHost232Colors.Snapshot): Palette = Palette(
+        pageBackground = native.pageArgb, rowBackground = native.brightArgb,
+        border = native.borderVariantArgb, title = native.roles.getValue("OnBackground"), body = native.captionArgb,
+        primary = native.roles.getValue("Primary"), primarySoft = native.roles.getValue("PrimaryContainer"),
+        primaryText = native.roles.getValue("Primary"), neutralText = native.roles.getValue("OnBackground"),
+        destructiveText = native.roles.getValue("Error"), dynamic = true,
+        onPrimary = native.roles.getValue("OnPrimary"), dark = native.dark,
+    )
 
     fun tintProgress(progressBar: ProgressBar, color: Int) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -190,6 +200,8 @@ internal object ModuleDialogTheme {
         val neutralText: Int,
         val destructiveText: Int,
         val dynamic: Boolean = true,
+        val onPrimary: Int = Color.WHITE,
+        val dark: Boolean? = null,
     ) {
         fun matches(dark: Boolean): Boolean =
             pageBackground.isUsableBackground(dark) &&

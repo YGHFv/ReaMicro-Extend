@@ -10,10 +10,6 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReferenceArray
 
-/**
- * Runs all enabled association providers in parallel and normalizes their results before
- * they are injected into the host BookPublish screen.
- */
 class AssociationSearchService(
     private val providersProvider: () -> List<BookAssociationSearchProvider> = {
         AssociationSearchProviderRegistry.providers()
@@ -37,8 +33,7 @@ class AssociationSearchService(
     fun search(keyword: String, limitPerSource: Int = 10): List<BookSearchResult> {
         val activeProviders = activeProviders()
         if (activeProviders.isEmpty()) return emptyList()
-        // Preserve provider order in the final merge while still letting slow/failing sources
-        // run independently.
+
         val resultsByProvider = AtomicReferenceArray<List<BookSearchResult>>(activeProviders.size)
         val latch = CountDownLatch(activeProviders.size)
         activeProviders.forEachIndexed { index, provider ->

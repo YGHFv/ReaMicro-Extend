@@ -3,7 +3,6 @@ package com.reamicro.fix.cloud.api
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** 服务器返回的模块上传许可。 */
 data class ApiUploadPolicy(
     val enabled: Boolean,
     val allowed: Boolean,
@@ -29,26 +28,21 @@ data class ApiUploadPolicy(
     }
 }
 
-/**
- * 待上传或待关联的本地源。
- * [domains] 是书源地址解析出的域名，[identities] 是本地稳定 ID 与别名，
- * 服务器优先用“名称 + 域名”比对，关联源没有域名时退化为“名称 + 标识”。
- */
 data class ApiLibraryItem(
     val kind: ApiPackageKind,
     val name: String,
     val contentId: String,
-    /** 名称集合：当前名称加上本机记录过的历史名称。服务器按"任一名称命中"匹配。 */
+
     val names: Set<String> = emptySet(),
     val domains: Set<String>,
-    /** 主地址。留空时服务器取 domains 的第一项。 */
+
     val primaryDomain: String = "",
     val identities: Set<String>,
     val payloadName: String,
     val payload: ByteArray,
-    /** 本地落地标识：书源为源 ID，关联源为文件名，安装时用于复用同一份本地内容。 */
+
     val localContentId: String,
-    /** 内容是否包含会内嵌进上传包的本机图片等资源。 */
+
     val usesLocalAssets: Boolean = false,
 ) {
     fun toDescriptorJson(): JSONObject = JSONObject()
@@ -60,7 +54,6 @@ data class ApiLibraryItem(
         .put("primaryDomain", primaryDomain)
         .put("identities", JSONArray(identities.toList()))
 
-    /** 主地址在前的地址列表，便于服务器沿用同一顺序。 */
     fun orderedDomains(): List<String> =
         (listOf(primaryDomain) + domains).filter(String::isNotBlank).distinct()
 
@@ -70,7 +63,6 @@ data class ApiLibraryItem(
     override fun hashCode(): Int = 31 * kind.hashCode() + contentId.hashCode()
 }
 
-/** 服务器内容包摘要，仅包含关联和后续更新需要的字段。 */
 data class ApiPackageSummary(
     val kind: ApiPackageKind,
     val packageId: String,
@@ -82,7 +74,7 @@ data class ApiPackageSummary(
     val names: Set<String> = emptySet(),
     val domains: List<String> = emptyList(),
     val primaryDomain: String = "",
-    /** 服务器给出的命中依据，仅用于提示。 */
+
     val matchReason: String = "",
 ) {
     companion object {
@@ -113,7 +105,6 @@ data class ApiPackageSummary(
     }
 }
 
-/** 单个源的比对结果。 */
 data class ApiLibraryMatch(
     val kind: ApiPackageKind,
     val name: String,
@@ -135,7 +126,6 @@ data class ApiLibraryMatch(
     }
 }
 
-/** 单个源的上传结果。 */
 data class ApiUploadResult(
     val uploaded: Boolean,
     val linked: Boolean,
@@ -143,7 +133,6 @@ data class ApiUploadResult(
     val summary: ApiPackageSummary?,
 )
 
-/** 内容库上传或关联的汇总结果。 */
 data class ApiLibrarySyncSummary(
     val total: Int,
     val uploaded: Int,
@@ -154,10 +143,6 @@ data class ApiLibrarySyncSummary(
     val changed: Int get() = uploaded + linked
 }
 
-/**
- * 从书源地址、域名或主机名解析出可比较的小写域名；
- * 纯标识（例如 youshu）不含点，不作为域名参与比对。
- */
 internal fun normalizeSourceDomain(value: String): String {
     val text = value.trim()
     if (text.isBlank()) return ""

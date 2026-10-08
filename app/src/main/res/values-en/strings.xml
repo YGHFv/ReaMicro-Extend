@@ -2,7 +2,6 @@
     <string name="module_name">ReaMicro Extend</string>
     <string name="module_description">Make ReaMicro Great Again!</string>
 
-    <!-- Language -->
     <string name="section_language">Language</string>
     <string name="pref_app_language_title">App Language</string>
     <string name="pref_app_language_summary">Select the display language</string>
@@ -10,7 +9,6 @@
     <string name="language_zh">简体中文</string>
     <string name="language_en">English</string>
 
-    <!-- Interface -->
     <string name="section_interface">Interface</string>
     <string name="pref_theme_title">Theme</string>
     <string name="pref_theme_summary">Choose the app theme mode</string>
@@ -24,7 +22,6 @@
     <string name="pref_liquid_glass_title">Liquid Glass</string>
     <string name="pref_liquid_glass_summary">Liquid-glass effect on the floating bar</string>
 
-    <!-- Personalization -->
     <string name="section_personalization">Personalization</string>
     <string name="pref_app_icon_title">App Icon</string>
     <string name="pref_hide_recent_title">Hide from Recents</string>
@@ -37,7 +34,6 @@
     <string name="toast_icon_switch_failed">Could not switch the icon; this system may restrict component management</string>
     <string name="toast_icon_multiple">Multiple launcher entries detected and realigned to the current icon; if it persists, run am start -n %1$s/%2$s</string>
 
-    <!-- Gestures -->
     <string name="section_gesture">Gestures</string>
     <string name="pref_predictive_back_title">Predictive Back</string>
     <string name="pref_predictive_back_summary">Enable predictive back gesture</string>
@@ -49,7 +45,6 @@
     <string name="pager_gesture_cross">Cross-axis</string>
     <string name="pager_gesture_ios">iOS-style</string>
 
-    <!-- Module pages and task dialogs -->
     <string name="task_daily_lore">Daily lore</string>
     <string name="task_auto_wish">Auto wish</string>
     <string name="task_auto_read">Auto read</string>
@@ -197,7 +192,6 @@
     <string name="icon_violet">Violet</string>
     <string name="icon_slate">Slate</string>
 
-    <!-- Diagnostics and record presentation -->
     <string name="pawn_empty">No items available</string>
     <string name="pawn_none_locked">No items locked (all may be pawned)</string>
     <string name="pawn_item_with_hint">%1$s (%2$s)</string>

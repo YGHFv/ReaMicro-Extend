@@ -1179,21 +1179,6 @@ class AccountCompletionController(
             }
         }
 
-    private fun queryRowsForIds(
-        database: SQLiteDatabase,
-        table: String,
-        idColumn: String,
-        ids: List<Long>,
-    ): List<JSONObject> {
-        if (ids.isEmpty()) return emptyList()
-        val placeholders = ids.joinToString(",") { "?" }
-        return queryRows(
-            database = database,
-            sql = "SELECT * FROM $table WHERE $idColumn IN ($placeholders) ORDER BY id",
-            selectionArgs = ids.map(Long::toString).toTypedArray(),
-        )
-    }
-
     private fun cursorRowToJson(cursor: Cursor): JSONObject =
         JSONObject().apply {
             cursor.columnNames.forEachIndexed { index, columnName ->
@@ -1465,45 +1450,6 @@ class AccountCompletionController(
         }
     }
 
-/*
-    private fun decodePortableCredentials(raw: String): List<StoredAccount> {
-        val trimmed = raw.trim()
-        if (trimmed.isBlank()) error("鍓创鏉夸腑娌℃湁璐﹀彿鍑瘉")
-        val jsonString = runCatching {
-            when {
-                trimmed.startsWith("{") -> trimmed
-                trimmed.startsWith(PORTABLE_PREFIX) -> String(
-                    Base64.decode(trimmed.removePrefix(PORTABLE_PREFIX), Base64.DEFAULT),
-                    Charsets.UTF_8,
-                )
-                else -> String(Base64.decode(trimmed, Base64.DEFAULT), Charsets.UTF_8)
-            }
-        }.getOrElse {
-            error("璐﹀彿鍑瘉鏍煎紡涓嶆纭?)
-        }
-        val json = runCatching { JSONObject(jsonString) }
-            .getOrElse { error("璐﹀彿鍑瘉鏍煎紡涓嶆纭?) }
-        return when {
-            json.optString("type") == "credential_bundle" || json.has("accounts") -> {
-                val array = json.optJSONArray("accounts") ?: error("璐﹀彿鍑瘉鏍煎紡涓嶆纭?)
-                buildList {
-                    for (index in 0 until array.length()) {
-                        val item = array.optJSONObject(index) ?: continue
-                        val credential = item.optString("credential").trim()
-                        when {
-                            credential.isNotBlank() -> addAll(decodePortableCredentials(credential))
-                            item.has("session") || item.has("localLibraryPrefs") -> add(StoredAccount.fromJson(item))
-                            item.has("token") && item.has("userData") -> add(PortableCredential.fromJson(item).toStoredAccount())
-                        }
-                    }
-                }.distinctBy { it.accountId }
-            }
-            json.has("session") || json.has("localLibraryPrefs") -> listOf(StoredAccount.fromJson(json))
-            else -> listOf(PortableCredential.fromJson(json).toStoredAccount())
-        }
-    }
-
-*/
     private fun decodePortableCredentials(raw: String): List<StoredAccount> {
         val trimmed = raw.trim()
         if (trimmed.isBlank()) error("credential is empty")
@@ -2014,8 +1960,7 @@ class AccountCompletionController(
         val screenAlwaysOn: Boolean,
         val systemBars: Boolean,
         val agreement: Boolean,
-        // 「高级功能」页的开关。此前未纳入账号快照，切换账号再切回来时宿主设置会被
-        // 还原成默认值，表现为这些开关"自动重置"（壁纸取色因复用 dynamicColor 而不受影响）。
+
         val smartRecognition: Boolean,
         val illustrationOptimization: Boolean,
         val relateDownloadCover: Boolean,

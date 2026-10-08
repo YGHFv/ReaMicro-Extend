@@ -4,12 +4,9 @@ import android.os.Process
 import com.reamicro.fix.cloud.local.LocalTaskEngine
 import com.reamicro.fix.cloud.local.LocalTaskKey
 import com.reamicro.fix.cloud.local.CloudTaskLocalRunner
-import com.reamicro.fix.cloud.local.nextDailyRunAt
 import com.reamicro.fix.cloud.local.rescheduleLocalTasks
 import org.json.JSONObject
 import java.io.File
-import java.nio.file.Files
-import java.nio.file.attribute.PosixFilePermissions
 import kotlin.system.exitProcess
 
 object RootTaskMain {
@@ -17,10 +14,6 @@ object RootTaskMain {
     fun main(arguments: Array<String>) {
         try {
             val command = arguments.firstOrNull().orEmpty()
-            if (command == "self-test") {
-                selfTest()
-                return
-            }
             check(Process.myUid() == 0) { "需要 Root" }
             val repository = RootTaskRepository(File(RootTaskRepository.STATE_DIRECTORY)) {
                 File(RootTaskRepository.MODULE_DIRECTORY).isDirectory &&
@@ -73,14 +66,13 @@ object RootTaskMain {
             }
             respond(repository.snapshot())
         } catch (error: Throwable) {
-            if (arguments.firstOrNull() == "self-test") error.printStackTrace(System.err)
             respond(JSONObject().put("schema", RootTaskRepository.SCHEMA).put("error", error.javaClass.simpleName))
             exitProcess(1)
         }
     }
 
     private fun readInput(): JSONObject {
-        // Enforce the transport budget while reading, not after an unbounded readText allocation.
+
         val text = System.`in`.bufferedReader(Charsets.UTF_8).use { reader ->
             val result = StringBuilder()
             val buffer = CharArray(4096)
@@ -93,32 +85,6 @@ object RootTaskMain {
             result.toString()
         }
         return JSONObject(text.ifBlank { "{}" })
-    }
-
-    private fun selfTest() {
-        val directory = File("/data/local/tmp", "reamicro-ksu-selftest-${Process.myPid()}")
-        check(directory.mkdir()) { "无法创建独立诊断目录" }
-        try {
-            val repository = RootTaskRepository(directory)
-            val tasks = JSONObject().put("cloud_auto_read", JSONObject().put("enabled", true).put("nextRunAt", 1L))
-            repository.configure(JSONObject().put("accounts", JSONObject().put("diagnostic",
-                JSONObject().put("tasks", tasks).put("token", "diagnostic-only"))), enable = true)
-            val engine = LocalTaskEngine(repository, execute = { _, _, _, _ ->
-                CloudTaskLocalRunner.Outcome("success", "diagnostic", JSONObject().put("dailyReadMinutes", 1))
-            })
-            check(repository.withExecutionLock { engine.runDue().size } == 1)
-            check(RootTaskRepository(directory).runtimeState("diagnostic", "cloud_auto_read").optInt("dailyReadMinutes") == 1)
-            check(!repository.snapshot().toString().contains("diagnostic-only"))
-            check(Files.getPosixFilePermissions(directory.toPath()) == PosixFilePermissions.fromString("rwx------"))
-            check(Files.getPosixFilePermissions(File(directory, "state.json").toPath()) == PosixFilePermissions.fromString("rw-------"))
-            respond(JSONObject().put("schema", RootTaskRepository.SCHEMA).put("uid", Process.myUid())
-                .put("engine", "ok").put("persistence", "ok").put("credentialsRedacted", true)
-                .put("privatePermissions", true)
-                .put("nextRunAt", nextDailyRunAt("00:00", System.currentTimeMillis())))
-        } finally {
-            directory.listFiles()?.forEach { it.delete() }
-            directory.delete()
-        }
     }
 
     private fun notifyModule() {

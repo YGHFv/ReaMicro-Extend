@@ -7,13 +7,12 @@ import top.yukonga.scripta.editor.highlight.LineState
 import top.yukonga.scripta.editor.highlight.SyntaxHighlighter
 import top.yukonga.scripta.editor.highlight.TokenType
 
-/** Bounded, incremental markup coloring for XHTML/HTML and NCX; never builds a DOM. */
 internal class EpubMarkupHighlighter : SyntaxHighlighter {
     override val blockComment = BlockComment("<!--", "-->")
     private data class State(val mode: Int, val quote: Char? = null, val tagName: Boolean = false) : LineState
 
     override fun highlightLine(text: String, entryState: LineState?): LineHighlight {
-        // Preserve Scripta's fast path for minified/very long lines rather than scanning megabytes per keystroke.
+
         if (text.length > 8192) return LineHighlight(emptyList(), null)
         val spans = ArrayList<HighlightSpan>()
         var mode = (entryState as? State)?.mode ?: 0

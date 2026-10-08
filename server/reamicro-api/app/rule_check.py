@@ -1,19 +1,3 @@
-"""书源规则级检测。
-
-`source_check` 只验证域名可达——但站点最常见的失效方式是**改版**：域名还在、首页 200，
-搜索接口的字段结构变了，`ruleSearch` 取不到任何东西。那种源在列表里显示"可用"，
-实际已经搜不出书了。
-
-这里真的发一次搜索请求，按书源自己的规则解析响应，看还能不能取出书名。判定分四类：
-
-- `rules_ok`      规则命中，取到了书名
-- `rules_stale`   请求成功但规则取不到条目 —— 站点大概率改版了
-- `unsupported`   规则依赖 JS 脚本，服务端没有 JS 引擎，不做判定（不算失效）
-- 其余            沿用 source_check 的 `unreachable` / `blocked`
-
-**SSRF 防护**沿用 `source_check.check_url` 那一套：目标 URL 来自上传的书源内容，
-等于让服务器访问任意地址，所以只允许 http/https、拒绝内网与回环、不跟随跨主机跳转。
-"""
 import json
 import re
 import socket
@@ -49,10 +33,10 @@ RULE_STATUS_LABELS = {
     STATUS_SKIPPED: "未检测",
 }
 
-# 用于试搜的关键词。挑常见字，绝大多数中文书站都能返回若干结果。
+
 DEFAULT_PROBE_QUERY = "剑"
 USER_AGENT = "ReaMicro-Server-RuleCheck/1.0"
-# 脚本型规则的标记。命中就判 unsupported，不假装检测成功。
+
 SCRIPT_MARKERS = ("@js:", "<js>", "@JS:", "<JS>")
 
 
@@ -62,18 +46,13 @@ def _is_script(value: str) -> bool:
 
 
 def parse_search_url(raw: str) -> dict[str, Any]:
-    """解析 searchUrl。
 
-    形态是 `url` 后面可选跟一个 legado 风格的 options 块：
-    `url,{"method":"POST","body":"key={{key}}","charset":"gbk","headers":{...}}`
-    与模块端 `buildOnlineSearchRequest` 保持一致。
-    """
     text = str(raw or "").strip()
     if not text:
         return {"error": "书源没有 searchUrl"}
     if _is_script(text):
         return {"error": "searchUrl 依赖脚本，服务端无法执行"}
-    # 只取第一行非空内容，与模块一致。
+
     line = next((part.strip() for part in text.splitlines() if part.strip()), "")
     if not line:
         return {"error": "searchUrl 为空"}
@@ -87,7 +66,7 @@ def parse_search_url(raw: str) -> dict[str, Any]:
             if isinstance(parsed, dict):
                 options = parsed
         except ValueError:
-            # options 解析不了就按纯 GET 处理，不因为附加参数写坏而判整个源失效。
+
             options = {}
     headers = options.get("headers")
     return {
@@ -100,7 +79,7 @@ def parse_search_url(raw: str) -> dict[str, Any]:
 
 
 def _options_block_index(raw: str) -> int:
-    """找到 options 块起始位置。与模块端 indexOfOptionsBlock 同义。"""
+
     for pattern in (",{", ", {"):
         found = raw.find(pattern)
         if found >= 0:
@@ -109,11 +88,7 @@ def _options_block_index(raw: str) -> int:
 
 
 def apply_template(template: str, query: str, base_url: str, charset: str = "UTF-8") -> str:
-    """替换书源模板占位符。
 
-    只处理检测需要的几个：`{{key}}` / `{{page}}` / `searchKey` / `searchPage`。
-    页码统一取 1，检测只看第一页够不够取到书名。
-    """
     encoded = urllib.parse.quote(query, encoding=charset, errors="replace")
     result = str(template or "")
     replacements = {
@@ -128,12 +103,12 @@ def apply_template(template: str, query: str, base_url: str, charset: str = "UTF
     }
     for needle, value in replacements.items():
         result = result.replace(needle, value)
-    # 去掉未识别的 {{...}} 表达式：留着会让 URL 非法，去掉至少能发出请求。
+
     return re.sub(r"\{\{[^}]*\}\}", "", result)
 
 
 def fetch(request_spec: dict[str, Any], base_url: str, query: str, timeout: int) -> dict[str, Any]:
-    """按书源的请求配置发一次搜索。返回 {status, httpStatus, body, message}。"""
+
     charset = request_spec.get("charset", "UTF-8")
     url = apply_template(request_spec["url"], query, base_url, charset)
     if "://" not in url:
@@ -158,7 +133,7 @@ def fetch(request_spec: dict[str, Any], base_url: str, query: str, timeout: int)
     http_request = urllib.request.Request(url, data=data, method=request_spec.get("method", "GET"), headers=headers)
 
     class _NoCrossHostRedirect(urllib.request.HTTPRedirectHandler):
-        """不跟随跨主机跳转，否则内网检查可以被绕过。"""
+
 
         def redirect_request(self, req, fp, code, msg, hdrs, newurl):
             if urllib.parse.urlparse(newurl).hostname != parsed.hostname:
@@ -194,11 +169,7 @@ def fetch(request_spec: dict[str, Any], base_url: str, query: str, timeout: int)
 
 
 def extract_results(body: str, rule_search: str) -> dict[str, Any]:
-    """按 ruleSearch 从响应里取书名。
 
-    JSON 走移植过来的 JSONPath；不是 JSON 就退化为 HTML 锚点扫描，
-    与模块端 `parseOnlineHtmlResults` 的兜底思路一致。
-    """
     try:
         rules = json.loads(rule_search) if rule_search.strip() else {}
     except ValueError:
@@ -219,7 +190,7 @@ def extract_results(body: str, rule_search: str) -> dict[str, Any]:
         if document is not None:
             nodes = jsonpath.rule_values(document, book_list_rule) if book_list_rule else []
             if not nodes and not book_list_rule:
-                # 没写 bookList 时试常见包裹层，尽量给出有意义的判定。
+
                 for candidate in jsonpath.candidate_roots(document):
                     if isinstance(candidate, list) and candidate:
                         nodes = candidate
@@ -236,7 +207,7 @@ def extract_results(body: str, rule_search: str) -> dict[str, Any]:
                     names.append(text)
             return {"kind": "json", "names": names[:20], "total": len(nodes)}
 
-    # HTML 兜底：数一数带 href 的锚点文字，只用于判断"页面里有没有条目"。
+
     anchors = re.findall(r"(?is)<a\b[^>]*\bhref\s*=\s*[\"'][^\"']+[\"'][^>]*>(.*?)</a>", body)
     names = []
     for raw in anchors:
@@ -253,7 +224,7 @@ def check_source_rules(
     query: str = DEFAULT_PROBE_QUERY,
     timeout: int = CHECK_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """对单个书源做规则级检测。`payload` 是书源 JSON 解析后的字典。"""
+
     started = datetime.now(timezone.utc)
     search_url = str(payload.get("searchUrl", "") or payload.get("searchURL", "") or payload.get("search", ""))
     rule_search = payload.get("ruleSearch")
@@ -300,7 +271,7 @@ def check_source_rules(
     if extracted["names"]:
         result.update(status=STATUS_RULES_OK, message=f"取到 {len(extracted['names'])} 条结果")
     elif extracted["kind"] == "html" and not rule_search.strip():
-        # 没有规则可判的 HTML 源：能取到锚点就算通，取不到也不能断言规则失效。
+
         result.update(status=STATUS_UNSUPPORTED, message="HTML 书源缺少 ruleSearch，无法判定规则")
     else:
         result.update(
@@ -311,7 +282,7 @@ def check_source_rules(
 
 
 def load_package_payload(kind: str, package_id: str) -> dict[str, Any] | None:
-    """读出内容包的书源 JSON。不是 JSON 或读不到时返回 None。"""
+
     directory = runtime.PACKAGE_ROOT / safe_package_segment(kind) / safe_package_segment(package_id)
     manifest_path = directory / "manifest.json"
     if not manifest_path.is_file():
@@ -331,7 +302,7 @@ def load_package_payload(kind: str, package_id: str) -> dict[str, Any] | None:
 
 def check_package_rules(kind: str, package_id: str, query: str = DEFAULT_PROBE_QUERY,
                         timeout: int = CHECK_TIMEOUT_SECONDS) -> dict[str, Any]:
-    """检测一个内容包的规则，并把结果写回清单的 `ruleCheck`。"""
+
     kind = safe_package_segment(kind)
     package_id = safe_package_segment(package_id)
     manifest_path = runtime.PACKAGE_ROOT / kind / package_id / "manifest.json"
@@ -366,7 +337,7 @@ def check_package_rules(kind: str, package_id: str, query: str = DEFAULT_PROBE_Q
 
 def check_kind_rules(kind: str, query: str = DEFAULT_PROBE_QUERY,
                      timeout: int = CHECK_TIMEOUT_SECONDS, limit: int = 100) -> list[dict[str, Any]]:
-    """批量检测一类内容包的规则。串行执行，避免同时对多个站点发搜索请求。"""
+
     kind = safe_package_segment(kind)
     reports = []
     for path, manifest in _package_manifests(kind)[:limit]:
@@ -380,7 +351,7 @@ def check_kind_rules(kind: str, query: str = DEFAULT_PROBE_QUERY,
 
 
 def stored_rule_check(manifest: dict[str, Any]) -> dict[str, Any]:
-    """读回上次规则检测结果，供列表显示，不触发网络请求。"""
+
     stored = manifest.get("ruleCheck")
     if not isinstance(stored, dict):
         return {"status": STATUS_SKIPPED, "checkedAt": 0, "matched": 0, "message": "", "samples": []}

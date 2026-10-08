@@ -14,7 +14,6 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-/** 本地自动任务的一条配置 + 运行时状态。与云端 CloudTask 字段保持对应，便于两套 UI 共用。 */
 data class LocalTask(
     val taskType: String,
     val enabled: Boolean = false,
@@ -26,16 +25,11 @@ data class LocalTask(
     val merchantCityCode: String = "",
     val merchantPrincipal: Long = 0L,
     val merchantTransportId: Long = 0L,
-    /**
-     * 期物典当要跳过的 propId。空集合表示不禁止任何期物。
-     *
-     * 没保存过这个字段的旧配置由 [localTaskFromJson] 回落到
-     * [CloudTaskLocalRunner.PROHIBITED_PAWN_PROP_HINTS] 的默认清单，保证老用户行为不变。
-     */
+
     val forbiddenPawnPropIds: Set<String> = emptySet(),
-    /** 执行前要祈禳的道观运签签种（空 = 不祈禳）。wire 值取自游戏：LUCK/SAFETY/WEALTH。 */
+
     val blessingType: String = "",
-    // 运行时状态
+
     val nextRunAt: Long = 0L,
     val lastMessage: String = "",
     val lastRunAt: Long = 0L,
@@ -47,31 +41,17 @@ data class LocalTaskBook(
     val name: String,
 )
 
-/** 一条本地任务执行记录。前后台（宿主/模块）各写各的，UI 合并展示。 */
 data class LocalTaskRecord(
     val at: Long,
     val taskType: String,
     val result: String,
     val message: String,
-    /**
-     * 这条记录的细节，形如 `{"运签":"求运签 · 初晴签","效果":"下一次每日轶闻：绿色及以上概率提升 2 个百分点"}`。
-     *
-     * 存 JSON 而不是固定字段：不同任务要展示的东西完全不同（轶闻看奖励、行商看事件与收益、
-     * 典当看期物与铜钱），固定字段会逼着每个任务都填一堆空值。
-     */
+
     val detail: String = "",
 )
 
-/**
- * 本地自动任务存储。与云端任务不同，本地任务的凭据（阅微 token）只保存在本机，
- * 用 Android Keystore AES/GCM 加密，按阅微账号（accountId）分组保存到 SharedPreferences。
- *
- * 运行时状态（下次执行时间、每日计数、行商已通知 tripId 等）也一并落盘，
- * 便于系统闹钟静默唤醒时无 UI 也能续跑。
- */
 class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRepository {
 
-    /** 读取某账号下的所有本地任务配置（含运行时状态）。 */
     override fun list(accountId: String): List<LocalTask> {
         if (accountId.isBlank()) return emptyList()
         val root = readAccount(accountId) ?: return emptyList()
@@ -84,21 +64,37 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
     override fun get(accountId: String, taskType: String): LocalTask? =
         list(accountId).firstOrNull { it.taskType == taskType }
 
-    /** 保存（新建或更新）一条任务的配置。保存时刷新加密 token；自动阅读按有效时刻安排，其余任务保留立即调度。 */
     fun saveTask(accountId: String, task: LocalTask, token: String) {
         if (accountId.isBlank()) return
+        saveTaskInternal(accountId, task, token, null, false)
+    }
+
+    fun saveEditedTask(accountId: String, task: LocalTask, token: String, expected: LocalTask?) {
+        require(expected == null || expected.taskType == task.taskType) { "任务类型已变更，请重新打开配置" }
+        saveTaskInternal(accountId, task, token, expected, true)
+    }
+
+    private fun saveTaskInternal(accountId: String, task: LocalTask, token: String, expected: LocalTask?, checkVersion: Boolean) {
+        require(accountId.isNotBlank()) { "账号不可用，请重新登录" }
         editAccount(accountId) { root, tasks ->
             val existing = tasks.optJSONObject(task.taskType)
+            if (checkVersion) {
+                check(if (expected == null) existing == null else existing != null &&
+                    existing.optLong(KEY_CONFIG_UPDATED_AT) == expected.configUpdatedAt &&
+                    existing.optBoolean(KEY_ENABLED) == expected.enabled) {
+                    "任务配置已更新，请重新打开配置后保存"
+                }
+            }
             val merged = writeTaskConfig(task)
             merged.put(KEY_CONFIG_UPDATED_AT, maxOf(System.currentTimeMillis(), (existing?.optLong(KEY_CONFIG_UPDATED_AT) ?: 0L) + 1L))
-            // 保留运行时进度，随后按任务类型重排 nextRunAt。
+
             if (existing != null) {
                 for (stateKey in RUNTIME_STATE_KEYS) {
                     if (existing.has(stateKey)) merged.put(stateKey, existing.get(stateKey))
                 }
             }
             if (task.enabled) {
-                // 自动阅读按有效时间安排，不能因保存配置而立即上报数小时阅读。
+
                 val now = System.currentTimeMillis()
                 val next = if (task.taskType == AutoReadTimeLock.TASK_TYPE) {
                     AutoReadTimeLock.nextDailyAt(task.timeOfDay, task.durationMinutes, now)
@@ -113,7 +109,6 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         syncRootConfiguration()
     }
 
-    /** 切换启用状态，不改动其它配置。 */
     fun setEnabled(accountId: String, taskType: String, enabled: Boolean, token: String = "") {
         if (accountId.isBlank()) return
         editAccount(accountId) { root, tasks ->
@@ -135,7 +130,6 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         syncRootConfiguration()
     }
 
-    /** 写回运行时状态（下次执行时间、最近消息、每日计数等）。state 为要合并的键值。 */
     override fun recordState(accountId: String, taskType: String, state: JSONObject) {
         if (accountId.isBlank()) return
         editAccount(accountId) { _, tasks ->
@@ -145,16 +139,11 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         }
     }
 
-    /** 取当前账号已加密保存的阅微 token（供无 UI 唤醒时使用）。 */
     override fun token(accountId: String): String {
         val root = readAccount(accountId) ?: return ""
         return decrypt(root.optString(KEY_TOKEN))
     }
 
-    /**
-     * 读取某任务已落盘的运行时状态（每日计数、轮转、签到时间、行商已通知 tripId 等），
-     * 供执行器读取上次执行结果续跑。返回的 JSON 只含 RUNTIME_STATE_KEYS 里的键。
-     */
     override fun runtimeState(accountId: String, taskType: String): JSONObject {
         val obj = readAccount(accountId)?.optJSONObject(KEY_TASKS)?.optJSONObject(taskType) ?: return JSONObject()
         val state = JSONObject()
@@ -174,25 +163,8 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         }
     }
 
-    /**
-     * 本机存过数据的所有账号 ID（不区分任务是否启用）。
-     *
-     * 给模块主界面用：那里要展示"本机存了哪些账号的任务记录"，只取已启用账号会在用户
-     * 临时关掉任务后让记录凭空消失。
-     */
     override fun accountIds(): List<String> = storedAccountIds()
 
-    /**
-     * 按任务配置的时间点重算已启用任务的下次执行时刻（**不执行任务**）。
-     *
-     * 用来修正历史遗留的旧值：早前排程用 `now + 24h`，与用户配的「每天 HH:mm」无关，
-     * 那些任务因为时刻在将来又不会被 runDue 选中，光靠执行永远修不回来。
-     *
-     * 但它只能**提前**、不能推后：签到没领到奖励时它的下次执行是"解锁时刻"（比如次日 08:00），
-     * 直接按每日时间点重算会把这个约定抹成次日 00:00，用户看到的就是"任务时刻刷新了、
-     * 奖励却没下文"。所以取两者中更早的那个——旧值更晚说明是遗留的 `now + 24h`，按配置纠正；
-     * 旧值更早说明是一个仍在等待中的节点，保留它。
-     */
     fun rescheduleEnabledTasks(now: Long = System.currentTimeMillis()): Int {
         val context = contextProvider()
         if (context != null && com.reamicro.fix.cloud.root.RootTaskBridge.isEnabled(context)) {
@@ -201,22 +173,12 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         return rescheduleLocalTasks(this, now)
     }
 
-    /** 所有已启用任务的账号集合（去重）。 */
     fun accountsWithEnabledTasks(): Set<String> =
         storedAccountIds().filterTo(linkedSetOf()) { accountId -> list(accountId).any { it.enabled } }
 
-    /**
-     * prefs 里实际存了数据的账号 ID。
-     *
-     * 必须先把 [KEY_ACCOUNT_PREFIX] 剥掉再交给 [list]：prefs 的 key 形如 `account_<accountId>`，
-     * 直接把它当 accountId 传进去，[accountKey] 会再加一次前缀，永远查不到账号。踩过这个坑的
-     * 表现是「本地任务配置得好好的，前台后台却从不执行」——[accountsWithEnabledTasks] 恒空集，
-     * 于是 [LocalTaskRunner.runDue] 一个任务都不遍历。
-     */
     private fun storedAccountIds(): List<String> =
         accountIdsFromStorageKeys(prefs()?.all?.keys.orEmpty())
 
-    /** 追加一条执行记录；只保留最近 [MAX_RECORDS] 条，避免无限增长。 */
     fun appendRecord(
         accountId: String,
         taskType: String,
@@ -244,7 +206,6 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         }
     }
 
-    /** 读取某账号的执行记录，最新在前。 */
     fun records(accountId: String): List<LocalTaskRecord> {
         val array = readAccount(accountId)?.optJSONArray(KEY_RECORDS) ?: return emptyList()
         return (0 until array.length()).mapNotNull { index ->
@@ -269,12 +230,6 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         else LocalTaskMirror.push(context)
     }
 
-    /**
-     * 组装下发给模块进程的镜像载荷：所有账号的任务配置 + **明文** token。
-     *
-     * 必须带明文 token：Android Keystore 的密钥按应用（UID）隔离，宿主进程加密的 token
-     * 模块进程根本解不开，只能由模块收到后用自己的密钥重新加密落盘。
-     */
     fun mirrorPayload(): JSONObject {
         val prefs = prefs() ?: return JSONObject()
         val accounts = JSONObject()
@@ -292,7 +247,6 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         return JSONObject().put(KEY_ACCOUNTS, accounts)
     }
 
-    /** 镜像只接纳更新的配置，执行状态以模块进程为准。 */
     fun applyMirror(accountId: String, tasks: JSONObject, token: String, recordsClearedAt: Long = 0L) {
         if (accountId.isBlank()) return
         editAccount(accountId) { root, existing ->
@@ -307,17 +261,20 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         syncRootConfiguration()
     }
 
-    fun snapshotPayload(): JSONObject {
+    @JvmOverloads
+    fun snapshotPayload(accountId: String? = null, recordLimit: Int = 20): JSONObject {
         val accounts = JSONObject()
-        for (accountId in storedAccountIds()) {
+        val selectedAccounts = storedAccountIds().filter { accountId == null || it == accountId }
+        val limit = recordLimit.coerceIn(0, 100)
+        for (accountId in selectedAccounts) {
             val root = readAccount(accountId) ?: continue
             val records = root.optJSONArray(KEY_RECORDS) ?: JSONArray()
             val recent = JSONArray()
-            for (index in (records.length() - 20).coerceAtLeast(0) until records.length()) recent.put(records.get(index))
+            for (index in (records.length() - limit).coerceAtLeast(0) until records.length()) recent.put(records.get(index))
             accounts.put(accountId, JSONObject()
                 .put(KEY_TASKS, root.optJSONObject(KEY_TASKS) ?: JSONObject())
                 .put("recordsClearedAt", root.optLong("recordsClearedAt"))
-                .put(KEY_RECORDS, recent))
+                .apply { if (limit > 0) put(KEY_RECORDS, recent) })
         }
         return JSONObject().put(KEY_ACCOUNTS, accounts)
     }
@@ -398,34 +355,28 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
     private fun prefs(): SharedPreferences? =
         contextProvider()?.applicationContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    private fun encrypt(value: String): String {
-        if (value.isBlank()) return ""
-        return runCatching {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, key())
-            val iv = cipher.iv
-            val body = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-            Base64.encodeToString(ByteBuffer.allocate(4 + iv.size + body.size).apply {
-                putInt(iv.size)
-                put(iv)
-                put(body)
-            }.array(), Base64.NO_WRAP)
-        }.getOrElse { "" }
+    private fun encrypt(value: String): String = transformLocalTaskCredential(value) { plain ->
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, key())
+        val iv = cipher.iv
+        val body = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
+        Base64.encodeToString(ByteBuffer.allocate(4 + iv.size + body.size).apply {
+            putInt(iv.size)
+            put(iv)
+            put(body)
+        }.array(), Base64.NO_WRAP)
     }
 
-    private fun decrypt(value: String?): String {
-        if (value.isNullOrBlank()) return ""
-        return runCatching {
-            val bytes = Base64.decode(value, Base64.NO_WRAP)
-            val buffer = ByteBuffer.wrap(bytes)
-            val ivSize = buffer.int
-            require(ivSize in 12..32)
-            val iv = ByteArray(ivSize).also(buffer::get)
-            val body = ByteArray(buffer.remaining()).also(buffer::get)
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, iv))
-            String(cipher.doFinal(body), Charsets.UTF_8)
-        }.getOrDefault("")
+    private fun decrypt(value: String?): String = transformLocalTaskCredential(value) { encrypted ->
+        val bytes = Base64.decode(encrypted, Base64.NO_WRAP)
+        val buffer = ByteBuffer.wrap(bytes)
+        val ivSize = buffer.int
+        require(ivSize in 12..32)
+        val iv = ByteArray(ivSize).also(buffer::get)
+        val body = ByteArray(buffer.remaining()).also(buffer::get)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, iv))
+        String(cipher.doFinal(body), Charsets.UTF_8)
     }
 
     private fun key(): SecretKey {
@@ -467,21 +418,19 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         const val KEY_LAST_MESSAGE = "lastMessage"
         const val KEY_LAST_RUN_AT = "lastRunAt"
 
-        // 由 LocalTaskRunner 写回、saveTask 更新配置时需保留的运行时状态键。
         internal val RUNTIME_STATE_KEYS = setOf(
             KEY_NEXT_RUN_AT, KEY_LAST_MESSAGE, KEY_LAST_RUN_AT,
             "dailyCounterDate", "dailyCounter", "lastDrawItems", "lastDrawResult", "lastDrawAt",
             "drawPending", "drawRewardLoreId",
             "dailyReadDate", "dailyReadMinutes", "bookRotation",
             "lastPawnDate", "pawnUsedToday", "pawnLastCoin",
-            // 期物图鉴：执行时学到的 propId → 名字/品质，配置页的「禁当期物」列表就靠它。
+
             CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG,
             "lastCheckinDate", "lastCheckinAt", "claimDueAt", "claimCompletedDate", "claimLoreId", "automationStateVersion",
             CloudTaskLocalRunner.KEY_MERCHANT_NOTIFIED_TRIP, "merchantPausedUntil", "merchantStartAfterSettle",
-            // 行商按趟记账：结算过哪趟、为哪趟开过新行商、哪趟查过运签。三者缺一都会让
-            // 某件事被重复做或永远不做，所以必须一起保留。
+
             KEY_MERCHANT_SETTLED_TRIP, KEY_MERCHANT_RESTART_AFTER, KEY_MERCHANT_BLESSED_TRIP, KEY_MERCHANT_END_TIME,
-            // 上次观察到的行商参数：自动开新行商未填城池/本金/车马时沿用。
+
             KEY_MERCHANT_LAST_CITY, KEY_MERCHANT_LAST_TRANSPORT, KEY_MERCHANT_LAST_PRINCIPAL,
         )
 
@@ -489,13 +438,13 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         internal const val KEY_MERCHANT_END_TIME = "merchantEndTime"
         internal const val KEY_MERCHANT_LAST_TRANSPORT = "merchantLastTransportId"
         internal const val KEY_MERCHANT_LAST_PRINCIPAL = "merchantLastPrincipal"
-        /** 已经自动结算过的行商趟次 id。 */
+
         internal const val KEY_MERCHANT_SETTLED_TRIP = "merchantSettledTripId"
-        /** 已经为哪一趟结算成功开启过新行商。用于失败后重试。 */
+
         internal const val KEY_MERCHANT_RESTART_AFTER = "merchantRestartedAfterTripId"
-        /** 已经检查/祈禳过运签的行商趟次 id，避免每次轮询都重复祈禳。 */
+
         internal const val KEY_MERCHANT_BLESSED_TRIP = "merchantBlessedTripId"
-        // 镜像只下发这些「配置」字段；其余（运行时状态）由各自进程保留。
+
         private val CONFIG_KEYS = setOf(
             KEY_ENABLED, KEY_TIME_OF_DAY, KEY_DURATION_MINUTES, KEY_DAILY_DRAW_LIMIT, KEY_BOOKS,
             KEY_MERCHANT_AUTO_COMPLETE, KEY_MERCHANT_CITY_CODE, KEY_MERCHANT_PRINCIPAL, KEY_MERCHANT_TRANSPORT_ID,
@@ -514,8 +463,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             }
             merged.put(KEY_CONFIG_UPDATED_AT, incoming.optLong(KEY_CONFIG_UPDATED_AT))
             if (changed || !merged.has(KEY_NEXT_RUN_AT)) {
-                // 镜像只接纳配置，不信任对端的运行时 nextRunAt；自动阅读按保存的每日时刻重排。
-                // taskType 必须取外层任务键：首次镜像的 JSON 未必包含 taskType 字段。
+
                 val next = when {
                     !merged.optBoolean(KEY_ENABLED) -> 0L
                     taskType == AutoReadTimeLock.TASK_TYPE -> AutoReadTimeLock.nextDailyAt(
@@ -527,7 +475,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             }
             return merged
         }
-        // 执行记录只保留最近若干条，避免 SharedPreferences 无限增长。
+
         private const val KEY_RECORDS = "records"
         internal const val MAX_RECORDS = 100
 
@@ -536,18 +484,11 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
     }
 }
 
-/**
- * `account_<accountId>` → `<accountId>`；不是账号键或 ID 为空时返回 null。
- *
- * 与 [LocalTaskStore] 内部的账号键拼法（`KEY_ACCOUNT_PREFIX + accountId`）严格互逆，
- * 这个往返关系是账号配置聚合逻辑正确性的基础。
- */
 internal fun accountIdFromStorageKey(storageKey: String): String? =
     storageKey.takeIf { it.startsWith(LocalTaskStore.KEY_ACCOUNT_PREFIX) }
         ?.removePrefix(LocalTaskStore.KEY_ACCOUNT_PREFIX)
         ?.takeIf { it.isNotBlank() }
 
-/** 从 SharedPreferences 的 key 集合里取出账号 ID；非账号键一律忽略。 */
 internal fun accountIdsFromStorageKeys(keys: Collection<String>): List<String> =
     keys.mapNotNull(::accountIdFromStorageKey)
 

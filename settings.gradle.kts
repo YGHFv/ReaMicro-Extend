@@ -22,7 +22,6 @@ dependencyResolutionManagement {
 rootProject.name = "阅微补全"
 include(":app")
 
-// Fixed-source Scripta editor, without the upstream sandbox application.
 include(":scripta-editor")
 project(":scripta-editor").projectDir = file("third_party/scripta/editor")
 project(":scripta-editor").buildFileName = "reamicro.android.gradle"

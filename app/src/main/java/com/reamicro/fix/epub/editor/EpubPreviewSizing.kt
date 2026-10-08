@@ -1,6 +1,5 @@
 package com.reamicro.fix.epub.editor
 
-/** Power-of-two decoding bound; arithmetic must not overflow for corrupt image headers. */
 internal fun epubPreviewSampleSize(width: Int, height: Int, maxEdge: Int, maxPixels: Long = 4_194_304L): Int {
     require(width > 0 && height > 0) { "无法识别图片尺寸" }
     require(maxEdge > 0 && maxPixels > 0)

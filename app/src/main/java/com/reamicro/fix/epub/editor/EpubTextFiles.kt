@@ -15,12 +15,13 @@ import java.security.DigestOutputStream
 import java.security.MessageDigest
 import java.util.Locale
 
-/** Deliberately excludes CSS, OPF, images and fonts: those retain the host-style viewers. */
 internal fun usesScriptaEpubEditor(path: String): Boolean {
     val name = path.replace('\\', '/').substringAfterLast('/').lowercase(Locale.ROOT)
-    val extension = name.substringAfterLast('.', "")
-    return extension in setOf("html", "xhtml", "ncx", "toc") || name == "toc" || name == "toc.xml"
+    return name.substringAfterLast('.', "") in setOf("html", "htm", "xhtml")
 }
+
+internal fun canEditEpubSource(path: String): Boolean =
+    usesScriptaEpubEditor(path) || path.endsWith(".ncx", ignoreCase = true)
 
 internal data class EpubTextFormat(val charset: Charset, val bom: ByteArray)
 internal data class EpubFileFingerprint(val size: Long, val modified: Long, val sha256: String)
@@ -39,7 +40,6 @@ internal object EpubTextFiles {
         return file
     }
 
-    /** Bounds memory, rather than keeping the previous WebView's arbitrary 5 MB limit. */
     fun availableLoadBudget(): Long {
         val runtime = Runtime.getRuntime()
         val available = runtime.maxMemory() - runtime.totalMemory() + runtime.freeMemory()
@@ -95,7 +95,7 @@ internal object EpubTextFiles {
                 .onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
             temporary.outputStream().use { stream ->
                 val output = DigestOutputStream(object : FilterOutputStream(stream) {
-                    // Let the encoder finish/validate without closing fd before fsync.
+
                     override fun close() { flush() }
                     override fun write(bytes: ByteArray, offset: Int, length: Int) {
                         stream.write(bytes, offset, length)
@@ -110,19 +110,21 @@ internal object EpubTextFiles {
                     writer.write(text, offset, count)
                     offset += count
                 }
-                // Closing the encoder validates incomplete surrogate pairs as well.
+
                 writer.close()
                 stream.fd.sync()
             }
             runCatching { Files.setPosixFilePermissions(temporary.toPath(), Files.getPosixFilePermissions(file.toPath())) }
             checkCancelled()
             requireCurrent(file, snapshot.fingerprint, checkCancelled)
+            val expected = VerifiedFileIO.Digest(temporary.length(), digest.digest().hex())
             try {
                 Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
             } catch (_: AtomicMoveNotSupportedException) {
                 Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
             }
-            return EpubTextSnapshot(snapshot.format, EpubFileFingerprint(file.length(), file.lastModified(), digest.digest().hex()))
+            VerifiedFileIO.requireMatches(file, expected)
+            return EpubTextSnapshot(snapshot.format, EpubFileFingerprint(expected.size, file.lastModified(), expected.sha256))
         } finally {
             temporary.delete()
         }

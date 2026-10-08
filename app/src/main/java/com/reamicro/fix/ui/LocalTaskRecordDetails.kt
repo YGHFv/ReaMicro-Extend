@@ -42,7 +42,7 @@ internal fun localTaskRecordDetailFields(taskType: String, detail: JSONObject): 
         }
     }
     detail.keys().forEach { key ->
-        // 奖励明细是给通知着色用的结构化数组，正文里已经逐项列出，别把 JSON 原文倒进详情。
+
         if (key != DAILY_LORE_DETAIL_KEY && key != CloudTaskLocalRunner.KEY_REWARD_ITEMS &&
             (lore == null || key !in setOf("轶闻", "奖励"))
         ) {

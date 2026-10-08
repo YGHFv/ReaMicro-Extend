@@ -1,7 +1,8 @@
 __pycache__/
 *.py[cod]
 .env
+.env.*
+!.env.example
 data/
-tests/
 .git/
 .github/

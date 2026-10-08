@@ -15,19 +15,11 @@ app/build/
 signing/
 *.apk
 *.aab
-!RM1.3.0+.APK
 .tools/
-# tools/ 放本地分析工具，只放行随仓库分发的代码生成脚本
-tools/*
-!tools/gen-epub-styles.mjs
-!tools/gen-header-masks.mjs
-!tools/build-module.py
 decompiled/
 dex_tmp/
 base_decompiled/
 classes.dex
-
-# Local analysis and diagnostic leftovers
 __pycache__/
 *.py[cod]
 *.log
@@ -44,8 +36,6 @@ __pycache__/
 /.gradle-user-home/
 /.workbuddy/
 /outputs/
-
-# Local verification leftovers
 .rm_sheet.png
 .window-check.xml
 device-*.txt
@@ -57,19 +47,25 @@ icon.png
 reamicro_highlight_style_*.json
 晚风里.json
 番茄.json
-
-# Optional closed/local side-loaded ReaMicro sources. If these directories
-# exist locally, Gradle can bundle their .rmsource files into the APK.
 external-sources/
 source-files/*
 !source-files/
 !source-files/fanqie.rmsource
-
-# 服务端拆分期间的一次性辅助文件
 .refactor_*.py
 .out_*.py
 .main.backup.py
-
-# Maintained source-provider build inputs.
 !tools/build-fanqie-source.py
 !source-files/fanqie/
+/docs/verification/
+*.dex
+*.class
+*.keystore
+*.jks
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+/app/src/main/java/com/reamicro/fix/online/OnlineSourceScriptCompat.kt
+.ruff_cache/
+artifacts/

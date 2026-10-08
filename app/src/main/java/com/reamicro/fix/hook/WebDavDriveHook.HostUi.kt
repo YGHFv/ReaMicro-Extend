@@ -1,10 +1,9 @@
 package com.reamicro.fix.hook
+import com.reamicro.fix.notification.setReaMicroSmallIcon
 
 import android.app.Notification
 import android.content.Context
-import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.Icon
 import android.os.Handler
 import android.os.Looper
 import android.os.Build
@@ -14,16 +13,9 @@ import com.reamicro.fix.R
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.xposed.XposedBridge
 import java.lang.reflect.Method
-import java.lang.reflect.Modifier
 import com.reamicro.fix.hook.webdav.*
 import com.reamicro.fix.logging.logWebDav
 
-// WebDavDriveHook 的宿主 UI 渲染簇。
-//
-// 反射构造 Compose Modifier / 主题色 / 图标，以及原生 View 版本的登录页与结果行。
-//
-// 从 WebDavDriveHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun WebDavDriveHook.renderOnlineCompletionUpdateRowFromLocalSheet(composer: Any?) {
     if (onlineCompletionUpdateRowInjecting.get() == true) return
     if (onlineCompletionCombinedGroupRowHooked) return
@@ -543,7 +535,7 @@ internal fun cloudPathOf(value: Any?): String =
 internal fun setOnlineCompletionSmallIcon(builder: Notification.Builder) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
         runCatching {
-            builder.setSmallIcon(Icon.createWithResource(MODULE_PACKAGE_NAME, R.drawable.ic_notification_reamicro))
+            builder.setReaMicroSmallIcon()
         }.onSuccess {
             return
         }.onFailure {

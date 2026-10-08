@@ -55,7 +55,7 @@ def main():
                 info.external_attr = 0o644 << 16
                 archive.writestr(info, data)
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        # Only replace the existing package after javac, D8 and archive checks have succeeded.
+
         pending = args.output.with_suffix('.rmsource.tmp')
         pending.write_bytes(archive_path.read_bytes())
         pending.replace(args.output)

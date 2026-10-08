@@ -4,15 +4,6 @@ import com.reamicro.fix.xposed.XposedHelpers
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 
-/**
- * 宿主反射的缓存入口。
- *
- * 类、方法、字段的查找结果按名字缓存——hook 安装期与渲染期会反复解析同一批成员，
- * 每次都走 Class.getDeclaredMethods 在阅读页翻页时是可观测的开销。
- *
- * 原名 ReaMicroHostCompat，位于 compat 包；与 HostClasses / ComposeInterop 同属
- * 「宿主互操作基建」，一并收到 core。
- */
 class HostReflect(
     private val classLoader: ClassLoader,
 ) {

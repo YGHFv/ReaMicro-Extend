@@ -9,8 +9,6 @@ import org.json.*;
 final class SourceUtils {
     private SourceUtils() {}
 
-    // Optional bridge preserves apiVersion=1 compatibility when imported into an older module.
-    // Such modules still obey the host policy; this is not a global policy toggle.
     private static AutoCloseable beginAssociationRequest(String url) {
         try {
             Class<?> scope = Class.forName("com.reamicro.fix.association.network.AssociationNetworkScope");
@@ -55,8 +53,7 @@ final class SourceUtils {
         if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
         HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
         try {
-            // Re-open each hop with a fresh exact request scope and origin headers.
-            // Cookies, if a host CookieHandler is configured, are selected for that target URL.
+
             connection.setInstanceFollowRedirects(false);
             connection.setConnectTimeout(connectTimeout);
             connection.setReadTimeout(readTimeout);
@@ -64,8 +61,7 @@ final class SourceUtils {
             connection.setRequestProperty("Accept", "application/json,text/plain,*/*");
             URI uri = URI.create(url);
             connection.setRequestProperty("Referer", uri.getScheme() + "://" + uri.getRawAuthority() + "/");
-            // HttpURLConnection retains the platform CookieHandler, if configured by the host.
-            // No embedded credentials, fabricated VIP cookies or cross-host token copying.
+
             int status = connection.getResponseCode();
             if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308)
                 throw new Redirect(redirectTarget(url, connection.getHeaderField("Location")));

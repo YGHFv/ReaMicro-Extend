@@ -2,11 +2,6 @@ package com.reamicro.fix.ui
 
 import kotlin.math.roundToLong
 
-/**
- * 本金轨道：0 是独立的「沿用上次」档；轻滑到下限后，其余 95% 按有效金额线性分布。
- * 零档保留半个档位的吸附范围，避免大负重下 0 与下限挤在同一个像素里。
- * 与 Compose 分离，确保回显、拖动和更换车马采用同一套双向映射。
- */
 internal class MerchantPrincipalScale(minimum: Long, capacity: Long) {
     val upper: Long = capacity.coerceAtLeast(0L)
     val lower: Long = minimum.coerceAtLeast(1L).coerceAtMost(upper)
@@ -14,7 +9,7 @@ internal class MerchantPrincipalScale(minimum: Long, capacity: Long) {
 
     fun clamp(amount: Long): Long = when {
         amount <= 0L -> 0L
-        !enabled -> amount // 清单尚未加载时不要丢失已保存的本金。
+        !enabled -> amount
         else -> amount.coerceIn(lower, upper)
     }
 

@@ -2,7 +2,8 @@ package top.yukonga.scripta.editor.find
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.BasicText
@@ -21,20 +22,16 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import top.yukonga.scripta.editor.EditorColors
 import top.yukonga.scripta.editor.GotoLineSession
 
-/**
- * 停靠式跳转行号条：与查找条同族——嵌在编辑器根 Column 顶部、占布局行，不用 focusable Popup
- * （Android 上会吞浮层外全部触摸，见 [FindReplaceBar]）。输入框只收数字；Enter / 确认跳转并
- * 回焦编辑器，Esc / ✕ 关闭回焦。
- */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun GotoLineBar(
     session: GotoLineSession,
     lineCount: Int,
     colors: EditorColors,
+    controlTextStyle: TextStyle,
     onRequestEditorFocus: () -> Unit,
 ) {
     if (!session.visible) return
@@ -48,19 +45,19 @@ internal fun GotoLineBar(
     fun jumpAndRefocus() {
         if (session.jump()) onRequestEditorFocus()
     }
-    Row(
+    FlowRow(
         Modifier
             .fillMaxWidth()
             .background(colors.symbolBarBackground)
             .padding(start = 6.dp, end = 6.dp, bottom = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        itemVerticalAlignment = Alignment.CenterVertically,
     ) {
         FindField(
             value = session.input,
             onValueChange = { session.input = it.filter(Char::isDigit) },
             placeholder = "跳转到行",
-            colors = colors,
+            colors = colors, controlTextStyle = controlTextStyle,
             modifier = Modifier
                 .weight(1f)
                 .focusRequester(fieldFocus)
@@ -83,12 +80,12 @@ internal fun GotoLineBar(
         )
         BasicText(
             text = "共 $lineCount 行",
-            style = TextStyle(color = colors.symbolBarForeground.copy(alpha = 0.75f), fontSize = 12.sp),
+            style = controlTextStyle.copy(color = colors.symbolBarForeground.copy(alpha = 0.75f)),
             maxLines = 1,
         )
-        ActionChip("跳转", colors) { jumpAndRefocus() }
-        ActionChip("✕", colors) { closeAndRefocus() }
+        ActionChip("跳转", colors, controlTextStyle) { jumpAndRefocus() }
+        ActionChip("✕", colors, controlTextStyle) { closeAndRefocus() }
     }
-    // 挂载后聚焦输入框（初值为当前行号、挂载态全选：直接键入即覆盖）。
+
     LaunchedEffect(Unit) { fieldFocus.requestFocus() }
 }

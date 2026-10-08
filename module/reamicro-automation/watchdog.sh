@@ -8,8 +8,7 @@ chmod 700 "$STATE" || exit 1
 . "$MODDIR/common.sh"
 BUSYBOX=$(find_busybox) || exit 1
 export ASH_STANDALONE=1
-# Hold the lock in this ash process, not in a flock wrapper inherited by timeout monitors.
-# As with service.sh, Android mksh must not open the descriptor before entering BusyBox ash.
+
 if [ "$1" != --reamicro-ash ]; then
   exec "$BUSYBOX" sh "$0" --reamicro-ash "$@"
 fi
@@ -23,7 +22,7 @@ release_wake_lock() {
   if [ -w /sys/power/wake_unlock ]; then echo reamicro_tasks > /sys/power/wake_unlock; fi
 }
 cleanup() {
-  # CHILD_PID is a child we spawned, and not an arbitrary PID read from disk.
+
   if [ -n "$CHILD_PID" ] && [ -r "/proc/$CHILD_PID/status" ]; then
     parent=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$CHILD_PID/status")
     [ "$parent" = "$$" ] && kill "$CHILD_PID" 2>/dev/null
@@ -63,8 +62,7 @@ while module_active; do
     "$BUSYBOX" timeout -k 15 -s TERM 240 "$BUSYBOX" sh "$MODDIR/runner.sh" run 8>&- </dev/null >/dev/null 2>&1 &
     CHILD_PID=$!
     printf '%s\n' "$CHILD_PID" >"$STATE/runner.pid"
-    # Keep heartbeat fresh while a network task takes minutes. sleep is interruptible and
-    # does not hold a permanent wake lock. there is no app-side alarm fallback.
+
     while kill -0 "$CHILD_PID" 2>/dev/null; do
       printf '%s\n' "$(date +%s)" >"$STATE/heartbeat"
       module_active || { kill "$CHILD_PID" 2>/dev/null; break; }

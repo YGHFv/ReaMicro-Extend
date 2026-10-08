@@ -22,12 +22,6 @@ import java.io.File
 import java.lang.ref.WeakReference
 import com.reamicro.fix.hook.reader.*
 
-// 阅读页朗读簇。
-//
-// 朗读入口与控制条、分句推送、朗读高亮跟随、翻页重启、Lyricon 歌词卡片。
-//
-// 从 ReaderHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaderHook.canRunReadAloud(): Boolean =
     settingsProvider().canRunReaderReadAloud
 
@@ -68,12 +62,12 @@ internal fun ReaderHook.showReadAloudMenuButton(activity: Activity, receiver: An
             setOnClickListener { openReadAloud() }
         }
         decor.addView(button, FrameLayout.LayoutParams(
-            dp(activity, SEARCH_MENU_BUTTON_SIZE_DP),
-            dp(activity, SEARCH_MENU_BUTTON_SIZE_DP),
+            dp(activity, READ_ALOUD_MENU_BUTTON_SIZE_DP),
+            dp(activity, READ_ALOUD_MENU_BUTTON_SIZE_DP),
         ).apply {
             gravity = Gravity.BOTTOM or Gravity.END
             rightMargin = dp(activity, READ_ALOUD_MENU_BUTTON_RIGHT_MARGIN_DP)
-            bottomMargin = dp(activity, SEARCH_MENU_BUTTON_BOTTOM_MARGIN_DP)
+            bottomMargin = dp(activity, READ_ALOUD_MENU_BUTTON_BOTTOM_MARGIN_DP)
         })
         button.bringToFront()
         readAloudMenuButtonRef = WeakReference(button)

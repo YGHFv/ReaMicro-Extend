@@ -17,10 +17,8 @@ import top.yukonga.miuix.kmp.blur.LayerBackdrop
 import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
-// Records only the shader background, never the cards or the horizontal pager.
 internal val LocalAboutBackdrop = staticCompositionLocalOf<LayerBackdrop?> { null }
 
-/** miuix 0.9.4 AboutPage / KSU AboutMiuix background-sampling card treatment. */
 @Composable
 internal fun AboutEffectCard(
     modifier: Modifier = Modifier,

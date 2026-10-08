@@ -1,5 +1,4 @@
 package com.reamicro.fix.hook
-import java.io.File
 
 import android.app.Activity
 import android.app.Dialog
@@ -10,8 +9,6 @@ import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.text.TextUtils
 import android.view.Gravity
-import android.view.KeyEvent
-import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
@@ -27,52 +24,11 @@ import com.reamicro.fix.xposed.XposedBridge
 import java.lang.reflect.Method
 import com.reamicro.fix.hook.reader.*
 
-// 阅读页划词菜单簇。
-//
-// 精简选择菜单、词典与 AI 释义、划词朗读。
-//
-// 从 ReaderHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaderHook.canEditReaderSelection(): Boolean =
     settingsProvider().canEditReaderSelection
 
 internal fun ReaderHook.canShowReaderDictionary(): Boolean =
     settingsProvider().canShowReaderDictionary
-
-internal fun ReaderHook.restoreTranslateFlipStyleIfScrollCrashed(session: Any, source: String) {
-    if (!isPreviousScrollCrashPending()) return
-    Thread {
-        runCatching {
-            forceTranslateFlipStyle(session)
-            clearScrollCrashPending("fallback updated by $source")
-            val activity = activityProvider()
-            activity?.runOnUiThread {
-                Toast.makeText(activity, "\u5df2\u81ea\u52a8\u5207\u6362\u4e3a\u5e73\u79fb\u7ffb\u9875", Toast.LENGTH_SHORT).show()
-            }
-            XposedBridge.log("$LOG_PREFIX scroll crash fallback switched flip_style to translate from $source")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX scroll crash fallback update failed from $source: ${it.stackTraceToString()}")
-        }
-    }.apply {
-        name = "ReaMicroScrollCrashFallback"
-        isDaemon = true
-        start()
-    }
-}
-
-internal fun ReaderHook.forceTranslateFlipStyle(session: Any) {
-    val prefKeysClass = classLoader.loadClass(PREF_KEYS_CLASS)
-    val prefKeys = prefKeysClass.getDeclaredField("INSTANCE")
-        .apply { isAccessible = true }
-        .get(null)
-    val flipStyleKey = prefKeysClass.methods.first {
-        it.name == "getFLIP_STYLE" && it.parameterTypes.isEmpty()
-    }.invoke(prefKeys)
-    val method = session.javaClass.methods.first {
-        it.name == "update" && it.parameterTypes.size == 3
-    }.apply { isAccessible = true }
-    invokeSuspendBlocking(method, session, flipStyleKey, Integer.valueOf(FLIP_STYLE_TRANSLATE))
-}
 
 internal fun ReaderHook.selectionMenuMaxItemsPerRow(actionCount: Int): Int? {
     if (settingsProvider().canUseCompactReaderSelectionMenu) {
@@ -169,8 +125,6 @@ private fun ReaderHook.renderCompactWrappedSelectionMenu(
     )
 }
 
-// FlowRow 按标题固有宽度排版时，各行的列起点会不同。固定单元格宽度后，
-// 仍然使用宿主 SelectionMenuItem，因此点击回调、图标和主题样式保持不变。
 private fun ReaderHook.selectionMenuCellWidthDp(actions: List<Any>): Int {
     val maxTitleWidth = actions.maxOfOrNull { action ->
         callString(action, "getTitle").sumOf { character ->
@@ -407,81 +361,7 @@ internal fun ReaderHook.selectionOffsetInDocument(text: String, quote: String): 
 
 internal fun ReaderHook.showSelectionEditDialog(
     activity: Activity, text: String, onSave: (String, ReaderSelectionEditDialog) -> Unit,
-): ReaderSelectionEditDialog {
-    val colors = DialogColors(activity)
-    val dialog = Dialog(activity)
-    val density = activity.resources.displayMetrics.density
-    fun dp(value: Int): Int = (value * density).toInt()
-    val editor = createThoughtStyleEditor(activity, text, colors, ::dp)
-    val save = thoughtStyleSaveButton(activity, colors, ::dp)
-    val handle = ReaderSelectionEditDialog(dialog, editor, save)
-    save.setOnClickListener {
-        if (!handle.saving) onSave(editor.text?.toString().orEmpty(), handle)
-    }
-    val inputCard = LinearLayout(activity).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(20), dp(18), dp(20), dp(14))
-        background = GradientDrawable().apply {
-            setColor(colors.inputBackground)
-            cornerRadius = dp(24).toFloat()
-            setStroke(dp(2), colors.inputStroke)
-        }
-        addView(
-            editor,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(138),
-            ),
-        )
-        addView(
-            LinearLayout(activity).apply {
-                gravity = Gravity.CENTER_VERTICAL
-                addView(android.view.View(activity), LinearLayout.LayoutParams(0, 1, 1f))
-                addView(save)
-            },
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ),
-        )
-    }
-    val root = LinearLayout(activity).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(16), dp(10), dp(16), dp(12))
-        addView(
-            inputCard,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ),
-        )
-    }
-    dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-    dialog.setContentView(root)
-    dialog.setCanceledOnTouchOutside(true)
-    dialog.setOnKeyListener { _, keyCode, event ->
-        if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
-            if (!handle.saving) dialog.dismiss()
-            true
-        } else {
-            false
-        }
-    }
-    dialog.show()
-    dialog.window?.apply {
-        setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-        setGravity(Gravity.BOTTOM)
-        decorView.setPadding(0, 0, 0, 0)
-        setSoftInputMode(
-            WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
-                WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE,
-        )
-        setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-    }
-    focusEditorAndShowKeyboard(activity, editor)
-    return handle
-}
+): ReaderSelectionEditDialog = ReaderThoughtSelectionEditor(activity, text, onSave).also { it.show() }.handle
 
 internal fun ReaderHook.showDictionaryDialog(
     activity: Activity,
@@ -654,6 +534,3 @@ internal fun ReaderHook.showDictionaryPresetPicker(
         setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
 }
-
-// Selection writes are exclusively handled by openAnchoredSelectionEditor:
-// the source chapter and offsets must come from the captured host CFI.

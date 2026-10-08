@@ -6,13 +6,6 @@ import com.reamicro.fix.notification.CloudTaskNotifications
 import com.reamicro.fix.xposed.XposedBridge
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * 本地任务的显式手动处理入口；自动调度仅由 Root 模块提供。
- *
- * 配置与阅微 token 保存在本机 [LocalTaskStore]，不经过云任务服务器。
- * ROOT增强停用时只响应用户手动操作；开启时把请求提交给 Root，不在应用内重复处理。
- * 两种本地模式都复用 [CloudTaskLocalRunner.runTask]，结果通过模块的通知渠道发出。
- */
 object LocalTaskRunner {
     private val running = AtomicBoolean(false)
 
@@ -47,7 +40,7 @@ object LocalTaskRunner {
     private fun postNotification(context: Context, accountId: String, taskType: String, outcome: CloudTaskLocalRunner.Outcome) {
         val id = "local_${taskType}_${accountId}_${outcome.message.hashCode()}"
         val title = localTaskTitle(taskType) + if (outcome.result == "success") "" else "异常"
-        // 结构化奖励明细交给通知着色；正文里已经写了物品名，通知会就地着色而不是拼接列表。
+
         val items = outcome.detail.optJSONArray(CloudTaskLocalRunner.KEY_REWARD_ITEMS)?.toString().orEmpty()
         val intent = CloudTaskNotifications.intent(id, title, outcome.message, outcome.result, items)
         if (!CloudTaskNotifications.post(context, intent, source = "local-task-runner")) {
@@ -65,12 +58,6 @@ object LocalTaskRunner {
     }
 }
 
-/**
- * 按任务配置的每天时间点算出下一次执行时刻（东八区）。
- *
- * 配置的是"每天 HH:mm"，所以下一次必须是**那一天的 HH:mm**：今天还没到就用今天，否则明天。
- * 用 now + 24h 会让执行时刻每天往后漂，也和设置页里显示的时间对不上。
- */
 internal fun nextDailyRunAt(timeOfDay: String, now: Long): Long {
     val zone = java.time.ZoneId.of("Asia/Shanghai")
     val parts = timeOfDay.trim().split(":")
@@ -82,16 +69,6 @@ internal fun nextDailyRunAt(timeOfDay: String, now: Long): Long {
     return candidate.toInstant().toEpochMilli()
 }
 
-/**
- * 「重算下次时刻」算出来的值。
- *
- * 只能提前、不能推后：签到没领到奖励时它的下次执行是"解锁时刻"（比如次日 08:00），
- * 直接按每日时间点重算会把它抹成次日 00:00 —— 用户看到的就是"任务时刻刷新了、奖励却没下文"。
- * 所以取两者中更早的那个：旧值更晚，说明是历史遗留的 `now + 24h`，按配置纠正；旧值更早，
- * 说明是一个仍在等待中的节点，保留它。
- *
- * [scheduled] 传 null 表示没有仍在将来的旧值（已过期或不存在）。
- */
 internal fun rescheduledNextRunAt(
     taskType: String, timeOfDay: String, scheduled: Long?, now: Long, pendingAt: Long = 0L,
 ): Long {

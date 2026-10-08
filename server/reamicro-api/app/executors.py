@@ -1,10 +1,3 @@
-"""云端任务的实际执行。
-
-get-daily-lore 获取每日轶闻及 endTime；isFinish=true 后才能调用 complete-daily-lore 领取奖励。
-等待中的轶闻只安排后续检查，不提前调用领取接口，也不猜测固定的 8 小时等待期。
-注意不要与文社**周**奖励（claim-literary-society-weekly-reward）搞混——那是另一个奖励，
-早年误用它导致每天都拿到"上一周奖励已领取"并被判成可重试失败。
-"""
 import asyncio
 import json
 import urllib.error
@@ -13,11 +6,9 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app import runtime
-from app.audit import audit_event
-from app.config_store import bounded_config_int, load_config
-from app.crypto import decrypt_secret, encrypt_secret
-from app.state import load_credentials, save_credentials, task_credential_id
+from app.config_store import bounded_config_int
+from app.crypto import decrypt_secret
+from app.state import load_credentials, save_credentials
 
 
 def redact_message(value: str) -> str:
@@ -58,7 +49,7 @@ def nested_value(value: Any, *keys: str) -> Any:
 
 
 def reamicro_business_error(body: Any) -> str:
-    """提取阅微 HTTP 200 响应里的业务错误。"""
+
     if not isinstance(body, dict) or "code" not in body:
         return ""
     raw_code = body.get("code")
@@ -124,7 +115,7 @@ def normalize_lottery_quality(value: Any) -> str:
 
 
 def lottery_result_items(body: Any) -> list[dict[str, Any]]:
-    """从阅微祈愿响应中提取结构化物品，供后台与通知统一渲染。"""
+
     result = (
         nested_value(body, "data", "props")
         or nested_value(body, "props")
@@ -162,7 +153,7 @@ def lottery_result_items(body: Any) -> list[dict[str, Any]]:
 
 
 def aggregate_lottery_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """合并同名同品质物品，并按品质从高到低稳定排序。"""
+
     merged: dict[tuple[str, str], int] = {}
     for item in items:
         name = str(item.get("name", "")).strip()
@@ -183,17 +174,17 @@ def aggregate_lottery_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def lottery_items_summary(items: list[dict[str, Any]]) -> str:
-    """生成不重复品质文字的紧凑结果，例如“端砚 x1、花笺 x2”。"""
+
     return "、".join(f"{item['name']} x{item['count']}" for item in aggregate_lottery_items(items))
 
 
 def lottery_result_summaries(body: Any) -> list[str]:
-    """兼容旧调用方，返回已聚合的紧凑物品文本。"""
+
     return [f"{item['name']} x{item['count']}" for item in aggregate_lottery_items(lottery_result_items(body))]
 
 
 def lottery_result_summary(body: Any) -> str:
-    """兼容需要单行展示祈愿结果的调用方。"""
+
     return lottery_items_summary(lottery_result_items(body))
 
 
@@ -218,15 +209,7 @@ def credential_for_task(task: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
 
 
 def claim_daily_lore_reward(base_url: str, token: str, request: dict[str, Any], user_lore_id: int) -> tuple[str, str]:
-    """用阅微实际的每日轶闻完成接口领取签到奖励。
 
-    返回 (结果, 面向用户的说明)。结果取值：
-    - granted：本次领到了奖励
-    - already：奖励此前已领取
-    - locked：奖励还没解锁，等下一轮定时执行，不算失败
-    - paused：命中认证或风控，任务应暂停
-    - failed：真实错误，交由调用方走重试逻辑
-    """
     endpoint = str(request.get("completeEndpoint") or "rest/community/complete-daily-lore")
     status_code, body, raw = json_http_request(base_url, token, {"userLoreId": user_lore_id}, endpoint)
     if status_code in (401, 403, 429):
@@ -246,7 +229,7 @@ def claim_daily_lore_reward(base_url: str, token: str, request: dict[str, Any], 
 
 
 def claim_reward_already_granted(message: Any, body: Any = None) -> bool:
-    """判断失败回复是否其实表示奖励早已领取。"""
+
     text = str(message or "")
     if any(pattern in text for pattern in CLAIM_ALREADY_GRANTED_PATTERNS):
         return True
@@ -263,7 +246,6 @@ def reward_not_ready(message: Any) -> bool:
     return any(pattern in text for pattern in REWARD_NOT_READY_PATTERNS)
 
 
-# 阅微对重复领取的回复文案。命中任意一条即视为奖励已到账的终态，不再重试。
 CLAIM_ALREADY_GRANTED_PATTERNS = (
     "已领取",
     "已经领取",
@@ -296,7 +278,7 @@ LOTTERY_BALANCE_EXHAUSTED_PATTERNS = (
 
 
 def lottery_balance_exhausted(*values: Any) -> bool:
-    """判断抽卡回复是否表示彩筹已经耗尽。"""
+
     text = " ".join(
         json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value or "")
         for value in values
@@ -305,7 +287,7 @@ def lottery_balance_exhausted(*values: Any) -> bool:
 
 
 def timestamp_millis(value: Any) -> int:
-    """兼容阅微响应中的秒级和毫秒级时间戳。"""
+
     try:
         timestamp = int(value or 0)
     except (TypeError, ValueError):
@@ -316,7 +298,7 @@ def timestamp_millis(value: Any) -> int:
 
 
 def daily_lore_reward_items(lore: Any) -> list[dict[str, Any]]:
-    """从每日轶闻响应提取结构化奖励明细。"""
+
     rewards: list[dict[str, Any]] = []
     exp = bounded_config_int(nested_value(lore, "data", "exp"), 0, 0)
     gem = bounded_config_int(nested_value(lore, "data", "gem"), 0, 0)
@@ -332,7 +314,7 @@ def daily_lore_reward_items(lore: Any) -> list[dict[str, Any]]:
 
 
 def daily_lore_reward_summary(lore: Any) -> str:
-    """生成签到奖励的紧凑通知文本。"""
+
     return lottery_items_summary(daily_lore_reward_items(lore))
 
 
@@ -662,7 +644,7 @@ def _execute_reamicro_task_body(task: dict[str, Any]) -> tuple[str, str]:
                 continue
             raw_book_id = book.get("bookId")
             if not uses_recent_books and raw_book_id in (None, ""):
-                # 兼容旧版自定义图书配置；最近阅读响应不得回退到公共云书 ID。
+
                 raw_book_id = book.get("cloudBookId")
             try:
                 book_id = int(str(raw_book_id).strip())
@@ -693,7 +675,6 @@ def _execute_reamicro_task_body(task: dict[str, Any]) -> tuple[str, str]:
     return "failed", f"未知阅微任务类型：{task_type}"
 
 
-
 PROHIBITED_PAWN_PROP_HINTS = {
     "11": "传承消耗物品（清酒）",
     "12": "祈禳消耗物品（剡藤）",
@@ -703,19 +684,14 @@ PROHIBITED_PAWN_PROP_HINTS = {
     "16": "备选消耗物品（端砚）",
     "17": "夺宝消耗物品（琬琰）",
     "18": "传承消耗物品（欹器）",
-    # 青圭的 propId 静态拿不到（背包 materials 里没有，宿主只存 qinggui 计数），
-    # 用 name: 前缀键占位，执行时除 propId 外再按当日期物名字兜底匹配。
+
+
     "name:青圭": "招募消耗物品（青圭）",
 }
 
 
 def execute_pawn_task(task: dict[str, Any]) -> tuple[str, str]:
-    """期物典当：把当日期物换成铜钱。
 
-    判定与参考脚本一致：`get-pawn-count` 取当日可典当期物与剩余次数；期物命中禁当清单就跳过
-    （那些消耗品另有用途，典当掉会让祈禳/传承/夺宝缺料）；再从背包里找到该期物的 userPropId，
-    循环 `pawn` 直到次数或持有量用尽。
-    """
     request, secret = credential_for_task(task)
     base_url = str(secret.get("baseUrl") or "https://api.reamicro.zhendong.ltd/").strip()
     token = str(secret.get("token"))
@@ -741,7 +717,7 @@ def execute_pawn_task(task: dict[str, Any]) -> tuple[str, str]:
         return "success", f"今日期物「{prop_name}」是{PROHIBITED_PAWN_PROP_HINTS[prop_id]}，跳过典当"
     if f"name:{prop_name}" in PROHIBITED_PAWN_PROP_HINTS:
         return "success", f"今日期物「{prop_name}」是{PROHIBITED_PAWN_PROP_HINTS[f'name:{prop_name}']}，跳过典当"
-    # 红色品质一律不自动典当：RED 档全是青圭这类另有用途的稀有消耗品。
+
     if str(data.get("specialPropQuality") or "").strip().upper() == "RED":
         return "success", f"今日期物「{prop_name}」是红色品质，不自动典当"
     status, body, raw = json_http_request(
@@ -802,7 +778,7 @@ def _safe_long(value: Any) -> int:
 
 
 def merchant_profit_text(event_title: Any, settlement_amount: Any, principal: Any) -> str:
-    """行商完成通知正文：事件标题 + 收益/亏损（结算额 − 本金）。"""
+
     delta = _safe_long(settlement_amount) - _safe_long(principal)
     profit = f"收益 +{delta}" if delta >= 0 else f"亏损 {delta}"
     title = str(event_title or "").strip() or "行商"
@@ -810,7 +786,7 @@ def merchant_profit_text(event_title: Any, settlement_amount: Any, principal: An
 
 
 def execute_traveling_merchant_task(task: dict[str, Any]) -> tuple[str, str]:
-    """SETTLED 是待领取状态；领取成功后才按配置祈禳并续开。"""
+
     request, secret = credential_for_task(task)
     base_url = str(secret.get("baseUrl") or "https://api.reamicro.zhendong.ltd/").strip()
     token = str(secret.get("token"))
@@ -928,7 +904,7 @@ def _merchant_next_run(trip: dict[str, Any] | None, now_ms: int) -> int:
 
 
 def _merchant_remembered_config(task: dict[str, Any], trip: Any) -> dict[str, Any]:
-    """上次行商实际使用的城池/本金/车马。用户留空时沿用——阅微只在内存里保存这些选择。"""
+
     trip = trip if isinstance(trip, dict) else {}
     return {
         "cityCode": str(trip.get("cityCode") or task.get("merchantLastCityCode") or "").strip(),
@@ -938,7 +914,7 @@ def _merchant_remembered_config(task: dict[str, Any], trip: Any) -> dict[str, An
 
 
 def _merchant_start_config(request: dict[str, Any], remembered: dict[str, Any]) -> dict[str, Any]:
-    """用户填了的优先，留空的沿用上次行商配置。"""
+
     return {
         "cityCode": str(request.get("merchantCityCode") or "").strip() or remembered.get("cityCode", ""),
         "transportId": bounded_config_int(request.get("merchantTransportId", 0), 0, 0) or remembered.get("transportId", 0),

@@ -1,36 +1,57 @@
 package com.reamicro.fix.cloud.local
 
+import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import com.reamicro.fix.logging.ModuleLogBuffer
 import com.reamicro.fix.xposed.XposedBridge
-import org.json.JSONObject
 
-/** Receives configuration only. Store synchronization notifies Root only when ROOT enhancement is enabled. */
 class LocalTaskMirrorReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
-        if (intent?.action != LocalTaskMirror.ACTION) return
-        val appContext = context.applicationContext
-        // 绑定日志落盘位置：模块进程没有界面，这些接收器是最早、也往往是唯一拿到 Context 的地方。
-        ModuleLogBuffer.attach(appContext)
-        val payload = runCatching {
-            JSONObject(intent.getStringExtra(LocalTaskMirror.EXTRA_PAYLOAD) ?: "")
-        }.getOrElse {
-            XposedBridge.log("ReaMicro local task mirror payload invalid: ${it.message}")
+        if (intent?.action != LocalTaskMirror.ACTION || !isOrderedBroadcast) return
+        val app = context.applicationContext
+        ModuleLogBuffer.attach(app)
+        if (Build.VERSION.SDK_INT < 34) {
+
+            val pending = goAsync()
+            if (!LocalTaskBridgeRuntime.enqueue {
+                try {
+                    val granted = LocalTaskBridgeRuntime.grantLegacyVisibility(app)
+                    pending.setResult(if (granted) LocalTaskBridgeRuntime.LEGACY_READY else Activity.RESULT_CANCELED,
+                        if (granted) null else "legacy_provider_unavailable", null)
+                } finally { pending.finish() }
+            }) {
+                pending.setResult(Activity.RESULT_CANCELED, "busy", null)
+                pending.finish()
+            }
             return
         }
-        val accounts = payload.optJSONObject(LocalTaskMirror.PAYLOAD_ACCOUNTS) ?: return
-        val store = LocalTaskStore { appContext }
-        accounts.keys().forEach { accountId ->
-            val entry = accounts.optJSONObject(accountId) ?: return@forEach
-            store.applyMirror(
-                accountId,
-                entry.optJSONObject(LocalTaskStore.KEY_TASKS) ?: JSONObject(),
-                entry.optString(LocalTaskStore.KEY_TOKEN),
-                entry.optLong("recordsClearedAt"),
-            )
+
+        val uid = runCatching { sentFromUid }.getOrDefault(-1)
+        if (!LocalTaskBridgeRuntime.trustedUid(app, uid)) {
+            setResult(Activity.RESULT_CANCELED, "unauthorized", null)
+            XposedBridge.logError("ReaMicro local task bridge rejected unauthenticated sender")
+            return
         }
-        XposedBridge.log("ReaMicro local task mirror applied accounts=${accounts.length()}")
+        val request = runCatching { intent.extras?.let(LocalTaskBridgeRuntime::request) }.getOrNull()
+        if (request == null) {
+            setResult(Activity.RESULT_CANCELED, "invalid_request", null)
+            return
+        }
+        val pending = goAsync()
+        if (!LocalTaskBridgeRuntime.enqueue {
+            try {
+                val reply = LocalTaskBridgeRuntime.execute(app, request)
+                pending.setResult(if (reply.success) Activity.RESULT_OK else Activity.RESULT_CANCELED,
+                    reply.error, LocalTaskBridgeRuntime.replyBundle(reply))
+            } catch (_: Exception) {
+                pending.setResult(Activity.RESULT_CANCELED, "processing_failed", null)
+            } finally { pending.finish() }
+        }) {
+            pending.setResult(Activity.RESULT_CANCELED, "busy", null)
+            pending.finish()
+        }
     }
 }

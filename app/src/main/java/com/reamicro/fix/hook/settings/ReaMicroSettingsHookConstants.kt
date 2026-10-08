@@ -1,15 +1,8 @@
 package com.reamicro.fix.hook.settings
 
-import android.widget.Switch
 import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.settings.ModuleSettings
 
-// ReaMicroSettingsHook 与其外移出去的扩展函数共用的常量。
-//
-// 原先是 ReaMicroSettingsHook 的 companion object 成员。功能簇拆成同包扩展函数后，
-// companion 的 private 成员对扩展函数不可见，因此提升为子包顶层 internal 声明，
-// 由各簇文件通过包级 star import 引用。companion 里的函数没有搬——它们是给其它
-// hook 调用的对外入口。
 internal const val FEATURE_ID = "ReaMicroSettingsHook"
 
 internal const val LOG_PREFIX = "ReaMicro LSP"
@@ -17,8 +10,7 @@ internal const val LOG_PREFIX = "ReaMicro LSP"
 internal const val SETTINGS_SCREEN_CLASS = HostClasses.Host.SETTINGS_SCREEN
 internal const val SETTINGS_LIST_BUILDER_METHOD = "SettingsScreen\$lambda\$0\$1\$0\$0"
 internal const val ACCOUNT_SECURITY_SCREEN_CLASS = HostClasses.Host.ACCOUNT_SECURITY_SCREEN
-// 账号配置页删除项 lambda 的 mangling 名会随宿主增删条目而漂移（2.3.2 起新增登录方式项，
-// 该 lambda 从 $4$0$2 移到 $4$0$3）。运行期改用签名匹配定位，此常量仅作兜底/记录用途。
+
 internal const val ACCOUNT_SECURITY_DELETE_CONTENT_METHOD = "AccountSecurityScreen\$lambda\$0\$0\$4\$0\$3"
 internal const val ACCOUNT_SECURITY_DELETE_ITEM_METHOD = "DeleteAccountItem"
 internal const val COMPOSE_STATE_CLASS = HostClasses.Compose.COMPOSE_STATE
@@ -26,12 +18,6 @@ internal const val MUTABLE_STATE_CLASS = HostClasses.Compose.MUTABLE_STATE
 internal const val LAZY_ITEM_SCOPE_CLASS = "androidx.compose.foundation.lazy.LazyItemScope"
 internal const val NAV_GRAPH_SCOPE_CLASS = HostClasses.Host.NAV_GRAPH_SCOPE
 
-/**
- * 导航图谱 DSL 上注册页面的方法名。
- *
- * 宿主每次重组导航图谱都会调用它，因此是「刷新 NavGraphScope 缓存」的最佳锚点
- * （见 `hookNavGraphScope`）。
- */
 internal const val NAV_GRAPH_COMPOSABLE_METHOD = "composable"
 internal const val NAV_CONTROLLER_CLASS = HostClasses.AndroidX.NAV_CONTROLLER
 internal const val ROUTE_ABOUT_CLASS = "app.zhendong.reamicro.Route\$About"
@@ -56,7 +42,7 @@ internal const val WINDOW_INSETS_EXT_ANDROID_KT_CLASS = HostClasses.Host.WINDOW_
 internal const val EVA_ICONS_CLASS = "compose.icons.EvaIcons"
 internal const val EVA_OUTLINE_KT_CLASS = "compose.icons.evaicons.__OutlineKt"
 internal const val EVA_CLOSE_KT_CLASS = "compose.icons.evaicons.outline.CloseKt"
-// 宿主右侧箭头（Icons.AutoMirrored.Filled.NavigateNext）与其所在的 Icons 容器。
+
 internal const val NAVIGATE_NEXT_ICON_CLASS = HostClasses.Compose.NAVIGATE_NEXT_ICON
 internal const val ICONS_AUTO_MIRRORED_FILLED_CLASS = "androidx.compose.material.icons.automirrored.filled.Icons"
 
@@ -95,11 +81,9 @@ internal const val WIDTH_METHOD = "width-3ABfNKs"
 internal const val PADDING_KT_CLASS = HostClasses.Compose.PADDING_KT
 internal const val PADDING_VALUES_METHOD = "padding"
 internal const val PADDING_HORIZONTAL_DEFAULT_METHOD = "padding-VpY3zN4\$default"
-// 四边独立内边距（start/top/end/bottom + mask）。mask 置位表示该参数用默认值 0：
-// 按位 top=2、end=4、bottom=8，所以「只要顶部」用 14，「只要起始边」用 14 的镜像同理。
+
 internal const val PADDING_SIDES_DEFAULT_METHOD = "padding-qDBjuR0\$default"
-// 四边独立内边距的**非** $default 版（4 个 Dp 全部显式给）。真沉浸页要「只消费顶部、
-// 底部保留 0」，用这个比凑 $default 掩码更直观。
+
 internal const val PADDING_SIDES_METHOD = "padding-qDBjuR0"
 internal const val PADDING_SIDES_PARAMETER_COUNT = 5
 internal const val PADDING_MASK_TOP_ONLY = 14
@@ -153,7 +137,7 @@ internal const val USER_REPOSITORY_CLASS = HostClasses.Host.USER_REPOSITORY
 internal const val USER_REPOSITORY_SIGN_OUT_METHOD = "signOut"
 
 internal const val INSERT_AFTER_SETTINGS_ITEM_COUNT = 2
-// 账号配置页把「切换账号」注入到宿主第 2 个条目（邮箱）之后。
+
 internal const val INSERT_AFTER_ACCOUNT_EMAIL_ITEM_COUNT = 2
 internal const val ACCOUNT_SWITCH_ITEM_KEY = 0x524D4659
 internal const val MODULE_SETTINGS_ITEM_KEY = 0x524D4658
@@ -210,7 +194,7 @@ internal const val DISCOVER_BOOK_LIST_ITEM_KEY = 0x524D468B
 internal const val DISCOVER_EMPTY_ITEM_KEY = 0x524D468C
 internal const val ACCOUNT_CREDENTIAL_DOCUMENT_REQUEST_CODE = 0x524D47
 internal const val ACCOUNT_DATA_DOCUMENT_REQUEST_CODE = 0x524D48
-/** 项目地址。既作为「关于补全」里那一行的副标题直接显示，也是点击后打开的目标。 */
+
 internal const val PROJECT_URL = "https://github.com/YGHFv/ReaMicro-Extend"
 
 internal const val ONLINE_SOURCE_DOCUMENT_REQUEST_CODE = 0x524D49

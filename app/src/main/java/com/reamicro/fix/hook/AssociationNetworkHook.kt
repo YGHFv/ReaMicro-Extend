@@ -6,17 +6,14 @@ import com.reamicro.fix.xposed.XC_MethodHook
 import com.reamicro.fix.xposed.XposedBridge
 import java.net.URL
 
-/** Independent of WebDAV/online-reading switches: association is a separate feature. */
 internal object AssociationNetworkHook {
     @Volatile private var installed = false
 
-    // Intentional Xposed-only access to optional host/platform internals.
-    // Keep each lookup guarded and restrict bypasses to AssociationNetworkScope.
     @SuppressLint("BlockedPrivateApi")
     @Synchronized fun install() {
         if (installed) return
         var count = 0
-        // Never hook the no-argument policy: it could allow unrelated traffic.
+
         val policyClasses = linkedSetOf<Class<*>>()
         listOf(
             "android.security.NetworkSecurityPolicy",

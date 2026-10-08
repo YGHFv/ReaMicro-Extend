@@ -10,17 +10,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
-import com.reamicro.fix.R
 import com.reamicro.fix.logging.ModuleAndroidLog
 
-/**
- * 云端任务消息的通知投递。
- *
- * 这些消息由跑在阅微进程里的 [com.reamicro.fix.cloud.api.CloudTaskNotificationPoller] 拉取，
- * 但**不能在阅微进程里发通知**：`POST_NOTIFICATIONS` 是按应用授予的，阅微没授权就只能退化成
- * Toast；即便授权了，通知也会挂在阅微名下、用阅微的渠道。所以这里沿用在线补全下载通知那套
- * 成熟做法——把消息投给模块自己的组件，由模块进程用模块的权限、渠道和图标发出。
- */
 object CloudTaskNotifications {
     const val ACTION_OPEN_RECORDS = "com.reamicro.fix.OPEN_TASK_RECORDS"
     const val ACTION_POST = "com.reamicro.fix.CLOUD_TASK_NOTIFICATION"
@@ -38,7 +29,6 @@ object CloudTaskNotifications {
 
     private const val LOG_TAG = "ReaMicroNotify"
 
-    /** 构造投递用的 Intent；调用方再决定走广播还是 Activity。 */
     fun intent(messageId: String, title: String, text: String, result: String, itemsJson: String = ""): Intent =
         Intent(ACTION_POST).apply {
             addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
@@ -54,10 +44,6 @@ object CloudTaskNotifications {
         Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
 
-    /**
-     * 点击通知打开模块主界面。显式指向 ModuleMainActivity（不是被禁用的 launcher 别名），
-     * 带 NEW_TASK + CLEAR_TOP：已在运行则复用并回到栈顶，触发 onResume 里的状态刷新。
-     */
     private fun contentIntent(context: Context): PendingIntent {
         val intent = Intent(ACTION_OPEN_RECORDS).apply {
             component = ComponentName(MODULE_PACKAGE_NAME, "$MODULE_PACKAGE_NAME.ui.ModuleMainActivity")
@@ -69,13 +55,6 @@ object CloudTaskNotifications {
         )
     }
 
-    /**
-     * 在当前进程发出通知。只应由模块进程里的组件调用。
-     * 返回是否成功发出，调用方据此决定要不要继续兜底、以及能不能回执给服务器。
-     *
-     * 成功与失败都会往 [NotificationRecordStore] 记一条：模块进程没有界面，这是事后唯一
-     * 能回答「这条通知到底发出去没有、为什么没发出去」的地方。
-     */
     fun post(context: Context, intent: Intent, source: String): Boolean {
         if (intent.action != ACTION_POST) return false
         val messageId = intent.getStringExtra(EXTRA_ID).orEmpty().ifBlank { return false }
@@ -102,14 +81,14 @@ object CloudTaskNotifications {
                 Notification.Builder(context)
             }
             builder
-                .setSmallIcon(R.drawable.ic_notification_reamicro)
+                .setReaMicroSmallIcon()
                 .setContentTitle(title)
                 .setContentText(displayText)
                 .setStyle(Notification.BigTextStyle().bigText(displayText))
                 .setContentIntent(contentIntent(context))
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(true)
-            // 用消息 ID 派生通知 ID，同一条消息重复投递只会覆盖而不是堆叠。
+
             manager.notify(notificationId(messageId), builder.build())
             ModuleAndroidLog.legacy(LOG_TAG, "cloud task notification posted source=$source id=$messageId")
             record(context, title, displayText, result, source, delivered = true)
@@ -146,7 +125,6 @@ object CloudTaskNotifications {
     }
 
     private fun notificationId(messageId: String): Int = BASE_NOTIFICATION_ID + (messageId.hashCode() and 0xFFFF)
-
 
     private const val BASE_NOTIFICATION_ID = 4400
 }

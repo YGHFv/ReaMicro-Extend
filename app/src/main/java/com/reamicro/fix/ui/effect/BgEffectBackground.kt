@@ -1,5 +1,4 @@
 // Adapted from KernelSU manager (GPL-3.0); see assets/licenses/KernelSU-effect-LICENSE.txt.
-// Mirrored from compose-miuix-ui example.
 
 package com.reamicro.fix.ui.effect
 
@@ -52,15 +51,13 @@ fun BgEffectBackground(
         val isDarkTheme = (MiuixTheme.colorScheme.surface.luminance() < 0.5f)
         var painter by remember { mutableStateOf<BgEffectPainter?>(null) }
         LaunchedEffect(Unit) {
-            // Preloading starts this work even when the page is not playing. The new painter
-            // stays private to this worker until construction completes; only then can draw()
-            // mutate its uniforms. Cancellation on disposal prevents publishing a stale result.
+
             painter = withContext(Dispatchers.Default) {
                 try {
                     BgEffectPainter()
                 } catch (error: RuntimeException) {
                     Log.w("ReaMicroAbout", "Unable to prepare the about background", error)
-                    null // Keep the current theme surface, never a white loading layer.
+                    null
                 }
             }
         }
@@ -90,7 +87,7 @@ fun BgEffectBackground(
         Spacer(
             modifier = Modifier
                 .fillMaxSize()
-                // Isolate shader invalidations from the surrounding pager and static UI.
+
                 .graphicsLayer()
                 .then(bgModifier)
                 .bgEffectDraw(

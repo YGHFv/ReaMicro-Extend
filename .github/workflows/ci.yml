@@ -5,10 +5,10 @@ on:
   push:
     branches:
       - main
-    # 模块本体或 通用模块脚本变更时构建配套 APK 和 ZIP；服务端单独变更由 Docker workflow 负责。
     paths:
       - "app/**"
       - "module/**"
+      - "tools/build-fanqie-source.py"
       - "tools/build-module.py"
       - "tools/export-bundled-module.py"
       - "third_party/**"
@@ -37,7 +37,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # 统一解析模块版本号，后续打包命名、Release 命名、模块仓库同步都读这里。
       - name: Resolve module version
         run: |
           VERSION_NAME="$(grep -oE 'versionName[[:space:]]*=[[:space:]]*"[^"]+"' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')"
@@ -72,8 +71,6 @@ jobs:
 
       - name: Install Android SDK packages
         run: |
-          # CLI 23 supports the Android 37 minor-version repository format.
-          # Its compatibility sdkmanager accepts licenses during installation.
           sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
           test -f "$ANDROID_HOME/platforms/android-37.0/android.jar"
 
@@ -85,7 +82,6 @@ jobs:
           for script in module/reamicro-automation/*.sh; do
             sh -n "$script"
           done
-      # 与旧版一致：只生成体积/复杂度报告，不因检查结果阻断 APK 构建。
       - name: Detekt (report only)
         continue-on-error: true
         run: ./gradlew :app:detekt
@@ -116,7 +112,6 @@ jobs:
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
-          # Same signing inputs as the previous CI; never substitute a debug build.
           if [ -n "$RELEASE_KEYSTORE_BASE64" ] && [ -n "$RELEASE_KEYSTORE_PASSWORD" ] && [ -n "$RELEASE_KEY_ALIAS" ] && [ -n "$RELEASE_KEY_PASSWORD" ]; then
             mkdir -p signing
             (umask 077; printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > signing/ci-release.jks)
@@ -154,14 +149,11 @@ jobs:
               exit 1
             fi
           fi
-          # An invalid APK must not be mistaken for a merely unsigned APK.
           python3 -c 'import sys, zipfile; apks = [zipfile.ZipFile(p) for p in sys.argv[1:]]; required = {"AndroidManifest.xml", "resources.arsc", "classes.dex"}; assert all(required.issubset(z.namelist()) and z.testzip() is None for z in apks), "Invalid APK contents"' "artifacts/$DEBUG_APK" "artifacts/$RELEASE_APK"
           "$ANDROID_HOME/build-tools/37.0.0/aapt2" dump badging "artifacts/$RELEASE_APK" > /dev/null
           (cd artifacts && sha256sum "$DEBUG_APK" > "$DEBUG_APK.sha256" && sha256sum "$RELEASE_APK" > "$RELEASE_APK.sha256")
-      # 发布的 ZIP 直接提取自 APK，并检查 debug/release 内置 ZIP 字节完全一致。
       - name: Export and verify bundled companion module
         run: python3 tools/export-bundled-module.py --output artifacts artifacts/*.apk
-      # v7 原文件上传：不额外套 ZIP。每步只上传一个文件，下载名就是原文件名。
       - name: Upload debug APK
         uses: actions/upload-artifact@v7
         with:
@@ -198,15 +190,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # Keep debug APKs in Actions artifacts, not in the release/update feed.
       - name: Create CI release
         if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # tag 保持 ci- 前缀并带上版本号：服务端 releases.py 先按 tag 解析版本，
-          # 只有 tag 不构成语义版本时才回退到标题里的版本。若把 tag 写成 "65-2.3.4"，
-          # 那里会先 split("-") 取到 "65" 当成版本号，客户端更新判断会出错。
           TAG="ci-${VERSION_NAME}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
           if [ "$RELEASE_SIGNING_ENABLED" = "true" ]; then
             TITLE="${VERSION_NAME} · CI #${GITHUB_RUN_NUMBER} signed"
@@ -225,15 +213,6 @@ jobs:
           gh release create "$TAG" artifacts/*-release*.apk artifacts/*-release*.apk.sha256 artifacts/ReaMicro-Automation-Root-*.zip \
             --target "$GITHUB_SHA" --title "$TITLE" "${NOTES_ARGS[@]}" --prerelease
 
-      # 把签名 APK 同步到 LSPosed 模块仓库（Xposed-Modules-Repo）并建 release，避免每次手动上传附件。
-      # secret MODULE_REPO_TOKEN 必须是「经典 PAT（classic）」：
-      #   模块仓库属于 Xposed-Modules-Repo 组织，作者只是该仓库的 outside collaborator，
-      #   而 fine-grained PAT 明确不支持 outside collaborator / 非成员组织的仓库，那边选不到这个仓库。
-      #   建法：Settings → Developer settings → Personal access tokens → Tokens (classic)，
-      #   勾 public_repo 即可（模块仓库是公开仓库）。
-      # 未配置 secret 时本步直接跳过；配置了但 token 不可写则直接失败，避免静默漏发。
-      # 只在版本号变化时发布：模块仓库已有 <versionCode>-<versionName> 这条 release 就跳过；
-      # 需要覆盖同版本时，先删掉模块仓库里那条 release（连同 tag），再重跑本 workflow。
       - name: Publish to LSPosed module repo
         if: github.repository == 'YGHFv/ReaMicro-Extend' && github.ref == 'refs/heads/main'
         env:
@@ -244,8 +223,6 @@ jobs:
             echo "MODULE_REPO_TOKEN 未配置，跳过模块仓库同步。"
             exit 0
           fi
-          # token 不可写就直接失败：静默跳过会让模块仓库悄悄断更。
-          # 只要 push / maintain / admin 任一为真就认作可写（maintain 角色下 push 的取值不稳）。
           if [ "$(gh api "repos/$MODULE_REPO" --jq '.permissions.push == true or .permissions.maintain == true or .permissions.admin == true' 2>/dev/null || echo false)" != "true" ]; then
             echo "::error::MODULE_REPO_TOKEN 无法写 $MODULE_REPO。请改用经典 PAT（classic）并勾选 public_repo；fine-grained PAT 不支持 outside collaborator 的仓库。"
             exit 1

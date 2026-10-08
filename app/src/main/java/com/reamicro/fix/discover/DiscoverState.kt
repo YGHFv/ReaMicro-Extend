@@ -6,115 +6,66 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
-/**
- * 「发现」页的状态与后台加载。
- *
- * Compose 侧只读 [version] 触发重组、再拉 [snapshot] 取数据，和模块其它注入页一贯的
- * 「版本号 + 快照」模式一致（见 `profileBackgroundVersionValue` 一类实现）。
- *
- * 加载走单线程池串行执行：书源普遍有并发限流（`concurrentRate`），并发请求既容易被
- * 封也拿不到更快的首屏；串行还能保证 [setState] 的写入顺序与用户点击顺序一致。
- */
 internal object DiscoverState {
 
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "ReaMicroDiscover").apply { isDaemon = true }
     }
 
-    /** 每次状态变化自增，Compose 侧读它建立依赖。 */
     @Volatile
     var version: Int = 0
         private set
 
-    /** 已解析出分类的源列表（顺序与 [OnlineSourceStore.list] 一致）。 */
     @Volatile
     var sources: List<DiscoverSource> = emptyList()
         private set
 
-    /** 当前选中的「源 + 分类」。 */
     @Volatile
     var selection: DiscoverSelection = DiscoverSelection.NONE
         private set
 
-    /** 当前选中分类的加载状态。 */
     @Volatile
     var state: DiscoverLoadState = DiscoverLoadState.Idle
         private set
 
-    /**
-     * 书单排布（列表 / 网格）。
-     *
-     * 属于用户偏好而不是会话状态，因此落到 SharedPreferences；读取时机与书源列表一致
-     * （见 [refreshSources]），避免在 App 启动早期就去碰 Context。
-     */
     @Volatile
     var layout: DiscoverLayout = DiscoverLayout.LIST
         private set
 
-    /** 源列表是否正在刷新。 */
     @Volatile
     var refreshing: Boolean = false
         private set
 
-    /** 已加载书单的缓存，键是「源 id + 分类 key」，避免来回切标签重复请求。 */
     private val cache = ConcurrentHashMap<String, DiscoverBookPage>()
 
-    /** 当前分类是否还有下一页（仅 Loaded 态有意义）。 */
     @Volatile
     var hasMore: Boolean = false
         private set
 
-    /** 是否正在加载下一页。 */
     @Volatile
     var loadingMore: Boolean = false
         private set
 
-    /** 防止过期请求的结果覆盖新选择：每次选择递增，回调时比对。 */
     private val requestToken = AtomicInteger(0)
 
-    /** 排布偏好是否已经从磁盘读过；读盘只做一次。 */
     @Volatile
     private var layoutRestored = false
 
-    /**
-     * 持久化的「源 + 分类」选择（每次 [select] 时落盘）。
-     *
-     * 只在进程首次刷新源列表时参与收敛：用户切了书源却每次进页都回落第一个源，
-     * 就是漏了这条持久化。
-     */
     @Volatile
     private var storedSelection: DiscoverSelection? = null
 
-    /** 选择偏好是否已经从磁盘读过；读盘只做一次。 */
     @Volatile
     private var selectionRestored = false
 
-    /**
-     * 组合筛选生成的合成分类（当前源）。
-     *
-     * 用户在配置弹窗里「打开当前筛选结果」后生成：以普通分类的身份排在标签行最前、
-     * 参与选中与缓存（[selectionKey] 只看「源 + 分类名」，合成分类天然复用整套加载链路）。
-     * 换源时按新源已存的筛选选择重建；从没筛过的源为 null。
-     */
     @Volatile
     var filterKind: DiscoverKind? = null
         private set
 
-    /** 每个源的「组名 → 选中项标题」，内存态；[persistFilters] 落盘。 */
     private val filterSelectionsBySource = ConcurrentHashMap<String, Map<String, String>>()
 
-    /** 筛选选择是否已经从磁盘读过；读盘只做一次。 */
     @Volatile
     private var filtersRestored = false
 
-    /**
-     * 状态变化时的外部通知。
-     *
-     * UI 侧在第一次组合时注册它，用来把「版本号变了」推成一次 Compose 重组。
-     * 之所以需要：`version` 只是普通 `@Volatile` 字段，Compose 追踪不到；只靠组合期间比对
-     * 版本号的话，后台线程加载完成后再没有任何东西会触发下一次组合 —— 页面会永远停在
-     * 第一帧的「正在加载…」，切标签也没有任何反应。
-     */
     @Volatile
     var onChanged: (() -> Unit)? = null
 
@@ -123,7 +74,6 @@ internal object DiscoverState {
         onChanged?.invoke()
     }
 
-    /** 会话结束时清掉缓存，避免书源更新后一直读到旧书单。 */
     fun invalidate() {
         requestToken.incrementAndGet()
         loadingMore = false
@@ -131,12 +81,6 @@ internal object DiscoverState {
         version += 1
     }
 
-    /**
-     * 刷新源与分类列表。
-     *
-     * 只解析 `exploreUrl`，不发网络请求，所以可以直接在调用线程跑完再吐 UI，
-     * 不必占用加载线程池。
-     */
     fun refreshSources(context: Context?) {
         requestToken.incrementAndGet()
         loadingMore = false
@@ -153,7 +97,7 @@ internal object DiscoverState {
             }
             .filter { it.hasKinds }
         sources = resolved
-        // 之前选中的源/分类可能已经不在了，重新收敛一次；本会话还没选过时用持久化的选择。
+
         val current = resolveSelection(
             selection.takeIf { it != DiscoverSelection.NONE } ?: storedSelection ?: selection,
             resolved,
@@ -165,8 +109,7 @@ internal object DiscoverState {
         state = cached?.state ?: DiscoverLoadState.Idle
         hasMore = cached?.hasMore ?: false
         bump()
-        // 首次进入（或选中的分类刚被自动收敛到别的项）时，主动拉一次书单，
-        // 否则页面停在 Idle 只会一直显示「正在加载…」。
+
         if (cached == null && current != DiscoverSelection.NONE && (changed || state == DiscoverLoadState.Idle)) {
             load(current, context)
         } else {
@@ -174,9 +117,8 @@ internal object DiscoverState {
         }
     }
 
-    /** 选中某个分类；已有缓存就直接用，否则发起加载。每次选择都持久化。 */
     fun select(sourceId: String, kindTitle: String, context: Context?) {
-        // 即使目标已有缓存，也要让旧分类正在补齐的后台请求失效。
+
         requestToken.incrementAndGet()
         loadingMore = false
         val next = DiscoverSelection(sourceId, kindTitle)
@@ -193,7 +135,6 @@ internal object DiscoverState {
         load(next, context)
     }
 
-    /** 强制重新加载当前分类。 */
     fun reload(context: Context?) {
         val current = selection
         if (current == DiscoverSelection.NONE) return
@@ -201,13 +142,6 @@ internal object DiscoverState {
         load(current, context)
     }
 
-    /**
-     * 切换书源。
-     *
-     * 源与分类是一起选的（[DiscoverSelection] 同时持有两者），换源必须顺带把分类收到新源的
-     * 第一个，否则会留下一个「源 A + 源 B 的分类」的越界组合——那边已有的收敛逻辑
-     * （[resolveSelection]）只在刷新源列表时跑，点击换源这条路径不经过它。
-     */
     fun selectSource(sourceId: String, context: Context?) {
         val entry = sources.firstOrNull { it.source.id == sourceId } ?: return
         val kind = entry.kinds.firstOrNull() ?: return
@@ -215,14 +149,6 @@ internal object DiscoverState {
         select(sourceId, kind.title, context)
     }
 
-    // ── 组合筛选 ────────────────────────────────────────────────────────────
-
-    /**
-     * 某源当前的筛选选择（「组名 → 选项标题」）。
-     *
-     * 以该源的默认选择为底、覆盖已存选择；已存的组名/选项在源更新后可能失效，
-     * 失效项回落默认，保证 [DiscoverFilter.buildUrl] 拿到的永远是合法组合。
-     */
     fun filterSelection(sourceId: String): Map<String, String> {
         val filter = sources.firstOrNull { it.source.id == sourceId }?.filter ?: return emptyMap()
         val stored = filterSelectionsBySource[sourceId].orEmpty()
@@ -233,12 +159,6 @@ internal object DiscoverState {
         }
     }
 
-    /**
-     * 应用一份筛选选择：落盘、生成合成分类并选中它（触发加载）。
-     *
-     * 合成分类的地址由各组选中项的参数按源脚本 `search({sort,platform,…})` 的语义拼出，
-     * 加载与翻页完全复用普通分类的链路。
-     */
     fun applyFilterSelection(sourceId: String, selections: Map<String, String>, context: Context?) {
         val source = sources.firstOrNull { it.source.id == sourceId } ?: return
         val filter = source.filter ?: return
@@ -250,40 +170,12 @@ internal object DiscoverState {
         select(sourceId, kind.title, context)
     }
 
-    /**
-     * 重置某源的筛选：清掉已存选择与合成分类。
-     *
-     * 当前正好停在合成分类上时，顺带把选中收敛回该源的第一个平铺分类——
-     * 否则标签行的合成分类消失了、书单却还停在筛选结果上。
-     */
-    fun resetFilterSelection(sourceId: String, context: Context?) {
-        filterSelectionsBySource.remove(sourceId)
-        persistFilters(context)
-        val onFilterKind = selection.sourceId == sourceId && filterKind?.title == selection.kindTitle
-        filterKind = null
-        if (onFilterKind) {
-            val first = sources.firstOrNull { it.source.id == sourceId }?.kinds?.firstOrNull()
-            if (first != null) {
-                select(sourceId, first.title, context)
-                return
-            }
-        }
-        bump()
-    }
-
-    /**
-     * 标签行/分类弹窗实际要展示的分类列表：平铺分类 + （当前源有筛选时的）合成分类。
-     *
-     * 合成分类放在**最前**而不是末尾：标签行只容得下前几颗，追加在尾部会永远躲进「▾」
-     * 弹窗里，应用筛选后页面上看不到任何已筛指示。
-     */
     fun kindsFor(source: DiscoverSource): List<DiscoverKind> {
         val extra = filterKind ?: return source.kinds
         if (selection.sourceId != source.source.id) return source.kinds
         return listOf(extra) + source.kinds
     }
 
-    /** 按已存选择为某源重建合成分类；没筛过或源不支持筛选时为 null。 */
     private fun buildFilterKind(sourceId: String): DiscoverKind? {
         val source = sources.firstOrNull { it.source.id == sourceId } ?: return null
         val filter = source.filter ?: return null
@@ -294,7 +186,6 @@ internal object DiscoverState {
         return DiscoverKind(title = filter.selectionTitle(resolved), url = url, urls = listOf(url))
     }
 
-    /** 把选择收敛到当前组/选项集合内（源更新后旧选项可能已不存在）。 */
     private fun DiscoverFilter.filterSelectionsResolved(stored: Map<String, String>): Map<String, String> =
         defaultSelection().mapValues { (groupName, default) ->
             val chosen = stored[groupName] ?: return@mapValues default
@@ -302,7 +193,6 @@ internal object DiscoverState {
             if (group != null && group.options.any { it.title == chosen }) chosen else default
         }
 
-    /** 首次拿到 Context 时读一次筛选选择；之后由内存值主导。 */
     private fun restoreFilters(context: Context?) {
         if (filtersRestored) return
         val app = context?.applicationContext ?: return
@@ -340,7 +230,6 @@ internal object DiscoverState {
         }
     }
 
-    /** 切换书单排布并持久化；值没变时不触发重组。 */
     fun setLayout(context: Context?, next: DiscoverLayout) {
         if (next == layout) return
         requestToken.incrementAndGet()
@@ -363,7 +252,6 @@ internal object DiscoverState {
         }
     }
 
-    /** 列表切到网格或恢复列表缓存时，自动补到下一个 21 本边界。 */
     private fun fillGridBatch(context: Context?) {
         val loaded = state as? DiscoverLoadState.Loaded ?: return
         if (layout == DiscoverLayout.GRID && hasMore &&
@@ -373,14 +261,12 @@ internal object DiscoverState {
         }
     }
 
-    /** 列表 ⇄ 网格互切，返回切换后的排布。 */
     fun toggleLayout(context: Context?): DiscoverLayout {
         val next = layout.toggled()
         setLayout(context, next)
         return next
     }
 
-    /** 首次拿到 Context 时读一次偏好；之后由内存值主导，避免每次进页面都读盘。 */
     private fun restoreLayout(context: Context?) {
         if (layoutRestored) return
         val app = context?.applicationContext ?: return
@@ -392,7 +278,6 @@ internal object DiscoverState {
         )
     }
 
-    /** 首次拿到 Context 时读一次持久化的「源 + 分类」选择。 */
     private fun restoreSelection(context: Context?) {
         if (selectionRestored) return
         val app = context?.applicationContext ?: return
@@ -405,7 +290,6 @@ internal object DiscoverState {
         }
     }
 
-    /** 把当前选择落到偏好，下次进发现页直接回到这个源 + 分类。 */
     private fun persistSelection(context: Context?) {
         val app = context?.applicationContext ?: return
         runCatching {
@@ -439,7 +323,7 @@ internal object DiscoverState {
                 state = DiscoverLoadState.Failed(result.error)
                 hasMore = false
             } else {
-                // 包括预取但尚未展示的书和真实书源页码，切分类后也不会丢失。
+
                 cache[key] = page
                 state = page.state
                 hasMore = page.hasMore
@@ -448,10 +332,6 @@ internal object DiscoverState {
         }
     }
 
-    /**
-     * 网格追加一批 21 本（补齐当前批次），列表追加一页。
-     * 先用缓冲中的书，不足时才继续请求原始书源页；失败保留进度供下次重试。
-     */
     fun loadMore(context: Context?) {
         val target = selection
         if (target == DiscoverSelection.NONE || loadingMore || !hasMore) return
@@ -471,7 +351,7 @@ internal object DiscoverState {
                 isCancelled = { token != requestToken.get() },
                 fetch = { page -> DiscoverRepository.loadBooks(source.source, kind, page) },
             ) ?: return@execute
-            // 过期请求不能覆盖新分类的缓存，也不能清掉新请求的 loadingMore。
+
             if (token != requestToken.get() || selection != target) return@execute
             val page = result.page
             cache[key] = page
@@ -487,7 +367,6 @@ internal object DiscoverState {
         }
     }
 
-    /** 默认选中第一个源的第一个分类，让发现页一进来就有内容。 */
     private fun resolveSelection(
         current: DiscoverSelection,
         available: List<DiscoverSource>,
@@ -496,17 +375,15 @@ internal object DiscoverState {
         val matched = available.firstOrNull { it.source.id == current.sourceId }
         if (matched != null) {
             if (matched.kinds.any { it.title == current.kindTitle }) return current
-            // 当前选中的是合成分类：源还在、筛选选择还在就仍然有效。
+
             if (buildFilterKind(matched.source.id)?.title == current.kindTitle) return current
-            // 源还在、分类没了（含恢复持久化选择时合成分类失效）：留在该源回落第一个分类，
-            // 不能跳回第一个源——否则换过的源看起来「记不住」。
+
             return DiscoverSelection(matched.source.id, matched.kinds.first().title)
         }
         val first = available.first()
         return DiscoverSelection(first.source.id, first.kinds.first().title)
     }
 
-    /** 按名取分类：平铺分类优先，其次是当前源的合成分类。 */
     private fun resolveKind(source: DiscoverSource, kindTitle: String): DiscoverKind? =
         source.kinds.firstOrNull { it.title == kindTitle }
             ?: filterKind?.takeIf { source.source.id == selection.sourceId && it.title == kindTitle }
@@ -514,16 +391,13 @@ internal object DiscoverState {
     private fun selectionKey(selection: DiscoverSelection): String =
         "${selection.sourceId}|${selection.kindTitle}"
 
-    /** 排布偏好所在的偏好文件名，与其它模块偏好一样独立一份。 */
     private const val PREFS_NAME = "reamicro_discover"
 
     private const val KEY_LAYOUT = "book_layout"
 
-    /** 「源 + 分类」选择的持久化 key：进页恢复上次选的书源与分类。 */
     private const val KEY_SELECTION_SOURCE = "selection_source"
 
     private const val KEY_SELECTION_KIND = "selection_kind"
 
-    /** 组合筛选选择的持久化 key：JSON `{源 id: {组名: 选项标题}}`。 */
     private const val KEY_FILTERS = "filter_selections_v1"
 }

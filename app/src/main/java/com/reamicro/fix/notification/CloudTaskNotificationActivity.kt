@@ -9,10 +9,6 @@ import android.os.Bundle
 import com.reamicro.fix.logging.ModuleAndroidLog
 import com.reamicro.fix.logging.ModuleLogState
 
-/**
- * 广播被系统或 OEM 后台策略拦掉时的兜底：无界面 Activity 同样跑在模块进程里，
- * 而且是唯一能**主动申请** `POST_NOTIFICATIONS` 的入口——首次使用云任务时通常还没授权。
- */
 class CloudTaskNotificationActivity : Activity() {
     private var pending: Intent? = null
 

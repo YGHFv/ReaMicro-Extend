@@ -1,6 +1,5 @@
 #!/system/bin/sh
-# Open the stable exported Activity, never the switchable launcher aliases.
-# Works independently of task execution mode and does not enable/unhide any component.
+
 PACKAGE=com.reamicro.fix
 ACTIVITY=com.reamicro.fix.ui.ModuleMainActivity
 USER_ID=$(am get-current-user 2>/dev/null)

@@ -1,10 +1,3 @@
-"""认证、授权、会话与限流。
-
-**归属（owner）与认证模式解耦**是这里最重要的约定：只要请求带阅微账号 ID，
-归属就固定 `host:<id>`，与用哪种模式通过校验无关。认证模式只决定"能不能访问"，
-不参与"数据属于谁"——否则管理员改一次认证模式，同一台设备就换了身份，
-已上传的密钥、已建的任务、积压的消息和备份目录全部失联。
-"""
 import base64
 import binascii
 import hashlib
@@ -22,17 +15,15 @@ from app import runtime
 from app.audit import audit_actor, audit_event
 from app.config_store import (
     active_auth_mode,
-    api_key_auth_configured,
     load_config,
     module_upload_kinds,
     save_config,
 )
-from app.crypto import api_key_digest, generate_long_secret, password_hash, password_matches, validate_admin_password
+from app.crypto import api_key_digest, generate_long_secret, password_matches
 from app.responses import response
-from app.state import backup_owner_dir_name, owner_host_account_id
+from app.state import backup_owner_dir_name
 
-# 可分配给子管理员的权限键。这里是事实来源，后台勾选框的中文说明在 admin/views
-# 里按这个顺序配文案——反过来会造成 security → admin.views 的反向依赖。
+
 ADMIN_ASSIGNABLE_PERMISSIONS = (
     "settings:write",
     "packages:write",
@@ -43,8 +34,7 @@ ADMIN_ASSIGNABLE_PERMISSIONS = (
     "security:write",
 )
 
-# API Key 可授予的权限。required_api_scope 用到的每个 scope 都必须在此出现，
-# 否则那条路由对任何 API Key 调用方都会无条件 403。
+
 API_KEY_PERMISSIONS = (
     "read", "write", "packages:read", "packages:write", "tasks:read", "tasks:write",
     "credentials:read", "credentials:write", "backup:read", "backup:write",
@@ -78,8 +68,8 @@ def api_key_permissions(config: dict[str, Any], value: str | None) -> set[str]:
     if "read" in result:
         result.update({"packages:read", "tasks:read", "credentials:read", "backup:read"})
     if "write" in result:
-        # backup:write 必须包含在内。漏掉它会让所有带 API Key 的备份上传请求
-        # 无条件 403——required_api_scope 要求这个 scope，但它此前无处可授予。
+
+
         result.update({"packages:write", "tasks:write", "credentials:write", "backup:write"})
     return result
 
@@ -218,7 +208,7 @@ def validate_admin_session_token(token: str) -> dict[str, Any] | None:
 
 
 async def basic_security(request: Request) -> HTTPBasicCredentials | None:
-    """会话优先，兼容旧的 HTTP Basic 登录。"""
+
     token = request.cookies.get(runtime.ADMIN_SESSION_COOKIE, "")
     if token and validate_admin_session_token(token):
         return HTTPBasicCredentials(username="__session__:" + token, password="")
@@ -298,8 +288,8 @@ def check_request_auth(
         authorized = True
     if not authorized:
         raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="认证信息无效"))
-    # 停用的用户要在**所有**接口被拒，不只是任务和备份那几个。
-    # 此前这里有四条独立的 return，各自绕过了用户闸门。
+
+
     account_id = str(host_account_id or "").strip()
     if account_id and not _user_enabled(account_id):
         raise HTTPException(
@@ -309,13 +299,7 @@ def check_request_auth(
 
 
 def resolve_identity(api_key_value: str | None, account_name: str | None, account_password: str | None, host_account_id: str | None) -> str:
-    """把一次请求解析成稳定的数据归属标识。
 
-    关键约定：只要请求带了阅微账号 ID，归属就固定是 `host:<id>`，与用哪种认证模式通过校验无关。
-    认证模式只负责"能不能访问"，不参与"数据属于谁"——否则管理员在后台把认证模式从公开
-    改成阅微白名单之后，同一台设备的归属会从 `host-public:3` 变成 `host:3`，
-    已上传的同步密钥、已建立的任务和积压的消息全部失联，后台还会出现同一个账号两行在线记录。
-    """
     config = load_config()
     mode = active_auth_mode(config)
     account_id = str(host_account_id or "").strip()
@@ -346,7 +330,7 @@ def resolve_identity(api_key_value: str | None, account_name: str | None, accoun
 
 
 def _user_enabled(account_id: str) -> bool:
-    """延迟导入 users：users 需要读 config 与 state，而本模块位于它们之上。"""
+
     from app.users import user_enabled
 
     return user_enabled(account_id)
@@ -385,7 +369,7 @@ async def backup_owner(
     x_reamicro_host_account_id: str | None = Header(default=None),
 ) -> str:
     enforce_api_scope(request, x_reamicro_api_key)
-    # 复用 resolve_identity 的规范归属，备份目录才不会在认证模式变更后失联。
+
     identity = resolve_identity(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
     if identity == "public":
         raise HTTPException(status_code=401, detail=response(code="AUTH_REQUIRED", message="备份功能需要非公开认证"))
@@ -399,7 +383,7 @@ async def module_upload_owner(
     x_reamicro_password: str | None = Header(default=None),
     x_reamicro_host_account_id: str | None = Header(default=None),
 ) -> str:
-    """模块上传的所有者标识。先走常规认证，再校验上传白名单。"""
+
     identity = resolve_identity(x_reamicro_api_key, x_reamicro_account, x_reamicro_password, x_reamicro_host_account_id)
     enforce_api_scope(request, x_reamicro_api_key)
     policy = module_upload_policy(load_config(), x_reamicro_host_account_id)
@@ -416,7 +400,7 @@ async def module_upload_owner(
 
 
 def module_upload_policy(config: dict[str, Any], host_account_id: str | None) -> dict[str, Any]:
-    """模块上传许可：需要后台启用上传功能，且当前阅微账号 ID 在上传白名单内。"""
+
     enabled = bool(config.get("moduleUploadEnabled", False))
     account_id = str(host_account_id or "").strip()
     allowlist = set(config.get("moduleUploadAllowlist", []))
@@ -460,7 +444,7 @@ def allow_rate_limit(key: str) -> bool:
 
 
 def create_api_key_record(config: dict[str, Any], name: str, raw_permissions: Any) -> tuple[dict[str, Any], str]:
-    """生成一条 API Key 记录并返回明文密钥；明文只在创建时返回一次。"""
+
     if isinstance(raw_permissions, str):
         raw_permissions = [item for item in raw_permissions.replace(",", "\n").splitlines()]
     if not isinstance(raw_permissions, (list, tuple)):
@@ -483,7 +467,7 @@ def create_api_key_record(config: dict[str, Any], name: str, raw_permissions: An
 
 
 def revoke_api_key_record(config: dict[str, Any], key_id: str) -> None:
-    """把指定 API Key 标记为已吊销；记录保留以便审计。"""
+
     found = False
     records = []
     for item in config.get("apiKeyRecords", []):
@@ -501,7 +485,7 @@ def revoke_api_key_record(config: dict[str, Any], key_id: str) -> None:
 
 
 def normalized_admin_permissions(values: Any) -> list[str]:
-    """把复选框的多值或逗号分隔字符串统一成受支持的权限列表。"""
+
     if isinstance(values, str):
         values = values.replace(",", "\n").splitlines()
     if not isinstance(values, (list, tuple, set)):
@@ -510,9 +494,8 @@ def normalized_admin_permissions(values: Any) -> list[str]:
     return sorted({str(item).strip() for item in values if str(item).strip() in allowed})
 
 
-
 def _user_can_upload(account_id: str) -> bool:
-    """延迟导入同上。用户档案里关掉上传能力时，即便在白名单里也不放行。"""
+
     from app.users import user_has_capability
 
     return user_has_capability(account_id, "content:upload")

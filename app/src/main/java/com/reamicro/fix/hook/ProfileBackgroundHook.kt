@@ -19,29 +19,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 
-/**
- * Stage 4: paints a configurable solid color OR image over the
- * "avatar top banner" region of the Profile screen (个人中心头像上方色块)
- * without touching the host's toolbar icons, avatars, or click behaviour.
- *
- * Mechanism: the host's ProfileScreen.lambda$0$1 ("ProfileScreen.kt:48"
- * anonymous content lambda) sets a thread-local flag while it executes.
- *
- * Color mode: ColorScheme.getSurfaceContainerHigh is intercepted while the
- * flag is set so the host's `Modifier.background(surfaceContainerHigh)` call
- * at ProfileScreen.kt:51 paints our configured color.
- *
- * Image mode: BackgroundKt.background-bw27NRU$default (the colour-background
- * factory invoked at ProfileScreen.kt:51) is intercepted while the flag is
- * set; the original Modifier argument is re-routed through Brush-based
- * background$default with a BitmapShader brush built from the user's
- * configured image file. The result is patched in afterHookedMethod so the
- * host's downstream Modifier chain receives a brush-painted Modifier instead
- * of the colour-painted one.
- *
- * All other UI elements (gear/back icons in the toolbar, avatars, lists) keep
- * their own colour sources and are untouched.
- */
 class ProfileBackgroundHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
@@ -123,9 +100,7 @@ class ProfileBackgroundHook(
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (inProfileLambda.get() != true) return
                         if (!settingsProvider().canShowProfileBackground) return
-                        // Suppress the divider draw -- it is the white horizontal
-                        // rule that the host paints across the screen between the
-                        // avatar-top region and the lower content (ProfileScreen.kt:119).
+
                         param.result = null
                     }
                 },
@@ -211,8 +186,7 @@ class ProfileBackgroundHook(
                     override fun afterHookedMethod(param: MethodHookParam) {
                         if (inProfileLambda.get() != true) return
                         if (resolvingHostBackground.get() == true) return
-                        // 始终缓存 ColorScheme,不管图片模式还是颜色模式。
-                        // 图片模式下 fillMaxSize hook 需要用它读 getBackgroundAuto。
+
                         cachedColorScheme = param.thisObject
                         val snapshot = settingsProvider()
                         if (!snapshot.canShowProfileBackground) return
@@ -276,8 +250,7 @@ class ProfileBackgroundHook(
                         if (!snapshot.canShowProfileBackground) return
                         if (!snapshot.profileBackgroundUseImage) return
                         if (snapshot.profileBackgroundImage.isBlank()) return
-                        // 第 2 次及以后是宿主的胶囊按钮和下方卡片。
-                        // 直接给主题适配的半透明表面，避免浅色模式被错误压成黑色。
+
                         val count = (backgroundCallCount.get() ?: 0) + 1
                         if (count < 2) return
                         val colorArg = param.args?.getOrNull(1)
@@ -299,7 +272,7 @@ class ProfileBackgroundHook(
                         backgroundCallCount.set(count)
                         val modifier = param.args?.getOrNull(0) ?: return
                         if (count == 1) {
-                            // 第 1 次(顶部 banner):跳过色块,让根布局模糊背景透出
+
                             param.result = modifier
                             return
                         }
@@ -314,13 +287,7 @@ class ProfileBackgroundHook(
 
     private fun findProfileScreenLambdaMethod(): Method? {
         val profileScreenClass = XposedHelpers.findClass(PROFILE_SCREEN_CLASS, classLoader)
-        // 背景/颜色/fillMaxSize 注入都 gate 在 inProfileLambda（内容渲染窗口）内。
-        // 2.2.0：整块内容在 ProfileScreen$lambda$0$1。
-        // 2.3.0 beta：ProfileScreen 改用 Scaffold，lambda$0$1 变成 topBar（几乎无背景调用），
-        //   真正的内容区是带 PaddingValues 的 content lambda（lambda$0$2，含 fillMaxSize/background/头像/卡片）。
-        // 旧代码固定 hook lambda$0$1 → 内容区渲染时开关为 false，所有注入失效 → 主页补全背景完全不生效。
-        // 改为按“ProfileScreen$lambda 前缀 + 参数含 PaddingValues”定位 content lambda，抗 lambda 编号变化；
-        // 找不到时回退旧的 lambda$0$1，兼容旧版本。
+
         return profileScreenClass.declaredMethods.firstOrNull { method ->
             method.name.startsWith("ProfileScreen\$lambda\$0\$") &&
                 method.parameterTypes.any { it.name == PADDING_VALUES_CLASS }
@@ -516,8 +483,7 @@ class ProfileBackgroundHook(
     }
 
     private fun bottomEdgeAverageColor(bitmap: Bitmap): Int {
-        // Average the bottom ~5% rows (after downscaling) so a single row of
-        // oddly-coloured pixels doesn't dominate the slab colour.
+
         val downscale = 0.25f
         val smallW = (bitmap.width * downscale).toInt().coerceAtLeast(1)
         val smallH = (bitmap.height * downscale).toInt().coerceAtLeast(1)
@@ -553,23 +519,14 @@ class ProfileBackgroundHook(
         }
         val colorClass = XposedHelpers.findClass(COLOR_CLASS, classLoader)
         val boxMethod = colorClass.getDeclaredMethod(COLOR_BOX_METHOD, java.lang.Long.TYPE).apply { isAccessible = true }
-        // The avatar-top banner (ProfileScreen.kt:51) renders the user image
-        // at fit-to-width from y=0 down to y=imageBottomY. Above that line the
-        // banner itself is what the user sees; below it we want a clean fade
-        // from the image's bottom-edge colour into the host's page background.
-        // So the gradient does NOT start at y=0 -- it starts at imageBottomY.
-        // Above imageBottomY the gradient contributes nothing (the banner
-        // paints there). Below imageBottomY we fade from opaque image-bottom
-        // colour at the top of the band to fully transparent (same RGB) at the
-        // page bottom, letting the host's own page background show through.
+
         val opaque = boxMethod.invoke(null, colorLongFromArgb(bottomArgb or 0xFF000000.toInt()))
         val transparent = boxMethod.invoke(null, colorLongFromArgb(bottomArgb and 0x00FFFFFF.toInt()))
         val colors = java.util.ArrayList<Any>(2).apply {
             add(opaque)
             add(transparent)
         }
-        // Fit-to-width scaling matches banner hook: scale = screenWidth / bitmapW,
-        // so scaledImageHeight = scale * bitmapH.
+
         val screenPx = activity.resources.displayMetrics.widthPixels
         val screenHeight = activity.resources.displayMetrics.heightPixels.toFloat()
         val imageBottomY = (screenPx.toFloat() / bitmap.width.coerceAtLeast(1)) * bitmap.height
@@ -994,39 +951,6 @@ class ProfileBackgroundHook(
         return luminance < 128f
     }
 
-    private fun bitmapShaderBrush(bitmap: Bitmap): Any? = runCatching {
-        val activity = activityProvider() ?: return@runCatching null
-        val matrix = android.graphics.Matrix()
-        val screenW = activity.resources.displayMetrics.widthPixels
-        val bw = bitmap.width.toFloat().coerceAtLeast(1f)
-        // Fit-to-width: scale so the image's width matches the screen width.
-        // Vertical direction uses the same scale, so portrait images extend
-        // downward (potentially beyond the screen), landscape images only
-        // occupy the top band of the page. Width is always preserved.
-        val scale = screenW / bw
-        matrix.setScale(scale, scale)
-        // DECAL on API 31+ so pixels beyond the image rectangle render as
-        // fully transparent -- crucial: this prevents the CLAMP edge-stretch
-        // band from leaking through the layers above/below the image's
-        // natural height, which was the visible "stretched" area the user
-        // reported. Below API 31 we fall back to CLAMP (the visibility is
-        // best-effort; modern devices are API 31+).
-        val tileMode = if (android.os.Build.VERSION.SDK_INT >= 31) {
-            Shader.TileMode.DECAL
-        } else {
-            Shader.TileMode.CLAMP
-        }
-        val shader = BitmapShader(bitmap, tileMode, tileMode).apply {
-            setLocalMatrix(matrix)
-        }
-        val brushKtClass = XposedHelpers.findClass(BRUSH_KT_CLASS, classLoader)
-        val factory = brushKtClass.declaredMethods.firstOrNull { m ->
-            m.name == SHADER_BRUSH_METHOD && m.parameterTypes.size == 1 &&
-                m.parameterTypes[0] == Shader::class.java
-        }?.apply { isAccessible = true } ?: return@runCatching null
-        factory.invoke(null, shader)
-    }.getOrNull()
-
     private fun headerBitmapShaderBrush(path: String, bitmap: Bitmap): Any? = runCatching {
         val activity = activityProvider() ?: return@runCatching null
         val screenW = activity.resources.displayMetrics.widthPixels.coerceAtLeast(1)
@@ -1095,19 +1019,14 @@ class ProfileBackgroundHook(
         }
         val colorClass = XposedHelpers.findClass(COLOR_CLASS, classLoader)
         val boxMethod = colorClass.getDeclaredMethod(COLOR_BOX_METHOD, java.lang.Long.TYPE).apply { isAccessible = true }
-        // Two stops: transparent at the image's bottom edge (so the upper
-        // region shows the user image 1:1) fading to ~80% opaque white at the
-        // page bottom so the lower content area is a soft wash and any CLAMP
-        // stretch band below the image's natural height gets masked.
+
         val top = boxMethod.invoke(null, colorLongFromArgb(0x00FFFFFF))
         val bottom = boxMethod.invoke(null, colorLongFromArgb(0xCCFFFFFF.toInt()))
         val colors = java.util.ArrayList<Any>(2).apply {
             add(top)
             add(bottom)
         }
-        // startY = where the image's natural height ends at fit-to-width scale
-        // (so we don't waste gradient range above that -- the image is 100%
-        // visible up to that line). endY = page bottom.
+
         val screenW = activity.resources.displayMetrics.widthPixels
         val screenHeight = activity.resources.displayMetrics.heightPixels.toFloat()
         val imageBottomY = (screenW.toFloat() / bitmap.width.coerceAtLeast(1)) * bitmap.height
@@ -1127,16 +1046,8 @@ class ProfileBackgroundHook(
         null
     }
 
-    private fun verticalGradientWhiteFadeBrush(): Any? = runCatching {
-        verticalGradientHostFadeBrush(0xFFFFFFFF.toInt())
-    }.getOrNull()
-
     private fun hostBackgroundArgb(): Int? = runCatching {
-        // Resolve the host's page background colour the same way the host does
-        // at ProfileScreen.kt:87: ThemeKt.getBackgroundAuto(ColorScheme).
-        // The ProfileScreen lambda hook eagerly caches MaterialTheme's
-        // ColorScheme before fillMaxSize is patched, so first render and
-        // return-from-settings render use the same target background.
+
         val scheme = cachedColorScheme ?: return@runCatching null
         val themeKtClass = XposedHelpers.findClass(THEME_KT_CLASS, classLoader)
         val method = themeKtClass.declaredMethods.firstOrNull { m ->
@@ -1164,8 +1075,7 @@ class ProfileBackgroundHook(
     }
 
     private fun profileBackgroundPageFallbackArgb(): Int {
-        // 首次进入未缓存 ColorScheme 时的退回路径。
-        // 用系统级 configuration 判断夜间模式。
+
         val nightMode = android.content.res.Resources.getSystem().configuration.uiMode and
             android.content.res.Configuration.UI_MODE_NIGHT_MASK
         return if (nightMode == android.content.res.Configuration.UI_MODE_NIGHT_YES) {
@@ -1176,8 +1086,7 @@ class ProfileBackgroundHook(
     }
 
     private fun colorLongToArgb(colorLong: Long): Int {
-        // Compose stores sRGB Color(Int) in the high 32 bits. The low bits hold
-        // colour-space metadata, so narrowing the Long directly corrupts ARGB.
+
         return (colorLong ushr 32).toInt()
     }
 
@@ -1277,13 +1186,7 @@ class ProfileBackgroundHook(
         }
         val colorClass = XposedHelpers.findClass(COLOR_CLASS, classLoader)
         val boxMethod = colorClass.getDeclaredMethod(COLOR_BOX_METHOD, java.lang.Long.TYPE).apply { isAccessible = true }
-        // Top = fully transparent host background colour (lets the user image
-        // show 1:1 in the avatar-top region). Bottom = opaque host background
-        // colour (covers any clear-image leakage below the natural image
-        // height and blends into the host page background colour naturally).
-        // Because both ends share the host's `getBackgroundAuto` RGB, the
-        // alpha ramp never bleeds into a different hue family -- the wash
-        // stays tonally consistent with the host's own page background.
+
         val transparent = boxMethod.invoke(null, colorLongFromArgb(backgroundArgb and 0x00FFFFFF.toInt()))
         val opaque = boxMethod.invoke(null, colorLongFromArgb(backgroundArgb or 0xFF000000.toInt()))
         val colors = java.util.ArrayList<Any>(2).apply {
@@ -1306,68 +1209,6 @@ class ProfileBackgroundHook(
         null
     }
 
-    private fun blurredBitmapShaderBrush(bitmap: Bitmap): Any? = runCatching {
-        val activity = activityProvider() ?: return@runCatching null
-        val screenW = activity.resources.displayMetrics.widthPixels.coerceAtLeast(1)
-        val screenH = activity.resources.displayMetrics.heightPixels.coerceAtLeast(1)
-        val cropPosition = settingsProvider().profileBackgroundCropPosition
-        // 先把原图按 centerCrop 裁到屏幕尺寸,再做模糊,这样模糊层和清晰层
-        // 像素严格对齐,不会出现错位。
-        val cropped = Bitmap.createBitmap(screenW, screenH, Bitmap.Config.ARGB_8888).also { target ->
-            val canvas = android.graphics.Canvas(target)
-            val paint = android.graphics.Paint(
-                android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG,
-            )
-            val scale = maxOf(
-                screenW.toFloat() / bitmap.width.toFloat().coerceAtLeast(1f),
-                screenH.toFloat() / bitmap.height.toFloat().coerceAtLeast(1f),
-            )
-            val scaledW = bitmap.width * scale
-            val scaledH = bitmap.height * scale
-            val left = (screenW - scaledW) / 2f
-            val overflowY = (scaledH - screenH).coerceAtLeast(0f)
-            val cropFraction = when (cropPosition) {
-                ModuleSettings.PROFILE_BACKGROUND_CROP_BOTTOM -> 1f
-                ModuleSettings.PROFILE_BACKGROUND_CROP_CENTER -> 0.5f
-                else -> 0f
-            }
-            val top = -overflowY * cropFraction
-            canvas.drawBitmap(
-                bitmap,
-                null,
-                android.graphics.RectF(left, top, left + scaledW, top + scaledH),
-                paint,
-            )
-        }
-        // 下采样再 box blur,近似高斯模糊,成本低
-        val downscale = 0.25f
-        val smallW = (screenW * downscale).toInt().coerceAtLeast(1)
-        val smallH = (screenH * downscale).toInt().coerceAtLeast(1)
-        var small = Bitmap.createScaledBitmap(cropped, smallW, smallH, true)
-        small = boxBlur(small, radius = 12)
-        val matrix = android.graphics.Matrix()
-        val scale = screenW.toFloat() / smallW.toFloat().coerceAtLeast(1f)
-        matrix.setScale(scale, scale)
-        val tileMode = if (android.os.Build.VERSION.SDK_INT >= 31) {
-            Shader.TileMode.DECAL
-        } else {
-            Shader.TileMode.CLAMP
-        }
-        val shader = BitmapShader(small, tileMode, tileMode).apply {
-            setLocalMatrix(matrix)
-        }
-        val brushKtClass = XposedHelpers.findClass(BRUSH_KT_CLASS, classLoader)
-        val factory = brushKtClass.declaredMethods.firstOrNull { m ->
-            m.name == SHADER_BRUSH_METHOD && m.parameterTypes.size == 1 &&
-                m.parameterTypes[0] == Shader::class.java
-        }?.apply { isAccessible = true } ?: return@runCatching null
-        factory.invoke(null, shader)
-    }.getOrNull()
-
-    private fun blurredBitmapShaderBrushOffset(bitmap: Bitmap, offsetY: Float): Any? = runCatching {
-        blurredBitmapShaderBrush(bitmap)
-    }.getOrNull()
-
     private fun boxBlur(src: Bitmap, radius: Int): Bitmap {
         if (radius < 1) return src.copy(src.config ?: Bitmap.Config.ARGB_8888, true)
         val w = src.width
@@ -1375,7 +1216,7 @@ class ProfileBackgroundHook(
         val pixels = IntArray(w * h)
         src.getPixels(pixels, 0, w, 0, 0, w, h)
         val temp = IntArray(w * h)
-        repeat(3) { // 3 passes ≈ Gaussian
+        repeat(3) {
             boxBlurHorizontal(pixels, temp, w, h, radius)
             boxBlurVertical(temp, pixels, w, h, radius)
         }
@@ -1457,7 +1298,7 @@ class ProfileBackgroundHook(
             brush,
             resolvedShape,
             1f,
-            4, // default mask: skip alpha (idx 3)
+            4,
             null,
         )
     }.getOrNull()

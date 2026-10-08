@@ -1,6 +1,5 @@
 package com.reamicro.fix.hook.reader
 
-import android.content.Context
 import android.content.Intent
 import com.reamicro.fix.tts.ReadAloudIntents
 import com.reamicro.fix.online.search.decodeOnlineHtmlEntities
@@ -8,11 +7,6 @@ import java.io.File
 import java.util.Locale
 import com.reamicro.fix.hook.reader.*
 
-// 从 ReaderHook 提升出来的成员扩展函数。
-//
-// 原先它们是「既是 String/Context/Any 的扩展、又是 hook 成员」的成员扩展函数，
-// 这种函数只在类体内可见。把功能簇拆成同包扩展函数后调用不到，因此提升为不依赖
-// hook 实例的顶层扩展函数。
 internal fun List<String>.indexOfFirstIndexed(predicate: (Int, String) -> Boolean): Int {
     forEachIndexed { index, value ->
         if (predicate(index, value)) return index
@@ -73,17 +67,6 @@ internal fun String.normalizeChapterTitle(): String =
         .decodeBasicHtmlEntities()
         .replace(Regex("\\s+"), " ")
         .trim()
-
-internal fun String.normalizeSearchVoidTags(): String {
-    var value = this
-    for (tag in SEARCH_VOID_TAGS) {
-        value = value.replace(Regex("<$tag\\b([^>]*)>", RegexOption.IGNORE_CASE)) { match ->
-            val raw = match.value
-            if (raw.endsWith("/>")) raw else "<$tag${match.groupValues.getOrNull(1).orEmpty()}/>"
-        }
-    }
-    return value
-}
 
 internal fun String.decodeBasicHtmlEntities(): String =
     decodeOnlineHtmlEntities()

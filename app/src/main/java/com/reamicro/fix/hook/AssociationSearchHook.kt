@@ -3,11 +3,11 @@ package com.reamicro.fix.hook
 import android.app.Activity
 import com.reamicro.fix.association.AssociationSearchService
 import com.reamicro.fix.association.model.BookSearchResult
-import com.reamicro.fix.association.model.BookSource
 import com.reamicro.fix.association.normalizedAssociationSearchKey
 import com.reamicro.fix.association.normalizedAssociationTitleKey
 import com.reamicro.fix.association.orderAssociationMatches
 import com.reamicro.fix.association.provider.AssociationSearchProviderRegistry
+import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.xposed.XC_MethodHook
@@ -59,7 +59,7 @@ class AssociationSearchHook(
     }
 
     private fun hookUpdateUiState() {
-        runCatching {
+        HookInstallReport.install("AssociationSearchHook", "hookUpdateUiState") {
             val viewModelClass = XposedHelpers.findClass(BOOK_PUBLISH_VIEW_MODEL_CLASS, classLoader)
             val updateMethod = XposedHelpers.findMethodBestMatch(
                 viewModelClass,
@@ -83,13 +83,11 @@ class AssociationSearchHook(
                 }
             })
             XposedBridge.log("$LOG_PREFIX BookPublish updateUiState hook installed: ${updateMethod.declaringClass.name}")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook BookPublish updateUiState: ${it.stackTraceToString()}")
         }
     }
 
     private fun hookSearchByThird() {
-        runCatching {
+        HookInstallReport.install("AssociationSearchHook", "hookSearchByThird") {
             val viewModelClass = XposedHelpers.findClass(BOOK_PUBLISH_VIEW_MODEL_CLASS, classLoader)
             XposedHelpers.findAndHookMethod(
                 viewModelClass,
@@ -109,13 +107,11 @@ class AssociationSearchHook(
                 },
             )
             XposedBridge.log("$LOG_PREFIX association search hook installed")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook searchByThird: ${it.stackTraceToString()}")
         }
     }
 
     private fun hookViewModelCleared() {
-        runCatching {
+        HookInstallReport.install("AssociationSearchHook", "hookViewModelCleared") {
             val viewModelClass = XposedHelpers.findClass(BOOK_PUBLISH_VIEW_MODEL_CLASS, classLoader)
             XposedBridge.hookAllMethods(viewModelClass, "onCleared", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
@@ -124,8 +120,6 @@ class AssociationSearchHook(
                     clearLatestSearchResults()
                 }
             })
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook association ViewModel.onCleared: ${it.stackTraceToString()}")
         }
     }
 

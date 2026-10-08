@@ -1,63 +1,14 @@
 package com.reamicro.fix.cloud.webdav
 
-import android.app.Activity
-import android.app.Dialog
 import android.content.Context
-import android.graphics.Color
-import android.graphics.Path
-import android.graphics.drawable.ColorDrawable
-import android.os.Handler
-import android.os.Looper
-import android.os.Build
-import android.text.Editable
-import android.text.InputType
-import android.text.TextWatcher
-import android.view.Gravity
-import android.view.KeyEvent
-import android.view.View
-import android.view.ViewGroup
-import android.view.Window
-import android.view.WindowManager
-import android.widget.Button
-import android.widget.EditText
-import android.widget.FrameLayout
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
-import com.reamicro.fix.R
-import com.reamicro.fix.logging.ModuleLogLevel
-import com.reamicro.fix.logging.legacyModuleLogLevel
 import com.reamicro.fix.cloud.webdav.CloudDownloadCancelledException
 import com.reamicro.fix.cloud.webdav.CancellableWebDavDownload
-import com.reamicro.fix.cloud.webdav.WebDavBackupSnapshot
-import com.reamicro.fix.cloud.webdav.WebDavCredentials
-import com.reamicro.fix.cloud.webdav.WebDavHttpException
-import com.reamicro.fix.cloud.webdav.WebDavImportSource
-import com.reamicro.fix.xposed.XposedBridge
-import java.io.ByteArrayInputStream
-import java.io.File
-import java.lang.ref.WeakReference
 import java.net.URI
 import java.net.URL
 import java.util.Locale
-import java.util.UUID
-import javax.xml.parsers.DocumentBuilderFactory
-import kotlin.math.max
-import org.w3c.dom.Element
 import com.reamicro.fix.hook.webdav.*
-import com.reamicro.fix.online.search.homeCloudSearchResults
-import com.reamicro.fix.online.download.importCacheFile
-import com.reamicro.fix.online.download.enqueueNativeImport
-import com.reamicro.fix.online.download.cleanupDownloadToken
-import com.reamicro.fix.online.download.cancelExistingBackupTasks
-import com.reamicro.fix.online.download.findImportBookMethod
 import com.reamicro.fix.logging.logWebDav
 
-// WebDAV 的纯逻辑部分。
-//
-// 路径规整与父子推导、href 解析、日志脱敏、文件名安全化、登录页 HTML。
-//
-// 这些函数不依赖 hook 实例——由 已移除的一次性生成工具 编译验证。
 internal fun cleartextHostOf(value: Any?): String =
     when (value) {
         null -> ""
@@ -148,7 +99,6 @@ internal fun normalizeWebDavPath(path: String): String {
     if (trimmed.isBlank() || trimmed == "root") return "/"
     return "/" + trimmed.trim('/').replace(Regex("/{2,}"), "/")
 }
-
 
 internal fun webDavLoginHtml(url: String, username: String): String {
     val escapedUrl = url.htmlAttrEscape()

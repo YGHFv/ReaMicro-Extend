@@ -1,34 +1,15 @@
-"""书源使用的轻量 JSONPath 兼容器。
-
-这是模块端 `OnlineJsonPathCompat.kt` 的 Python 移植，**语义必须与模块一致**——
-服务端按这套语义判定"规则还能不能取到数据"，如果两边解析结果不同，检测结论就没有意义。
-
-支持的语法（只覆盖书源规则实际用到的部分）：
-
-    $.a.b          字段路径
-    .a.b / a.b     省略 $ 前缀
-    $              整个节点
-    a[0] / a[*]    数组下标与通配
-    *  / *[*]      对象或数组的全部子节点
-    $..name        递归下降，且下降后继续执行剩余路径
-    a||b           取第一个非空结果
-    a&&b           合并全部结果
-
-刻意不支持过滤表达式（`[?(...)]`）与脚本（`@js:`）：书源里用得少，
-而且服务端没有 JS 引擎，遇到时按"无法检测"处理，不假装成功。
-"""
 import re
 from typing import Any
 
 _TOKEN_RE = re.compile(r"^([^\[]+)(?:\[(\d+|\*)\])?$")
 _LEADING_SELECTOR_RE = re.compile(r"^\[(\d+|\*)\]")
 
-# 递归下降与字段访问的最大展开量，防止畸形规则在大响应上炸开。
+
 MAX_VALUES = 5000
 
 
 def values(node: Any, raw_rule: str) -> list[Any]:
-    """按规则取值。`&&` 合并全部分支，`||` 取第一个非空分支。"""
+
     rule = (raw_rule or "").strip()
     if node is None or not rule:
         return []
@@ -181,18 +162,14 @@ def _valid(items: list[Any]) -> list[Any]:
 
 
 def rule_items(value: Any) -> list[Any]:
-    """把取到的值摊平成条目列表。数组摊开，单值包成一项。"""
+
     if isinstance(value, list):
         return list(value)
     return [] if value is None else [value]
 
 
 def candidate_roots(node: Any) -> list[Any]:
-    """书源常把列表埋在 data / result / rows 之类的包裹层里。
 
-    与模块端 `onlineJsonCandidateRoots` 保持一致：先试节点本身，再试这些常见包裹键，
-    以及 data 下再套一层的情况。
-    """
     wrappers = ("data", "result", "book", "chapter", "rows", "ret_data")
     roots: list[Any] = []
     seen: list[int] = []
@@ -218,7 +195,7 @@ def candidate_roots(node: Any) -> list[Any]:
 
 
 def rule_values(node: Any, rule: str) -> list[Any]:
-    """按书源列表规则取条目。规则里的 `<js>` / `@js:` 段直接截掉，脚本部分不执行。"""
+
     if node is None or not (rule or "").strip():
         return []
     selector = rule.split("<js>", 1)[0].split("@js:", 1)[0].strip()
@@ -234,13 +211,13 @@ def rule_values(node: Any, rule: str) -> list[Any]:
 
 
 def primitive(value: Any) -> str:
-    """取标量文本。与模块端 onlineJsonPrimitive 一致：布尔与数字转字符串，其余原样。"""
+
     if value is None:
         return ""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
-        # 整数不要显示成 1.0
+
         return str(int(value)) if float(value).is_integer() else str(value)
     if isinstance(value, str):
         return value.strip()
@@ -248,7 +225,7 @@ def primitive(value: Any) -> str:
 
 
 def rule_string(node: Any, rule: str) -> str:
-    """按规则取第一个标量值。"""
+
     selector = (rule or "").split("<js>", 1)[0].split("@js:", 1)[0].strip()
     if not selector:
         return ""

@@ -1,9 +1,5 @@
 package com.reamicro.fix.cloud.root
 
-/**
- * Verified, injectable lifecycle transaction. The installer owns replacement and boot promotion.
- * No retry of mutations, no uninstall-before-update, no task credentials in module directories.
- */
 internal class RootModuleLifecycle(
     private val inspect: () -> RootModuleStatus,
     private val manager: () -> RootModuleManager,
@@ -29,7 +25,7 @@ internal class RootModuleLifecycle(
         }
         install(provider())
         state = checked()
-        // Exit 0 alone is not success. Actual complete scripts and lifecycle markers must agree.
+
         val decision = state.installDecision(requiredVersion)
         check(decision != RootModuleInstallDecision.INSTALL) {
             "安装器已返回，但未发现完整的目标模块；请查看管理器安装日志并重新检测"
@@ -37,13 +33,11 @@ internal class RootModuleLifecycle(
         return decision
     }
 
-    /** Called only after ownership/credentials have been handed back and the daemon stopped. */
     fun remove(): Boolean {
         val before = checked()
         if (!before.installed && !before.stagedPresent && before.stagedVersion == 0) return false
         val provider = manager()
-        // KernelSU regenerates preinit rc on module uninstall. Cancel our staging FIRST so that
-        // its regenerated view cannot still select the staged copy. Never remove the active dir.
+
         command(provider.cancelStaging())
         if (before.installed) command(provider.uninstall(), 30)
         val after = checked()
@@ -52,7 +46,6 @@ internal class RootModuleLifecycle(
         return after.installed
     }
 
-    /** Keep module files for a later explicit enable; manager owns its disable bookkeeping. */
     fun pause() {
         val before = checked()
         if (!before.installed) {

@@ -13,12 +13,6 @@ internal fun dailyLoreSnapshot(data: JSONObject, claimed: Boolean): JSONObject {
     return snapshot.put("claimed", claimed)
 }
 
-/**
- * 每日轶闻的结构化奖励明细。
- *
- * 形状与服务端 `daily_lore_reward_items` 一致（name/quality/count），这样通知着色、通知摘要
- * 和记录详情页可以共用同一套渲染：阅历、彩筹没有品质，期物按 propQuality 上色。
- */
 internal fun dailyLoreRewardItems(data: JSONObject): JSONArray {
     val rewards = JSONArray()
     val exp = data.optInt("exp", 0)

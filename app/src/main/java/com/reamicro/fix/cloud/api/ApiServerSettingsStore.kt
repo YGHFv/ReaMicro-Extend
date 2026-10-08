@@ -5,7 +5,6 @@ import android.content.SharedPreferences
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
-import com.reamicro.fix.settings.ModuleSettings
 import java.nio.ByteBuffer
 import java.security.KeyStore
 import org.json.JSONArray
@@ -15,7 +14,6 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-/** 保存 API 服务器配置。API Key/密码单独使用 Android Keystore 加密。 */
 class ApiServerSettingsStore(private val contextProvider: () -> Context?) {
     fun get(): ApiServerSettings {
         val prefs = prefs() ?: return ApiServerSettings()

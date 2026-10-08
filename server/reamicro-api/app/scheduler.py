@@ -1,10 +1,3 @@
-"""任务调度循环与执行记账。
-
-调度**不依赖模块在线**：所有云端任务都在服务器执行。模块进程只负责展示配置、投递结果
-通知，以及执行不依赖服务器的**本地任务**（见模块侧 LocalTaskStore/LocalTaskRunner）。
-历史上存在过的 device 模式（模块领租约代跑云端任务）已废弃，由
-[migrate_device_tasks_to_server] 在启动时把存量任务迁回服务器。
-"""
 import asyncio
 import json
 import secrets
@@ -16,10 +9,10 @@ from fastapi import HTTPException
 
 from app import runtime
 from app.audit import audit_event, task_log
-from app.backups import create_server_snapshot, prune_server_snapshots
+from app.backups import create_server_snapshot
 from app.retention import run_retention
 from app.config_store import bounded_config_int, load_config
-from app.crypto import decrypt_secret, encrypt_secret
+from app.crypto import decrypt_secret
 from app.executors import execute_task, redact_message
 from app.releases import sync_module_release
 from app.responses import response
@@ -41,7 +34,7 @@ TASK_CONFIGURATION_FIELDS = {
 
 
 def normalized_task_schedule(task_type: str, schedule: dict[str, Any]) -> dict[str, Any]:
-    """抽卡是签到奖励事件任务；行商按固定间隔轮询；其余任务保留原定时配置。"""
+
     if task_type == "yeshe_draw_card":
         return {"event": YESHE_DRAW_TRIGGER_EVENT}
     if task_type == "traveling_merchant":
@@ -118,12 +111,7 @@ def recover_interrupted_tasks() -> int:
 
 
 def migrate_device_tasks_to_server() -> int:
-    """把历史上落在设备（模块进程）执行的云端任务迁回服务器执行。
 
-    device 模式已废弃：云端任务一律由服务器执行，模块进程只跑不依赖服务器的本地任务。
-    迁移时一并清掉设备租约残留；device 任务常把 nextRunAt 置 0 等模块唤醒，迁回后要重新
-    排期，否则调度循环会把它当成"已到期"而立刻补跑。抽卡是事件型任务，nextRunAt 保持 0。
-    """
     tasks = load_tasks()
     migrated = 0
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -210,7 +198,7 @@ def record_task_execution(task: dict[str, Any], result: str, message: str, start
 
 
 def schedule_linked_draw_task(tasks: dict[str, dict[str, Any]], checkin_task: dict[str, Any], started_at: int) -> tuple[str, str] | None:
-    """领奖后排入同一调度通道，让抽卡也经过任务锁、记账和失败重试。"""
+
     if not checkin_task.pop("claimJustCompleted", False):
         return None
     owner = str(checkin_task.get("owner", ""))
@@ -362,8 +350,8 @@ async def server_snapshot_loop() -> None:
                 audit_event("scheduled_server_snapshot", metadata={"filename": snapshot.name})
             except Exception as error:
                 audit_event("scheduled_server_snapshot_failed", success=False, metadata={"type": type(error).__name__})
-        # 搭同一个低频循环执行数据保留清理，不额外起后台任务。
-        # 放在快照之后：先留档再清理，清理出问题也有快照可回。
+
+
         try:
             await asyncio.to_thread(run_retention, config)
         except Exception as error:

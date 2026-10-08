@@ -1,22 +1,14 @@
-"""从 GitHub Release 同步模块 APK。
-
-本模块的 CI 发布的全是预发布 Release，所以"包含预发布"开关默认关闭时会同步不到东西；
-渠道标记规则：预发布标 beta，正式标 stable，只有请求 stable 时才拒绝 beta。
-"""
 import hashlib
 import hmac
 import json
-import os
 import re
 import shutil
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from typing import Any
 
 from app import runtime
-from app.audit import audit_event
 from app.config_store import load_config
 
 
@@ -51,16 +43,11 @@ def is_semantic_version(value: str) -> bool:
 
 
 def release_version_name(tag: str, title: str) -> str:
-    """从 tag 或 Release 标题里取出语义版本号。
 
-    客户端按语义版本号比较新旧，无法解析的字符串会被当成 0.0.0 并永远判定"已是最新版本"。
-    CI 的 tag 形如 ``ci-123-1``，但标题里带着真实版本号（``CI 2.0.0 #123``），
-    因此 tag 不是语义版本号时回退到标题。
-    """
     candidate = tag.strip().lstrip("vV").split("+")[0]
     if is_semantic_version(candidate):
         return candidate
-    # 至少要带一个小数点，避免把标题里的构建号（#123）误当成版本号。
+
     match = re.search(r"\d+(?:\.\d+)+", title or "")
     if match:
         return match.group(0)
@@ -77,8 +64,8 @@ def sync_module_release() -> dict[str, Any] | None:
         try:
             release = github_json(f"https://api.github.com/repos/{repository}/releases/latest")
         except urllib.error.HTTPError as error:
-            # GitHub 的 /releases/latest 会跳过预发布。仓库里只有预发布 Release 时返回 404，
-            # 这不是网络故障，直接提示需要在后台勾选"包含预发布 Release"。
+
+
             if error.code == 404:
                 raise RuntimeError(
                     f"仓库 {repository} 没有正式 Release；如果只发布预发布版本，请在后台勾选“包含预发布 Release”"
@@ -135,5 +122,5 @@ def sync_module_release() -> dict[str, Any] | None:
 
 
 def github_webhook_signature(body: bytes) -> str:
-    """按当前配置的 Webhook Secret 计算期望签名。抽出来便于单测覆盖比对逻辑。"""
+
     return "sha256=" + hmac.new(runtime.GITHUB_WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()

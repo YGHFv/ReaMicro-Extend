@@ -11,11 +11,6 @@ import java.util.Locale
 import org.w3c.dom.Element
 import com.reamicro.fix.hook.webdav.*
 
-// 从 WebDavDriveHook 提升出来的成员扩展函数。
-//
-// 原先它们是「既是 String/Context/Any 的扩展、又是 hook 成员」的成员扩展函数，
-// 这种函数只在类体内可见。把功能簇拆成同包扩展函数后调用不到，因此提升为不依赖
-// hook 实例的顶层扩展函数。
 internal fun String.normalizedAssociationPlatformName(): String {
     val clean = cleanOnlineText()
         .trim()
@@ -42,14 +37,6 @@ internal fun String.cleanOnlineText(): String =
         .replace(Regex("\\s+"), " ")
         .trim()
 
-/**
- * 简介等需要保留作者分段的多行文本：清洗标签与实体，但**保留换行**。
- *
- * `cleanOnlineText` 会把 `\s+`（含换行）整体压成空格，简介里的分段就全糊成一行里
- * 零散的空格——下载确认弹窗里简介「不能正常换行」的根因。这里区别对待：
- * 行内空白（Tab/回车/连续空格）压成一个空格，换行保留（`<br>` 先转成换行再剥标签），
- * 三连以上换行压成一个空行。
- */
 internal fun String.cleanOnlineMultilineText(): String =
     replace(Regex("(?is)<script[\\s\\S]*?</script>"), " ")
         .replace(Regex("(?is)<style[\\s\\S]*?</style>"), " ")
@@ -129,7 +116,6 @@ internal fun Context.resolveOpaqueThemeColor(attr: Int, fallback: Int): Int {
 internal fun Context.isNightMode(): Boolean =
     (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
         android.content.res.Configuration.UI_MODE_NIGHT_YES
-
 
 internal fun Int.isDarkColor(): Boolean {
     val red = Color.red(this) / 255.0

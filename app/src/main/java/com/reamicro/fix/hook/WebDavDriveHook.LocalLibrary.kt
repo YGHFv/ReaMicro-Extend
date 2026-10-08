@@ -17,7 +17,6 @@ import android.widget.TextView
 import com.reamicro.fix.R
 import com.reamicro.fix.cloud.webdav.ImportLocalLibraryRowContext
 import com.reamicro.fix.xposed.XposedBridge
-import java.io.File
 import java.lang.ref.WeakReference
 import java.util.Locale
 import java.util.UUID
@@ -35,12 +34,6 @@ import com.reamicro.fix.cloud.local.decodeLocalLibraryPath
 import com.reamicro.fix.cloud.local.queryDocumentEntry
 import com.reamicro.fix.logging.logWebDav
 
-// WebDavDriveHook 的本地书库簇。
-//
-// 基于 SAF 文档树的目录浏览、增删改、索引与搜索。
-//
-// 从 WebDavDriveHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun WebDavDriveHook.canShowLocalLibraryEntry(): Boolean =
     settingsProvider().canRunLocalLibraryCloud
 
@@ -184,9 +177,7 @@ internal fun WebDavDriveHook.enqueueLocalLibraryImport(workerManager: Any, book:
             } ?: error("无法读取本地书库文件")
             setTrackedWorkState(tracker, id, "Running", 80, null, null, name)
             val platformFile = platformFile(localFile)
-            // 冲突判定前移到这里：先解析这本 epub 的身份、查一次冲突，需要时当场问用户。
-            // 用户选「取消导入」时**照常导入**，但会按独立副本落地、由 Hook 在导入完成后删掉
-            // （见 applyCancelAsIndependentCopy：抛异常中止不住宿主的写入，只能这样绕）。
+
             ModuleImportPrecheck.precheck(localFile, sourceUrl)
             rememberPendingWebDavImport(platformFile, localFile, sourceUrl, sourceSize?.toLong() ?: entry.size)
             enqueueNativeImport(workerManager, platformFile)

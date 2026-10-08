@@ -14,12 +14,6 @@ internal data class OnlineParagraphCommentRuntimePayload(
     val runtimeId: String,
 )
 
-/**
- * 将在线段评上下文放入宿主 CommentAnnotation.href。
- *
- * 载荷使用 URL-safe Base64 封装 JSON，既不会与 EPUB 原生 href 混淆，也不会受
- * CommentAnnotation 自身的 U+001F 字段分隔符影响。
- */
 internal object OnlineParagraphCommentRuntimePayloadCodec {
     const val PREFIX = "reamicro-online-comment:"
 

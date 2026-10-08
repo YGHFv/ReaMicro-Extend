@@ -1,6 +1,6 @@
 #!/system/bin/sh
 REAMICRO_MODULE_VERSION=9
-# Shared by install, service and watchdog. Do not fall back to an unlocked daemon.
+
 find_busybox() {
   magisk_tmp="$MAGISKTMP"
   if [ -z "$magisk_tmp" ] && command -v magisk >/dev/null 2>&1; then
@@ -23,7 +23,6 @@ find_busybox() {
   return 1
 }
 
-# Fast PID-file verification; never trust a bare/stale PID and never kill based on this alone.
 reamicro_daemon_alive() {
   pid=$(cat "$STATE/daemon.pid" 2>/dev/null)
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac

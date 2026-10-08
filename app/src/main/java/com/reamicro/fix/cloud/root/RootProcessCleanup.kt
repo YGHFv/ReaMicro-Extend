@@ -1,6 +1,5 @@
 package com.reamicro.fix.cloud.root
 
-/** Stop only processes with the exact script argument; never use broad pkill -f matches. */
 internal object RootProcessCleanup {
     const val LEGACY_SCRIPT = "/data/adb/service.d/reamicro-watchdog.sh"
 

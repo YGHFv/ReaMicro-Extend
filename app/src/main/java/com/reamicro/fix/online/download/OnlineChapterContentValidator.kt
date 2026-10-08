@@ -5,9 +5,6 @@ import org.json.JSONObject
 import java.util.Locale
 import com.reamicro.fix.online.search.decodeOnlineHtmlEntities
 
-/**
- * 校验在线章节正文，避免把接口错误响应或下载占位文字写成真实正文。
- */
 internal object OnlineChapterContentValidator {
     fun downloadedFailureReason(content: String): String? {
         val text = content.trim().removePrefix("\uFEFF").trim()
@@ -21,7 +18,7 @@ internal object OnlineChapterContentValidator {
         if (xhtml.isBlank()) return "章节文件为空"
         val bodyHtml = XHTML_BODY_REGEX.find(xhtml)?.groupValues?.getOrNull(1)
             ?: XHTML_HEAD_REGEX.replace(xhtml, " ")
-        // 纯插图章节正文里可能没有文字，只有 <img>，不能据此判定为空。
+
         val hasImage = XHTML_IMAGE_REGEX.containsMatchIn(bodyHtml)
         val paragraphs = XHTML_PARAGRAPH_REGEX.findAll(bodyHtml)
             .map { match -> match.groupValues[1] }

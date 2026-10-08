@@ -16,7 +16,6 @@ internal data class OnlineUrlRequestCompat(
     val headers: Map<String, String> = emptyMap(),
 )
 
-/** 将书源规则生成的相对 URL 按当前请求地址解析，绝对 URL 保持不变。 */
 internal fun resolveOnlineUrlCompat(baseUrl: String, value: String): String {
     val raw = value.trim()
     if (raw.isBlank()) return ""
@@ -29,7 +28,6 @@ internal fun resolveOnlineUrlCompat(baseUrl: String, value: String): String {
     }.getOrDefault(raw)
 }
 
-/** 拆分 Legado URL 末尾的 JSON 请求选项；无法完整解析时保留原 URL。 */
 internal fun parseOnlineUrlRequestCompat(raw: String): OnlineUrlRequestCompat {
     val index = raw.indexOf(",{")
     if (index <= 0) return OnlineUrlRequestCompat(raw)
@@ -40,9 +38,6 @@ internal fun parseOnlineUrlRequestCompat(raw: String): OnlineUrlRequestCompat {
     return OnlineUrlRequestCompat(raw.substring(0, index), headers)
 }
 
-/**
- * 兼容 QQ 阅读书源中由 book_id 和内联 JS 拼接出来的腾讯云封面地址。
- */
 internal fun evaluateQqReaderCoverRule(rawRule: String, selectedValue: String): String? {
     if (!rawRule.contains("@js:", ignoreCase = true)) return null
     if (!rawRule.contains("wfqqreader-1252317822.image.myqcloud.com/cover/", ignoreCase = true)) return null
@@ -53,12 +48,6 @@ internal fun evaluateQqReaderCoverRule(rawRule: String, selectedValue: String): 
     return "https://wfqqreader-1252317822.image.myqcloud.com/cover/$bucket/$bookId/t7_$bookId.webp"
 }
 
-/**
- * 兼容“先用 JS 重组 JSON，再用 JSONPath 取章节”的目录规则。
- *
- * 这里只解析明确的数组别名包装和数字字段排序，不执行任意 JS；无法识别时返回 null，
- * 调用方继续使用原有 JSONPath 逻辑，避免影响其他书源。
- */
 internal fun resolveOnlineChapterListRuleCompat(rawRule: String): OnlineChapterListRuleCompat? {
     val text = rawRule.trim()
     if (!text.startsWith("<js>", ignoreCase = true)) return null
@@ -131,9 +120,6 @@ internal fun applyOnlineChapterListRuleCompat(
     }.map { it.value }
 }
 
-/**
- * 兼容章节 URL 规则中通过 baseUrl 提取 bookId，再与 chapter_id 拼接地址的内联 JS。
- */
 internal fun evaluateOnlineChapterUrlRule(rawRule: String, selectedValue: String, baseUrl: String): String? {
     if (!rawRule.contains("<js>", ignoreCase = true)) return null
     if (!rawRule.contains("String(baseUrl", ignoreCase = true)) return null
@@ -160,7 +146,6 @@ internal fun evaluateOnlineChapterUrlRule(rawRule: String, selectedValue: String
     return prefix + bookId + middle + selected + suffix
 }
 
-/** 仅使用强特征从末章标题推断完结，避免把普通章节或断更作品误标为完结。 */
 internal fun inferOnlineStatusFromLastChapterTitle(raw: String): String {
     val title = raw.trim()
     if (title.isBlank()) return ""
@@ -174,18 +159,15 @@ internal fun inferOnlineStatusFromLastChapterTitle(raw: String): String {
     }
 }
 
-/** 清理章节标题末尾明确表示更新次数的标记，例如“（三更）”，保留其他括号内容。 */
 internal fun cleanOnlineChapterTitleValue(raw: String): String =
     raw.replace(
         Regex("""\s*[（(]\s*[零〇一二三四五六七八九十百两0-9]+\s*更\s*[）)]\s*$"""),
         "",
     ).trim()
 
-/** 只移除在线正文中的明确章末标记，不影响其他括号文本。 */
 internal fun cleanOnlineChapterContentValue(raw: String): String =
     raw.replace(Regex("""[（(]\s*本[章韋韦]完\s*[）)]"""), " ")
 
-/** 从在线源 HTTP 错误响应中提取可读原因，避免界面只显示状态码。 */
 internal fun onlineHttpErrorDetail(rawBody: String): String {
     val text = rawBody.trim()
     if (text.isBlank()) return ""
@@ -202,9 +184,6 @@ internal fun onlineHttpErrorDetail(rawBody: String): String {
     }
 }
 
-/**
- * 统一在线书源返回的字数字段，兼容小数、万/亿单位以及缺少“字”后缀的值。
- */
 internal fun formatOnlineWordCountValue(raw: String): String {
     val text = raw.trim()
     if (text.isBlank()) return ""
@@ -241,9 +220,6 @@ internal fun isOnlineChapterCountSelector(rawRule: String): Boolean {
     ).any(normalized::contains)
 }
 
-/**
- * 在线搜索相关性：书名精确匹配优先，其次作者精确匹配，再按包含关系排序。
- */
 internal fun onlineSearchRelevanceScore(query: String, name: String, author: String): Int {
     val needle = normalizeOnlineSearchValue(query)
     if (needle.isBlank()) return 0

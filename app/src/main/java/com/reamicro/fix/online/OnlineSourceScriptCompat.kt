@@ -5,7 +5,7 @@ import java.net.URLEncoder
 import java.security.MessageDigest
 
 object OnlineSourceScriptCompat {
-    /** 兼容“JSON 字段 + 内联 JS”形式的详情页规则，仅解析 result 的字符串拼接。 */
+
     fun resolveInlineResultUrl(rawRule: String, selectedValue: String): String? {
         val scriptStart = rawRule.indexOf("<js>", ignoreCase = true)
         if (scriptStart <= 0) return null
@@ -25,7 +25,6 @@ object OnlineSourceScriptCompat {
         return candidates.lastOrNull()
     }
 
-    /** 兼容书旗详情页中固定算法生成的目录签名地址。 */
     fun resolveShuqiTocUrl(rawRule: String, detailUrl: String, nowSeconds: Long): String? {
         if (!rawRule.contains("ocean.shuqireader.com/api/bcspub/qswebapi/book/chapterlist", ignoreCase = true) ||
             !rawRule.contains("37e81a9d8f02596e1b895d07c171d5c9", ignoreCase = true)
@@ -42,10 +41,6 @@ object OnlineSourceScriptCompat {
             "?_=&bookId=$bookId&user_id=$userId&sign=$sign&timestamp=$nowSeconds"
     }
 
-    /**
-     * 兼容书旗小说书源通过 source.get(...) 读取正文接口和 API Key 的章节脚本。
-     * 该脚本依赖宿主源变量，模块不会执行任意 JS，因此只在检测到完整特征时启用。
-     */
     fun resolveShuqiChapterUrl(
         baseUrl: String,
         rawScript: String,

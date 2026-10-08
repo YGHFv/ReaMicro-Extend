@@ -5,11 +5,10 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
-/** Auto-reading cannot claim more time than has actually elapsed today. */
 internal object AutoReadTimeLock {
     const val TASK_TYPE = "cloud_auto_read"
     private const val MINUTE_MS = 60_000L
-    // Keep the existing server-side accounting date; the UI clock follows the device.
+
     private val recordZone = ZoneId.of("Asia/Shanghai")
 
     fun minutesOfDay(time: String): Int {
@@ -37,8 +36,7 @@ internal object AutoReadTimeLock {
         val localDay = instant.atZone(zone).toLocalDate()
         val localStart = localDay.atStartOfDay(zone).toInstant().toEpochMilli()
         val recordStart = instant.atZone(recordZone).toLocalDate().atStartOfDay(recordZone).toInstant().toEpochMilli()
-        // Both the device day and the service accounting day must have enough elapsed time.
-        // Using elapsed milliseconds also handles DST and clock rollback conservatively.
+
         val duration = durationMinutes.coerceIn(1, 720)
         val elapsedFloor = maxOf(localStart, recordStart) + (usedMinutes.coerceIn(0, 1_440) + duration) * MINUTE_MS
         val clockFloor = localDay.atTime(duration / 60, duration % 60).atZone(zone).toInstant().toEpochMilli()

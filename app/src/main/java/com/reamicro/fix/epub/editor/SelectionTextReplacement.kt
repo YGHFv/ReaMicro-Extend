@@ -1,6 +1,5 @@
 package com.reamicro.fix.epub.editor
 
-/** Never inject user text as HTML; prefer the complete escaped entity, not a piece of it. */
 internal fun replaceUniqueSelectionText(content: String, oldText: String, newText: String): String? {
     if (oldText.isBlank()) return null
     fun escape(value: String) = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

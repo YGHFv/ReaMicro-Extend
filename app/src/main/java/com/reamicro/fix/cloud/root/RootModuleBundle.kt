@@ -4,7 +4,6 @@ import java.io.File
 import java.util.Properties
 import java.util.zip.ZipFile
 
-/** Validate the packaged payload before invoking any installer. */
 internal object RootModuleBundle {
     fun verify(file: File, expectedVersionCode: Int) {
         ZipFile(file).use { zip ->

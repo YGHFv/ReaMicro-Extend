@@ -87,30 +87,6 @@ object SearchHighlightPlanner {
     fun cfiCharacterOffset(cfi: String): Int? =
         Regex(""":(\d+)\)?$""").find(cfi)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
-    fun correctionDirection(
-        targetNumber: Int?,
-        currentNumber: Int?,
-        targetKey: String?,
-        currentKey: String?,
-        activeVisibleMatches: Boolean,
-    ): Boolean? {
-        if (targetNumber != null && currentNumber != null) {
-            return when {
-                targetNumber > currentNumber -> true
-                targetNumber < currentNumber -> false
-                else -> null
-            }
-        }
-        if (targetKey != null && currentKey != null) {
-            return if (targetKey != currentKey) true else null
-        }
-        // 目标页完全未知（高亮还没来得及渲染、或刚跳转还在排版）时不猜方向：
-        // 此前这里默认往后翻一页，跳转越慢越容易在渲染完成前误翻，
-        // 正是「点搜索结果落点偏一页」的成因。未知就什么都不做，
-        // 让 jumpToCfi 自己的精确落点生效；已知目标页仍走上面两个分支纠。
-        return null
-    }
-
     private fun matchingStarts(content: String, quote: String, windowStart: Int, windowEnd: Int): List<Int> =
         generateSequence(content.indexOf(quote, windowStart.coerceAtLeast(0))) { previous ->
             content.indexOf(quote, previous + 1)

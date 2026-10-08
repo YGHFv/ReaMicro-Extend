@@ -38,7 +38,7 @@ public class XC_MethodHook {
         private Object result;
         private Throwable throwable;
         private boolean returnEarly;
-        private final Map<String, Object> extras = new HashMap<>();
+        private Map<String, Object> extras;
 
         public MethodHookParam(Executable method, Object thisObject, Object[] args) {
             this.method = method;
@@ -67,11 +67,18 @@ public class XC_MethodHook {
         }
 
         public Object getObjectExtra(String key) {
-            return extras.get(key);
+            return extras == null ? null : extras.get(key);
         }
 
         public void setObjectExtra(String key, Object value) {
+            if (extras == null) extras = new HashMap<>();
             extras.put(key, value);
+        }
+
+        void resetOutcome() {
+            result = null;
+            throwable = null;
+            returnEarly = false;
         }
 
         public boolean isReturnEarly() {

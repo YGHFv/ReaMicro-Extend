@@ -1,9 +1,6 @@
 package com.reamicro.fix.hook
 
-import android.widget.Switch
 import com.reamicro.fix.ai.AiApiStore
-import com.reamicro.fix.cloud.api.ApiServerClient
-import com.reamicro.fix.cloud.api.ApiServerSettingsStore
 import com.reamicro.fix.core.AppTopBarArguments
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.ai.AiImagePresetTarget
@@ -13,12 +10,6 @@ import com.reamicro.fix.xposed.XposedBridge
 import java.lang.reflect.Method
 import com.reamicro.fix.hook.settings.*
 
-// 设置页界面渲染簇。
-//
-// 注入到宿主 NavHost 的各个设置页面、顶栏、列表项与卡片。
-//
-// 从 ReaMicroSettingsHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的
-// 结果重新缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaMicroSettingsHook.insertModuleSettingsItem(lazyListScope: Any) {
     injectingModuleItem.set(true)
     runCatching {
@@ -36,7 +27,6 @@ internal fun ReaMicroSettingsHook.insertModuleSettingsItem(lazyListScope: Any) {
     injectingModuleItem.set(false)
 }
 
-// 「切换账号」入口注入到账号配置页「邮箱」条目之后，作为单独一行。
 internal fun ReaMicroSettingsHook.insertAccountSwitchEntryItem(lazyListScope: Any) {
     if (!settings.snapshot().moduleEnabled) return
     injectingModuleItem.set(true)
@@ -105,13 +95,7 @@ internal fun ReaMicroSettingsHook.openInjectedRouteViaHostNavigation(
     route: InjectedRoute,
     navGraphScopeOverride: Any? = null,
 ): Boolean {
-    // 候选顺序：显式传入 → 最近一次见到的 → 设置页记录的那个。任一能用就成。
-    //
-    // 为什么 `lastKnownNavGraphScope` 排在 `currentSettingsNavGraphScope` 前面：Activity 被系统
-    // 回收后重建时，后者可能仍指着已销毁组合里的旧实例，用它 navigate 会静默失败——用户看到的
-    // 就是「从多任务切回来之后再点『发现』点不动」。前者由 NavGraphScope 自己的
-    // navigate / composable 调用刷新（见 [hookNavGraphScope]），重建后宿主第一次重组导航图谱
-    // 就会被换成新实例，因此它一定不比那两个旧。
+
     val candidates = listOfNotNull(navGraphScopeOverride, lastKnownNavGraphScope, currentSettingsNavGraphScope)
         .distinctBy { System.identityHashCode(it) }
     if (candidates.isEmpty()) return false
@@ -122,7 +106,6 @@ internal fun ReaMicroSettingsHook.openInjectedRouteViaHostNavigation(
     return false
 }
 
-/** 在指定 scope 上推一次注入页；失败时把注入路由栈回滚成进入前的样子。 */
 private fun ReaMicroSettingsHook.navigateToInjectedRoute(navGraphScope: Any, route: InjectedRoute): Boolean {
     val previousStack = injectedRouteStack
     return runCatching {
@@ -150,16 +133,6 @@ private fun ReaMicroSettingsHook.navigateToInjectedRoute(navGraphScope: Any, rou
     }.getOrDefault(false)
 }
 
-/**
- * 宿主自行返回时，把注入路由栈的顶层弹出。
- *
- * 注入页复用宿主 `Route.About` 承载，返回有三个来源：注入页顶栏（走
- * [navigateBackFromInjectedRoute]）、NavGraphScope 上的 `popBackStack`、以及宿主系统
- * 返回键走的 NavController `popBackStack` / `navigateUp`。三处都要把栈同步弹出——
- * 只处理嵌套子路由时，**顶层注入路由**（如「发现」）会残留在栈里，使下一次进入入口
- * 被 [openNestedInjectedRoute] 误判为「已在注入页内」（该分支只改 UI 状态、不推导航，
- * 表现为点击无反应）。
- */
 internal fun ReaMicroSettingsHook.consumeTopInjectedRoute(source: String) {
     val previousSize = injectedRouteStack.size
     val nextStack = injectedRouteStack.dropLast(1)
@@ -233,7 +206,7 @@ internal fun ReaMicroSettingsHook.renderInjectedSettingsScreen(route: InjectedRo
     val topBar = composableLambda(MODULE_TOP_BAR_KEY, FUNCTION2_CLASS) { args ->
         val innerComposer = args?.getOrNull(0) ?: return@composableLambda targetUnit()
         val currentRoute = routeStateValue(routeState) ?: route
-        // 发现页的标题行右侧多两颗按钮（配置 / 切换布局），走宿主 AppTopBar 的 actions 槽。
+
         if (currentRoute == InjectedRoute.Discover) {
             renderDiscoverTopBar(currentRoute.title, innerComposer)
         } else {
@@ -345,13 +318,6 @@ internal fun ReaMicroSettingsHook.renderReaderSheetTopBar(title: String, compose
     )
 }
 
-/**
- * 调用宿主 AppTopBar 渲染顶栏标题。
- *
- * 签名随宿主版本变化（2.2.0 的 8 参 → 2.3.0 beta 的 9 参 → 2.3.1 beta 的 10 参 + 方法名
- * mangling），所以定位与实参铺设都不写死：方法由 [appTopBarMethod] 按 Composable 尾参形状找，
- * 实参由 [AppTopBarArguments.plan] 按参数类型铺。两处的版本沿革与失效方式见各自注释。
- */
 internal fun ReaMicroSettingsHook.invokeAppTopBar(
     title: String,
     composer: Any,
@@ -383,13 +349,6 @@ internal fun ReaMicroSettingsHook.invokeAppTopBar(
     m.invoke(null, *args)
 }
 
-/**
- * 定位宿主 `AppTopBar`：按基础名（容忍 inline class mangling 后缀）+ 首参 String +
- * 末三参 `(Composer,int,int)`，取参数最多者，兼容参数个数与方法名的版本变化。
- *
- * 2.3.1 beta 新增 `contentColor: Color` 参数后 JVM 方法名变成 `AppTopBar-cd68TDI`，
- * 原先的 `name == "AppTopBar"` 精确匹配落空 → 顶栏整条静默消失（异常被 Compose 代理吞掉）。
- */
 internal fun ReaMicroSettingsHook.appTopBarMethod(): Method =
     synchronized(methodCache) {
         methodCache.getOrPut("$APP_TOP_BAR_CLASS#$APP_TOP_BAR_METHOD/*") {
@@ -684,6 +643,23 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
         val snapshot = settings.snapshot()
         val toggleRows = listOf(
             ToggleRow(
+                key = ModuleSettings.KEY_HOST_CRASH_UPLOAD_ENABLED,
+                title = "崩溃上传",
+                checked = snapshot.hostCrashUploadEnabled,
+                checkedProvider = { settings.snapshot().hostCrashUploadEnabled },
+                syncWithSnapshot = true,
+                onChanged = { checked, _ ->
+                    val saved = settings.setHostCrashUploadEnabled(checked)
+                    activityProvider()?.let { activity ->
+                        val message = if (!saved) "保存失败，开关未更改"
+                        else if (checked) "已开启，重启宿主生效"
+                        else "已关闭，重启宿主生效"
+                        android.widget.Toast.makeText(activity, message, android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                    settings.snapshot().hostCrashUploadEnabled
+                },
+            ),
+            ToggleRow(
                 key = ModuleSettings.KEY_CONCISE_LOG_ENABLED,
                 title = "\u7b80\u6d01\u65e5\u5fd7",
                 checked = snapshot.conciseLogEnabled,
@@ -711,7 +687,7 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
                 },
             ),
         )
-        // API 服务器设置入口只在调试模式解锁后显示，位置在"模块自检"上方。
+
         val debugRows = if (snapshot.apiDebugUnlocked) {
             listOf(
                 ActionRow(
@@ -724,7 +700,7 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
         } else {
             emptyList()
         }
-        // \u300c\u81ea\u52a8\u4efb\u52a1\u300d\u5165\u53e3\u59cb\u7ec8\u53ef\u89c1\uff08\u4e0d\u53d7\u8c03\u8bd5\u89e3\u9501\u9650\u5236\uff09\uff0c\u4f4d\u7f6e\u7d27\u8ddf\u300cAPI \u670d\u52a1\u5668\u8bbe\u7f6e\u300d\u4e4b\u4e0b\u3002
+
         val localAutomationRow = ActionRow(
             key = "about_completion_local_automation",
             title = "\u81ea\u52a8\u4efb\u52a1",
@@ -748,7 +724,7 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
                 onClick = { exportModuleLog() },
             ),
         )
-        // 项目地址单独一张卡片放在最下面，副标题直接是链接本身，点击跳浏览器。
+
         val versionLine = moduleBuildVersionLine()
         val projectRows = listOf(
             ActionRow(
@@ -780,18 +756,6 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
     renderHostLazyColumn(innerPaddings, listContent, composer)
 }
 
-/**
- * 展示 hook 安装自检结果。
- *
- * 宿主升级后，先看这里的「已安装 N/M」与失败列表，能直接定位掉线的 hook，
- * 不必再靠功能表现反推。
- */
-
-// 从阅读页原生高亮界面点击"补全计划"进入的完整聚合页。三段式：
-//   段1 高亮样式入口（点进去是完整页面，非弹窗）
-//   段2 全局规则卡（添加全局规则 + 跟随全局开关 + 各全局规则）
-//   段3 单书规则卡（仅本书规则，平铺，含添加本书规则）
-// 全部复用宿主 ActionCard/Switch 组件与宿主 LazyColumn，样式与设置页一致。
 internal fun ReaMicroSettingsHook.renderReaderCompletionPlanContent(
     route: InjectedRoute.ReaderCompletionPlan,
     innerPaddings: Any,
@@ -802,7 +766,7 @@ internal fun ReaMicroSettingsHook.renderReaderCompletionPlanContent(
         readerHighlightVersionValue()
         fontLibraryVersionValue()
         val highlight = settings.highlightSettings()
-        // 段1：高亮样式入口
+
         val styleRows = listOf(
             ActionRow(
                 key = "reader_plan_style_entry_${route.bookKey.hashCode()}",
@@ -812,7 +776,7 @@ internal fun ReaMicroSettingsHook.renderReaderCompletionPlanContent(
                 onClick = { openNestedInjectedRoute(InjectedRoute.ReaderHighlightConfigSettings) },
             ),
         )
-        // 段2：全局规则（添加全局规则 + 跟随全局 + 各全局规则）
+
         val followsGlobal = highlight.bookFollowsGlobalRules(route.bookKey)
         val enabledGlobalIds = highlight.effectiveGlobalRuleIdsForBook(route.bookKey)
         val globalRows = buildList {
@@ -869,7 +833,7 @@ internal fun ReaMicroSettingsHook.renderReaderCompletionPlanContent(
                 )
             }
         }
-        // 段3：单书规则（仅本书，平铺）
+
         val bookRules = highlight.bookRules(route.bookKey)
         val bookRows = buildList {
             add(
@@ -1391,7 +1355,6 @@ internal fun ReaMicroSettingsHook.renderOnlineCompletionSettingsContent(innerPad
     renderHostLazyColumn(innerPaddings, listContent, composer)
 }
 
-/** 「下载配置」页：五类成书样式各一行，点进去是与高亮样式一致的样式列表。 */
 internal fun ReaMicroSettingsHook.renderOnlineDownloadStyleSettingsContent(innerPaddings: Any, composer: Any) {
     val listContent = functionProxy("OnlineDownloadStyleList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
@@ -1565,25 +1528,21 @@ internal fun ReaMicroSettingsHook.renderImageSettingsContent(innerPaddings: Any,
     renderHostLazyColumn(innerPaddings, listContent, composer)
 }
 
-/**
- * 注入页统一的 `LazyColumn` 骨架。
- *
- * [extendBottom] 打开「真沉浸」：底部不留系统导航栏白，内容铺到屏幕最底、手势条浮在上面。
- * 逐页开启（见 `renderDiscoverContent`），默认关闭保持原「颜色沉浸」行为。
- */
 internal fun ReaMicroSettingsHook.renderHostLazyColumn(
     innerPaddings: Any,
     listContent: Any,
     composer: Any,
     extendBottom: Boolean = false,
+    itemSpacing: Int = 16,
+    modifierOverride: Any? = null,
 ) {
     method(LAZY_DSL_KT_CLASS, LAZY_COLUMN_METHOD, 13).invoke(
         null,
-        pageModifier(innerPaddings, extendBottom),
+        modifierOverride ?: pageModifier(innerPaddings, extendBottom),
         null,
         null,
         false,
-        spacedBy(16),
+        spacedBy(itemSpacing),
         null,
         null,
         false,
@@ -1621,7 +1580,7 @@ internal fun ReaMicroSettingsHook.renderHostSettingsCard(rows: List<ToggleRow>, 
     )
 }
 
-internal fun ReaMicroSettingsHook.renderHostActionCard(rows: List<ActionRow>, composer: Any) {
+internal fun ReaMicroSettingsHook.renderHostActionCard(rows: List<ActionRow>, composer: Any, backgroundOverride: Long? = null) {
     val content = functionProxy("ModuleActionCardContent", FUNCTION3_CLASS) { args ->
         val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
         rows.forEachIndexed { index, row ->
@@ -1632,7 +1591,7 @@ internal fun ReaMicroSettingsHook.renderHostActionCard(rows: List<ActionRow>, co
     }
     method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
         null,
-        settingsCardModifier(composer),
+        settingsCardModifier(composer, backgroundOverride),
         arrangementTop(),
         alignmentStart(),
         content,
@@ -1651,8 +1610,7 @@ internal fun ReaMicroSettingsHook.renderHostActionRow(row: ActionRow, composer: 
     val supporting = row.subtitle?.takeIf { it.isNotBlank() }?.let { subtitle ->
         composableLambda(row.key.hashCode() xor ACTION_SUPPORTING_KEY_MASK, FUNCTION2_CLASS) { args ->
             val innerComposer = args?.getOrNull(0) ?: return@composableLambda targetUnit()
-            // Preset prompt previews must be single-line; ordinary explanatory rows keep
-            // host defaults so settings copy can still wrap naturally.
+
             renderHostSupportingText(subtitle, innerComposer, row.singleLineSubtitle)
             targetUnit()
         }
@@ -1933,28 +1891,10 @@ internal fun ReaMicroSettingsHook.addLazyItem(lazyListScope: Any, key: Int, item
         targetUnit()
     }
     val itemMethod = lazyItemDefaultMethod ?: method(LAZY_LIST_SCOPE_CLASS, LAZY_ITEM_DEFAULT_METHOD, 6)
-    // `item$default` 掩码 bit0=key、bit1=contentType：传了真实 itemKey 就只默认 contentType（掩码 2），
-    // 都不传时维持旧行为（掩码 3，全默认）。
-    //
-    // 真实 itemKey 的价值：无 key 的 LazyList 只按下标认 item，往前插新行时原位 item 会被
-    // 「整组替换」（旧组合子树删除 + 新子树插入，走 gapbuffer 的 InsertSlotsWithFixups →
-    // PostInsertNodeFixup），子树重建成本高、滚动位置也容易跳。
-    // ⚠ 但它**不是**发现页「加载更多」两次连点闪退的解药——那个崩溃的根因是网格行内
-    // 子节点种类切换（Spacer→Column），已在 `renderDiscoverGridRow` 修复。
+
     itemMethod.invoke(null, lazyListScope, itemKey, null, content, if (itemKey == null) 3 else 2, null)
 }
 
-/**
- * 主线程断言：成立时执行 [block]，否则只记一条日志。
- *
- * `showSettingsDialog`、`Dialog.show()` 这类调用必须落在主线程，否则会抛
- * `CalledFromWrongThreadException: Only the original thread that created a view hierarchy
- * can touch its views`——异常会被 `functionProxy` 吞掉，用户看到的只是一次静默失败。
- *
- * 判据用 `Looper.getMainLooper() == Looper.myLooper()`：本模块跑在 LSPosed 进程内，
- * 直接读 `Looper.myLooper()` 可能触发未初始化的 sThreadLocal 而抛 `RuntimeException`，
- * 用 `Looper.getMainLooper()` 取主线程判据可以完全绕开这个坑。
- */
 internal fun ReaMicroSettingsHook.runOnMainThreadOrLog(name: String, block: () -> Unit) {
     val mainLooper = runCatching { android.os.Looper.getMainLooper() }.getOrNull()
     @Suppress("DEPRECATION")
@@ -1968,7 +1908,7 @@ internal fun ReaMicroSettingsHook.runOnMainThreadOrLog(name: String, block: () -
     )
 }
 
-internal fun ReaMicroSettingsHook.settingsCardModifier(composer: Any): Any {
+internal fun ReaMicroSettingsHook.settingsCardModifier(composer: Any, backgroundOverride: Long? = null): Any {
     updateModuleDialogTheme(composer)
     val shape = method(SHAPE_KT_CLASS, ROUNDED_SHAPE_METHOD, 0).invoke(null)
     val scheme = colorScheme(composer)
@@ -1983,7 +1923,7 @@ internal fun ReaMicroSettingsHook.settingsCardModifier(composer: Any): Any {
     val background = method(BACKGROUND_KT_CLASS, BACKGROUND_DEFAULT_METHOD, 5).invoke(
         null,
         bordered,
-        method(THEME_KT_CLASS, BACKGROUND_AUTO_METHOD, 1).invoke(null, scheme),
+        backgroundOverride ?: method(THEME_KT_CLASS, BACKGROUND_AUTO_METHOD, 1).invoke(null, scheme),
         null,
         2,
         null,

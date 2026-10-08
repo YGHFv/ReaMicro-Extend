@@ -33,9 +33,6 @@ private val ONLINE_HTML_NAMED_ENTITIES = mapOf(
     "quest" to "?",
 )
 
-/**
- * 解码在线正文里的 HTML 实体，并兼容 `&amp;#34;` 这类重复编码。
- */
 internal fun String.decodeOnlineHtmlEntities(maxPasses: Int = 4): String {
     var current = this
     repeat(maxPasses.coerceAtLeast(1)) {

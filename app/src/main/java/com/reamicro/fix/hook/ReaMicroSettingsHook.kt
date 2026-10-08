@@ -23,19 +23,13 @@ import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.ReaderHighlightPreviewTextView
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
-/**
- * Injects the module settings UI into the host About/Settings surface.
- *
- * The host is Compose, but this module cannot compile against host internals, so most UI is
- * created through reflected Compose calls and small value objects kept in this class.
- */
 class ReaMicroSettingsHook(
     internal val classLoader: ClassLoader,
     internal val activityProvider: () -> Activity?,
     internal val settings: XposedModuleSettings,
     internal val onGlobalFontChanged: () -> Unit = {},
 ) {
-    // Compose 反射互操作的共用实现，避免各 hook 各存一份逐渐漂移的副本。
+
     internal val composeInterop = ComposeInterop(
         classLoader = classLoader,
         resolveClass = ::cls,
@@ -47,12 +41,10 @@ class ReaMicroSettingsHook(
     internal val settingsBuildDepth = ThreadLocal.withInitial { 0 }
     internal val itemCount = ThreadLocal.withInitial { 0 }
     internal val injectingModuleItem = ThreadLocal.withInitial { false }
-    // 高亮界面（ReaderHighlightScreen）LazyColumn 渲染期间的深度与去重标志。
-    // 借用宿主自身调用 LazyListScope.item$default 的时机注入"补全计划"入口。
+
     internal val highlightScreenBuildDepth = ThreadLocal.withInitial { 0 }
     internal val highlightEntryInjected = ThreadLocal.withInitial { false }
-    // 账号配置页（AccountSecurityScreen）LazyColumn 渲染期间的深度、条目计数与去重标志。
-    // 借助宿主自身的 item$default 调用时机，把「切换账号」入口注入到「邮箱」条目之后。
+
     internal val accountSecurityBuildDepth = ThreadLocal.withInitial { 0 }
     internal val accountSecurityItemCount = ThreadLocal.withInitial { 0 }
     internal val accountSwitchEntryInjected = ThreadLocal.withInitial { false }
@@ -60,17 +52,16 @@ class ReaMicroSettingsHook(
     internal val navigatingModuleRoute = ThreadLocal.withInitial { false }
     internal val poppingInjectedRoute = ThreadLocal.withInitial { false }
     internal val methodCache = mutableMapOf<String, Method>()
-    // ReaderHook 在进入高亮界面前设置的入口点击回调（打开三段式高亮规则 sheet）。
+
     @Volatile internal var highlightScreenEntryOnClick: (() -> Unit)? = null
     internal var lazyItemDefaultMethod: Method? = null
-    // 关于补全页"构建版本"行的连续点击计数，累计 6 次弹出调试模式解锁确认。
+
     @Volatile internal var aboutVersionTapCount: Int = 0
-    // 关于补全页版本号，解锁调试模式后 bump 触发页面重组以显示 API 服务器设置入口。
+
     @Volatile internal var aboutVersionUiState: Any? = null
     @Volatile internal var currentSettingsNavGraphScope: Any? = null
     @Volatile internal var currentSettingsNavController: Any? = null
-    // 全 app 唯一的 NavGraphScope（setup() 里 new 一次，reader/设置共用）。
-    // 阅读页没有设置页的 NavGraphScope 捕获时机，用它作为导航兜底 scope。
+
     @Volatile internal var lastKnownNavGraphScope: Any? = null
     @Volatile internal var injectedRouteStack: List<InjectedRoute> = emptyList()
     @Volatile internal var injectedRouteUiState: Any? = null
@@ -85,6 +76,7 @@ class ReaMicroSettingsHook(
     @Volatile internal var cloudAutomationCredentials: List<com.reamicro.fix.cloud.api.ReaMicroCredential> = emptyList()
     @Volatile internal var cloudAutomationUpdatingTaskTypes: Set<String> = emptySet()
     @Volatile internal var localAutomationVersionUiState: Any? = null
+    internal val localAutomationRequests = LocalAutomationRequestGate()
     @Volatile internal var localAutomationLoaded: Boolean = false
     @Volatile internal var localAutomationAccountId: String = ""
     @Volatile internal var localAutomationError: String = ""
@@ -93,23 +85,20 @@ class ReaMicroSettingsHook(
     @Volatile internal var aiApiVersionUiState: Any? = null
     @Volatile internal var readerHighlightVersionUiState: Any? = null
     @Volatile internal var onlineEpubStyleVersionUiState: Any? = null
-    // 成书样式弹窗里 CSS 预览的防抖任务，逐字输入时只保留最后一次刷新。
+
     @Volatile internal var pendingOnlineEpubPreviewRefresh: Runnable = Runnable {}
-    // 样式关联图片选择的回调，选图 Activity 返回后回填到弹窗。
+
     @Volatile internal var pendingOnlineEpubStyleImagePick: ((File) -> Unit)? = null
-    // 头图蒙版合成结果缓存，key 为样式 + 原图，避免每次输入 CSS 都重算上百万像素。
+
     internal val onlineEpubHeaderPreviewCache = java.util.concurrent.ConcurrentHashMap<String, String>()
-    // 阅读页高亮规则 sheet 内的子页面导航状态：0=规则列表，1=高亮样式列表。
-    // 借用 mutableState 让 sheet 的 content lambda 读取后可随点击重组，实现 sheet 内翻页而非弹窗。
+
     @Volatile internal var readerHighlightSheetSubPageUiState: Any? = null
-    // 阅微原生高亮页（ReaderHighlightScreen）内的"补全计划"页面导航状态：
-    // 0=原生高亮页，1=补全计划规则页，2=补全计划-高亮样式页。
-    // 点击"补全计划"时置 1，令 HighlightPageContent 改渲染我们的补全计划内容（同一整页跳转，不用弹窗）。
+
     @Volatile internal var readerHighlightScreenPlanUiState: Any? = null
     @Volatile internal var profileBackgroundVersionUiState: Any? = null
-    // 「发现」页的刷新信号。Compose 侧读取它的 value 建立依赖，后台加载完成后 bump 触发重组。
+
     @Volatile internal var discoverVersionUiState: Any? = null
-    // 上一次观察到的 DiscoverState.version，用来避免每帧都写 state 造成无谓重组。
+
     @Volatile internal var discoverObservedVersion: Int = -1
     @Volatile internal var pendingDeleteFontUiState: Any? = null
     @Volatile internal var lastFontImportToken: String = ""
@@ -141,7 +130,7 @@ class ReaMicroSettingsHook(
 
     fun install() {
         activeInstance = this
-        // 逐个登记安装结果，宿主升级后靠启动汇总定位掉线的 hook。
+
         HookInstallReport.installAll(
             FEATURE_ID,
             listOf(
@@ -150,7 +139,6 @@ class ReaMicroSettingsHook(
                 "aboutScreen" to ::hookAboutScreen,
                 "settingsListBuilder" to ::hookSettingsListBuilder,
                 "lazyListItem" to ::hookLazyListItem,
-                "layoutNodeInsertDiagnostics" to ::hookLayoutNodeInsertDiagnostics,
                 "fontDocumentPickerResult" to ::hookFontDocumentPickerResult,
                 "externalSourceImportIntent" to ::hookExternalSourceImportIntent,
                 "hostAccountSignOut" to ::hookHostAccountSignOut,
@@ -275,15 +263,15 @@ class ReaMicroSettingsHook(
     internal val readerHighlightCssSizeRegex = Regex("""\b\d+(?:\.\d+)?(?:px|dp|em|rem)?\b""", RegexOption.IGNORE_CASE)
     internal val readerHighlightCssColorRegex = Regex("""rgba?\([^)]+\)|#[0-9a-fA-F]{6,8}""")
 
-    internal inner class SettingsDialogColors(context: Context) {
-        private val palette = ModuleDialogTheme.palette(context)
+    internal inner class SettingsDialogColors(context: Context, paletteOverride: ModuleDialogTheme.Palette? = null) {
+        private val palette = paletteOverride ?: ModuleDialogTheme.palette(context)
         val card: Int = palette.pageBackground
         val border: Int = palette.border
         val title: Int = palette.title
         val body: Int = palette.body
         val field: Int = palette.rowBackground
         val primary: Int = palette.primary
-        val primarySoft: Int = palette.rowBackground
+        val primarySoft: Int = palette.primarySoft
         val primaryText: Int = palette.primaryText
         val neutralSoft: Int = palette.rowBackground
         val neutralText: Int = palette.neutralText
@@ -333,37 +321,12 @@ class ReaMicroSettingsHook(
     companion object {
         @Volatile private var activeInstance: ReaMicroSettingsHook? = null
 
-        /**
-         * 取最近一次 `install()` 的实例。
-         *
-         * 设置页那一整套反射与 Compose 互操作扩展函数都挂在 `ReaMicroSettingsHook` 这个
-         * 接收者上，而「我的」页社区卡片之类的注入点只持有 classLoader，拿不到实例。
-         * 这里放出实例供它们以 `with(hook) { ... }` 的形式复用同一套扩展，
-         * 而不是把 toolbelt 再抄一遍。未安装时为 null，调用方自行跳过。
-         */
         internal fun activeInstanceOrNull(): ReaMicroSettingsHook? = activeInstance
 
-        /**
-         * 打开模块自绘的「发现」页。
-         *
-         * 「发现」入口挂在「我的」页社区卡片上，那里拿不到 hook 实例，只能走这个
-         * 静态入口。与设置页里的入口一致，优先用宿主导航（把 `Route.About` 推上宿主
-         * 返回栈）承载页面，返回栈由既有机制接管。
-         *
-         * 返回 false 表示宿主导航不可用（尚未捕获 NavGraphScope）——未安装时同样返回
-         * false，调用方据此只记日志，不弹错。
-         */
         fun openDiscoverPage(): Boolean =
             activeInstance?.let { hook ->
                 runCatching {
-                    // 「发现」入口挂在宿主「我的」页上（不是注入页），所以每次点它都必然是
-                    // 「从宿主页面进入」，固定走宿主导航即可。
-                    //
-                    // 进入前先把注入路由栈复位：上一次从这里进入后，若用户是用宿主的系统返回
-                    // 键退出的，`injectedRouteStack` 里可能残留一条 `Discover`
-                    // （宿主返回走的是 NavController.popBackStack / navigateUp，
-                    //  [consumeTopInjectedRoute] 未覆盖时不会出栈）。带着残留栈再点入口会落入
-                    // nested 分支——那个分支只改 UI 状态、不推导航，表现就是「点了没反应」。
+
                     hook.injectedRouteStack = emptyList()
                     hook.setInjectedRouteState(null)
                     hook.openInjectedRouteViaHostNavigation(InjectedRoute.Discover)
@@ -372,7 +335,6 @@ class ReaMicroSettingsHook(
                 }.getOrDefault(false)
             } ?: false
 
-        // 从阅读页原生高亮界面点击"补全计划"进入完整聚合页（复用宿主 NavHost 页面框架，遵循宿主返回）。
         fun openReaderCompletionPlanFromReader(
             bookKey: String,
             bookTitle: String,
@@ -421,7 +383,6 @@ class ReaMicroSettingsHook(
                 XposedBridge.log("$LOG_PREFIX reader highlight screen entry card render failed: ${it.stackTraceToString()}")
             }?.getOrDefault(false) ?: false
 
-        // 高亮界面顶部注入容器：plan==0 显示入口卡片，plan>0 显示补全计划整页（同一高亮页内跳转）。
         fun renderReaderHighlightScreenContainer(
             bookKey: String,
             bookTitle: String,
@@ -440,7 +401,6 @@ class ReaMicroSettingsHook(
                 XposedBridge.log("$LOG_PREFIX reader highlight screen container render failed: ${it.stackTraceToString()}")
             }?.getOrDefault(false) ?: false
 
-        // 在阅微原生高亮界面的 LazyColumn 上，向列表最前面插入一个"补全计划"入口 item。
         fun addReaderHighlightScreenEntryLazyItem(
             lazyListScope: Any,
             bookKey: String,
@@ -459,12 +419,10 @@ class ReaMicroSettingsHook(
                 XposedBridge.log("$LOG_PREFIX reader highlight screen entry lazy item failed: ${it.stackTraceToString()}")
             }?.getOrDefault(false) ?: false
 
-        // 进入高亮界面 LazyColumn 渲染前调用，标记区间并提供入口点击回调。
         fun beginHighlightScreenBuild(onClick: () -> Unit) {
             activeInstance?.beginHighlightScreenBuild(onClick)
         }
 
-        // 高亮界面 LazyColumn 渲染结束后调用，结束区间。
         fun endHighlightScreenBuild() {
             activeInstance?.endHighlightScreenBuild()
         }
@@ -489,16 +447,13 @@ class ReaMicroSettingsHook(
                 XposedBridge.log("$LOG_PREFIX reader highlight rules sheet render failed: ${it.stackTraceToString()}")
             }?.getOrDefault(false) ?: false
 
-        // 当前是否处于"补全计划"整页（1=规则页，2=样式页）。0 表示原生高亮页。
         fun readerHighlightScreenPlanValue(): Int =
             activeInstance?.runCatching { this.readerHighlightScreenPlanValue() }?.getOrDefault(0) ?: 0
 
-        // 设置"补全计划"整页导航状态。点击入口置 1；返回置 0 回到原生高亮页。
         fun setReaderHighlightScreenPlan(page: Int) {
             activeInstance?.setReaderHighlightScreenPlan(page)
         }
 
-        // 在阅微原生高亮页（HighlightPageContent）位置渲染"补全计划"整页内容，替换原生内容。
         fun renderReaderHighlightScreenPlanPage(
             bookKey: String,
             bookTitle: String,
@@ -511,6 +466,5 @@ class ReaMicroSettingsHook(
                 XposedBridge.log("$LOG_PREFIX reader highlight plan page render failed: ${it.stackTraceToString()}")
             }?.getOrDefault(false) ?: false
 
-        // 2.2 更名后的设置列表构建 lambda；旧版名称不存在时会回退到签名匹配。
     }
 }

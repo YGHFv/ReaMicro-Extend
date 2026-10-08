@@ -1,23 +1,14 @@
 package com.reamicro.fix.hook.webdav
 
-import android.graphics.drawable.Icon
 import com.reamicro.fix.core.HostClasses
 import java.util.concurrent.atomic.AtomicBoolean
 
-// WebDavDriveHook 与其外移出去的扩展函数共用的常量。
-//
-// 原先这些是 WebDavDriveHook 的 private companion object 成员。功能簇拆成同包扩展
-// 函数后，companion 的 private 成员对扩展函数不可见，因此提升为顶层 internal 声明。
-//
-// 单独开一个子包而不是放在 com.reamicro.fix.hook 顶层：该包里已有文件用 private
-// 顶层常量（如 LOG_PREFIX），顶层 internal 会与之冲突；Kotlin 又不允许对 object
-// 做 star import，所以走「子包 + 包级 star import」这条路。
 internal const val FEATURE_ID = "WebDavDriveHook"
 internal const val LOG_TAG = "ReaMicroWebDAV"
 internal const val LOG_PREFIX = "ReaMicro LSP"
-// 暂停段评网络请求与缓存写入，保留实现供后续继续修复。
+
 internal const val ONLINE_PARAGRAPH_COMMENTS_RUNTIME_ENABLED = false
-// 关闭常规运行日志向 LSPosed 面板输出，避免刷屏；错误日志不受影响。
+
 internal const val VERBOSE_WEBDAV_LOG = false
 internal const val BACKUP_TYPE_CLASS = HostClasses.Host.BACKUP_TYPE
 internal const val BACKUP_TYPE_NAME_METHOD = "getName"
@@ -161,8 +152,6 @@ internal const val BAIDU_ICON_CLASS = HostClasses.Host.BAIDU_ICON
 internal const val BAIDU_ICON_METHOD = "getBaiduNetdisk"
 internal const val YUN115_ICON_CLASS = HostClasses.Host.YUN115_ICON
 internal const val YUN115_ICON_METHOD = "getYun115"
-internal const val FILE_FOLDER_ICON_CLASS = HostClasses.Host.FILE_FOLDER_ICON
-internal const val FILE_FOLDER_ICON_METHOD = "getFileFolder"
 internal const val CLOUD_ROW_ICON_CLASS = HostClasses.Host.BOOK_ROW_INFO
 internal const val CLOUD_ROW_ICON_METHOD = "getIconForFileType"
 internal const val ANDROID_OS_ICON_CLASS = HostClasses.Host.ANDROID_OS_ICON
@@ -332,8 +321,6 @@ internal const val DOWNLOAD_CANCEL_CONFIRM_WINDOW_MS = 2_500L
 internal const val STARTUP_CACHE_CLEANUP_DELAY_MS = 1_500L
 internal const val STALE_IMPORT_CACHE_MIN_AGE_MS = 60 * 60_000L
 
-// 启动清理会碰到的模块自建临时目录名。都在宿主 cacheDir/filesDir 下、由本模块创建，
-// 删掉只会让下一次操作重新生成，不影响已入库的书、封面与阅读数据。
 internal const val COVER_STAGE_CACHE_DIR = "reamicro_cover_stage"
 internal const val PROFILE_BACKGROUND_FILES_DIR = "profile_background"
 internal const val REQUEST_LOCAL_LIBRARY_DIR = 8931

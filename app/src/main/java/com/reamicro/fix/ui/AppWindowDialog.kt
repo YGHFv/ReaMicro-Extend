@@ -26,7 +26,6 @@ import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.window.WindowDialog
 
-/** Shared by task configuration, Root management, confirmation, diagnostics and text dialogs. */
 @Composable
 internal fun AppWindowDialog(
     show: Boolean, title: String, onClose: () -> Unit,
@@ -37,8 +36,7 @@ internal fun AppWindowDialog(
     WindowDialog(
         show = show, title = title, onDismissRequest = onClose,
         insideMargin = DpSize(DIALOG_INSIDE_DP.dp, DIALOG_INSIDE_DP.dp),
-        // Real 0.9.4 DialogContentLayout handles navigation, caption bars, IME and corner shape.
-        // Do not force largeScreen: use exactly the same responsive presentation as task config.
+
         defaultWindowInsetsPadding = true,
     ) {
         Column(Modifier.fillMaxWidth()) {

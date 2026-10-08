@@ -18,12 +18,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/**
- * 「不祈禳」选项的 wire 值：空串。
- *
- * 与游戏侧一致——不发祈禳请求就是不做这件事，不存在一个叫 NONE 的签种。
- * 放在选项列表**末尾**，未配置的任务默认仍取列表第一项（求运/求安），不祈禳是显式选择。
- */
 internal const val BLESSING_NONE = ""
 
 internal data class CloudAutomationTaskSpec(
@@ -33,12 +27,7 @@ internal data class CloudAutomationTaskSpec(
     val autoRead: Boolean = false,
     val rewardTriggered: Boolean = false,
     val merchant: Boolean = false,
-    /**
-     * 这个任务跑之前要不要先检查道观运签、没有就祈禳一支；列表为空表示不需要。
-     *
-     * 「每日轶闻」可求运，「自动行商」可选求安/求财；两者都可显式选择不祈禳。
-     * 值是 `CloudTaskLocalRunner.BLESSING_*` 的 wire 值——服务端按它判合法性，不能自造。
-     */
+
     val blessingOptions: List<String> = emptyList(),
 ) {
     fun resolveBlessingChoice(value: String?): String {
@@ -51,7 +40,6 @@ internal data class CloudAutomationTaskSpec(
 
 private const val CLOUD_AUTOMATION_LOG_PREFIX = "[ReaMicroFix/CloudAutomation]"
 
-// 云端页与本地「自动任务」页共用同一份任务规格，保证两处任务列表一致。
 internal val CLOUD_AUTOMATION_TASKS = listOf(
     CloudAutomationTaskSpec(
         taskType = "yeshe_checkin",
@@ -340,7 +328,7 @@ private fun ReaMicroSettingsHook.setCloudAutomationTaskEnabled(
                 cloudAutomationTasks = cloudAutomationTasks.map { current ->
                     if (current.id == updated.id) updated else current
                 }
-                // 互斥：启用云端任务时关闭本地同类型任务。
+
                 if (updated.enabled) disableLocalAutomationTask(accountId, spec.taskType)
                 updateChecked(updated.enabled)
                 showToast(if (updated.enabled) "已启用${spec.title}" else "已停用${spec.title}")
@@ -408,7 +396,7 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
             setSingleLine(false)
         }
         val merchantAutoComplete = settingsDialogSwitchRow(activity, "自动完成行商", task?.merchantAutoComplete == true, colors)
-        // 运签：与本地页共用选择逻辑，空串是显式不祈禳，不能当成未配置。
+
         var blessingChoice = spec.resolveBlessingChoice(task?.blessingType)
         val blessingButton = spec.blessingOptions.takeIf { it.isNotEmpty() }?.let {
             settingsDialogButton(
@@ -538,7 +526,7 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
                         timeOfDay = normalizedTime,
                         request = request,
                     )
-                    // 互斥：启用云端任务时关闭本地同类型任务。
+
                     if (savedTask.enabled) {
                         disableLocalAutomationTask(currentCredential.accountId, spec.taskType)
                     }
@@ -572,7 +560,6 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
         showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, dismissOnThemeChange = true)
     }
 }
-
 
 internal fun normalizeCloudAutomationTime(raw: String): String {
     val parts = raw.trim().split(':', limit = 2)

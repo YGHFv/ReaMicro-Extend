@@ -3,7 +3,6 @@ package com.reamicro.fix.cloud.api
 import android.content.Context
 import com.reamicro.fix.online.OnlineSourceStore
 import com.reamicro.fix.settings.OnlineEpubStyleStore
-import com.reamicro.fix.settings.OnlineEpubStyle
 import com.reamicro.fix.settings.XposedModuleSettings
 import java.io.File
 import java.security.KeyFactory
@@ -13,8 +12,6 @@ import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
 import android.util.Base64
 import org.json.JSONObject
-import com.reamicro.fix.settings.ReaderHighlightStyle
-import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.association.provider.ExternalSourceLoader
 
 data class ApiPackageUpdateResult(
@@ -33,7 +30,6 @@ data class InstalledApiPackage(
     val contentId: String,
 )
 
-/** 统一管理内容包下载、校验、缓存和按类型安装。 */
 class ApiPackageManager(
     private val context: Context,
     private val client: ApiServerClient,
@@ -69,11 +65,6 @@ class ApiPackageManager(
         ApiPackageUpdateResult(contentPackage.packageId, contentPackage.version, false, it.message ?: "安装失败")
     }
 
-    /**
-     * 把本机已有内容登记成某个服务器内容包，不下载任何数据。
-     * 版本刻意写 0.0.0：下一次检查更新时一定判定为有新版本，从而用服务器内容覆盖本机内容，
-     * 同时沿用 [localContentId]（书源为源 ID、关联源为文件名）保住已下载图书与登录凭据。
-     */
     fun link(kind: ApiPackageKind, packageId: String, localContentId: String) {
         val packageKey = key(kind, packageId)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
@@ -87,7 +78,6 @@ class ApiPackageManager(
             .apply()
     }
 
-    /** 判断某个内容包是否已经登记（无论来自安装还是关联）。 */
     fun isRegistered(kind: ApiPackageKind, packageId: String): Boolean =
         installed().any { it.kind == kind && it.packageId == packageId }
 
@@ -181,8 +171,7 @@ class ApiPackageManager(
                 val json = JSONObject(bytes.toString(Charsets.UTF_8))
                 val styleRoot = json.optJSONObject("style") ?: json
                 val id = styleRoot.optString("id").trim().ifBlank { error("高亮样式缺少 ID") }
-                // 字段定义与上传侧共用 readHighlightStylePayload，避免两边对不上。
-                // 样式本身不带深浅外观，深浅由高亮规则和默认样式设置决定。
+
                 settings.setReaderHighlightStyle(
                     readHighlightStylePayload(
                         styleRoot = styleRoot,
@@ -202,7 +191,7 @@ class ApiPackageManager(
                 if (target.exists()) target.setWritable(true)
                 require(temp.renameTo(target)) { "关联源文件写入失败" }
                 target.setReadOnly()
-                // 关联时登记的是本机原文件名；服务器包落地后文件名可能不同，需要删掉旧文件避免同一个源出现两份。
+
                 val previous = installed().firstOrNull { it.kind == contentPackage.kind && it.packageId == contentPackage.packageId }
                     ?.contentId
                     .orEmpty()
@@ -291,7 +280,7 @@ class ApiPackageManager(
         private const val ROOT = "reamicro_api_packages"
         private const val HIGHLIGHT_IMAGE_DIR = "reader_highlight_nine_patch"
         private const val KEY_INSTALLED_IDS = "installed_ids"
-        /** 仅关联、尚未从服务器安装过内容的占位版本号。 */
+
         const val LINKED_VERSION = "0.0.0"
     }
 }

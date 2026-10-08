@@ -37,36 +37,19 @@ import java.util.concurrent.locks.ReentrantLock
 import com.reamicro.fix.hook.webdav.*
 import com.reamicro.fix.logging.logWebDav
 
-/**
- * Cloud/local-library integration hook.
- *
- * This class is intentionally broad because it coordinates host cloud UI injection,
- * WebDAV/Alist access, import/export jobs, and online-completion downloads that share
- * the same reflected host repositories and notification flow.
- */
 class WebDavDriveHook(
     internal val classLoader: ClassLoader,
     internal val activityProvider: () -> Activity?,
     internal val settingsProvider: () -> ModuleSettingsSnapshot = { ModuleSettingsSnapshot() },
-    /**
-     * 全局字体（原生 Typeface 形态）。在线源搜索结果行一类的原生 TextView 不在 Compose 与
-     * Dialog 的覆盖范围内，需要由创建方把同一个字体套上去。未配置时返回 null。
-     */
+
     internal val globalTypefaceProvider: () -> Typeface? = { null },
 ) {
-    /**
-     * 当前已安装的实例。
-     *
-     * 在线书源相关的扩展函数（请求构造、结果解析）都挂在 `WebDavDriveHook` 这个接收者上，
-     * 而「发现」页之类的入口只需要读配置、发请求，拿不到也不该重建一个实例。这里保留
-     * 最近一次 `install()` 的实例供它们复用，未安装时为 null，调用方自行跳过。
-     */
+
     internal companion object {
         @Volatile
         internal var activeInstance: WebDavDriveHook? = null
     }
 
-    // Compose 反射互操作的共用实现，避免各 hook 各存一份逐渐漂移的副本。
     internal val composeInterop = ComposeInterop(
         classLoader = classLoader,
         resolveClass = ::cls,
@@ -75,8 +58,7 @@ class WebDavDriveHook(
     )
 
     internal val methodCache = mutableMapOf<String, Method>()
-    // Compose renders nested lambdas without passing enough host context to later hooks.
-    // ThreadLocal render contexts mark the current host row/screen while its children compose.
+
     internal val syncAuthCardRender = ThreadLocal<SyncAuthCardRenderContext?>()
     internal val importUnauthRender = ThreadLocal<ImportUnauthRenderContext?>()
     internal val importLocalLibraryRow = ThreadLocal<ImportLocalLibraryRowContext?>()
@@ -84,13 +66,11 @@ class WebDavDriveHook(
     internal val syncAvailableTypes = ThreadLocal<List<Int>?>()
     internal val syncAvailableRowIndex = ThreadLocal<Int>()
     internal val webDavCloudTitleDepth = ThreadLocal<Int>()
-    internal val webDavCloudScreenDepth = ThreadLocal<Int>()
     internal val webDavCloudTreeDepth = ThreadLocal<Int>()
     internal val webDavAccountScreenDepth = ThreadLocal<Int>()
     internal val webDavAccountNavGraphScope = ThreadLocal<Any?>()
     internal val localLibraryIconDepth = ThreadLocal<Int>()
     internal val localLibraryCloudTitleDepth = ThreadLocal<Int>()
-    internal val localLibraryCloudScreenDepth = ThreadLocal<Int>()
     internal val onlineCompletionCloudTitleDepth = ThreadLocal<Int>()
     internal val onlineCompletionCloudTitleText = ThreadLocal<String?>()
     internal val onlineCompletionRenderTypesBySource = ConcurrentHashMap<String, Int>()
@@ -225,11 +205,6 @@ class WebDavDriveHook(
             if (tracker != null && workId != null) {
                 setTrackedWorkState(tracker, workId, "Running", displayProgress, null, null, "$bookName：$compactMessage")
             }
-            logWebDav(
-                "online completion progress notify id=$notificationId progress=$displayProgress raw=$progress " +
-                    "force=$force progressChanged=$progressChanged failedCountChanged=$failedCountChanged " +
-                    "phaseChanged=$phaseChanged text=$compactMessage",
-            )
             return updateOnlineCompletionNotification(
                 context,
                 notificationId,

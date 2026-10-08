@@ -1,13 +1,7 @@
-"""模块 APK 版本查询、下载与 GitHub webhook。
-
-本仓库 CI 发布的都是预发布，所以不带 channel 参数时会命中 stable 过滤并返回 404。
-"""
-
 from typing import Any
 
-from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request, UploadFile, File, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
-from fastapi.security import HTTPBasicCredentials
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse, Response
 
 from app import runtime
 import asyncio

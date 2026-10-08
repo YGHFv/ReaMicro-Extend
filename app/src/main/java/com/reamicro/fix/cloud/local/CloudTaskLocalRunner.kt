@@ -8,17 +8,8 @@ import org.json.JSONObject
 import java.time.LocalDate
 import java.time.ZoneId
 
-/**
- * 阅微自动任务的执行逻辑库，由本地任务 [LocalTaskRunner] 调用。
- *
- * 早前这里还负责「设备模式」：向服务器领 device 租约、在模块进程代跑云端任务，再把结果
- * 回报服务器（`runDue` + `dispatchCompletion`）。云端任务已改回服务器执行，该路径整体移除；
- * 本对象现在只保留与传输方式无关的任务实现——轶闻、祈愿、自动阅读、行商、期物典当。
- */
 object CloudTaskLocalRunner {
-    /**
-     * 执行一条阅微自动任务。任务运行状态通过返回的 state 表达，由调用方决定如何落盘。
-     */
+
     internal fun runTask(taskType: String, task: JSONObject, request: JSONObject, credential: JSONObject,
         checkpoint: (JSONObject) -> Unit = {}): Outcome =
         when (taskType) {
@@ -30,7 +21,6 @@ object CloudTaskLocalRunner {
             else -> Outcome("failed", "模块暂不支持此任务类型")
         }
 
-    /** 行商的 SETTLED 表示奖励待领取，领取成功后才能开启下一趟。 */
     internal fun runMerchantNotify(task: JSONObject, request: JSONObject, credential: JSONObject, checkpoint: (JSONObject) -> Unit = {}): Outcome {
         val baseUrl = credential.optString("baseUrl").ifBlank { REAMICRO_BASE_URL }
         val token = credential.optString("token").ifBlank { return Outcome("paused", "阅微登录凭据无效") }
@@ -141,7 +131,7 @@ object CloudTaskLocalRunner {
             message += "，已开启新行商${blessingNote(blessing, blessingType)}"
             detail.put("新行商", "预计 ${formatMerchantEpoch(nextTrip.endTimeMs)} 完成")
             val blessEffect = blessing.detail.optString("效果").trim()
-            // 新行商的结束时间和新运签的效果都写进正文：通知与任务记录不点开就能看到。
+
             if (nextTrip.endTimeMs > 0L) {
                 val endText = formatMerchantEpoch(nextTrip.endTimeMs)
                 message += "，结束时间 $endText"
@@ -158,19 +148,17 @@ object CloudTaskLocalRunner {
         return Outcome("success", message, state, notify = notify, detail = detail)
     }
 
-    /** 把当前生效的运签写进详情（读不到就什么都不写，不编造）。 */
     private fun addActiveBlessing(detail: JSONObject, active: JSONObject) {
         if (active.length() <= 0) return
         detail.put("运签", active.optString("运签"))
         detail.put("运签效果", active.optString("效果"))
     }
 
-    /** 行商详情：谁、去哪、本金多少、结算多少、事件是什么。 */
     private fun merchantDetail(trip: MerchantTrip): JSONObject = JSONObject()
         .put(
             "事件",
             trip.eventTitle.ifBlank {
-                // 行商途中的事件在结算时才生成，这里别用"行商"这种兜底词冒充事件内容。
+
                 if (trip.status.equals("TRAVELING", ignoreCase = true)) "待结算（事件在抵达后才生成）" else "无"
             },
         )
@@ -179,7 +167,7 @@ object CloudTaskLocalRunner {
         .put("城池", trip.cityName.ifBlank { trip.cityCode })
         .apply { if (trip.transportLabel.isNotBlank()) put("车马", trip.transportLabel) }
         .apply {
-            // 行商这趟自带运签信息（blessingName / effect），比单独查一次更准。
+
             if (trip.blessingName.isNotBlank()) {
                 val effect = blessingEffectText(trip.blessingEffectType, trip.blessingEffectValue)
                 put("运签", listOf(trip.blessingName, effect).filter { it.isNotBlank() }.joinToString(" · "))
@@ -189,17 +177,12 @@ object CloudTaskLocalRunner {
         .put("结算", "${trip.settlementAmount} 铜")
         .put("状态", trip.status.ifBlank { "—" })
 
-    /**
-     * 解析本次要用于开新行商的参数：**用户填了就用用户的，留空则沿用上次行商配置**。
-     * 上次配置优先取当前这趟行商实际使用的参数（最准确），没有则用历史记录。
-     */
     private fun rememberedMerchantConfig(task: JSONObject, trip: MerchantTrip): MerchantConfig = MerchantConfig(
         cityCode = trip.cityCode.ifBlank { task.optString(LocalTaskStore.KEY_MERCHANT_LAST_CITY) },
         transportId = if (trip.hasTrip) trip.transportId else task.optLong(LocalTaskStore.KEY_MERCHANT_LAST_TRANSPORT, 0L),
         principal = trip.principal.takeIf { it > 0L } ?: task.optLong(LocalTaskStore.KEY_MERCHANT_LAST_PRINCIPAL, 0L),
     )
 
-    /** 用户填了的字段优先；留空的字段沿用它记住的上次行商配置。 */
     internal fun resolveStartConfig(request: JSONObject, remembered: MerchantConfig): MerchantConfig = MerchantConfig(
         cityCode = request.optString("merchantCityCode").trim().ifBlank { remembered.cityCode },
         transportId = request.optLong("merchantTransportId", 0L).takeIf { it > 0L } ?: remembered.transportId,
@@ -226,7 +209,6 @@ object CloudTaskLocalRunner {
         val isComplete: Boolean get() = cityCode.isNotBlank() && transportId >= 0L && principal > 0L
     }
 
-    /** 查询生成每日轶闻；isFinish 表示可领取，领取只调用一次 complete-daily-lore。 */
     private fun runCheckin(task: JSONObject, request: JSONObject, credential: JSONObject, checkpoint: (JSONObject) -> Unit): Outcome {
         val baseUrl = credential.optString("baseUrl").ifBlank { return Outcome("failed", "阅微服务器地址为空") }
         val token = credential.optString("token").ifBlank { return Outcome("paused", "阅微登录凭据无效") }
@@ -270,7 +252,7 @@ object CloudTaskLocalRunner {
             val summary = cloudTaskItemsSummary(rewards.toString())
             if (summary.isNotBlank()) detail.put("获得", summary)
             addActiveBlessing(detail, blessing.detail)
-            // 奖励明细直接写进正文：通知和任务记录都不点开就能看到领到什么。
+
             val rewardNote = if (summary.isBlank()) "" else "（$summary）"
             return Outcome(result, message + rewardNote, state, detail = detail)
         }
@@ -312,11 +294,10 @@ object CloudTaskLocalRunner {
             claimDueAt > now -> "签到完成，奖励 ${formatMerchantEpoch(claimDueAt)} 解锁"
             else -> "签到完成，奖励待领取，将于 ${formatMerchantEpoch(nextRunAt)} 再次检查"
         }
-        // blessingNote 已经在 checkinOutcome 里按需追加，这里只传基础文案。
+
         return checkinOutcome("success", message + blessingNote(blessing, blessingType))
     }
 
-    /** 秒级 epoch 统一成毫秒：阅微有的接口给秒、有的给毫秒。 */
     private fun epochMillis(raw: Long): Long =
         if (raw in 1 until 100_000_000_000L) raw * 1_000L else raw
 
@@ -426,7 +407,7 @@ object CloudTaskLocalRunner {
                 state.put("nextRunAtOverride", beforeSubmit + 60_000L)
                 return Outcome("paused", "已跨日期，自动阅读将按新一天的真实时间重新检查", state, notify = false)
             }
-            // Recheck after network calls and between books; force/retries cannot over-report.
+
             AutoReadTimeLock.deferredOutcome(durationMinutes, state, beforeSubmit, dailyLimit)?.let { return it }
             val payload = JSONObject().put("list", JSONArray().put(
                 JSONObject()
@@ -452,16 +433,6 @@ object CloudTaskLocalRunner {
         return Outcome("success", "${names.joinToString("、")} · $completedMinutes 分钟", state, detail = detail)
     }
 
-    /**
-     * 任务执行前把道观运签调整成**任务配置的那一支**。
-     *
-     * 规则（用户口径）：配置了签种就要那支签。账号上生效的是同一支 → 直接沿用（祈禳要消耗道具，
-     * 同签种没必要重来一遍）；没有签、或是别的签种 → 祈禳配置的那支。
-     *
-     * 早前这里是"已有签就不替换"，于是自动行商祈禳的求财签会把每日轶闻配置的求运签一直挡在门外，
-     * 而战报还写着「已祈禳求运签」——用户看到的正是"我明明配了求运，怎么求财去了"。
-     * 运签是账号上的单槽位，两个任务本就可能互相顶，这一点由返回值如实报出来，不藏。
-     */
     private fun ensureTaoistBlessing(
         baseUrl: String,
         token: String,
@@ -490,7 +461,7 @@ object CloudTaskLocalRunner {
         )
         businessError(current)?.let { return BlessingCheck("查询运签失败：$it", JSONObject()) }
         val data = current.optJSONObject("data") ?: current
-        // blessing 为 null（JSONObject.NULL 或缺失）都表示无签；只有拿到具体签种才算"已有"。
+
         val blessing = data.opt("blessing") as? JSONObject
         val activeType = blessing?.optString("blessingType").orEmpty()
         if (activeType.equals(type, ignoreCase = true)) {
@@ -524,8 +495,6 @@ object CloudTaskLocalRunner {
         )
     }
 
-
-    /** 运签详情：签种、签文名、效果描述（游戏原文，例如"下一次每日轶闻：绿色及以上概率提升 2 个百分点"）。 */
     private fun blessingDetail(blessing: JSONObject, source: String): JSONObject {
         val type = blessing.optString("blessingType")
         return JSONObject()
@@ -533,25 +502,17 @@ object CloudTaskLocalRunner {
             .put("效果", blessing.optString("description"))
     }
 
-    /**
-     * 运签检查结果。
-     *
-     * [failure] 非空表示这次没拿到签；[prayed] 区分"这次真的祈禳了"与"沿用了已有的"——
-     * 两者都要如实告诉用户，早前统一按"已祈禳"播报，才会出现"配的求运、实际是求财"却写着
-     * 「已祈禳求运签」的矛盾记录。
-     */
     internal data class BlessingCheck(
         val failure: String?,
         val detail: JSONObject,
-        /** 这次是否真的发出并成功了祈禳请求。 */
+
         val prayed: Boolean = false,
-        /** 最终生效的签种（服务端回给我们的那个）。 */
+
         val activeType: String = "",
-        /** 被这次祈禳顶掉的旧签种；没有则为空。 */
+
         val replacedType: String = "",
     )
 
-    /** 祈禳结果给任务消息加一句：真的祈禳了、沿用了哪一支、还是失败了。 */
     internal fun blessingNote(check: BlessingCheck, configuredType: String): String = when {
         check.failure != null -> "（运签：${check.failure}）"
         configuredType.isBlank() -> ""
@@ -566,7 +527,7 @@ object CloudTaskLocalRunner {
     }
 
     internal fun blessingLabel(type: String): String = when (type.trim().uppercase()) {
-        // 空串是合法选择（用户明确要求"不祈禳"），不是"未知签种"。
+
         "" -> "不祈禳"
         BLESSING_LUCK -> "求运签"
         BLESSING_SAFETY -> "求安签"
@@ -574,13 +535,6 @@ object CloudTaskLocalRunner {
         else -> "运签"
     }
 
-    /**
-     * 期物典当：按游戏给定的当日期物典当换铜钱。
-     *
-     * 接口与判定完全对齐参考脚本：`get-pawn-count` 取当日期物与剩余次数；期物命中禁当清单
-     * （[PROHIBITED_PAWN_PROP_HINTS]，都是祈禳/传承/夺宝这类要留着的消耗品）就跳过；
-     * 再从背包 `get-user-materials` 里找到该期物的 `userPropId`，循环 `pawn` 直到次数或持有量用尽。
-     */
     private fun runPawn(task: JSONObject, request: JSONObject, credential: JSONObject, checkpoint: (JSONObject) -> Unit): Outcome {
         val baseUrl = credential.optString("baseUrl").ifBlank { return Outcome("failed", "阅微服务器地址为空") }
         val token = credential.optString("token").ifBlank { return Outcome("paused", "阅微登录凭据无效") }
@@ -597,9 +551,7 @@ object CloudTaskLocalRunner {
         val usedToday = data.optInt("usedToday", 0).coerceAtLeast(0)
         val propId = data.opt("specialPropId")?.toString().orEmpty().trim()
         val propName = data.optString("specialPropName").ifBlank { "期物" }
-        // 顺手把当日期物并进图鉴：名字与品质只有服务端当天才给，错过这次就再也补不回来。
-        // 并进去的是服务端原始名字，不是上面那句给消息用的"期物"兜底文案——今天没有期物时
-        // 服务端给空名字，图鉴就该什么都没有，而不是多出一行叫"期物"的假条目。
+
         var catalog = mergePawnPropCatalog(
             pawnPropCatalog(task),
             listOf(PawnPropChoice(propId, data.optString("specialPropName").trim(), data.optString("specialPropQuality"))),
@@ -608,20 +560,18 @@ object CloudTaskLocalRunner {
             return Outcome("success", "今日可典当次数已用完（$usedToday/$maxPerDay）", pawnCatalogState(catalog), notify = false)
         }
         if (propId in forbiddenPawnPropIds(request)) {
-            // 跳过不是故障：今天的期物恰好是要留着的消耗品，明天再看。
+
             val hint = PROHIBITED_PAWN_PROP_HINTS[propId]
             val why = if (hint.isNullOrBlank()) "在禁当清单里" else "是$hint"
             return Outcome("success", "今日期物「$propName」$why，跳过典当", pawnCatalogState(catalog), notify = false)
         }
         val forbidden = forbiddenPawnPropIds(request)
-        // 青圭这类特殊消耗品的 propId 静态拿不到（见 PROHIBITED_PAWN_PROP_HINTS 注释），
-        // 除 propId 外再按当日期物的名字兜底匹配一次默认清单里的 name: 键。
+
         if ("name:$propName" in forbidden) {
             val hint = PROHIBITED_PAWN_PROP_HINTS["name:$propName"]
             return Outcome("success", "今日期物「$propName」是$hint，跳过典当", pawnCatalogState(catalog), notify = false)
         }
-        // 红色品质一律不自动典当：RED 档全是青圭这类另有用途的稀有消耗品，
-        // 典当收益远低于缺料的代价，这条是硬规则、不受禁当清单配置影响。
+
         if (data.optString("specialPropQuality").trim().equals("RED", ignoreCase = true)) {
             return Outcome("success", "今日期物「$propName」是红色品质，不自动典当", pawnCatalogState(catalog), notify = false)
         }
@@ -635,7 +585,7 @@ object CloudTaskLocalRunner {
         val list = materials.optJSONObject("data")?.optJSONArray("materials")
             ?: materials.optJSONArray("materials")
             ?: JSONArray()
-        // 背包里的每件都记进图鉴：只有这里能一次性拿到期物的名字与品质。
+
         catalog = mergePawnPropCatalog(catalog, bagPawnPropChoices(list))
         var target: JSONObject? = null
         for (index in 0 until list.length()) {
@@ -723,7 +673,6 @@ object CloudTaskLocalRunner {
         } else null
     }
 
-    /** 从行商响应解析活跃行商。字段名与宿主 TravelingMerchantTrip 对齐；endTime 为秒级 epoch。 */
     internal fun parseMerchantTrip(body: JSONObject): MerchantTrip {
         val data = body.optJSONObject("data") ?: body
         val trip = data.optJSONObject("activeTrip") ?: data.optJSONObject("trip") ?: return MerchantTrip(hasTrip = false)
@@ -741,11 +690,10 @@ object CloudTaskLocalRunner {
             principal = trip.optLong("principal", 0L),
             eventTitle = trip.optString("eventTitle"),
             eventContent = trip.optString("eventContent").ifBlank { trip.optString("content") },
-            // 这趟行商实际使用的参数，作为「上次行商配置」的来源。
+
             cityCode = trip.optString("cityCode"),
             transportId = trip.optLong("transportId", 0L),
-            // 城池与车马的中文名：响应里带着 cities[] / transports[] 对照表，
-            // 直接把 code/id 翻出来，别把 LANGYA、transportId=5 这种内部值摆给用户看。
+
             cityName = lookupName(data.optJSONArray("cities"), "code", trip.optString("cityCode"), "name"),
             transportLabel = transportLabel(trip.optLong("transportId", 0L), data.optJSONArray("transports")),
             blessingName = trip.optString("blessingName"),
@@ -754,18 +702,6 @@ object CloudTaskLocalRunner {
         )
     }
 
-    /**
-     * 这一轮行商该做什么。
-     *
-     * 三件事互相独立、各按各的趟次记账，必须分开算：
-     * - [notify] 只决定"要不要发通知"，由"已播报过的趟次"去重；
-     * - [settle] 决定"这趟要不要自动结算"，由"已自动结算过的趟次"去重；
-     * - [start] 决定"要不要开新行商"，没在途行商时每次都试（失败下次再试），
-     *   有趟已结算的行商时按"为它开成功过没有"去重。
-     *
-     * 早前三件事共用"已通知趟次"这一个标记，先通知过、之后才打开自动完成的那一趟就再也
-     * 进不了结算分支——用户看到的就是"自动行商不领奖、也不开新行商"。
-     */
     internal fun merchantAction(
         hasTrip: Boolean,
         phase: MerchantPhase,
@@ -787,13 +723,12 @@ object CloudTaskLocalRunner {
         },
     )
 
-    /** [merchantAction] 的结果。 */
     internal data class MerchantAction(
-        /** 这趟还没播报过结果，该发通知。 */
+
         val notify: Boolean,
-        /** 这趟已抵达、且还没自动结算过。 */
+
         val settle: Boolean,
-        /** 该去开一趟新行商。 */
+
         val start: Boolean,
     )
 
@@ -805,7 +740,6 @@ object CloudTaskLocalRunner {
         else -> MerchantPhase.ARRIVED
     }
 
-    /** 组装行商完成通知正文：事件标题 + 收益/亏损（结算额 − 本金）。 */
     internal fun merchantProfitText(eventTitle: String, settlementAmount: Long, principal: Long): String {
         val delta = settlementAmount - principal
         val profit = if (delta >= 0L) "收益 +$delta" else "亏损 $delta"
@@ -818,7 +752,6 @@ object CloudTaskLocalRunner {
 
     internal enum class MerchantPhase { IN_TRANSIT, ARRIVED, SETTLED }
 
-    /** 在数组里按 [matchKey] 找到 [value] 对应的那一条，返回它的 [nameKey] 字段（找不到就退回原值）。 */
     private fun lookupName(array: JSONArray?, matchKey: String, value: String, nameKey: String): String {
         if (array == null || value.isBlank()) return value
         for (index in 0 until array.length()) {
@@ -828,7 +761,6 @@ object CloudTaskLocalRunner {
         return value
     }
 
-    /** 车马的中文名与效果，形如"河曲马 · 速度 +5%"；查不到时退回 id。 */
     private fun transportLabel(transportId: Long, transports: JSONArray?): String {
         if (transports == null || transportId <= 0L) return ""
         for (index in 0 until transports.length()) {
@@ -846,22 +778,14 @@ object CloudTaskLocalRunner {
         return "车马 $transportId"
     }
 
-    /**
-     * 运签效果文案。
-     *
-     * 效果类型是游戏侧的枚举，直接显示 MERCHANT_PROFIT_BONUS 这种值用户看不懂，按已知类型翻译。
-     */
     internal fun blessingEffectText(effectType: String, effectValue: String): String = when (effectType.trim().uppercase()) {
-        // 行商运签的 5 个效果类型：文案逐字照抄宿主 TravelingMerchantSheetKt.merchantBlessingEffectText
-        // （smali 取证 2.3.2），格式统一为「中文说明 + 数值%」。行商 trip 的 JSON 只回
-        // blessingEffectType/Value 而没有 description，所以这里要自己按类型翻译；求签接口
-        // （get/pray-taoist-blessing）另有 description 现成文本，走 blessingDetail 那条路。
+
         "MERCHANT_DISASTER_REDUCTION" -> "行商灾害概率降低 $effectValue%"
         "MERCHANT_PROFIT_BONUS" -> "商事盈利收益率提升 $effectValue%"
         "MERCHANT_LOSS_REDUCTION" -> "商事亏损降低 $effectValue%"
         "MERCHANT_DURATION_REDUCTION" -> "行商耗时缩短 $effectValue%"
         "MERCHANT_ENCOUNTER_BONUS" -> "行商奇遇概率提升 $effectValue%"
-        // 每日轶闻签的效果类型（非行商）：宿主是用签自带的 description 展示，这里作兜底翻译。
+
         "LORE_THRESHOLD_BONUS" -> "下一次每日轶闻：绿色及以上概率提升 $effectValue 个百分点"
         "" -> ""
         else -> "$effectType +$effectValue"
@@ -880,7 +804,7 @@ object CloudTaskLocalRunner {
         val cityCode: String = "",
         val cityName: String = "",
         val transportId: Long = 0L,
-        /** 车马名称/效果，形如"河曲马 · 速度 +5%"；取不到时为空串。 */
+
         val transportLabel: String = "",
         val blessingName: String = "",
         val blessingEffectType: String = "",
@@ -892,28 +816,16 @@ object CloudTaskLocalRunner {
         val message: String,
         val state: JSONObject = JSONObject(),
         val notify: Boolean = true,
-        /** 展示给用户的细节（运签/奖励/事件/期物…），落进任务记录供主界面详情页渲染。 */
+
         val detail: JSONObject = JSONObject(),
     )
 
     internal const val REAMICRO_BASE_URL = "https://api.reamicro.zhendong.ltd/"
 
-    /**
-     * 道观运签的签种。wire 值取自宿主 `ui/shrine/components/TempleWay`（LUCK/SAFETY/WEALTH），
-     * 不是我们自造的枚举，改名会让祈禳请求被服务端判为非法。
-     */
     internal const val BLESSING_LUCK = "LUCK"
     internal const val BLESSING_SAFETY = "SAFETY"
     internal const val BLESSING_WEALTH = "WEALTH"
 
-    /**
-     * 禁当期物：这些消耗品另有用途（祈禳/传承/夺宝需要），典当掉会让对应玩法缺料。
-     * 与参考脚本的 PAWN_PROHIBITED 一致。
-     *
-     * 青圭（门客招募消耗品）比较特殊：背包 materials 里没有它，宿主也只把持有数存成
-     * `qinggui` 计数字段，propId 静态拿不到——所以用 `name:` 前缀的键占位，执行侧
-     * 除了按 propId 匹配，再按当日期物的名字兜底匹配一次这些键。
-     */
     internal val PROHIBITED_PAWN_PROP_HINTS = mapOf(
         "11" to "传承消耗物品（清酒）",
         "12" to "祈禳消耗物品（剡藤）",
@@ -926,49 +838,34 @@ object CloudTaskLocalRunner {
         "name:青圭" to "招募消耗物品（青圭）",
     )
 
-    /**
-     * 内置清单里能确定品质的条目：背包材料表之外的消耗品（青圭）不出现在
-     * get-user-materials 响应里，品质只能按游戏内的档位静态写死，配置页才有着色。
-     */
     private val PROHIBITED_PAWN_PROP_QUALITIES = mapOf(
-        // 夺宝（琬琰）、传承（欹器）与招募（青圭）同为红色稀有消耗品，配置页一并按红色着色与排序。
+
         "17" to "RED",
         "18" to "RED",
         "name:青圭" to "RED",
     )
 
-    /**
-     * 期物图鉴的落盘键（存在任务运行时状态里，随 KSU 快照一起同步）。
-     *
-     * 「所有期物」没有静态数据源：客户端不存期物表，名字与品质只存在于两份响应里——
-     * 当日期物的 `get-pawn-count`（specialPropId/specialPropName/specialPropQuality）与
-     * 背包的 `get-user-materials`（`MaterialItem.propId/name/quality`）。
-     * 所以只能把见过的记下来，配置页才有点得动的期物清单，而不是让用户手打 propId。
-     */
     internal const val KEY_PAWN_PROP_CATALOG = "pawnPropCatalog"
 
-    /** 期物图鉴里的一条：配置页按品质排序、按品质着色，点一下就锁。 */
     internal data class PawnPropChoice(
         val propId: String,
         val name: String,
         val quality: String,
         val hint: String = "",
     ) {
-        /** 配置页上的一行：名字 +（用途备注）。 */
+
         val label: String get() = if (hint.isBlank()) name else "$name（$hint）"
     }
 
-    /** 从任务状态里取期物图鉴（没跑过就是空表）。 */
     internal fun pawnPropCatalog(state: JSONObject): JSONObject =
         state.optJSONObject(KEY_PAWN_PROP_CATALOG) ?: JSONObject()
 
-    /** 把这次见到的期物并进图鉴。服务端没给品质时保留上次记下的，别把已知品质抹成空。 */
     internal fun mergePawnPropCatalog(catalog: JSONObject, seen: List<PawnPropChoice>): JSONObject {
         val merged = JSONObject(catalog.toString())
         for (choice in seen) {
             val propId = choice.propId.trim()
             val name = choice.name.trim()
-            // propId 为 0 是服务端"今天没有期物"的占位值；记下来只会变成一行点不动的空条目。
+
             if (propId.isEmpty() || propId == "0" || name.isEmpty()) continue
             val previous = merged.optJSONObject(propId)
             merged.put(
@@ -981,13 +878,6 @@ object CloudTaskLocalRunner {
         return merged
     }
 
-    /**
-     * 背包响应里带得出名字的条目。
-     *
-     * 字段名照抄宿主 `data/res/community/MaterialItem`（`userPropId/propId/name/quality/quantity`）。
-     * 这里原来读的是根本不存在的 `propName`/`propQuality`，于是每条都因"名字为空"被丢掉，
-     * 配置页只剩内置清单，表现就是"读不全"。旧字段名保留作兜底。
-     */
     internal fun bagPawnPropChoices(materials: JSONArray): List<PawnPropChoice> =
         (0 until materials.length()).mapNotNull { index ->
             val item = materials.optJSONObject(index) ?: return@mapNotNull null
@@ -998,11 +888,6 @@ object CloudTaskLocalRunner {
             )
         }
 
-    /**
-     * 配置页要展示的期物清单：图鉴里见过的 + 内置默认清单里还没见过的。
-     *
-     * 按品质从高到低排，同品质按名字排，没有品质的排最后——用户第一眼看到的就是最该留意的那些。
-     */
     internal fun pawnPropChoices(state: JSONObject): List<PawnPropChoice> {
         val catalog = pawnPropCatalog(state)
         val nameKeyedDefaults = PROHIBITED_PAWN_PROP_HINTS.keys
@@ -1011,8 +896,7 @@ object CloudTaskLocalRunner {
             .toSet()
         val entries = LinkedHashMap<String, PawnPropChoice>()
         for ((key, hint) in PROHIBITED_PAWN_PROP_HINTS) {
-            // 内置清单只写得出用途（"传承消耗物品（清酒）"），期物名在括号里；
-            // 青圭这类背包里见不到的条目品质静态写死（见 PROHIBITED_PAWN_PROP_QUALITIES）。
+
             entries[key] = PawnPropChoice(
                 propId = key,
                 name = hint.substringAfter('（', hint).substringBefore('）'),
@@ -1038,20 +922,11 @@ object CloudTaskLocalRunner {
         )
     }
 
-    /** 只装图鉴的状态对象：给那些"没有别的状态要更新、但学会了新期物"的分支用。 */
     private fun pawnCatalogState(catalog: JSONObject): JSONObject =
         JSONObject().put(KEY_PAWN_PROP_CATALOG, catalog)
 
-    /** 主动刷新期物图鉴的结果：catalog 是这次学到的，error 非空表示至少有一半没拉到。 */
     internal data class PawnCatalogFetch(val catalog: JSONObject, val error: String?)
 
-    /**
-     * 从服务端拉一次期物图鉴（当日期物 + 背包全量）。
-     *
-     * 图鉴平时靠执行任务时顺手积累，但用户第一次打开配置页时任务往往还没跑过，
-     * 所以配置页另给一个主动刷新入口，免得期物一栏永远是空的。
-     * 两个接口都失败才算失败；只失败一个时把已经拿到的那半返回，并在 error 里说明。
-     */
     internal fun fetchPawnPropCatalog(
         token: String,
         baseUrl: String = REAMICRO_BASE_URL,
@@ -1074,7 +949,7 @@ object CloudTaskLocalRunner {
                 listOf(
                     PawnPropChoice(
                         propId = data.opt("specialPropId")?.toString().orEmpty().trim(),
-                        // 刻意不用"期物"兜底：没有名字就说明今天没有期物，不该造一条假条目。
+
                         name = data.optString("specialPropName").trim(),
                         quality = data.optString("specialPropQuality").trim(),
                     ),
@@ -1097,34 +972,20 @@ object CloudTaskLocalRunner {
         return PawnCatalogFetch(catalog, errors.takeIf { it.isNotEmpty() }?.joinToString("；"))
     }
 
-    /** 行商城池选项：code 是落库值。宿主 TravelingMerchantCity 同名字段。 */
     internal data class MerchantCityOption(
         val code: String,
         val label: String,
-        /**
-         * 车马需求的**显示**依据（HORSE=需要马车，SHIP=需要船只，空=无需舆蓁）。
-         * 真正的通行校验按 [routeType] 推导（见 hostExpectedTransportType），宿主
-         * TravelingMerchantSheet 的 MerchantLoadout 就这么分——此字段只用于文案。
-         */
+
         val requiredTransportType: String,
-        /**
-         * 路线类型（LAND=陆路→期望 HORSE，其余水路→期望 SHIP）。宿主用它推导有效性与耗时，
-         * 而不是 requiredTransportType。空串按非 LAND（SHIP）处理。
-         */
+
         val routeType: String,
-        /** 不打车马加成的基础耗时（分钟）——宿主 TravelingMerchantCity 同名字段。 */
+
         val baseDurationMinutes: Long,
     )
 
-    /** 宿主按 routeType 推导城池期望的车马类型：LAND→HORSE，其余→SHIP。 */
     internal fun hostExpectedTransportType(routeType: String): String =
         if (routeType.trim() == "LAND") "HORSE" else "SHIP"
 
-    /**
-     * 行商车马选项：transportType 与城池的 requiredTransportType 配对（宿主行商准备页
-     * 就是拿这两个字段筛车马，如只有船能去蓬莱）；carryingCapacity 给本金做上限校验，
-     * speedPercent 是宿主「速度 +x%」文案里的那个 x。
-     */
     internal data class MerchantTransportOption(
         val id: String,
         val label: String,
@@ -1134,25 +995,16 @@ object CloudTaskLocalRunner {
         val speedPercent: Long,
     )
 
-    /** 拉行商可选项的结果；error 非空表示整次请求失败。active* 是当前这趟在用的城池/车马。 */
     internal data class MerchantOptionsFetch(
         val cities: List<MerchantCityOption>,
         val transports: List<MerchantTransportOption>,
         val activeCityCode: String,
         val activeTransportId: Long,
-        /** 不带车马（transportId=0）时的本金上限——宿主 GetTravelingMerchantRes.noTransportCapacity。 */
+
         val noTransportCapacity: Long,
         val error: String?,
     )
 
-    /**
-     * 拉当前账号的行商可选项：城池与车马清单、当前这趟实际在用的城市/车马。
-     *
-     * 数据源就是任务轮询已经在用的 `get-traveling-merchant`——它的 `cities`/`transports`
-     * 正是阅微行商准备弹层里那两份下拉（字段名照抄宿主 `TravelingMerchantCity/Transport`：
-     * code/name/requiredTransportType、id/name/owned/transportType/carryingCapacity/speedPercent），
-     * 不用另找接口。
-     */
     internal fun fetchMerchantOptions(
         token: String,
         baseUrl: String = REAMICRO_BASE_URL,
@@ -1168,7 +1020,7 @@ object CloudTaskLocalRunner {
             cities = (0 until cities.length()).mapNotNull { index ->
                 cities.optJSONObject(index)?.let { city ->
                     val code = city.optString("code").trim()
-                    // code 是落库值，没 code 的条目没法回填，丢掉。
+
                     MerchantCityOption(
                         code = code,
                         label = city.optString("name").trim().ifBlank { code },
@@ -1198,12 +1050,6 @@ object CloudTaskLocalRunner {
         )
     }
 
-    /**
-     * 本次执行要跳过的期物 ID。
-     *
-     * 请求里带了清单就用用户的配置（显式清空表示不禁止任何期物）；旧配置、旧请求没有这个
-     * 字段时回落到 [PROHIBITED_PAWN_PROP_HINTS] 的默认清单，保证老用户行为不变。
-     */
     private fun forbiddenPawnPropIds(request: JSONObject): Set<String> =
         request.optJSONArray("forbiddenPawnPropIds")?.let { array ->
             (0 until array.length()).mapNotNull { index ->
@@ -1211,7 +1057,6 @@ object CloudTaskLocalRunner {
             }.toSet()
         } ?: PROHIBITED_PAWN_PROP_HINTS.keys
 
-    /** 解析配置页期物选择器回传的 ID 列表（逗号分隔，沿用「按标签取字符串」这条通道）。 */
     internal fun parseForbiddenPawnPropIds(text: String): Set<String> =
         text.split(',').map(String::trim).filter(String::isNotEmpty).toSet()
 
@@ -1219,17 +1064,10 @@ object CloudTaskLocalRunner {
     private const val TRAVELING_MERCHANT_ARRIVE_GRACE_MS = 60_000L
     internal const val TASK_RETRY_INTERVAL_MS = 5 * 60_000L
 
-    /** 服务端没给奖励解锁时刻时的重试间隔：按小时回来问一次，直到领到。 */
     private const val CLAIM_RETRY_INTERVAL_MS = 3_600_000L
 
-    /** 已播报过结果的趟次（只管通知去重，不代表已经自动完成）。 */
     internal const val KEY_MERCHANT_NOTIFIED_TRIP = "merchantLastNotifiedTripId"
 
-    /**
-     * 任务记录 detail 里结构化奖励物品（name/quality/count）的键名。
-     *
-     * 通知着色、通知摘要和记录详情共用这一份数据；详情页正文已经逐项列出，因此渲染时要跳过它。
-     */
     internal const val KEY_REWARD_ITEMS = "奖励物品"
 
     private val MERCHANT_TIME_FORMAT = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())

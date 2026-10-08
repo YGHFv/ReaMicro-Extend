@@ -1,9 +1,3 @@
-"""运行期配置与可变全局状态。
-
-**所有可变状态都集中在这里**，其他模块必须通过 `runtime.X` 在调用时读取，
-不要写 `from app.runtime import CONFIG_PATH` —— 那样拿到的是导入时的快照，
-测试重定向路径就会失效。测试也统一改这里的属性来隔离数据目录。
-"""
 import os
 import threading
 from pathlib import Path
@@ -71,7 +65,7 @@ RUN_SCHEDULER = env_bool("REAMICRO_RUN_SCHEDULER", True)
 RUN_RELEASE_SYNC = env_bool("REAMICRO_RUN_RELEASE_SYNC", True)
 
 MODULE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
-# 模块可上传的内容类型，需与模块端 ApiContentLibrarySync.UPLOADABLE_KINDS 保持一致。
+
 MODULE_UPLOAD_DEFAULT_KINDS = frozenset({"online_source", "association_source", "highlight_style"})
 
 PACKAGE_KINDS = frozenset({
@@ -88,7 +82,7 @@ PACKAGE_CHANNELS = frozenset({"stable", "beta", "nightly"})
 
 
 def get_state_store() -> "StateStore":
-    """惰性建库。测试把 state_store 置 None 即可强制换到新的临时数据库。"""
+
     global state_store
     with state_store_lock:
         if state_store is None:

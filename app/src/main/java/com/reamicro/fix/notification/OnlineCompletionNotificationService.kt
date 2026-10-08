@@ -239,8 +239,12 @@ class OnlineCompletionNotificationService : Service() {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
         }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
+        }
         builder
-            .setSmallIcon(R.drawable.ic_notification_reamicro)
+            .setReaMicroSmallIcon()
             .setContentTitle(onlineCompletionDownloadTitle(progress, text))
             .setContentText(onlineCompletionDownloadText(title, text))
             .setStyle(Notification.BigTextStyle().bigText(onlineCompletionDownloadBigText(title, text, progress)))

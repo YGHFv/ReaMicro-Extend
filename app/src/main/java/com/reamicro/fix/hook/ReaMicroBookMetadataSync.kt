@@ -27,7 +27,7 @@ internal object ReaMicroBookMetadataSync {
     private const val KOTLIN_COROUTINE_SINGLETONS_CLASS = HostClasses.Kotlin.KOTLIN_COROUTINE_SINGLETONS
     private const val ONLINE_COMPLETION_UUID_PREFIX = "reamicro-online-"
 
-    private var bookshelfRepositoryRef: WeakReference<Any>? = null
+    @Volatile private var bookshelfRepositoryRef: WeakReference<Any>? = null
 
     fun rememberBookshelfRepository(repository: Any?) {
         if (repository == null) return
@@ -65,6 +65,7 @@ internal object ReaMicroBookMetadataSync {
         }.apply { name = "ReaMicro-BookMetadataSync" }.start()
     }
 
+    @Synchronized
     fun syncBookMetadata(repository: Any?, book: Any?, patch: BookMetadataPatch): Boolean =
         runCatching {
             val targetRepository = repository ?: currentBookshelfRepository() ?: return false
@@ -73,6 +74,8 @@ internal object ReaMicroBookMetadataSync {
             val updated = copyBookWithMetadata(sourceBook, patch) ?: return false
             val updateMethod = method(targetRepository.javaClass, "updateBook", 2)
             invokeSuspendBlocking(targetRepository.javaClass.classLoader, updateMethod, targetRepository, updated)
+            val stored = latestBook(targetRepository, originalBook) ?: error("更新后未读到书架记录")
+            check(verifyPatch(stored, sourceBook, patch)) { "书架回读字段与提交值不同" }
             XposedBridge.log(
                 "$LOG_PREFIX synced book metadata: uuid=${stringValue(updated, "getUuid")}, " +
                     "title=${stringValue(updated, "getTitle")}, author=${stringValue(updated, "getAuthor")}",
@@ -82,7 +85,7 @@ internal object ReaMicroBookMetadataSync {
             XposedBridge.log("$LOG_PREFIX failed to sync book metadata: ${it.stackTraceToString()}")
         }.getOrDefault(false)
 
-    private fun latestBook(repository: Any, book: Any): Any? =
+    internal fun latestBook(repository: Any, book: Any): Any? =
         runCatching {
             val id = longValue(book, "getId")
             if (id <= 0L) return@runCatching null
@@ -91,6 +94,19 @@ internal object ReaMicroBookMetadataSync {
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to reload book metadata target: ${it.stackTraceToString()}")
         }.getOrNull()
+
+    internal fun verifyPatch(stored: Any, original: Any, patch: BookMetadataPatch): Boolean = runCatching {
+        fun value(target: Any, getter: String): Any? = method(target.javaClass, getter, 0).invoke(target)
+        val id = (value(original, "getId") as Number).toLong()
+        val uuid = value(original, "getUuid") as String
+        if (id <= 0 || (value(stored, "getId") as Number).toLong() != id || value(stored, "getUuid") != uuid)
+            return@runCatching false
+        val values = listOf("getTitle" to patch.title?.takeIf { it.isNotBlank() },
+            "getSubtitle" to patch.subtitle, "getAuthor" to patch.author,
+            "getCover" to patch.cover, "getPublisher" to patch.publisher)
+        values.all { (getter, expected) -> expected == null || value(stored, getter) == expected } &&
+            (patch.size == null || (value(stored, "getSize") as Number).toLong() == patch.size)
+    }.getOrDefault(false)
 
     private fun copyBookWithMetadata(book: Any, patch: BookMetadataPatch): Any? =
         runCatching {
@@ -211,7 +227,7 @@ internal object ReaMicroBookMetadataSync {
             throw e.targetException ?: e
         }
         if (returned !== coroutineSuspended(classLoader)) return returned
-        latch.await()
+        check(latch.await(30, java.util.concurrent.TimeUnit.SECONDS)) { "等待宿主书架写入超时" }
         error?.let { throw it }
         return value
     }

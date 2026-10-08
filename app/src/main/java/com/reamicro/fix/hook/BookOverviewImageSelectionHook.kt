@@ -1,31 +1,13 @@
 package com.reamicro.fix.hook
 
 import android.app.Activity
-import android.app.Dialog
 import android.content.ContentValues
-import android.content.Context
 import android.graphics.BitmapFactory
-import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import android.text.InputType
 import android.util.Base64
-import android.view.Gravity
-import android.view.View
-import android.view.ViewGroup
-import android.view.Window
-import android.view.WindowManager
-import android.widget.EditText
-import android.widget.ImageView
-import android.widget.LinearLayout
-import android.widget.ProgressBar
-import android.widget.ScrollView
-import android.widget.TextView
 import android.widget.Toast
 import com.reamicro.fix.ai.AiApiConfig
 import com.reamicro.fix.ai.AiApiStore
@@ -39,24 +21,22 @@ import java.io.InputStream
 import java.lang.reflect.Proxy
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.Collections
+import java.util.WeakHashMap
+import java.lang.reflect.InvocationHandler
+import java.lang.reflect.Method
 import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
 
-/**
- * Extends the host cover/banner bottom sheets with online image, AI generation, and cover-fix
- * actions while preserving the host's original local image picker callback.
- */
 class BookOverviewImageSelectionHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
-    private val requestCoverFix: () -> Boolean = { false },
+    private val requestCoverFix: (Any) -> Boolean = { false },
 ) {
-    // The host passes book/update callbacks through composable parameters, then opens the
-    // bottom sheet from a later callback. A per-thread stack bridges those two moments.
-    private val contextStack = ThreadLocal.withInitial { mutableListOf<BookImageContext>() }
-    private val activeSourceDialogs = Collections.synchronizedSet(mutableSetOf<String>())
+
+    private val contextStack = ThreadLocal.withInitial { mutableListOf<BookImageContext?>() }
+    private val sheetGates = WeakHashMap<Any, BookImageSheetActionGate>()
+    private val nativeSheetUi by lazy { BookImageSheetUi(classLoader) }
 
     fun install() {
         hookBookCoverBannerItem()
@@ -78,9 +58,12 @@ class BookOverviewImageSelectionHook(
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        val book = param.args?.getOrNull(1) ?: return
-                        val onUpdateCover = param.args?.getOrNull(2) ?: return
-                        stack().add(BookImageContext(book, onUpdateCover))
+                        val book = param.args?.getOrNull(1)
+                        val onUpdateCover = param.args?.getOrNull(2)
+
+                        stack().add(if (book != null && onUpdateCover != null) BookImageContext(book, onUpdateCover) else null)
+                        runCatching { EmbeddedHostUi.captureTypography(classLoader, param.args?.getOrNull(3)) }
+                        BookImageDialogStyle.capture(classLoader, param.args?.getOrNull(3))
                     }
 
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -97,194 +80,140 @@ class BookOverviewImageSelectionHook(
 
     private fun hookBottomSheet(methodName: String, target: ImageTarget) {
         runCatching {
+
+            val ui = nativeSheetUi
             val itemsClass = cls(BOOK_OVERVIEW_ITEMS_CLASS)
-            val methods = itemsClass.declaredMethods.filter { method ->
+            val callbackCount = if (target == ImageTarget.Cover) 4 else 3
+            val entry = itemsClass.declaredMethods.single { method ->
                 method.name == methodName &&
-                    method.parameterTypes.firstOrNull() == Boolean::class.javaPrimitiveType &&
-                    method.parameterTypes.count { it.name == FUNCTION0_CLASS } >= 3 &&
-                    method.parameterTypes.any { it.name == COMPOSER_CLASS }
-            }
-            if (methods.isEmpty()) error("$methodName not found")
-            methods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val context = currentBookContext() ?: return
-                        val activity = activityProvider() ?: return
-                        val hasSecondaryAction = param.args?.getOrNull(0) as? Boolean ?: false
-                        val callbacks = method.parameterTypes
-                            .mapIndexedNotNull { index, type ->
-                                if (type.name == FUNCTION0_CLASS) param.args?.getOrNull(index) else null
-                            }
-                        val originalOnPick = callbacks.getOrNull(0) ?: return
-                        val secondaryAction = when {
-                            target == ImageTarget.Cover && callbacks.size >= 4 -> callbacks.getOrNull(2)
-                            else -> callbacks.getOrNull(1)
-                        }
-                        val onDismiss = callbacks.lastOrNull()
-                        param.result = null
-                        val key = sourceDialogKey(context.book, target)
-                        if (!activeSourceDialogs.add(key)) return
-                        activity.runOnUiThread {
-                            activity.window?.decorView?.post {
-                                invokeFunction0(onDismiss)
-                                showImageSourceDialog(
-                                    context = context,
-                                    target = target,
-                                    originalOnPick = originalOnPick,
-                                    hasSecondaryAction = hasSecondaryAction,
-                                    secondaryAction = secondaryAction,
-                                    dialogKey = key,
-                                )
+                    method.parameterTypes.map { it.name } == listOf("boolean") +
+                    List(callbackCount) { FUNCTION0_CLASS } + listOf(COMPOSER_CLASS, "int")
+            }.apply { isAccessible = true }
+            val content = itemsClass.declaredMethods.single { method ->
+                method.name == "$methodName\$lambda\$2" &&
+                    method.parameterTypes.size == callbackCount + 6 &&
+                    method.parameterTypes[0].name == "kotlinx.coroutines.CoroutineScope" &&
+                    method.parameterTypes[1].name == "androidx.compose.material3.SheetState" &&
+                    method.parameterTypes.count { it.name == FUNCTION0_CLASS } == callbackCount &&
+                    method.parameterTypes.takeLast(3).map { it.name } ==
+                    listOf("androidx.compose.foundation.layout.ColumnScope", COMPOSER_CLASS, "int")
+            }.apply { isAccessible = true }
+
+            XposedBridge.hookMethod(content, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val args = param.args ?: return
+                    val binding = args.firstNotNullOfOrNull(::sheetBinding) ?: return
+                    if (binding.target != target) return
+                    val activity = activityProvider() ?: return
+                    if (activity.isFinishing || activity.isDestroyed) return
+                    val scope = args[0] ?: return
+                    val sheetState = args[1] ?: return
+                    val composer = args[args.size - 2] ?: return
+                    val gate = synchronized(sheetGates) {
+                        sheetGates.getOrPut(sheetState) { BookImageSheetActionGate() }
+                    }
+
+                    ui.render(composer, BookImageSheetActions.items(target == ImageTarget.Cover, binding.hasSecondary)) { id ->
+                        if (gate.tryStart()) {
+                            runCatching {
+                                ui.hide(scope, sheetState) { hidden, error ->
+                                    gate.hideFinished(hidden)
+                                    if (hidden) {
+                                        synchronized(sheetGates) { sheetGates.remove(sheetState) }
+                                        activity.runOnUiThread {
+                                            if (!activity.isFinishing && !activity.isDestroyed) {
+                                                runCatching { binding.execute(id) }.onFailure {
+                                                    activity.toast("操作失败，请重试")
+                                                    XposedBridge.log("$LOG_PREFIX image action failed: $it")
+                                                }
+                                            }
+                                        }
+                                    } else if (error != null) {
+                                        XposedBridge.log("$LOG_PREFIX image sheet dismissal cancelled: $error")
+                                    }
+                                }
+                            }.onFailure {
+                                gate.hideFinished(false)
+                                activity.toast("窗口关闭失败，请重试")
+                                XposedBridge.log("$LOG_PREFIX image sheet dismissal failed: $it")
                             }
                         }
                     }
-                })
-            }
-            XposedBridge.log("$LOG_PREFIX $methodName image source hook installed (${methods.size})")
+                    param.result = ui.unit
+                }
+            })
+            XposedBridge.hookMethod(entry, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val args = param.args ?: return
+                    val previous = sheetBinding(args.getOrNull(1))
+                    val context = currentBookContext() ?: previous?.context ?: return
+                    val callbacks = (1..callbackCount).map { index ->
+                        val callback = args[index] ?: return
+
+                        sheetBinding(callback)?.callbacks?.first() ?: callback
+                    }
+                    val binding = SheetBinding(context, target, args[0] as Boolean, callbacks)
+                    args[1] = Proxy.newProxyInstance(classLoader, arrayOf(cls(FUNCTION0_CLASS)), binding)
+
+                    args[args.lastIndex] = (args.last() as Int) and (0x7 shl 4).inv()
+
+                }
+            })
+            XposedBridge.log("$LOG_PREFIX $methodName unified native content installed")
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook $methodName image source: ${it.stackTraceToString()}")
+
+            XposedBridge.log("$LOG_PREFIX $methodName native menu kept (unsupported ABI): ${it.stackTraceToString()}")
         }
     }
 
-    private fun showImageSourceDialog(
-        context: BookImageContext,
-        target: ImageTarget,
-        originalOnPick: Any,
-        hasSecondaryAction: Boolean,
-        secondaryAction: Any?,
-        dialogKey: String,
-    ) {
-        val activity = activityProvider() ?: return
-        activity.runOnUiThread {
-            val colors = DialogColors(activity)
-            val dialog = imageDialog(activity)
-            val card = dialogCard(activity, colors)
-            card.addView(dialogTitle(activity, "${target.label}图片", colors))
-            card.addView(actionRow(activity, "选取图片", "使用阅微原来的本地图片选择", colors) {
-                dialog.dismiss()
-                invokeFunction0(originalOnPick)
-            })
-            card.addView(actionRow(activity, "在线图片", "输入图片链接，下载后预览并应用", colors) {
-                dialog.dismiss()
-                showOnlineImageDialog(context, target)
-            })
-            card.addView(actionRow(activity, "生成${target.label}", "使用生图管理里的 API 和${target.label}预设", colors) {
-                dialog.dismiss()
-                showAiImageDialog(context, target)
-            })
-            card.addView(actionRow(activity, "保存${target.label}", "把当前${target.label}图片保存到相册", colors) {
-                dialog.dismiss()
-                saveCurrentImageToGallery(context, target)
-            })
-            if (hasSecondaryAction && secondaryAction != null) {
-                val label = when (target) {
-                    ImageTarget.Cover -> "重置封面"
-                    ImageTarget.Banner -> "删除横幅"
+    private fun sheetBinding(value: Any?): SheetBinding? =
+        if (value != null && Proxy.isProxyClass(value.javaClass))
+            Proxy.getInvocationHandler(value) as? SheetBinding else null
+
+    private inner class SheetBinding(
+        val context: BookImageContext,
+        val target: ImageTarget,
+        val hasSecondary: Boolean,
+        val callbacks: List<Any>,
+    ) : InvocationHandler {
+        override fun invoke(proxy: Any, method: Method, args: Array<out Any?>?): Any? = when (method.name) {
+            "invoke" -> { invokeFunction0(callbacks.first()); targetUnit() }
+            "toString" -> "ReaMicro-NativeImageSheetBinding"
+            "hashCode" -> System.identityHashCode(proxy)
+            "equals" -> proxy === args?.firstOrNull()
+            else -> null
+        }
+
+        fun execute(id: BookImageSheetActions.Id) {
+            fun dismiss() = invokeFunction0(callbacks.last())
+            when (id) {
+                BookImageSheetActions.Id.Pick -> invokeFunction0(callbacks[0])
+                BookImageSheetActions.Id.Save -> if (target == ImageTarget.Cover)
+                    invokeFunction0(callbacks[1])
+                else { dismiss(); saveCurrentImageToGallery(context, target) }
+                BookImageSheetActions.Id.Restore -> if (hasSecondary) invokeFunction0(callbacks[2])
+                BookImageSheetActions.Id.Remove -> if (hasSecondary) invokeFunction0(callbacks[1])
+                BookImageSheetActions.Id.Online -> { dismiss(); showOnlineImageDialog(context, target) }
+                BookImageSheetActions.Id.Generate -> { dismiss(); showAiImageDialog(context, target) }
+                BookImageSheetActions.Id.Fix -> {
+                    dismiss()
+                    if (!requestCoverFix(context.book)) activityProvider()?.toast("当前页面无法执行封面修复")
                 }
-                card.addView(actionRow(activity, label, "", colors) {
-                    dialog.dismiss()
-                    invokeFunction0(secondaryAction)
-                })
+                BookImageSheetActions.Id.Cancel -> dismiss()
             }
-            if (target == ImageTarget.Cover) {
-                card.addView(actionRow(activity, "封面修复", "上传当前关联封面到书库", colors) {
-                    dialog.dismiss()
-                    if (!requestCoverFix()) {
-                        activity.toast("当前页面无法执行封面修复")
-                    }
-                })
-            }
-            card.addView(actionRow(activity, "取消", "", colors) {
-                dialog.dismiss()
-            })
-            dialog.setOnDismissListener {
-                activeSourceDialogs.remove(dialogKey)
-            }
-            showDialog(dialog, card, activity, 0.9f)
         }
     }
 
     private fun showOnlineImageDialog(context: BookImageContext, target: ImageTarget) {
         val activity = activityProvider() ?: return
         activity.runOnUiThread {
-            val colors = DialogColors(activity)
-            val dialog = imageDialog(activity)
-            val card = dialogCard(activity, colors)
-            var previewBytes: ByteArray? = null
-
-            card.addView(dialogTitle(activity, "在线图片", colors))
-            val input = editText(activity, "图片链接", singleLine = false, colors = colors).apply {
-                minLines = 2
-                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-            }
-            card.addView(input)
-            val imageView = previewImageView(activity, target)
-            card.addView(imageView)
-            val status = statusText(activity, colors)
-            val progress = ProgressBar(activity).apply {
-                visibility = View.GONE
-                isIndeterminate = true
-                ModuleDialogTheme.tintProgress(this, colors.primary)
-            }
-            card.addView(progress, centeredWrapParams(activity))
-            card.addView(status)
-
-            val buttons = horizontalActions(activity)
-            val preview = compactButton(activity, "预览", colors)
-            val apply = compactButton(activity, "应用", colors)
-            val cancel = compactButton(activity, "取消", colors, neutral = true)
-            buttons.addView(preview, actionWeightParams())
-            buttons.addView(apply, actionWeightParams())
-            buttons.addView(cancel, actionWeightParams())
-            card.addView(buttons)
-
-            preview.setOnClickListener {
-                val url = input.text?.toString().orEmpty().trim()
-                if (url.isBlank()) {
-                    activity.toast("请输入图片链接")
-                    return@setOnClickListener
-                }
-                runUiTask(
-                    activity = activity,
-                    status = status,
-                    progress = progress,
-                    controls = listOf(preview, apply, cancel),
-                    message = "正在下载图片",
-                    block = { downloadImageBytes(url) },
-                ) { bytes ->
-                    previewBytes = bytes
-                    updatePreview(imageView, bytes)
-                    status.text = "预览已加载"
-                }
-            }
-            apply.setOnClickListener {
-                val url = input.text?.toString().orEmpty().trim()
-                if (url.isBlank() && previewBytes == null) {
-                    activity.toast("请输入图片链接")
-                    return@setOnClickListener
-                }
-                runUiTask(
-                    activity = activity,
-                    status = status,
-                    progress = progress,
-                    controls = listOf(preview, apply, cancel),
-                    message = "正在应用图片",
-                    block = {
-                        val bytes = previewBytes ?: downloadImageBytes(url)
-                        val applied = saveBookImage(context, target, bytes)
-                        bytes to applied
-                    },
-                ) { (bytes, applied) ->
-                    previewBytes = bytes
-                    updatePreview(imageView, bytes)
-                    finishApply(activity, context, target, applied)
-                    dialog.dismiss()
-                }
-            }
-            cancel.setOnClickListener { dialog.dismiss() }
-
-            showDialog(dialog, scroll(card, activity), activity, 0.94f)
+            HostBookImageDialog(activity, "在线${target.label}", generated = false,
+                fetch = { url, _ -> downloadImageBytes(url) },
+                applyImage = { bytes ->
+                    val applied = saveBookImage(context, target, bytes)
+                    val finish: () -> Unit = { finishApply(activity, context, target, applied) }
+                    finish
+                }).show()
         }
     }
 
@@ -294,126 +223,22 @@ class BookOverviewImageSelectionHook(
             val appContext = activity.applicationContext ?: activity
             val config = AiApiStore.imageApi(appContext)
             val settings = AiApiStore.imageSettings(appContext)
-            val presetTarget = target.aiTarget
-            val selectedPresetId = when (target) {
-                ImageTarget.Cover -> settings.coverPresetId
-                ImageTarget.Banner -> settings.bannerPresetId
-            }
-            val preset = AiApiStore.imagePreset(appContext, presetTarget, selectedPresetId)
-            val colors = DialogColors(activity)
-            val dialog = imageDialog(activity)
-            val card = dialogCard(activity, colors)
-            var generatedBytes: ByteArray? = null
-
-            card.addView(dialogTitle(activity, "生成${target.label}", colors))
-            card.addView(dialogMessage(activity, "当前模型：${config?.model?.takeIf { it.isNotBlank() } ?: "未配置"}", colors))
-            card.addView(dialogMessage(activity, "参考图片：生成时自动读取当前封面并上传", colors))
-
-            val prompt = editText(activity, "提示词内容", singleLine = false, colors = colors).apply {
-                minLines = 4
-                setText(preset.prompt)
-                gravity = Gravity.TOP or Gravity.START
-            }
-            card.addView(prompt)
-
-            val size = editText(activity, "图片尺寸", singleLine = true, colors = colors).apply {
-                setText(DEFAULT_IMAGE_SIZE)
-            }
-            card.addView(size)
-
-            val imageView = previewImageView(activity, target)
-            card.addView(imageView)
-            val status = statusText(activity, colors)
-            val progress = ProgressBar(activity).apply {
-                visibility = View.GONE
-                isIndeterminate = true
-                ModuleDialogTheme.tintProgress(this, colors.primary)
-            }
-            card.addView(progress, centeredWrapParams(activity))
-            card.addView(status)
-
-            val buttons = horizontalActions(activity)
-            val generate = compactButton(activity, "生图", colors)
-            val apply = compactButton(activity, "应用", colors)
-            val save = compactButton(activity, "保存", colors)
-            val cancel = compactButton(activity, "取消", colors, neutral = true)
-            buttons.addView(generate, actionWeightParams())
-            buttons.addView(apply, actionWeightParams())
-            buttons.addView(save, actionWeightParams())
-            buttons.addView(cancel, actionWeightParams())
-            card.addView(buttons)
-
-            generate.setOnClickListener {
-                val api = config
-                if (api == null) {
-                    activity.toast("请先在 API 配置里设置生图 API")
-                    return@setOnClickListener
-                }
-                val template = prompt.text?.toString().orEmpty().trim()
-                if (template.isBlank()) {
-                    activity.toast("请输入提示词")
-                    return@setOnClickListener
-                }
-                runUiTask(
-                    activity = activity,
-                    status = status,
-                    progress = progress,
-                    controls = listOf(generate, apply, save, cancel),
-                    message = "正在生成图片",
-                    block = {
-                        generateImage(
-                            config = api,
-                            prompt = renderImagePrompt(template, context.book),
-                            referenceBytes = loadReferenceImageBytes(context.book),
-                            requestedSize = size.text?.toString().orEmpty().trim(),
-                            target = target,
-                        )
-                    },
-                ) { bytes ->
-                    generatedBytes = bytes
-                    updatePreview(imageView, bytes)
-                    status.text = "生成完成，点击应用才会写入${target.label}"
-                }
-            }
-            apply.setOnClickListener {
-                val bytes = generatedBytes
-                if (bytes == null) {
-                    activity.toast("请先生成图片")
-                    return@setOnClickListener
-                }
-                runUiTask(
-                    activity = activity,
-                    status = status,
-                    progress = progress,
-                    controls = listOf(generate, apply, save, cancel),
-                    message = "正在应用图片",
-                    block = { saveBookImage(context, target, bytes) },
-                ) { applied ->
-                    finishApply(activity, context, target, applied)
-                    dialog.dismiss()
-                }
-            }
-            save.setOnClickListener {
-                val bytes = generatedBytes
-                if (bytes == null) {
-                    activity.toast("请先生成图片")
-                    return@setOnClickListener
-                }
-                runUiTask(
-                    activity = activity,
-                    status = status,
-                    progress = progress,
-                    controls = listOf(generate, apply, save, cancel),
-                    message = "正在保存到相册",
-                    block = { saveToGallery(activity, bytes, target) },
-                ) {
-                    status.text = "已保存到相册"
-                    activity.toast("已保存到相册")
-                }
-            }
-            cancel.setOnClickListener { dialog.dismiss() }
-
-            showDialog(dialog, scroll(card, activity), activity, 0.94f)
+            val preset = AiApiStore.imagePreset(appContext, target.aiTarget,
+                if (target == ImageTarget.Cover) settings.coverPresetId else settings.bannerPresetId)
+            HostBookImageDialog(activity, "生成${target.label}", generated = true,
+                initialPrompt = preset.prompt, model = config?.model?.takeIf { it.isNotBlank() } ?: "未配置",
+                fetch = { prompt, size ->
+                    val api = requireNotNull(config) { "请先在 API 配置里设置生图 API" }
+                    generateImage(api, renderImagePrompt(prompt, context.book),
+                        loadReferenceImageBytes(context.book), size, target)
+                },
+                applyImage = { bytes ->
+                    val applied = saveBookImage(context, target, bytes)
+                    val finish: () -> Unit = { finishApply(activity, context, target, applied) }
+                    finish
+                },
+                saveImage = { bytes -> saveToGallery(activity, bytes, target); Unit },
+            ).show()
         }
     }
 
@@ -464,7 +289,7 @@ class BookOverviewImageSelectionHook(
         }
         val isGptImage = config.model.contains("gpt-image", ignoreCase = true)
         var lastError: Throwable? = null
-        // gpt-image 系列且有参考图：优先走 /images/edits + multipart 上传参考图。
+
         if (isGptImage && referenceBytes != null) {
             for (size in sizes) {
                 val normalizedSize = normalizeImageSize(size)
@@ -474,7 +299,7 @@ class BookOverviewImageSelectionHook(
                 if (bytes != null) return bytes
             }
         }
-        // 其余模型 / gpt-image 无参考图 / edits 失败：回退到 generations 兼容逻辑。
+
         for (size in sizes) {
             imageRequestBodies(config.model, prompt, size, referenceDataUrl).forEach { body ->
                 val bytes = runCatching {
@@ -559,7 +384,6 @@ class BookOverviewImageSelectionHook(
         }
     }
 
-    // gpt-image 系列参考图编辑：走 /v1/images/edits + multipart/form-data 上传 image 文件字段。
     private fun requestImageEditsMultipart(
         config: AiApiConfig,
         prompt: String,
@@ -628,7 +452,7 @@ class BookOverviewImageSelectionHook(
         fields.forEach { (name, value) ->
             if (value != null) writeFormField(name, value)
         }
-        // 文件字段
+
         out.write("--$boundary$crlf".toByteArray(Charsets.UTF_8))
         out.write("Content-Disposition: form-data; name=\"$fileFieldName\"; filename=\"$fileName\"$crlf".toByteArray(Charsets.UTF_8))
         out.write("Content-Type: $fileMime$crlf$crlf".toByteArray(Charsets.UTF_8))
@@ -772,8 +596,6 @@ class BookOverviewImageSelectionHook(
     private fun isVersionedApiBaseUrl(baseUrl: String): Boolean =
         Regex(""".*/api/v\d+$""", RegexOption.IGNORE_CASE).matches(baseUrl)
 
-    // 读取当前封面/横幅图片字节并保存到相册。封面复用在线/本地/data-url 的加载链路，
-    // 横幅则直接读取书籍目录下的 ~banner 变体文件。
     private fun saveCurrentImageToGallery(context: BookImageContext, target: ImageTarget) {
         val activity = activityProvider() ?: return
         activity.toast("正在保存${target.label}到相册")
@@ -832,21 +654,6 @@ class BookOverviewImageSelectionHook(
             runCatching { resolver.delete(uri, null, null) }
             throw error
         }
-    }
-
-    private fun updatePreview(imageView: ImageView, bytes: ByteArray) {
-        // 先只读尺寸，按目标预览宽度降采样，避免在 UI 线程解码超大图卡死。
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        val target = imageView.resources.displayMetrics.widthPixels
-        var sample = 1
-        while (bounds.outWidth / sample > target * 2) sample *= 2
-        val options = BitmapFactory.Options().apply { inSampleSize = sample }
-        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
-            ?: error("图片无法预览")
-        imageView.setImageBitmap(bitmap)
-        imageView.visibility = View.VISIBLE
-        imageView.requestLayout()
     }
 
     private fun validateImageBytes(bytes: ByteArray) {
@@ -911,12 +718,6 @@ class BookOverviewImageSelectionHook(
         return output.toByteArray()
     }
 
-    private fun loadReferenceImageDataUrl(book: Any): String? =
-        loadReferenceImageBytes(book)?.let { bytes ->
-            val mime = imageExtensionAndMime(bytes).second
-            "data:$mime;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
-        }
-
     private fun loadReferenceImageBytes(book: Any): ByteArray? {
         val activity = activityProvider() ?: return null
         val cover = callString(book, "getCover").trim()
@@ -967,13 +768,7 @@ class BookOverviewImageSelectionHook(
     private fun bannerRelativeForWrite(book: Any): String {
         val cover = safeRelativePath(callString(book, "getCover"))
         require(cover.isNotBlank()) { "请先设置封面后再设置横幅" }
-        val slash = cover.lastIndexOf('/')
-        val dot = cover.lastIndexOf('.')
-        return if (dot > slash) {
-            cover.take(dot) + "~banner" + cover.substring(dot)
-        } else {
-            "$cover~banner"
-        }
+        return com.reamicro.fix.epub.editor.EpubBannerVariants.primary(cover, book.javaClass.classLoader)
     }
 
     private fun safeRelativePath(value: String): String {
@@ -1035,42 +830,13 @@ class BookOverviewImageSelectionHook(
             error.optString("message")
         }.getOrDefault("")
 
-    private fun <T> runUiTask(
-        activity: Activity,
-        status: TextView,
-        progress: ProgressBar,
-        controls: List<View>,
-        message: String,
-        block: () -> T,
-        onSuccess: (T) -> Unit,
-    ) {
-        controls.forEach { it.isEnabled = false; it.alpha = 0.55f }
-        progress.visibility = View.VISIBLE
-        status.text = message
-        Thread {
-            val result = runCatching { block() }
-            activity.runOnUiThread {
-                controls.forEach { it.isEnabled = true; it.alpha = 1f }
-                progress.visibility = View.GONE
-                result
-                    .onSuccess { value -> onSuccess(value) }
-                    .onFailure {
-                        val text = it.message ?: it.javaClass.simpleName
-                        status.text = text
-                        activity.toast(text)
-                        XposedBridge.log("$LOG_PREFIX image task failed: ${it.stackTraceToString()}")
-                    }
-            }
-        }.apply { name = "ReaMicro-BookImageTask" }.start()
-    }
-
     private fun currentBookContext(): BookImageContext? =
         stack().lastOrNull()
 
-    private fun stack(): MutableList<BookImageContext> {
+    private fun stack(): MutableList<BookImageContext?> {
         val existing = contextStack.get()
         if (existing != null) return existing
-        val created = mutableListOf<BookImageContext>()
+        val created = mutableListOf<BookImageContext?>()
         contextStack.set(created)
         return created
     }
@@ -1083,19 +849,6 @@ class BookOverviewImageSelectionHook(
     private fun invokeFunction1(callback: Any?, value: Any?) {
         runCatching { XposedHelpers.callMethod(callback, "invoke", value) }
             .onFailure { XposedBridge.log("$LOG_PREFIX failed to invoke Function1: ${it.stackTraceToString()}") }
-    }
-
-    private fun function0Proxy(name: String, block: () -> Any?): Any {
-        val functionClass = cls(FUNCTION0_CLASS)
-        return Proxy.newProxyInstance(classLoader, arrayOf(functionClass)) { proxy, method, args ->
-            when (method.name) {
-                "invoke" -> block()
-                "toString" -> "ReaMicro-$name"
-                "hashCode" -> System.identityHashCode(proxy)
-                "equals" -> proxy === (args as? Array<*>)?.getOrNull(0)
-                else -> null
-            }
-        }
     }
 
     private fun targetUnit(): Any? =
@@ -1118,9 +871,6 @@ class BookOverviewImageSelectionHook(
         return lower.startsWith("http://") || lower.startsWith("https://")
     }
 
-    private fun sourceDialogKey(book: Any, target: ImageTarget): String =
-        target.id + ":" + callString(book, "getUuid").ifBlank { System.identityHashCode(book).toString() }
-
     private data class BookImageContext(
         val book: Any,
         val onUpdateCover: Any,
@@ -1138,20 +888,6 @@ class BookOverviewImageSelectionHook(
     ) {
         Cover("cover", "封面", AiImagePresetTarget.Cover),
         Banner("banner", "横幅", AiImagePresetTarget.Banner),
-    }
-
-    class DialogColors(context: Context) {
-        private val palette = ModuleDialogTheme.palette(context)
-        val card: Int = palette.pageBackground
-        val border: Int = palette.border
-        val title: Int = palette.title
-        val body: Int = palette.body
-        val field: Int = palette.rowBackground
-        val primary: Int = palette.primary
-        val primarySoft: Int = palette.rowBackground
-        val primaryText: Int = palette.primaryText
-        val neutralSoft: Int = palette.rowBackground
-        val neutralText: Int = palette.neutralText
     }
 
     private companion object {
@@ -1178,240 +914,6 @@ class BookOverviewImageSelectionHook(
         private val URL_KEYS = setOf("url", "image_url", "imageUrl")
     }
 }
-
-private fun dialogCard(context: Context, colors: BookOverviewImageSelectionHook.DialogColors): LinearLayout =
-    LinearLayout(context).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(context, 16), dp(context, 10), dp(context, 16), dp(context, 14))
-        background = GradientDrawable().apply {
-            setColor(colors.card)
-            cornerRadius = dp(context, 8).toFloat()
-        }
-        layoutParams = ViewGroup.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        )
-    }
-
-private fun dialogTitle(
-    context: Context,
-    title: String,
-    colors: BookOverviewImageSelectionHook.DialogColors,
-): TextView =
-    TextView(context).apply {
-        text = title
-        textSize = 18f
-        typeface = Typeface.DEFAULT_BOLD
-        includeFontPadding = false
-        setTextColor(colors.title)
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { bottomMargin = dp(context, 6) }
-    }
-
-private fun dialogMessage(
-    context: Context,
-    message: String,
-    colors: BookOverviewImageSelectionHook.DialogColors,
-): TextView =
-    TextView(context).apply {
-        text = message
-        textSize = 13f
-        setTextColor(colors.body)
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { bottomMargin = dp(context, 8) }
-    }
-
-private fun actionRow(
-    context: Context,
-    title: String,
-    subtitle: String,
-    colors: BookOverviewImageSelectionHook.DialogColors,
-    onClick: () -> Unit,
-): TextView =
-    TextView(context).apply {
-        text = if (subtitle.isBlank()) title else "$title\n$subtitle"
-        textSize = if (subtitle.isBlank()) 15f else 14f
-        setTextColor(if (subtitle.isBlank()) colors.neutralText else colors.title)
-        setPadding(dp(context, 14), dp(context, 12), dp(context, 14), dp(context, 12))
-        background = rounded(colors.neutralSoft, colors.border, dp(context, 8))
-        gravity = Gravity.CENTER_VERTICAL
-        setOnClickListener { onClick() }
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { bottomMargin = dp(context, 8) }
-    }
-
-private fun fieldLabel(
-    context: Context,
-    label: String,
-    colors: BookOverviewImageSelectionHook.DialogColors,
-): TextView =
-    TextView(context).apply {
-        text = label
-        textSize = 13f
-        setTextColor(colors.body)
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply {
-            topMargin = dp(context, 6)
-            bottomMargin = dp(context, 6)
-        }
-    }
-
-private fun editText(
-    context: Context,
-    hintText: String,
-    singleLine: Boolean,
-    colors: BookOverviewImageSelectionHook.DialogColors,
-): EditText =
-    EditText(context).apply {
-        hint = hintText
-        textSize = 14f
-        setSingleLine(singleLine)
-        minHeight = dp(context, 46)
-        setTextColor(colors.title)
-        setHintTextColor(colors.body)
-        setPadding(dp(context, 12), dp(context, 8), dp(context, 12), dp(context, 8))
-        background = rounded(colors.field, colors.border, dp(context, 8))
-        layoutParams = fieldParams(context)
-    }
-
-private fun previewImageView(context: Context, target: BookOverviewImageSelectionHook.ImageTarget): ImageView =
-    ImageView(context).apply {
-        visibility = View.GONE
-        adjustViewBounds = true
-        scaleType = ImageView.ScaleType.FIT_CENTER
-        background = null
-        setBackgroundColor(Color.TRANSPARENT)
-        maxWidth = context.resources.displayMetrics.widthPixels - dp(context, 48)
-        maxHeight = if (target.name == "Banner") dp(context, 240) else dp(context, 360)
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-            topMargin = dp(context, 10)
-            bottomMargin = dp(context, 10)
-        }
-    }
-
-private fun statusText(
-    context: Context,
-    colors: BookOverviewImageSelectionHook.DialogColors,
-): TextView =
-    TextView(context).apply {
-        text = ""
-        textSize = 13f
-        setTextColor(colors.body)
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { bottomMargin = dp(context, 10) }
-    }
-
-private fun horizontalActions(context: Context): LinearLayout =
-    LinearLayout(context).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(context, 4) }
-    }
-
-private fun compactButton(
-    context: Context,
-    title: String,
-    colors: BookOverviewImageSelectionHook.DialogColors,
-    neutral: Boolean = false,
-): TextView =
-    TextView(context).apply {
-        text = title
-        textSize = 14f
-        gravity = Gravity.CENTER
-        typeface = Typeface.DEFAULT_BOLD
-        setTextColor(if (neutral) colors.neutralText else colors.primaryText)
-        setPadding(dp(context, 8), dp(context, 11), dp(context, 8), dp(context, 11))
-        background = rounded(if (neutral) colors.neutralSoft else colors.primarySoft, colors.border, dp(context, 8))
-    }
-
-private fun imageDialog(activity: Activity): Dialog =
-    Dialog(activity, android.R.style.Theme_Translucent_NoTitleBar)
-
-private fun showDialog(dialog: Dialog, content: View, activity: Activity, widthRatio: Float) {
-    dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-    dialog.setContentView(content)
-    dialog.window?.let { window ->
-        window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        window.setDimAmount(0.46f)
-        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-        window.decorView.setPadding(0, 0, 0, 0)
-        window.setGravity(Gravity.CENTER)
-    }
-    dialog.show()
-    dialog.window?.let { window ->
-        window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        window.setDimAmount(0.46f)
-        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-        window.decorView.setPadding(0, 0, 0, 0)
-        window.findViewById<View>(android.R.id.content)?.setPadding(0, 0, 0, 0)
-        window.setGravity(Gravity.CENTER)
-        val attributes = window.attributes
-        attributes.width = (activity.resources.displayMetrics.widthPixels * widthRatio).toInt()
-        attributes.height = ViewGroup.LayoutParams.WRAP_CONTENT
-        attributes.gravity = Gravity.CENTER
-        window.attributes = attributes
-        window.setLayout(attributes.width, attributes.height)
-    }
-}
-
-private fun scroll(card: LinearLayout, context: Context): ScrollView =
-    ScrollView(context).apply {
-        isFillViewport = false
-        addView(card)
-        layoutParams = ViewGroup.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        )
-    }
-
-private fun fieldParams(context: Context): LinearLayout.LayoutParams =
-    LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT,
-        ViewGroup.LayoutParams.WRAP_CONTENT,
-    ).apply { bottomMargin = dp(context, 10) }
-
-private fun centeredWrapParams(context: Context): LinearLayout.LayoutParams =
-    LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.WRAP_CONTENT,
-        ViewGroup.LayoutParams.WRAP_CONTENT,
-    ).apply {
-        gravity = Gravity.CENTER_HORIZONTAL
-        bottomMargin = dp(context, 8)
-    }
-
-private fun actionWeightParams(): LinearLayout.LayoutParams =
-    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-        leftMargin = 4
-        rightMargin = 4
-    }
-
-private fun rounded(fill: Int, stroke: Int, radiusPx: Int): GradientDrawable =
-    GradientDrawable().apply {
-        shape = GradientDrawable.RECTANGLE
-        setColor(fill)
-        cornerRadius = radiusPx.toFloat()
-        if (stroke != Color.TRANSPARENT) setStroke(1, stroke)
-    }
-
-private fun dp(context: Context, value: Int): Int =
-    (value * context.resources.displayMetrics.density).toInt()
 
 private fun Activity.toast(message: String) {
     runOnUiThread { Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }

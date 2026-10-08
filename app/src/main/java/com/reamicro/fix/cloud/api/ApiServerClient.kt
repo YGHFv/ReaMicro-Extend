@@ -6,7 +6,6 @@ import org.json.JSONObject
 import java.io.File
 import java.net.SocketTimeoutException
 
-/** API 服务器最小客户端。所有异常都转成结果，调用方可安全降级到本地能力。 */
 class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     fun probe(): ApiServerProbeResult = probe(settingsStore.get())
 
@@ -149,7 +148,6 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
         )
     }
 
-    /** 查询服务器是否允许当前阅微账号从模块上传内容库。 */
     fun uploadPolicy(): ApiUploadPolicy {
         val settings = settingsStore.get()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
@@ -171,7 +169,6 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
         return ApiUploadPolicy.fromJson(root.optJSONObject("data") ?: root)
     }
 
-    /** 按名称和域名批量比对本地源与服务器内容库。 */
     fun matchPackages(items: List<ApiLibraryItem>): List<ApiLibraryMatch> {
         if (items.isEmpty()) return emptyList()
         val payload = JSONObject().put("items", org.json.JSONArray(items.map(ApiLibraryItem::toDescriptorJson)))
@@ -183,7 +180,6 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
         }
     }
 
-    /** 上传单个书源或关联源；服务器已有同名同域的源时只回关联信息。 */
     fun uploadPackage(item: ApiLibraryItem): ApiUploadResult {
         val payload = item.toDescriptorJson()
             .put("payloadName", item.payloadName)
@@ -201,8 +197,7 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     fun latestModuleRelease(): ApiModuleRelease? {
         val settings = settingsStore.get()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
-        // 必须显式带上渠道：服务器默认按 stable 过滤，而本模块 CI 发布的都是预发布 Release，
-        // 不带 channel 会稳定命中服务端的 404 RELEASE_NOT_FOUND。
+
         val channel = java.net.URLEncoder.encode(settings.updateChannel.wireValue, "UTF-8")
         val body = try {
             HttpClient.get(

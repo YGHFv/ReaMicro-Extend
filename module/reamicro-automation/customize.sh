@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# Sourced by the manager's installer; use MODPATH, never derive it from $0.
+
 [ "$BOOTMODE" = true ] || abort "请在已启动的 Android 系统中通过 Root 管理器安装，不支持 Recovery 安装"
 ui_print "阅微本地任务 Root 独立执行器（实验性）"
 if [ "$KSU" = true ] || [ "$KSU" = 1 ]; then

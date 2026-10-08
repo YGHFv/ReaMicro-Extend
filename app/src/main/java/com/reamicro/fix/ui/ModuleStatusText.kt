@@ -1,10 +1,8 @@
 package com.reamicro.fix.ui
 
 import android.content.Context
-import androidx.annotation.StringRes
 import com.reamicro.fix.R
 
-/** Raw option data survives language changes and pending multi-select edits. */
 internal data class ModulePawnOption(
     val value: String,
     val label: String,
@@ -23,7 +21,7 @@ internal fun modulePawnSelectionSummary(context: Context, options: List<ModulePa
 
 internal fun modulePawnOptionLabel(context: Context, option: ModulePawnOption): String {
     if (option.hint.isBlank()) return option.label
-    // These are persisted item IDs, not translated display labels.
+
     val hintRes = when (option.value) {
         "11", "13", "18" -> R.string.pawn_hint_inheritance
         "12", "14", "15" -> R.string.pawn_hint_blessing

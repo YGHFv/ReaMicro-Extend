@@ -1,5 +1,4 @@
 // Adapted from KernelSU manager (GPL-3.0); see assets/licenses/KernelSU-effect-LICENSE.txt.
-// Mirrored from compose-miuix-ui example.
 
 package com.reamicro.fix.ui.effect
 
@@ -117,7 +116,7 @@ private class BgEffectNode(
         animationJob = null
         revealJob?.cancel()
         revealJob = null
-        // A detached page must not replay a half-finished reveal when it comes back.
+
         revealAlpha = 1f
         drewFallback = false
     }
@@ -176,9 +175,7 @@ private class BgEffectNode(
         animationJob = null
         revealAlpha = 0f
         revealJob = coroutineScope.launch {
-            // Only needed if a fallback frame was already drawn before preparation finished.
-            // Fade the effect, not the surface, cards, text, or the whole page. Normal prepared
-            // entries display their static effect immediately and never repeat this transition.
+
             animate(
                 initialValue = 0f,
                 targetValue = 1f,

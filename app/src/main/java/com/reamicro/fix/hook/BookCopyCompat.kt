@@ -65,7 +65,17 @@ internal object BookCopyCompat {
         patch.backupId?.let { args[backupIdIndex] = it }
         patch.backupCode?.let { args[backupCodeIndex] = it }
         patch.publisher?.let { args[publisherIndex] = it }
-        return copyMethod.invoke(book, *args)
+        val updated = copyMethod.invoke(book, *args)
+        requireSameStorageIdentity(book, updated)
+        return updated
+    }
+
+    internal fun requireSameStorageIdentity(before: Any, after: Any) {
+        for (number in 1..3) {
+            check(componentMethod(before, number).invoke(before) == componentMethod(after, number).invoke(after)) {
+                "拒绝改变书籍身份字段 component$number，已阻止书架回写"
+            }
+        }
     }
 
     private fun findCopyMethod(book: Any): Method {

@@ -1,12 +1,6 @@
-"""管理后台路由。
-
-只做参数校验、权限与 CSRF 检查，页面渲染交给 app.admin.views，
-业务操作交给对应业务模块。
-"""
-
 from typing import Any
 
-from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request, UploadFile, File, status
+from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasicCredentials
 
@@ -29,6 +23,7 @@ from app.admin.format import (
     admin_section_path,
 )
 from app.admin.layout import (
+    _admin_auth_shell,
     _admin_shell,
     admin_html,
     admin_login_page,
@@ -85,7 +80,7 @@ from app.labels import (
 )
 from app.admin.paging import paginate, pager_html, read_tail_lines
 from app.admin.users_view import admin_users_page
-from app.retention import data_usage, prune_package_history, retention_settings, run_retention
+from app.retention import prune_package_history, retention_settings, run_retention
 from app.rule_check import DEFAULT_PROBE_QUERY, RULE_STATUS_LABELS, check_kind_rules, check_package_rules
 from app.source_check import STATUS_LABELS, check_kind, check_package
 from app.security import normalized_admin_permissions
@@ -153,7 +148,7 @@ from app.state import (
 
 router = APIRouter()
 
-# 审计页最多回扫的行数。再往前的记录直接看 /data/audit/events.jsonl。
+
 AUDIT_SCAN_LINES = 5000
 
 
@@ -290,8 +285,8 @@ async def admin_edit_package_post(
         raise HTTPException(status_code=400, detail="依赖必须是 JSON 数组")
     package_dir = manifest_path.parent
     history = package_dir / "history"; history.mkdir(exist_ok=True)
-    # 归档前先裁剪，否则编辑频繁的源会在两次定时清理之间堆出很多份副本。
-    # 上传走 persist_package_payload，那里也有同样一步。
+
+
     prune_package_history(package_kind, package_id, retention_settings().get("packageHistoryKeep", 10))
     old_version = safe_package_segment(current.get("version", "old"))
     archive_dir = history / f"{old_version}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"; archive_dir.mkdir(parents=True, exist_ok=True)
@@ -300,20 +295,20 @@ async def admin_edit_package_post(
     if old_payload.is_file() and old_payload.parent == package_dir:
         shutil.copy2(old_payload, archive_dir / old_payload.name)
     build_time = int(datetime.now(timezone.utc).timestamp() * 1000); digest = hashlib.sha256(body).hexdigest()
-    # 访问地址：管理员手填的在前，再补上从内容识别出的；主地址单独指定后置顶。
+
     edited_domains, edited_primary = merge_domains(
         domains.replace(",", "\n").splitlines(),
         package_match_domains({**current, "domains": [], "aliases": metadata.get("identity", [])}),
         primary=primary_domain_value,
     )
-    # 历史名称累积：源改名后旧名要留着，用旧名的客户端才能继续关联。
+
     edited_names = merge_match_names(
         names.replace(",", "\n").splitlines(),
         name.strip() or current.get("name", ""),
         current.get("names", []),
     )
     manifest = {**current, "packageId": package_id, "kind": package_kind, "version": version, "buildTime": build_time, "sha256": digest, "payload": filename, "contentId": stable_id, "aliases": merge_package_aliases(current.get("aliases", []), metadata.get("identity", []), aliases), "domains": edited_domains, "primaryDomain": edited_primary, "names": edited_names, "name": name.strip() or (str(current.get("name", "")) if not metadata.get("explicitName") else "") or str(metadata.get("name") or package_id), "status": status_value, "channel": channel, "dependencies": dependency_items}
-    # 地址变了就作废上次检测结果，避免显示过期的可用性。
+
     if edited_domains != [str(item) for item in current.get("domains", [])]:
         manifest.pop("healthCheck", None)
     if status_value == "published" and not package_dependency_status(manifest).get("dependenciesSatisfied", True):
@@ -568,7 +563,7 @@ async def admin_audit(
     total = 0
     failures = 0
     matched: list[dict[str, Any]] = []
-    # 从文件尾部按块回读，不把整个日志读进内存。
+
     for line in read_tail_lines(runtime.AUDIT_PATH, AUDIT_SCAN_LINES)[::-1]:
         try:
             event = json.loads(line)
@@ -766,7 +761,7 @@ async def admin_restore_server_backup(filename: str, request: Request, credentia
 async def admin_security_create_api_key(
     credentials: HTTPBasicCredentials | None = Depends(basic_security),
     name: str = Form(""),
-    # 权限用复选框提交多个同名字段。
+
     permissions: list[str] = Form(default=["read"]),
     csrf_token: str = Form(""),
 ) -> HTMLResponse:
@@ -888,7 +883,7 @@ async def admin_task_action(
     if not task:
         return admin_html(admin_page(config, "任务不存在", actor=actor, section="tasks"), status_code=404)
     if action == "delete":
-        # 删除是不可逆操作，单独处理并保留审计记录。
+
         tasks.pop(task_id, None)
         save_tasks(tasks)
         audit_event("admin_task_action", audit_actor(actor), metadata={"taskId": task_id, "action": action})
@@ -943,7 +938,7 @@ async def admin_credential_action(
     if action == "delete":
         stored.pop(credential_id.strip(), None)
         save_credentials(stored)
-        # 密钥删除后，依赖它的任务无法继续执行，一并暂停避免反复失败。
+
         tasks = load_tasks()
         affected = 0
         for task in tasks.values():
@@ -987,7 +982,7 @@ async def admin_setup(
         save_config(current)
         runtime.get_state_store().delete_admin_sessions_for_user(str(actor.get("username", "")))
         audit_event("primary_admin_initialized", f"admin:{username}", success=True)
-        # 走统一的认证页外壳，与登录、初始化页同一套配色与控件。
+
         return HTMLResponse(_admin_auth_shell(
             "主管理员初始化完成",
             "初始环境变量密码已经停用",
@@ -1030,7 +1025,7 @@ async def admin_settings(
     package_history_keep: int = Form(10),
     module_upload_enabled: str | None = Form(None),
     module_upload_allowlist: str = Form(""),
-    # 后台用复选框提交，未勾选任何类型时由 module_upload_kinds() 回退到默认集合。
+
     module_upload_kinds: list[str] = Form(default=[]),
     csrf_token: str = Form(""),
 ) -> HTMLResponse:
@@ -1058,7 +1053,7 @@ async def admin_settings(
         "authMode": selected_auth_mode,
         "hostAccountAllowlist": ([item.strip() for item in host_account_allowlist.splitlines() if item.strip()] if selected_auth_mode == "host_account_allowlist" else current.get("hostAccountAllowlist", [])),
         "features": [item.strip() for item in features.replace("\r", "\n").replace("\n", ",").split(",") if item.strip()],
-        # 公钥从文本域提交，粘贴时常带换行和空格，去掉后再保存。
+
         "signingPublicKey": "".join(signing_public_key.split()),
         "githubRepository": github_repository.strip() or current["githubRepository"],
         "githubToken": "" if clear_github_token is not None else (github_token or current.get("githubToken", "")),
@@ -1116,7 +1111,7 @@ async def admin_create_subadmin(
     credentials: HTTPBasicCredentials | None = Depends(basic_security),
     username: str = Form(""),
     password: str = Form(""),
-    # 后台用复选框提交多个同名字段，同时兼容旧的逗号分隔单值写法。
+
     permissions: list[str] = Form(default=["settings:write", "packages:write", "tasks:write"]),
     csrf_token: str = Form(""),
 ) -> HTMLResponse:
@@ -1366,8 +1361,8 @@ async def admin_create_task(
             credential = load_credentials().get(credential_id.strip())
             if not credential:
                 raise ValueError("阅微凭据不存在")
-            # 归属以密钥为准。后台表单的 owner 默认是 admin，而模块上传的密钥归属是
-            # host:<阅微账号>，拿表单值去比对会让任何选了密钥的提交都失败。
+
+
             credential_owner = str(credential.get("owner", "")).strip()
             if credential_owner:
                 owner = credential_owner
@@ -1442,8 +1437,8 @@ async def admin_task_logs(task_id: str, actor: dict[str, Any] = Depends(admin_ac
             ("累计执行", f"{bounded_config_int(task.get('runCount', 0), 0, 0)} 次"),
         )
     )
-    # task_log() 写的逐行日志此前只有 /v1/tasks/{id}/logs 能取到，后台完全看不到，
-    # 排查失败原因时只能看到执行历史里的一句汇总。这里一并展示。
+
+
     log_rows = []
     log_path = runtime.TASK_LOG_ROOT / f"{task_id}.log"
     if log_path.is_file():
@@ -1597,7 +1592,6 @@ async def admin_check_kind(
     ))
 
 
-# 批量操作允许的动作。每项都对应一条已有的单个操作路径，只是省去逐个点击。
 BATCH_ACTIONS = {
     "publish": "上架",
     "unpublish": "下架",
@@ -1667,7 +1661,7 @@ async def admin_batch_packages(
             temp.replace(manifest_path)
             done.append(name)
             continue
-        # check
+
         report = await asyncio.to_thread(check_package, kind, package_id)
         label = STATUS_LABELS.get(report["status"], report["status"])
         done.append(f"{name}（{label}）")

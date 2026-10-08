@@ -17,7 +17,6 @@ internal data class RootCommandResult(
 internal class RootCommandTimeout(val partial: RootCommandResult) :
     IllegalStateException("Root 命令超时，执行结果未知；不自动重试，请检测与同步后再操作")
 
-/** One-shot su transport. Never replay mutations, never mix stderr into the JSON protocol. */
 internal object RootCommandRunner {
     @Volatile private var selectedSu: String? = null
     @Volatile private var customSu: String? = null
@@ -52,7 +51,6 @@ internal object RootCommandRunner {
         return runAuthorized(executable, command, input, timeoutSeconds)
     }
 
-    /** Caching the route is NOT caching authorization. Verify UID on every invocation. */
     fun runAuthorized(executable: String, command: String, input: String? = null, timeoutSeconds: Long = 20): RootCommandResult {
         val guarded = """[ "${'$'}(/system/bin/id -u 2>/dev/null || id -u)" = 0 ] || exit 77
 printf '$RECEIPT\n'

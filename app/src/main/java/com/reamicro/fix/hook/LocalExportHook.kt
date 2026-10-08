@@ -16,7 +16,6 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.OutputStream
 import java.lang.reflect.Method
-import java.lang.reflect.Proxy
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -25,7 +24,7 @@ class LocalExportHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
 ) {
-    // Compose 反射互操作的共用实现，避免各 hook 各存一份逐渐漂移的副本。
+
     private val composeInterop = ComposeInterop(
         classLoader = classLoader,
         resolveClass = ::cls,

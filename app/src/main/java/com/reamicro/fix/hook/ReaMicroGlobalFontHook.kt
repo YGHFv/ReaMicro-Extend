@@ -29,6 +29,7 @@ class ReaMicroGlobalFontHook(
     @Volatile private var cachedGlobalFont: CachedGlobalFont? = null
 
     fun install() {
+        EmbeddedHostUi.bindUiFontResolver(::globalAndroidTypeface)
         hookReaderTextScopes()
         hookReaderFontPreviewScopes()
         hookThemeSerifFont()
@@ -38,6 +39,7 @@ class ReaMicroGlobalFontHook(
 
     fun invalidateGlobalFontCache() {
         cachedGlobalFont = null
+        synchronized(fontFamilyCache) { fontFamilyCache.clear() }
         synchronized(androidTypefaceCache) {
             androidTypefaceCache.clear()
         }
@@ -55,6 +57,7 @@ class ReaMicroGlobalFontHook(
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
+                        EmbeddedHostUi.captureTypography(classLoader, param.args?.firstOrNull())
                         val resolved = resolveGlobalUiFontCached() ?: return
                         param.result = resolved.family
                         logApplied("theme", resolved.selection)
@@ -174,26 +177,29 @@ class ReaMicroGlobalFontHook(
     private fun applyGlobalFontToDialog(dialog: Dialog) {
         val decor = dialog.window?.decorView ?: return
         val resolved = resolveGlobalAndroidTypefaceCached() ?: return
-        applyGlobalFontToViewTree(decor, resolved.typeface)
-        decor.post { applyGlobalFontToViewTree(decor, resolved.typeface) }
-        decor.postDelayed({ applyGlobalFontToViewTree(decor, resolved.typeface) }, 120L)
+        applyGlobalFontToViewTree(decor, resolved.typeface, resolved.selection == "host")
+        decor.post { applyGlobalFontToViewTree(decor, resolved.typeface, resolved.selection == "host") }
+        decor.postDelayed({ applyGlobalFontToViewTree(decor, resolved.typeface, resolved.selection == "host") }, 120L)
         logApplied("dialog", resolved.selection)
     }
 
-    private fun applyGlobalFontToViewTree(view: View, baseTypeface: Typeface) {
-        if (view is TextView) applyGlobalFontToTextView(view, baseTypeface)
+    private fun applyGlobalFontToViewTree(view: View, baseTypeface: Typeface, nativeFollow: Boolean) {
+        if (view is TextView) applyGlobalFontToTextView(view, baseTypeface, nativeFollow)
         if (view is ViewGroup) {
             for (index in 0 until view.childCount) {
-                applyGlobalFontToViewTree(view.getChildAt(index), baseTypeface)
+                applyGlobalFontToViewTree(view.getChildAt(index), baseTypeface, nativeFollow)
             }
         }
     }
 
-    private fun applyGlobalFontToTextView(textView: TextView, baseTypeface: Typeface) {
+    private fun applyGlobalFontToTextView(textView: TextView, baseTypeface: Typeface, nativeFollow: Boolean) {
+        if (textView.tag == "reamicro-font-preview") return
         val current = textView.typeface
         if (current === Typeface.MONOSPACE || current == Typeface.MONOSPACE) return
         val style = current?.style ?: Typeface.NORMAL
-        textView.typeface = Typeface.create(baseTypeface, style)
+        textView.typeface = if (nativeFollow && (style and Typeface.BOLD) != 0)
+            EmbeddedHostUi.nativeBoldTypeface(textView.context) ?: Typeface.create(baseTypeface, style)
+        else Typeface.create(baseTypeface, style)
     }
 
     private fun clearDefaultMask(args: Array<Any?>, parameterIndex: Int) {
@@ -228,9 +234,10 @@ class ReaMicroGlobalFontHook(
 
     private fun resolveGlobalUiFontCached(): ResolvedGlobalFont? {
         val now = System.currentTimeMillis()
-        cachedGlobalFont?.takeIf { now - it.atMs < GLOBAL_FONT_CACHE_WINDOW_MS }?.let { return it.font }
+        val selection = settings.fontSettings().globalFamily
+        cachedGlobalFont?.takeIf { now - it.atMs < GLOBAL_FONT_CACHE_WINDOW_MS && it.selection == selection }?.let { return it.font }
         val resolved = resolveGlobalUiFont()
-        cachedGlobalFont = CachedGlobalFont(now, resolved)
+        cachedGlobalFont = CachedGlobalFont(now, resolved, selection)
         return resolved
     }
 
@@ -243,54 +250,51 @@ class ReaMicroGlobalFontHook(
     }
 
     private fun resolveGlobalAndroidTypefaceCached(): ResolvedAndroidTypeface? {
-        if (!settings.snapshot().canUseFontSettings) return null
-        val selection = settings.fontSettings().globalFamily
-        if (selection.isBlank()) return null
-        val typeface = resolveAndroidTypeface(selection) ?: return null
+        val selection = if (settings.snapshot().canUseFontSettings) settings.fontSettings().globalFamily else ""
+        if (selection.isBlank()) return activityProvider()?.let(EmbeddedHostUi::nativeTypeface)?.let { ResolvedAndroidTypeface("host", it) }
+        val typeface = resolveAndroidTypeface(selection) ?: return activityProvider()?.let(EmbeddedHostUi::nativeTypeface)?.let { ResolvedAndroidTypeface("host", it) }
         return ResolvedAndroidTypeface(selection, typeface)
     }
 
-    /**
-     * 供宿主里那些用原生 View 自绘的界面（在线源搜索结果行、内置页面弹窗等）取用同一个全局字体。
-     *
-     * Compose 的 Text 与 Android Dialog 由本 hook 自己覆盖；普通页面里的 TextView 既不走
-     * Compose 也不在 Dialog 树里，只能由创建方显式套用。未配置全局字体（或宿主不允许字体
-     * 设置）时返回 null，调用方保持原样。
-     */
     internal fun globalAndroidTypeface(): Typeface? = resolveGlobalAndroidTypefaceCached()?.typeface
 
     private fun resolveAndroidTypeface(selection: String): Typeface? {
+        val resolvedFile = if (isBuiltinFontSelection(selection)) null else resolveFontFile(selection) ?: return null
+        val key = com.reamicro.fix.epub.editor.FontSelectionResolution.cacheKey(selection, resolvedFile)
         synchronized(androidTypefaceCache) {
-            androidTypefaceCache[selection]?.let { return it }
+            androidTypefaceCache[key]?.let { return it }
         }
         val resolved = when (selection) {
             FAMILY_SYSTEM -> Typeface.DEFAULT
-            FAMILY_SOURCE_HAN_SERIF -> Typeface.SERIF
+            FAMILY_SOURCE_HAN_SERIF -> activityProvider()?.let(EmbeddedHostUi::nativeTypeface) ?: Typeface.SERIF
             else -> {
-                val file = resolveFontFile(selection) ?: return null
+                val file = resolvedFile ?: return null
                 runCatching { Typeface.createFromFile(file) }
                     .onFailure { logResolveFontFamilyFailure(selection, it) }
                     .getOrNull()
             }
         } ?: return null
         synchronized(androidTypefaceCache) {
-            androidTypefaceCache[selection] = resolved
+            androidTypefaceCache[key] = resolved
         }
         return resolved
     }
 
     private fun resolveFontFamily(selection: String): Any? {
+        if (selection.isBlank()) return null
+        val resolvedFile = if (isBuiltinFontSelection(selection)) null else resolveFontFile(selection) ?: return null
+        val cacheKey = com.reamicro.fix.epub.editor.FontSelectionResolution.cacheKey(selection, resolvedFile)
         synchronized(fontFamilyCache) {
-            fontFamilyCache[selection]?.let { return it }
+            fontFamilyCache[cacheKey]?.let { return it }
         }
         if (isBuiltinFontSelection(selection)) {
             return resolveBuiltinFontFamily(selection)?.also { family ->
                 synchronized(fontFamilyCache) {
-                    fontFamilyCache[selection] = family
+                    fontFamilyCache[cacheKey] = family
                 }
             }
         }
-        val file = resolveFontFile(selection) ?: return null
+        val file = resolvedFile ?: return null
         return runCatching {
             val provider = staticObject(FONT_PROVIDER_CLASS, "INSTANCE")
             val normal = fontWeight("getNormal")
@@ -307,7 +311,7 @@ class ReaMicroGlobalFontHook(
                     List::class.java.isAssignableFrom(it.parameterTypes[0])
             }.invoke(null, fonts)
             synchronized(fontFamilyCache) {
-                fontFamilyCache[selection] = family
+                fontFamilyCache[cacheKey] = family
             }
             family
         }.onFailure { logResolveFontFamilyFailure(selection, it) }.getOrNull()
@@ -366,18 +370,9 @@ class ReaMicroGlobalFontHook(
             clazz.getField(fieldName).apply { isAccessible = true }.get(null)
         }.getOrNull()
 
-    private fun resolveFontFile(selection: String): File? {
-        val direct = File(selection)
-        if (direct.isFile && isFontFileName(direct.name)) return direct
-        val name = direct.name
-        if (!isFontFileName(name)) return null
-        val root = activityProvider()?.filesDir ?: return null
-        return fontDirectories(root)
-            .asSequence()
-            .flatMap { it.listFiles()?.asSequence() ?: emptySequence() }
-            .firstOrNull { it.isFile && it.name == name && isFontFileName(it.name) }
-    }
-
+    private fun resolveFontFile(selection: String): File? =
+        com.reamicro.fix.epub.editor.FontSelectionResolution.file(selection,
+            activityProvider()?.filesDir?.let(::fontDirectories).orEmpty())
     private fun fontDirectories(filesDir: File): List<File> {
         val dirs = filesDir.listFiles()
             ?.filter { it.isDirectory && it.name.toLongOrNull() != null }
@@ -483,6 +478,7 @@ class ReaMicroGlobalFontHook(
     private data class CachedGlobalFont(
         val atMs: Long,
         val font: ResolvedGlobalFont?,
+        val selection: String,
     )
 
     private companion object {

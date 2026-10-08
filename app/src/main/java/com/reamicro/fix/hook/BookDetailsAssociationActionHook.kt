@@ -2,6 +2,7 @@ package com.reamicro.fix.hook
 
 import android.app.Activity
 import android.widget.Toast
+import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.xposed.XC_MethodHook
 import com.reamicro.fix.xposed.XposedBridge
@@ -26,6 +27,8 @@ class BookDetailsAssociationActionHook(
                 size > MAX_COMPLETED_COVER_FIXES
         },
     )
+
+    private val overviewContexts = Collections.synchronizedMap(LinkedHashMap<Long, DetailContext>())
     @Volatile private var currentDetailsContext: DetailContext? = null
 
     fun install() {
@@ -36,14 +39,21 @@ class BookDetailsAssociationActionHook(
         hookNavigationBackCleanup()
     }
 
-    fun requestCoverFixForCurrentDetails(): Boolean {
-        val details = currentDetailsContext ?: return false
-        fixAssociationCover(details.bookId)
+    fun requestCoverFixForCurrentDetails(expectedBook: Any): Boolean {
+        val expectedBookId = callLong(expectedBook, "getId")
+        if (expectedBookId <= 0L) return false
+        val details = currentDetailsContext?.takeIf { it.bookId == expectedBookId }
+            ?: overviewContexts[expectedBookId]?.takeIf { it.viewModelRef.get() != null && it.repositoryRef.get() != null }
+            ?: return false
+        if (expectedBookId != details.bookId) return false
+        cacheLocalBook(expectedBook)
+        fixAssociationCover(details)
         return true
     }
 
     fun releaseMemory(reason: String) {
         currentDetailsContext = null
+        overviewContexts.clear()
         localBooksById.clear()
         localBooksByCloudId.clear()
         completedCoverFixes.clear()
@@ -73,7 +83,7 @@ class BookDetailsAssociationActionHook(
     }
 
     private fun hookBookDetailsViewModel() {
-        runCatching {
+        HookInstallReport.install("BookDetailsAssociationActionHook", "hookBookDetailsViewModel") {
             val viewModelClass = XposedHelpers.findClass(BOOK_DETAILS_VIEW_MODEL_CLASS, classLoader)
             XposedBridge.hookAllConstructors(viewModelClass, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
@@ -91,27 +101,19 @@ class BookDetailsAssociationActionHook(
                     XposedBridge.log("$LOG_PREFIX book details association context captured: bookId=$bookId, compat=$compat")
                 }
             })
-            XposedBridge.hookAllMethods(viewModelClass, "onCleared", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (currentDetailsContext?.viewModelRef?.get() === param.thisObject) {
-                        clearBookDetailsContext()
-                    }
+            hookViewModelCleared(viewModelClass) { viewModel ->
+                synchronized(overviewContexts) {
+                    overviewContexts.entries.removeAll { it.value.viewModelRef.get() == null || it.value.viewModelRef.get() === viewModel }
                 }
-            })
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook BookDetailsViewModel: ${it.stackTraceToString()}")
+                if (currentDetailsContext?.viewModelRef?.get() === viewModel) {
+                    clearBookDetailsContext()
+                }
+            }
         }
     }
 
-    /**
-     * 2.2.0 起点书打开的是 BookOverviewScreen（BookOverviewViewModel），封面弹窗 CoverBottomSheet
-     * 也挂在该页；而封面修复原本只监听 BookDetailsViewModel，导致 context 从未捕获、
-     * requestCoverFix() 恒返回 false（Toast「当前页面无法执行封面修复」）。
-     * 这里额外监听 BookOverviewViewModel：构造器捕获 bookId + bookRepository(BookRepository)，
-     * applyBook(Book) 缓存实际 Book 供后续封面上传使用。
-     */
     private fun hookBookOverviewViewModel() {
-        runCatching {
+        HookInstallReport.install("BookDetailsAssociationActionHook", "hookBookOverviewViewModel") {
             val viewModelClass = XposedHelpers.findClass(BOOK_OVERVIEW_VIEW_MODEL_CLASS, classLoader)
             XposedBridge.hookAllConstructors(viewModelClass, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
@@ -127,6 +129,7 @@ class BookDetailsAssociationActionHook(
                         repositoryRef = WeakReference(repository),
                         isOverview = true,
                     )
+                    currentDetailsContext?.let { overviewContexts[bookId] = it }
                     XposedBridge.log("$LOG_PREFIX book overview association context captured: bookId=$bookId")
                 }
             })
@@ -134,18 +137,21 @@ class BookDetailsAssociationActionHook(
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val book = param.args?.getOrNull(0) ?: return
                     cacheLocalBook(book)
+                    val vm = param.thisObject ?: return
+                    val repository = fieldValue(vm, "bookRepository") ?: return
+                    val id = callLong(book, "getId")
+                    if (id > 0L) overviewContexts[id] = DetailContext(id, true, WeakReference(vm), WeakReference(repository), isOverview = true)
                 }
             })
-            XposedBridge.hookAllMethods(viewModelClass, "onCleared", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (currentDetailsContext?.viewModelRef?.get() === param.thisObject) {
-                        clearBookDetailsContext()
-                    }
+            hookViewModelCleared(viewModelClass) { viewModel ->
+                synchronized(overviewContexts) {
+                    overviewContexts.entries.removeAll { it.value.viewModelRef.get() == null || it.value.viewModelRef.get() === viewModel }
                 }
-            })
+                if (currentDetailsContext?.viewModelRef?.get() === viewModel) {
+                    clearBookDetailsContext()
+                }
+            }
             XposedBridge.log("$LOG_PREFIX book overview viewModel hook installed")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook BookOverviewViewModel: ${it.stackTraceToString()}")
         }
     }
 
@@ -194,12 +200,12 @@ class BookDetailsAssociationActionHook(
         }
     }
 
-    private fun fixAssociationCover(bookId: Long) {
+    private fun fixAssociationCover(details: DetailContext) {
+        val bookId = details.bookId
         val activity = activityProvider()
-        val details = currentDetailsContext
         Thread {
             val result = runCatching {
-                if (details == null || details.bookId != bookId) error("Book details unavailable")
+
                 val repository = details.repositoryRef.get() ?: error("BookRepository unavailable")
                 val bookshelf = fieldValue(repository, "bookshelfRepository") ?: error("BookshelfRepository unavailable")
                 val book = findLocalBookForDetails(bookshelf, details) ?: error("Book not found: $bookId")
@@ -240,8 +246,7 @@ class BookDetailsAssociationActionHook(
 
     private fun resolveDetailsCoverUrl(repository: Any, details: DetailContext, book: Any): String {
         val publisherName = callString(book, "getPublisher").trim()
-        // BookOverview 页的 state 是 BookOverviewUiState，没有 getPublishers()，
-        // 封面来自 getRelationPublisher()（单个 Publisher）与 getBook().getCover()。
+
         if (details.isOverview) {
             overviewStateCoverUrl(details, publisherName).takeIf(::isRemoteCoverUrl)?.let { return it }
         } else {
@@ -251,8 +256,6 @@ class BookDetailsAssociationActionHook(
         return callString(book, "getCover").trim().takeIf(::isRemoteCoverUrl).orEmpty()
     }
 
-    // 从 BookOverviewUiState 读取封面：优先关联出版方 relationPublisher.cover，
-    // 其次 state.book.cover。返回首个远程 URL。
     private fun overviewStateCoverUrl(details: DetailContext, publisherName: String): String {
         val state = runCatching {
             details.viewModelRef.get()?.let { XposedHelpers.callMethod(it, "getCurrentState") }
@@ -546,8 +549,7 @@ class BookDetailsAssociationActionHook(
         val compat: Boolean,
         val viewModelRef: WeakReference<Any>,
         val repositoryRef: WeakReference<Any>,
-        // 2.2.0 BookOverview 页的 state 结构与 BookDetails 不同（无 getPublishers()，
-        // 封面来自 getRelationPublisher()/getBook()），据此走独立的封面解析分支。
+
         val isOverview: Boolean = false,
     )
 

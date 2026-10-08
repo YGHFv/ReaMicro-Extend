@@ -1,6 +1,5 @@
 #!/system/bin/sh
-# Sourced by service/stop/uninstall. MODDIR and STATE are supplied by the caller.
-# Compare whole argv entries, not substrings that can match unrelated processes or our own su command.
+
 reamicro_pids() {
   target=$1
   for cmdline in /proc/[0-9]*/cmdline; do
@@ -46,7 +45,6 @@ reamicro_cleanup_legacy() {
   reamicro_stop legacy
 }
 
-# BusyBox flock supports -n, not util-linux's -w. Bound retries without relying on GNU options.
 reamicro_lock_lifecycle() {
   lock_tries=0
   while ! "$BUSYBOX" flock -n 9; do

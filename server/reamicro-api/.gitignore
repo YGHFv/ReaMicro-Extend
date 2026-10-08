@@ -1,8 +1,9 @@
 __pycache__/
 *.py[cod]
+.ruff_cache/
+*.log
+*.tmp
 .env
-
-# 服务端拆分期间的一次性辅助文件
-server/reamicro-api/.refactor_*.py
-server/reamicro-api/.out_*.py
-server/reamicro-api/.main.backup.py
+.env.*
+!.env.example
+data/

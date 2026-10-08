@@ -6,7 +6,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.unit.dp
 
-/** Small Material-style navigation set; avoids bundling the entire extended icon library. */
 internal object StructureIcons {
     private fun icon(name: String, data: String) = ImageVector.Builder(
         name, 24.dp, 24.dp, 24f, 24f,

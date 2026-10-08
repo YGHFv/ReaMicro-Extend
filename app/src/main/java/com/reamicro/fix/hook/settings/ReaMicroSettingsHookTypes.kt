@@ -17,10 +17,6 @@ import com.reamicro.fix.settings.ReaderHighlightRule
 import com.reamicro.fix.settings.ReaderHighlightStyle
 import com.reamicro.fix.hook.settings.*
 
-// 从 ReaMicroSettingsHook 提升出来的嵌套类型。
-//
-// 拆分成同包扩展函数后，这些类型要在多个文件里出现；提升到子包顶层配合包级
-// star import，引用点无需加限定名。inner class 需要外部实例，仍留在原类里。
 internal data class PreviewNineSlice(
     val left: Int,
     val top: Int,
@@ -216,7 +212,7 @@ internal sealed class InjectedRoute(val title: String) {
     object ReaderHighlightSettings : InjectedRoute(READER_HIGHLIGHT_SETTINGS_TITLE)
     object ReaderHighlightConfigSettings : InjectedRoute("\u9ad8\u4eae\u6837\u5f0f")
     object ReaderHighlightTextSettings : InjectedRoute("\u9ad8\u4eae\u89c4\u5219")
-    // 从阅读页原生高亮界面点击"补全计划"进入的完整聚合页（复用宿主 NavHost 页面框架）。
+
     data class ReaderCompletionPlan(val bookKey: String, val bookTitle: String) : InjectedRoute("\u8865\u5168\u8ba1\u5212")
     data class ReaderBookHighlightRules(val bookKey: String, val bookTitle: String) : InjectedRoute(bookTitle)
     data class ReaderBookOnlyHighlightRules(val bookKey: String, val bookTitle: String) : InjectedRoute("\u5355\u4e66\u9ad8\u4eae\u89c4\u5219")
@@ -243,8 +239,7 @@ internal sealed class InjectedRoute(val title: String) {
     data class FontPicker(val target: FontPickerTarget) : InjectedRoute(target.title)
     object FontLibrary : InjectedRoute(FONT_LIBRARY_TITLE)
     object AboutCompletion : InjectedRoute(ABOUT_COMPLETION_TITLE)
-    // 我的页「发现」卡片入口。仿 Legado 发现页：分类标签 + 书单列表。
-    // 与其它注入页一样复用宿主 About 路由作为容器，返回栈由 handleNestedInjectedBack 接管。
+
     object Discover : InjectedRoute(DISCOVER_TITLE)
 }
 

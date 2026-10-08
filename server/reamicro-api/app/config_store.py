@@ -1,9 +1,3 @@
-"""服务器配置的读写、认证模式推断与对外能力声明。
-
-配置落在 `server.json`，缺失字段用环境变量默认值补齐。认证模式历史上是多选，
-现已收敛为单选，`infer_auth_mode` 负责从旧配置迁移。
-本模块只做配置的读取与推断，不涉及密码校验和会话——那些在 app.security。
-"""
 import json
 import os
 from typing import Any
@@ -51,7 +45,7 @@ def default_config() -> dict[str, Any]:
         "primaryAdmin": {},
         "adminAccounts": {},
         "hostAccountAllowlist": [],
-        # 数据保留阈值。此前审计日志、任务日志与内容包历史都无限增长。
+
         "auditMaxMb": bounded_config_int(os.getenv("REAMICRO_AUDIT_MAX_MB", "32"), 32, 1),
         "auditKeepFiles": bounded_config_int(os.getenv("REAMICRO_AUDIT_KEEP_FILES", "3"), 3, 0),
         "taskLogMaxKb": bounded_config_int(os.getenv("REAMICRO_TASK_LOG_MAX_KB", "512"), 512, 16),
@@ -138,7 +132,7 @@ def api_key_auth_configured(config: dict[str, Any]) -> bool:
 
 
 def infer_auth_mode(config: dict[str, Any]) -> str:
-    """从旧版多认证配置迁移到单选认证模式。"""
+
     if config.get("hostAccountAllowlist"):
         return "host_account_allowlist"
     if config.get("accounts"):
@@ -160,12 +154,11 @@ def configured_auth_modes(config: dict[str, Any]) -> list[str]:
 
 
 def module_upload_kinds(value: Any) -> list[str]:
-    """模块可上传的内容类型。只保留白名单内的类型，配置为空时回退到默认集合。"""
+
     values = {item for item in normalized_config_list(value) if item in runtime.MODULE_UPLOAD_DEFAULT_KINDS}
     return sorted(values or runtime.MODULE_UPLOAD_DEFAULT_KINDS)
 
 
-# 后台表单字段与 module_upload_kinds 同名，另取别名避免函数被参数遮蔽。
 module_upload_kinds_form = module_upload_kinds
 
 

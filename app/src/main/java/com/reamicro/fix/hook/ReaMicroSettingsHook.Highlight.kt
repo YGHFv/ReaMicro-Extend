@@ -12,7 +12,6 @@ import android.text.TextWatcher
 import android.util.Base64
 import android.view.View
 import android.view.ViewGroup
-import android.webkit.WebView
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -36,15 +35,6 @@ import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.ReaderHighlightPreviewTextView
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
-// 阅读页高亮设置簇。
-//
-// 高亮样式与规则的列表页、编辑弹窗、颜色选择、预览绘制，以及从阅读页唤起的
-// 高亮规则面板。
-//
-// 从 ReaMicroSettingsHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的
-// 结果重新缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
-// 借用宿主 item$default 调用时机，在高亮界面 LazyColumn 最前面插入"补全计划"入口。
-// onClick 由 ReaderHook 通过 highlightScreenEntryOnClick 提供。
 internal fun ReaMicroSettingsHook.insertHighlightScreenEntryItem(lazyListScope: Any) {
     val onClick = highlightScreenEntryOnClick ?: run {
         XposedBridge.log("$LOG_PREFIX highlight entry item skip: onClick null")
@@ -69,7 +59,6 @@ internal fun ReaMicroSettingsHook.insertHighlightScreenEntryItem(lazyListScope: 
     injectingModuleItem.set(false)
 }
 
-// 由 ReaderHook 在 HighlightPageContent 主方法 before/after 调用，标记高亮界面渲染区间。
 internal fun ReaMicroSettingsHook.beginHighlightScreenBuild(onClick: () -> Unit) {
     highlightScreenEntryOnClick = onClick
     highlightScreenBuildDepth.set((highlightScreenBuildDepth.get() ?: 0) + 1)
@@ -382,9 +371,6 @@ internal fun ReaMicroSettingsHook.renderReaderBookGlobalHighlightRulesContent(ro
     renderHostLazyColumn(innerPaddings, listContent, composer)
 }
 
-// 在阅微原生高亮界面顶部注入的容器：读取"补全计划"整页状态（快照读，随点击重组）。
-// plan==0 时渲染"补全计划"入口卡片；plan>0 时渲染占满全屏的补全计划整页覆盖在原生内容之上。
-// 因为读取状态发生在本注入 composable 的重启作用域内，点击改变状态会让本作用域重组切换分支。
 internal fun ReaMicroSettingsHook.renderReaderHighlightScreenContainer(
     bookKey: String,
     bookTitle: String,
@@ -400,7 +386,6 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightScreenContainer(
     }
 }
 
-// 在阅微原生高亮界面顶部注入的"补全计划"入口卡片，样式沿用设置里的 ActionRow 行样式。
 internal fun ReaMicroSettingsHook.renderReaderHighlightScreenEntryCard(
     bookKey: String,
     bookTitle: String,
@@ -419,7 +404,7 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightScreenEntryCard(
             onClick = onClick,
         ),
     )
-    // 用带底部内边距的宿主 Column 包裹卡片，与下方"预设规则"标题拉开间距。
+
     val content = functionProxy("ReaderHighlightScreenEntryCard", FUNCTION3_CLASS) { args ->
         val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
         renderHostActionCard(rows, innerComposer)
@@ -447,8 +432,6 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightScreenEntryCard(
     )
 }
 
-// 通过 LazyListScope.item 在高亮界面 LazyColumn 最前面插入"补全计划"入口。
-// 相比在 SectionTitle 前直接渲染，此方式才能真正成为独立的列表项显示在最上方。
 internal fun ReaMicroSettingsHook.addReaderHighlightScreenEntryLazyItem(
     lazyListScope: Any,
     bookKey: String,
@@ -472,16 +455,16 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightRulesSheetFromReader(
     composer: Any,
     onClose: () -> Unit,
 ) {
-    // 关闭 sheet 时把子页面状态复位到规则列表，避免下次打开仍停留在样式子页。
+
     val closeSheet: () -> Unit = {
         setReaderHighlightSheetSubPage(0)
         onClose()
     }
     val content = functionProxy("ReaderHighlightRulesSheetContent", FUNCTION3_CLASS) { args ->
         val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
-        // 读取子页面状态：0=规则列表，1=高亮样式列表。读值使其可随点击重组翻页。
+
         val subPage = readerHighlightSheetSubPageValue()
-        // 子页面标题与返回行为随状态切换：样式页返回到规则页，规则页返回关闭 sheet。
+
         val onBack: () -> Unit = if (subPage == 1) {
             { setReaderHighlightSheetSubPage(0) }
         } else {
@@ -509,7 +492,6 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightRulesSheetFromReader(
     )
 }
 
-// sheet 内的"高亮样式"子页面：与设置里的高亮样式页一致（添加配置 + 各样式行），点击样式打开编辑弹窗。
 internal fun ReaMicroSettingsHook.renderReaderHighlightSheetStyleList(composer: Any) {
     val listContent = functionProxy("ReaderHighlightSheetStyleList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
@@ -564,10 +546,6 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightSheetStyleList(composer: 
     )
 }
 
-// "补全计划"整页：直接替换阅微原生高亮页（HighlightPageContent）Column 里的正文内容。
-// 由 ReaderHook 在原生第一个分组标题处调用，并把原生标题/预设行/自定义行全部跳过，
-// 使本内容占据原生正文位置（保留原生顶部"高亮"标题栏），实现同一整页内的真实跳转，而非弹窗。
-// plan==1：三段式卡片（样式入口 + 全局/预设 + 单书）；plan==2：高亮样式列表。样式全部复用设置卡片。
 internal fun ReaMicroSettingsHook.renderReaderHighlightScreenPlanPage(bookKey: String, bookTitle: String, composer: Any) {
     val plan = readerHighlightScreenPlanValue()
     val onBack: () -> Unit = when (plan) {
@@ -576,7 +554,7 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightScreenPlanPage(bookKey: S
     }
     renderReaderSheetBackHandler(composer, onBack)
     readerHighlightVersionValue()
-    // 用一个 Column 承载多张设置卡片，卡片之间留出与设置页一致的间距（spacedBy 12dp）。
+
     val content = functionProxy("ReaderHighlightPlanContent", FUNCTION3_CLASS) { args ->
         val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
         if (plan == 2) {
@@ -600,7 +578,6 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightScreenPlanPage(bookKey: S
     )
 }
 
-// 补全计划正文 Column 的 modifier：横向留白与设置页一致（16dp）。
 internal fun ReaMicroSettingsHook.readerHighlightPlanColumnModifier(): Any {
     val filled = method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, 4)
         .invoke(null, modifierInstance(), 0f, 1, null)
@@ -608,7 +585,6 @@ internal fun ReaMicroSettingsHook.readerHighlightPlanColumnModifier(): Any {
         .invoke(null, filled, udp(16), udp(8), 2, null)
 }
 
-// 补全计划-高亮样式子页的行：添加配置 + 各样式行，与设置里的高亮样式页一致。
 internal fun ReaMicroSettingsHook.readerHighlightPlanStyleRows(): List<ActionRow> {
     val highlight = settings.highlightSettings()
     return buildList {
@@ -647,17 +623,17 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightRulesSheetList(
     val listContent = functionProxy("ReaderHighlightRulesSheetList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
         readerHighlightVersionValue()
-        // 样式行置顶：高亮样式入口作为该规则入口内部的第一张卡。
+
         val styleRows = readerHighlightSheetStyleRows()
         addLazyItem(lazyListScope, "reader_highlight_sheet_style_${bookKey}".hashCode()) { itemComposer ->
             renderHostActionCard(styleRows, itemComposer)
         }
-        // 全局（预设）高亮规则。
+
         val globalRuleRows = readerHighlightSheetGlobalRows(bookKey)
         addLazyItem(lazyListScope, "reader_highlight_sheet_global_${bookKey}".hashCode()) { itemComposer ->
             renderHostActionCard(globalRuleRows, itemComposer)
         }
-        // 单书规则：仅显示本书的，直接平铺，不再按书名折叠。
+
         val bookRuleRows = readerHighlightSheetBookRows(bookKey, bookTitle)
         addLazyItem(lazyListScope, "reader_highlight_sheet_book_${bookKey}".hashCode()) { itemComposer ->
             renderHostActionCard(bookRuleRows, itemComposer)
@@ -682,7 +658,6 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightRulesSheetList(
     )
 }
 
-// 样式入口行（置顶）：点击在 sheet 内翻到"高亮样式"子页面（不弹窗），与设置页体验一致。
 internal fun ReaMicroSettingsHook.readerHighlightSheetStyleRows(): List<ActionRow> {
     val highlight = settings.highlightSettings()
     return listOf(
@@ -697,7 +672,6 @@ internal fun ReaMicroSettingsHook.readerHighlightSheetStyleRows(): List<ActionRo
     )
 }
 
-// 全局（预设）高亮规则行：跟随全局开关 + 各规则开关。
 internal fun ReaMicroSettingsHook.readerHighlightSheetGlobalRows(bookKey: String): List<ActionRow> {
     val highlight = settings.highlightSettings()
     val rules = highlight.globalRules()
@@ -772,7 +746,6 @@ internal fun ReaMicroSettingsHook.readerHighlightSheetGlobalRows(bookKey: String
     }
 }
 
-// 单书规则行：仅本书，平铺显示，第一行为"添加本书规则"。
 internal fun ReaMicroSettingsHook.readerHighlightSheetBookRows(bookKey: String, bookTitle: String): List<ActionRow> {
     val highlight = settings.highlightSettings()
     val rules = highlight.rules.filter { it.bookKey.isNotBlank() && it.appliesToBook(bookKey, bookTitle) }
@@ -989,12 +962,6 @@ internal fun ReaMicroSettingsHook.openReaderHighlightStyleDialog(style: ReaderHi
         }
     }
 }
-
-/**
- * 成书样式编辑弹窗。
- *
- * 与高亮样式弹窗同一套组件与顺序；差别是 CSS 按选择器分段填写，并用 WebView 做所见即所得预览。
- */
 
 internal fun ReaMicroSettingsHook.exportReaderHighlightStyle(style: ReaderHighlightStyle) {        val activity = activityProvider() ?: return
     runCatching {
@@ -1408,7 +1375,7 @@ internal fun ReaMicroSettingsHook.openReaderHighlightRuleDialog(rule: ReaderHigh
             var selectedType = if (builtInRule) {
                 rule.type
             } else {
-                // 自建规则只能是可选类型之一；万一存进来别的（旧数据、导入的文件）就退回固定文本。
+
                 rule.type.takeIf { it in READER_HIGHLIGHT_SELECTABLE_TYPES } ?: ReaderHighlightRuleType.FixedText
             }
             var selectedStyleId = rule.styleId.ifBlank { ModuleSettings.READER_HIGHLIGHT_LIGHT_DEFAULT_REFERENCE_ID }
@@ -1458,7 +1425,7 @@ internal fun ReaMicroSettingsHook.openReaderHighlightRuleDialog(rule: ReaderHigh
             val finishButton = settingsDialogButton(activity, "\u5b8c\u6210", colors)
             val deleteButton = settingsDialogButton(activity, "\u5220\u9664", colors, SettingsDialogButtonRole.Destructive)
             val cancelButton = settingsDialogButton(activity, "\u53d6\u6d88", colors, SettingsDialogButtonRole.Neutral)
-            // \u7c7b\u578b\u4e09\u9009\u4e00\u6324\u5728\u4e00\u884c chip \u91cc\uff0c\u6bd4\u539f\u5148\u6bcf\u79cd\u7c7b\u578b\u5360\u4e00\u6574\u884c\u7701\u4e0d\u5c11\u9ad8\u5ea6\u3002
+
             val typeChipRow = settingsDialogChipRow(activity)
             val crossParagraphSwitch = settingsDialogSwitchRow(
                 activity,
@@ -1491,7 +1458,7 @@ internal fun ReaMicroSettingsHook.openReaderHighlightRuleDialog(rule: ReaderHigh
                     ReaderHighlightRuleType.Range -> "\u533a\u95f4\u754c\u5b9a\u7b26\uff0c\u4f8b\u5982\uff1a\u3010\u3011"
                     else -> "\u5339\u914d\u5185\u5bb9"
                 }
-                // \u56fa\u5b9a\u6587\u672c\u6309\u5b57\u9762\u91cf\u5339\u914d\uff0c\u8de8\u6bb5\u65e0\u610f\u4e49\uff0c\u5f00\u5173\u53ea\u5728\u6b63\u5219\u4e0e\u533a\u95f4\u4e0b\u51fa\u73b0\u3002
+
                 crossParagraphSwitch.visibility = if (draft.supportsCrossParagraph) View.VISIBLE else View.GONE
             }
             syncStyleSelection = {
@@ -1536,7 +1503,7 @@ internal fun ReaMicroSettingsHook.openReaderHighlightRuleDialog(rule: ReaderHigh
                         } else {
                             ""
                         },
-                        // 不支持跨段的类型强制存 false，免得切换类型后留下无效的旧值。
+
                         allowCrossParagraph = draft.supportsCrossParagraph && crossParagraphSwitch.isChecked,
                     ),
                 )
@@ -1818,7 +1785,6 @@ internal fun ReaMicroSettingsHook.bumpReaderHighlightVersion() {
         ?.invoke(state, value + 1)
 }
 
-// sheet 子页面导航状态：0=规则列表，1=高亮样式列表。
 internal fun ReaMicroSettingsHook.readerHighlightSheetSubPageState(): Any {
     readerHighlightSheetSubPageUiState?.let { return it }
     return mutableState(0).also { readerHighlightSheetSubPageUiState = it }
@@ -1834,7 +1800,6 @@ internal fun ReaMicroSettingsHook.setReaderHighlightSheetSubPage(page: Int) {
         ?.invoke(state, page)
 }
 
-// "补全计划"整页导航状态：0=原生高亮页，1=规则页，2=高亮样式页。
 internal fun ReaMicroSettingsHook.readerHighlightScreenPlanState(): Any {
     readerHighlightScreenPlanUiState?.let { return it }
     return mutableState(0).also { readerHighlightScreenPlanUiState = it }

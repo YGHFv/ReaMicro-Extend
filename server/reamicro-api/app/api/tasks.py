@@ -1,13 +1,6 @@
-"""云端任务生命周期、心跳与消息回执。
-
-心跳响应里带待发消息，模块显示成功后回执；未回执的留到下次在线重发。
-"""
-
 from typing import Any
 
-from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request, UploadFile, File, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
-from fastapi.security import HTTPBasicCredentials
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import runtime
 import json
@@ -64,8 +57,8 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
     task_type = str(payload.get("taskType", "")).strip()
     if task_type not in {"http", "yeshe_checkin", "yeshe_draw_card", "cloud_auto_read", "traveling_merchant", "pawn"}:
         raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="不支持的任务类型"))
-    # 云端任务一律在服务器执行。device 模式已废弃，客户端仍会带这个字段，这里直接落成
-    # "server"，避免历史客户端又造出永远不执行的设备任务。
+
+
     execution_mode = "server"
     request_value = payload.get("request", {})
     if not isinstance(request_value, dict):
@@ -148,7 +141,7 @@ async def presence_heartbeat(request: Request, owner: str = Depends(task_owner))
     payload = payload if isinstance(payload, dict) else {}
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     lease_until = now + 10 * 60_000
-    # 顺带记录用户活跃：首次出现的阅微账号自动建档，省去管理员手工录入。
+
     touch_user(owner_host_account_id(owner))
     presence = load_presence()
     presence[owner] = {
@@ -163,7 +156,7 @@ async def presence_heartbeat(request: Request, owner: str = Depends(task_owner))
     all_tasks = load_tasks()
     migrated = False
     for task in all_tasks.values():
-        # 云端任务一律在服务器执行：历史遗留的 device 任务随模块上线顺手迁回，无需等服务器重启。
+
         if task.get("executionMode", "server") == "device":
             task["executionMode"] = "server"
             task.pop("deviceLeaseToken", None)
@@ -268,7 +261,7 @@ async def configure_task(task_id: str, request: Request, owner: str = Depends(ta
         task["status"] = "scheduled" if task["enabled"] else "paused"
         task["nextRunAt"] = next_task_run(task) if task["enabled"] else 0
     if "executionMode" in payload:
-        # device 模式已废弃：无论客户端传什么，都落成服务器执行并清掉设备租约残留。
+
         task["executionMode"] = "server"
         task.pop("deviceLeaseToken", None)
         task.pop("deviceLeaseUntil", None)
@@ -287,8 +280,8 @@ async def delete_task(task_id: str, owner: str = Depends(task_owner)) -> dict[st
     tasks, _ = find_owned_task(task_id, owner)
     tasks.pop(task_id, None)
     save_tasks(tasks)
-    # 原先在这里写一条"任务已删除"日志——那会给已不存在的任务**新建**日志文件，
-    # 正是孤儿日志的来源。任务没了，它的日志也没有保留价值，直接删掉。
+
+
     purge_orphan_task_logs(set(tasks))
     return response({"deleted": True})
 

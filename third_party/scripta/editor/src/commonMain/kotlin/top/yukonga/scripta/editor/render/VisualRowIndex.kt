@@ -1,12 +1,5 @@
 package top.yukonga.scripta.editor.render
 
-/**
- * 软换行模式下的「文档行 ↔ 视觉行」映射。每个文档行占若干视觉行（换行后的行数），默认 1；
- * 可见行被测量后用 [setRows] 更新其真实行数。基于 Fenwick 树（BIT），前缀和/按视觉行定位均为 O(log n)，
- * 因此即便跳到第几十万行也无需测量全文——未测量的行按 1 行估算，滚动时自然收敛。
- *
- * 不换行模式不需要它（每行恒 1 行，用平凡公式即可）。
- */
 class VisualRowIndex(lineCount: Int) {
 
     private var n = lineCount
@@ -33,7 +26,6 @@ class VisualRowIndex(lineCount: Int) {
         }
     }
 
-    /** 视觉行数：行 [0, line) 的行数之和。 */
     fun rowsBefore(line: Int): Int {
         var s = 0
         var x = line.coerceIn(0, n)
@@ -45,7 +37,6 @@ class VisualRowIndex(lineCount: Int) {
 
     fun totalRows(): Int = rowsBefore(n)
 
-    /** 包含第 [row] 个视觉行的文档行下标（clamp 到 [0, n-1]）。 */
     fun lineAtRow(row: Int): Int {
         if (n == 0) return 0
         var pos = 0
@@ -63,12 +54,6 @@ class VisualRowIndex(lineCount: Int) {
         return pos.coerceIn(0, n - 1)
     }
 
-    /**
-     * 行结构变化：从 [from] 起的 [oldLines] 行被 [newLines] 行取代。编辑区间外的已测量行数原样保留
-     * （前段不动、尾段平移），新行以 1 行估算落地、可见后经 [setRows] 收敛。这样行数一变不必整表重建：
-     * 重建会把全文档打回 1 行估算，内容总高度骤变、视口跳动。O(n) 数组拷贝 + 重建树——保的是测量数据
-     * 不是渐进复杂度；行数变化（回车/删行）远比击键稀疏，线性拷贝可担。
-     */
     fun splice(from: Int, oldLines: Int, newLines: Int) {
         val f = from.coerceIn(0, n)
         val removed = oldLines.coerceIn(0, n - f)

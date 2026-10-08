@@ -1,35 +1,10 @@
 package com.reamicro.fix.cloud.local
 
 import android.content.Context
-import android.content.Intent
 import android.net.Uri
-import android.graphics.Color
-import android.os.Handler
-import android.os.Looper
 import android.provider.DocumentsContract
-import android.text.TextUtils
-import android.util.TypedValue
-import android.view.Gravity
-import android.view.View
-import android.view.ViewGroup
-import android.widget.LinearLayout
-import android.widget.TextView
-import com.reamicro.fix.R
-import com.reamicro.fix.cloud.webdav.ImportLocalLibraryRowContext
-import com.reamicro.fix.xposed.XposedBridge
-import java.io.File
-import java.lang.ref.WeakReference
-import java.util.Locale
-import java.util.UUID
 import com.reamicro.fix.hook.webdav.*
-import com.reamicro.fix.online.download.importCacheFile
-import com.reamicro.fix.online.download.enqueueNativeImport
 
-// 本地书库（SAF 文档树）的纯逻辑部分。
-//
-// 路径编解码、条目排序、可读路径展示、书籍文件类型判定。
-//
-// 这些函数不依赖 hook 实例——由 已移除的一次性生成工具 编译验证。
 internal fun syntheticLocalLibraryBookEntry(path: String): LocalLibraryEntry =
     LocalLibraryEntry(
         name = path.substringAfterLast(':').decodeLocalPathPart().substringAfterLast('/').ifBlank { LOCAL_LIBRARY_TITLE },

@@ -1,15 +1,6 @@
-"""任务、消息、在线状态与同步密钥的持久化，以及归属标识的历史迁移。
-
-**归属（owner）约定**：只要请求带阅微账号 ID，归属就固定是 `host:<id>`，与认证模式无关。
-旧版本按认证模式拼归属（`host-public:3`、`key:<hash>:host:3`），管理员改一次认证模式就会
-让同一台设备换身份，导致密钥、任务、消息、备份全部失联。`canonicalize_owner_identities`
-在启动时把历史写法折叠回规范形式。
-"""
 import hashlib
-import json
 import secrets
 import shutil
-from datetime import datetime, timezone
 from typing import Any
 
 from app import runtime
@@ -62,13 +53,13 @@ def owner_host_account_id(owner: str) -> str:
 
 
 def canonical_owner_of(owner: str) -> str:
-    """把任意历史归属写法折叠成当前的规范写法。"""
+
     account_id = owner_host_account_id(str(owner or ""))
     return f"host:{account_id}" if account_id else str(owner or "")
 
 
 def legacy_owner_identities(canonical: str) -> list[str]:
-    """列出某个归属标识在历史版本里可能出现过的旧写法，供启动迁移归并。"""
+
     account_id = owner_host_account_id(canonical)
     if not account_id:
         return []
@@ -76,12 +67,7 @@ def legacy_owner_identities(canonical: str) -> list[str]:
 
 
 def canonicalize_owner_identities() -> dict[str, int]:
-    """把历史遗留的归属写法统一成 `host:<阅微账号>`，并归并因此产生的重复记录。
 
-    旧版本按认证模式拼归属（`host-public:3`、`key:<hash>:host:3`、`account:name:host:3`），
-    管理员一改认证模式，同一台设备就换了身份：密钥、任务、消息、在线记录和备份目录全部分裂。
-    这里在启动时做一次性折叠，保证升级后旧数据还能被模块看到。
-    """
     stats = {"credentials": 0, "tasks": 0, "notifications": 0, "presence": 0, "backups": 0}
 
     credentials = load_credentials()
@@ -112,7 +98,7 @@ def canonicalize_owner_identities() -> dict[str, int]:
     if stats["notifications"]:
         save_notifications(notifications)
 
-    # 在线记录以归属为键，折叠后同一账号的多行要合并成最近一次心跳。
+
     presence = load_presence()
     merged: dict[str, dict[str, Any]] = {}
     for key, item in presence.items():
@@ -139,7 +125,7 @@ def canonicalize_owner_identities() -> dict[str, int]:
 
 
 def migrate_legacy_backup_dirs() -> int:
-    """把旧归属写法命名的备份目录迁到规范归属目录下。"""
+
     moved = 0
     accounts = {
         owner_host_account_id(str(item.get("owner", "")))
@@ -159,7 +145,7 @@ def migrate_legacy_backup_dirs() -> int:
                 if not legacy_dir.is_dir():
                     continue
                 if target_dir.exists():
-                    # 规范目录已有数据时不覆盖，仅补齐缺失文件。
+
                     for path in legacy_dir.rglob("*"):
                         if not path.is_file():
                             continue
@@ -177,7 +163,7 @@ def migrate_legacy_backup_dirs() -> int:
 
 
 def merge_duplicate_tasks() -> int:
-    """同一所有者、同一同步密钥、同一任务类型只保留最新任务。"""
+
     tasks = load_tasks()
     groups: dict[tuple[str, str, str], list[tuple[str, dict[str, Any]]]] = {}
     for key, task in tasks.items():
@@ -202,7 +188,7 @@ def merge_duplicate_tasks() -> int:
 
 
 def task_unique_key(task: dict[str, Any]) -> tuple[str, str, str] | None:
-    """返回需要幂等的任务键；通用 HTTP 任务允许多个并存。"""
+
     task_type = str(task.get("taskType", "")).strip()
     credential_id = task_credential_id(task)
     owner = str(task.get("owner", "")).strip()
@@ -222,7 +208,7 @@ def find_duplicate_task(tasks: dict[str, dict[str, Any]], task: dict[str, Any], 
 
 
 def merge_duplicate_credentials() -> int:
-    """归并历史上同一所有者、同一阅微账号产生的重复同步密钥。"""
+
     credentials = load_credentials()
     groups: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
     for key, item in credentials.items():
@@ -291,7 +277,7 @@ def enqueue_task_notification(task: dict[str, Any], result: str, message: str, f
     if isinstance(result_items, list) and result_items:
         notification["items"] = [dict(item) for item in result_items if isinstance(item, dict)]
     items[notification_id] = notification
-    # 每个用户最多保留最近 200 条，防止长期离线无限增长。
+
     owned = sorted((item for item in items.values() if item.get("owner") == task.get("owner")), key=lambda item: int(item.get("createdAt", 0)), reverse=True)
     for expired in owned[200:]:
         items.pop(str(expired.get("id", "")), None)
@@ -346,7 +332,7 @@ def task_credential_id(task: dict[str, Any]) -> str:
 
 
 def _task_title_label(task_type: Any) -> str:
-    """任务类型的中文名。延迟导入 labels 以打破 state ↔ labels 的循环依赖。"""
+
     from app.labels import _admin_task_label
 
     return _admin_task_label(task_type)

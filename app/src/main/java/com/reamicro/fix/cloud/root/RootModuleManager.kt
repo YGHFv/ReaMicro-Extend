@@ -1,6 +1,5 @@
 package com.reamicro.fix.cloud.root
 
-/** Commands are specific to the active root provider, never ksud's global uninstall command. */
 internal data class RootModuleManager(val kind: Kind, val executable: String) {
     enum class Kind { KERNEL_SU, APATCH, MAGISK }
 
@@ -51,8 +50,6 @@ internal data class RootModuleManager(val kind: Kind, val executable: String) {
             return RootModuleManager(kind, binary)
         }
 
-        // su -v identifies the active provider. Only fall back if exactly one installer is present,
-        // so leftovers from a previous root manager cannot silently select the wrong installer.
         val detectScript: String get() = detectionScript("su")
         fun detectionScript(su: String): String = """
             [ "${'$'}(id -u)" = 0 ] || exit 1

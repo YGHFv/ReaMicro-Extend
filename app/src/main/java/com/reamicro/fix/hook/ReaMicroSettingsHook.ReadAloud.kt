@@ -13,12 +13,6 @@ import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
-// 朗读设置簇。
-//
-// 朗读引擎与音色选择、翻页重启、音频焦点、Lyricon 歌词卡片开关。
-//
-// 从 ReaMicroSettingsHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的
-// 结果重新缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaMicroSettingsHook.renderReaderReadAloudSettingsContent(innerPaddings: Any, composer: Any) {
     val listContent = functionProxy("ReaderReadAloudSettingsList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()

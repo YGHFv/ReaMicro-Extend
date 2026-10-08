@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.padding
@@ -315,8 +314,6 @@ fun FloatingBottomBar(
     val pillHighlight = rememberGravityRotatedHighlight(iosIndicatorSpecular, extraDegrees = 90f)
     val combinedBackdrop = rememberCombinedBackdrop(backdrop, tabsBackdrop)
 
-    // 与 KernelSU 一致：胶囊按内容宽度收窄（IntrinsicSize.Min）再由外层居中，
-    // 而不是拉满整行——四个 tab 各有 76dp 最小宽（见调用处 defaultMinSize），整体是一枚窄胶囊。
     Box(modifier = modifier.width(IntrinsicSize.Min), contentAlignment = Alignment.CenterStart) {
         Row(
             Modifier

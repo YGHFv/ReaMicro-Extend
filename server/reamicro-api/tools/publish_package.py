@@ -1,4 +1,3 @@
-"""生成内容包清单；配置 Ed25519 PEM 私钥时同时签名。"""
 import argparse
 import base64
 import hashlib

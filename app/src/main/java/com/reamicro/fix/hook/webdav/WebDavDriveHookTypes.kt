@@ -1,7 +1,5 @@
 package com.reamicro.fix.hook.webdav
 
-import android.app.Activity
-import android.app.Dialog
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
@@ -9,19 +7,12 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import android.view.View
-import android.widget.Toast
-import android.webkit.JavascriptInterface
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.epub.OnlineBodyMarkup
 import com.reamicro.fix.settings.OnlineEpubHeaderScope
-import com.reamicro.fix.xposed.XposedBridge
 import java.io.File
 import com.reamicro.fix.hook.webdav.*
 
-// 从 WebDavDriveHook 提升出来的嵌套类型。
-//
-// 拆分成同包扩展函数后，这些类型要在多个文件里出现；提升到子包顶层配合包级
-// star import，引用点无需加限定名。inner class 需要外部实例，仍留在原类里。
 internal data class OnlineSearchRequest(
     val url: String,
     val method: String = "GET",
@@ -30,18 +21,12 @@ internal data class OnlineSearchRequest(
     val headers: Map<String, String> = emptyMap(),
 )
 
-/** 一张要嵌入 EPUB 的正文插图。 */
 internal data class OnlineContentImage(
     val url: String,
     val fileName: String,
     val bytes: ByteArray,
     val mimeType: String,
 )
-
-/**
- * 扫描所有章节里的插图标记，逐张下载并分配 EPUB 内文件名。下载失败的图片会被跳过（正文里回退成远程
- * `<img>`），不影响其余章节与图片，保证“下载时自动下载插图”尽量成功且不阻断整本导入。
- */
 
 internal data class OnlineHttpResponse(
     val url: String,
@@ -124,24 +109,17 @@ internal data class OnlineCompletionImportResult(
     val bookDir: File?,
 )
 
-/** 一卷在目录中的位置：order 用于卷首页文件名，startIndex 为该卷首章下标。 */
 internal data class OnlineVolumeSegment(
     val order: Int,
     val title: String,
     val startIndex: Int,
 )
 
-/**
- * 成书时随样式一起写入的装饰资源。
- *
- * 分割装饰图与头图都是全书一份，这里只带相对 href 与套用范围，避免把设置对象透到每个渲染函数。
- */
-
 internal data class OnlineEpubDecor(
     val dividerImageHref: String? = null,
     val headerImageHref: String? = null,
     val headerScope: OnlineEpubHeaderScope = OnlineEpubHeaderScope.Off,
-    /** 选中分割样式自带的正文结构，为空时用默认的 `p.te-divider-line`。 */
+
     val transitionMarkup: String = "",
 ) {
     fun headerHtml(isVolumePage: Boolean, isVolumeFirstChapter: Boolean): String {
@@ -219,52 +197,25 @@ internal data class LocalLibrarySearchIndex(
     val complete: Boolean,
 )
 
-/**
- * WebDAV 授权介绍页 / 登录页的配色。
- *
- * 这两页是模块自绘的原生视图，不经过宿主 Compose 主题，深浅色要自己判断。原先所有颜色都
- * 写死浅色（白底 + 深灰字 + 浅灰按钮），深色模式下整屏刺眼。这里按 uiMode 给两套等价取值：
- * 浅色一套与历史外观逐值一致（不改现有效果），深色一套取与 ModuleDialogTheme 深色回退同档的
- * 中性色，品牌色（WebDAV 青绿 / 标题蓝）只提亮、不换色相。
- */
 internal class WebDavPageColors(context: Context) {
-    val dark: Boolean = context.isNightMode()
-
-    /** 页面与系统栏底色。 */
-    val pageBackground: Int = if (dark) Color.rgb(17, 19, 24) else Color.WHITE
-
-    /** 顶栏标题（介绍页）。 */
-    val titleText: Int = if (dark) Color.rgb(229, 231, 235) else Color.rgb(32, 36, 38)
-
-    /** 登录页大标题与输入框正文。 */
-    val primaryText: Int = if (dark) Color.rgb(229, 231, 235) else Color.rgb(34, 38, 40)
-
-    /** 说明文字 / 介绍页提示。 */
-    val bodyText: Int = if (dark) Color.rgb(178, 183, 191) else Color.rgb(94, 98, 102)
-
-    /** 脚注（「登录信息仅保存在本机。」）。 */
-    val noteText: Int = if (dark) Color.rgb(146, 152, 162) else Color.rgb(139, 143, 148)
-
-    /** 返回箭头。 */
-    val backIcon: Int = if (dark) Color.rgb(226, 229, 234) else Color.rgb(34, 38, 40)
-
-    /** 输入框底色与占位符。 */
-    val inputBackground: Int = if (dark) Color.rgb(30, 33, 39) else Color.rgb(247, 247, 247)
-    val hintText: Int = if (dark) Color.rgb(124, 130, 140) else Color.rgb(166, 166, 166)
-
-    /** 中性按钮底（介绍页 CTA、登录页未填全时的提交键），文字恒白。 */
-    val neutralButton: Int = if (dark) Color.rgb(56, 59, 65) else Color.rgb(221, 221, 221)
-
-    /** 品牌青绿（可提交按钮 / 插图主块）。 */
-    val accent: Int = if (dark) Color.rgb(84, 190, 181) else Color.rgb(75, 175, 167)
-
-    /** 登录页品牌标题蓝。 */
-    val brandTitle: Int = if (dark) Color.rgb(122, 168, 238) else Color.rgb(53, 112, 196)
-
-    /** 空态插图的三档中性色（底块 / 纸页 / 装饰线）。 */
-    val illustrationSurface: Int = if (dark) Color.rgb(36, 40, 46) else Color.rgb(243, 246, 247)
-    val illustrationBand: Int = if (dark) Color.rgb(48, 53, 59) else Color.rgb(225, 232, 234)
-    val illustrationLine: Int = if (dark) Color.rgb(62, 68, 75) else Color.rgb(214, 222, 224)
+    private val p = com.reamicro.fix.hook.ModuleDialogTheme.palette(context)
+    private val native = com.reamicro.fix.hook.EmbeddedHostUi.snapshot(context)
+    val dark = p.dark ?: context.isNightMode()
+    val pageBackground = p.pageBackground
+    val titleText = p.title
+    val primaryText = p.title
+    val bodyText = p.body
+    val noteText = p.body
+    val backIcon = p.title
+    val inputBackground = p.rowBackground
+    val hintText = p.body
+    val neutralButton = native?.roles?.get("SurfaceContainerHigh") ?: p.rowBackground
+    val accent = p.primary
+    val actionText = p.onPrimary
+    val brandTitle = p.primary
+    val illustrationSurface = p.rowBackground
+    val illustrationBand = native?.roles?.get("SurfaceContainerHigh") ?: p.border
+    val illustrationLine = p.border
 }
 
 internal class WebDavBackButton(context: Context, private val iconColor: Int) : View(context) {
@@ -377,70 +328,4 @@ internal class WebDavEmptyView(context: Context, private val colors: WebDavPageC
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density + 0.5f).toInt()
-}
-
-internal class WebDavLoginBridge(
-    private val activity: Activity,
-    private val dialog: Dialog,
-    private val prefs: android.content.SharedPreferences,
-    private val closeWithSlide: () -> Unit,
-) {
-    @JavascriptInterface
-    fun back() {
-        activity.runOnUiThread {
-            closeWithSlide()
-        }
-    }
-
-    @JavascriptInterface
-    fun closeNow() {
-        activity.runOnUiThread {
-            dialog.dismiss()
-        }
-    }
-
-    @JavascriptInterface
-    fun save(rawUrl: String?, rawUsername: String?, rawPassword: String?) {
-        val url = normalizeServerUrl(rawUrl.orEmpty())
-        val username = rawUsername.orEmpty().trim()
-        val password = rawPassword.orEmpty()
-        activity.runOnUiThread {
-            when {
-                url.isBlank() -> activity.toast("请输入服务器地址")
-                username.isBlank() -> activity.toast("请输入账号")
-                password.isBlank() -> activity.toast("请输入密码")
-                else -> {
-                    prefs.edit()
-                        .putString(KEY_URL, url)
-                        .putString(KEY_USERNAME, username)
-                        .putString(KEY_PASSWORD, password)
-                        .putString(KEY_BROWSE_DIR, DEFAULT_DIR)
-                        .putBoolean(KEY_AUTHORIZED, true)
-                        .apply()
-                    XposedBridge.log("$LOG_PREFIX WebDAV login saved: ${url.redactWebDavUrl()}")
-                    activity.toast("WebDAV 已保存")
-                    dialog.dismiss()
-                }
-            }
-        }
-    }
-
-    private fun normalizeServerUrl(input: String): String {
-        val trimmed = input.trim().trimEnd('/')
-        if (trimmed.isBlank()) return ""
-        return if (trimmed.startsWith("http://", ignoreCase = true) ||
-            trimmed.startsWith("https://", ignoreCase = true)
-        ) {
-            trimmed
-        } else {
-            "https://$trimmed"
-        }
-    }
-
-    private fun Activity.toast(message: String) {
-        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
-    }
-
-    private fun String.redactWebDavUrl(): String =
-        replace(Regex("""//([^/@]+)@"""), "//***@")
 }

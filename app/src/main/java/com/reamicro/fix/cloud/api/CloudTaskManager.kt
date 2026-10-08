@@ -17,7 +17,7 @@ data class CloudTask(
     val lastMessage: String,
     val executionMode: String,
     val merchantAutoComplete: Boolean = false,
-    /** 执行前祈禳的道观运签签种（空 = 不祈禳）。 */
+
     val blessingType: String = "",
     val merchantCityCode: String = "",
     val merchantPrincipal: Long = 0L,
@@ -135,7 +135,6 @@ class CloudTaskManager(private val client: ApiServerClient) {
 
 }
 
-/** 云端任务族。这些任务一律在**服务器**执行；模块只负责展示配置与投递结果通知。 */
 internal val REAMICRO_AUTOMATION_TASK_TYPES = setOf(
     "yeshe_checkin",
     "yeshe_draw_card",
@@ -144,19 +143,12 @@ internal val REAMICRO_AUTOMATION_TASK_TYPES = setOf(
     "pawn",
 )
 
-/**
- * 云端任务的执行位置：统一为 **server**。
- *
- * 此前阅微类任务被改成 device（模块领租约代跑），现修正回服务器执行——模块进程只保留
- * 不依赖服务器的**本地任务**（LocalTaskStore + LocalTaskRunner）。显式回传 "server"
- * 而非省略该字段，是为了让服务器上已存在的 device 任务在下次保存配置时被迁移回服务器。
- */
 internal fun cloudTaskExecutionMode(@Suppress("UNUSED_PARAMETER") taskType: String): String = "server"
 
 internal fun cloudAutomationSchedule(taskType: String, timeOfDay: String): JSONObject =
     when (taskType) {
         "yeshe_draw_card" -> JSONObject().put("event", "yeshe_checkin_reward_claimed")
-        // 行商通知按固定间隔轮询（默认 4 小时），不绑定每日时间点。
+
         "traveling_merchant" -> JSONObject().put("intervalSeconds", TRAVELING_MERCHANT_POLL_SECONDS)
         else -> JSONObject()
             .put("intervalSeconds", 86_400)
@@ -164,7 +156,6 @@ internal fun cloudAutomationSchedule(taskType: String, timeOfDay: String): JSONO
             .put("timezoneOffsetMinutes", 480)
     }
 
-/** 行商轮询间隔：每 4 小时检查一次行商状态。 */
 internal const val TRAVELING_MERCHANT_POLL_SECONDS = 4L * 3_600L
 
 internal fun parseCloudTask(root: JSONObject): CloudTask {

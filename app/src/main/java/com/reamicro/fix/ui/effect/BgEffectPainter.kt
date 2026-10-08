@@ -1,5 +1,4 @@
 // Adapted from KernelSU manager (GPL-3.0); see assets/licenses/KernelSU-effect-LICENSE.txt.
-// Mirrored from compose-miuix-ui example.
 
 package com.reamicro.fix.ui.effect
 
@@ -14,13 +13,10 @@ import kotlin.math.sin
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
 internal class BgEffectPainter {
 
-    // Constructed on a worker before publication by BgEffectBackground. Do not defer shader
-    // creation to the first draw, and never mutate this instance from the worker after handoff.
     val runtimeShader = RuntimeShader(OS3_BG_FRAG).also {
         initStaticUniforms(it)
     }
 
-    // Android's mutable RuntimeShader keeps uniform updates visible through this cached brush.
     val brush: Brush = runtimeShader.asBrush()
 
     private val resolution = FloatArray(2)

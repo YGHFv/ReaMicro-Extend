@@ -1,45 +1,24 @@
-"""健康检查、能力发现、诊断与指标。
-
-/v1/discovery 是公开的，只暴露认证模式和功能列表，不泄露白名单内容与密钥。
-"""
-
 from typing import Any
 
-from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request, UploadFile, File, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
-from fastapi.security import HTTPBasicCredentials
+from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse, Response
 
 from app import runtime
-import asyncio
 import json
-import secrets
-from app.audit import audit_event
 from app.config_store import (
     load_config,
     public_server_capabilities,
 )
 from app.responses import response
-from app.scheduler import (
-    recover_interrupted_tasks,
-    release_sync_loop,
-    server_snapshot_loop,
-    task_scheduler_loop,
-)
 from app.security import (
-    allow_rate_limit,
     authenticated,
 )
 from app.state import (
-    canonicalize_owner_identities,
     load_credentials,
     load_tasks,
 )
 
 router = APIRouter()
-
-
-
-
 
 
 @router.get("/v1/health")

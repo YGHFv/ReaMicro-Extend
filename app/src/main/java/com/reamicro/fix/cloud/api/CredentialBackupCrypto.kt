@@ -11,7 +11,6 @@ import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 import org.json.JSONObject
 
-/** 客户端口令加密的账号密钥备份；服务器只接触密文。 */
 object CredentialBackupCrypto {
     private const val PREFIX = "RCRED1\n"
 

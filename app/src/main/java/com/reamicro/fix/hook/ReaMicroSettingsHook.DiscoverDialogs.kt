@@ -13,35 +13,14 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
-import com.reamicro.fix.hook.settings.SettingsDialogButtonRole
 import com.reamicro.fix.discover.DiscoverBook
 import com.reamicro.fix.online.download.OnlineBookDownloadMode
 import com.reamicro.fix.hook.webdav.OnlineBookSearchResult
 import com.reamicro.fix.hook.webdav.OnlineDownloadTarget
 import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.discover.DiscoverKind
 import com.reamicro.fix.discover.DiscoverSource
 import com.reamicro.fix.discover.DiscoverState
 
-// 「发现」页的两个选择弹窗：切换书源、选择分类。
-//
-// ## 为什么是原生 Dialog 而不是宿主 Compose 弹窗
-//
-// 模块从不反射宿主的 Dialog / Popup / ModalBottomSheet——那套东西的 `@Composable` 入口
-// 需要一整套 Composition 上下文，在 hook 里没有可靠的位置去挂；模块一贯的做法是
-// 「原生 `android.app.Dialog` + 编程式 View 树」（见 `ReaMicroSettingsHook.Dialogs.kt`）。
-//
-// 因此这里复用同一族构件：`settingsDialogCard` / `settingsDialogTitle` / `settingsDialogInput` /
-// `settingsDialogScroll` / `showSettingsDialog`，配色走 `SettingsDialogColors`——它由
-// `updateModuleDialogTheme(composer)` 从宿主当前 ColorScheme 灌进来，所以弹窗跟随宿主主题
-// （弹窗打开时注入页还在组合中，主题已经同步过一次）。
-//
-// ## 关闭与回写的分工
-//
-// 弹窗自己不持有状态：点中某一项就 `dismiss()`，然后把选择交给 `DiscoverState`；状态变化会
-// `bump()` 版本号，注入页据此重组。所以这里不需要把 UI 状态回传给调用方。
-
-/** 书源弹窗：标题 + 筛选框 + 可点列表，选中项带勾选标记。 */
 internal fun ReaMicroSettingsHook.openDiscoverSourceDialog(
     activity: Activity,
     onSourceChanged: (() -> Unit)? = null,
@@ -52,9 +31,9 @@ internal fun ReaMicroSettingsHook.openDiscoverSourceDialog(
     activity.runOnUiThread {
         runCatching {
             val context: Context = activity
-            val colors = SettingsDialogColors(activity)
+            val colors = SettingsDialogColors(activity, discoverDialogPalette(activity))
             val dialog = Dialog(activity)
-            val card = settingsDialogCard(context, colors)
+            val card = discoverDialogCard(context, colors)
             card.addView(settingsDialogTitle(context, DISCOVER_SOURCE_DIALOG_TITLE, colors))
 
             val input = settingsDialogInput(
@@ -64,7 +43,6 @@ internal fun ReaMicroSettingsHook.openDiscoverSourceDialog(
                 colors = colors,
             ).apply { inputType = android.text.InputType.TYPE_CLASS_TEXT }
 
-            // 列表容器：筛选时整块重建。条目最多几十条，重建代价远低于维护 diff。
             val listHost = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
             var previous = ""
             fun rebuild(keyword: String) {
@@ -102,17 +80,11 @@ internal fun ReaMicroSettingsHook.openDiscoverSourceDialog(
             card.addView(listHost)
             rebuild("")
 
-            showSettingsDialog(dialog, settingsDialogScroll(context, card), activity, 0.92f)
+            showSettingsDialog(dialog, settingsDialogScroll(context, card), activity, 0.92f, dismissOnThemeChange = true)
         }
     }
 }
 
-/**
- * 分类弹窗：标题 + 三列网格，选中项描边高亮。
- *
- * 与书源弹窗同构，区别只是排布：分类动辄几十个，列表要滚很久，三列网格一屏能看到大半，
- * 这也是参考图里的形态。
- */
 internal fun ReaMicroSettingsHook.openDiscoverKindDialog(activity: Activity) {
     val selection = DiscoverState.selection
     val entry = DiscoverState.sources.firstOrNull { it.source.id == selection.sourceId } ?: return
@@ -121,46 +93,26 @@ internal fun ReaMicroSettingsHook.openDiscoverKindDialog(activity: Activity) {
     activity.runOnUiThread {
         runCatching {
             val context: Context = activity
-            val colors = SettingsDialogColors(activity)
+            val colors = SettingsDialogColors(activity, discoverDialogPalette(activity))
             val dialog = Dialog(activity)
-            val card = settingsDialogCard(context, colors)
+            val card = discoverDialogCard(context, colors)
             card.addView(settingsDialogTitle(context, DISCOVER_KIND_DIALOG_TITLE, colors))
 
-            val grid = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-            kinds.chunked(DISCOVER_KIND_DIALOG_COLUMNS).forEach { rowKinds ->
-                val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-                rowKinds.forEach { kind ->
-                    row.addView(
-                        discoverKindDialogCell(context, kind, kind.title == selection.kindTitle, colors) {
-                            dialog.dismiss()
-                            DiscoverState.select(
-                                entry.source.id,
-                                kind.title,
-                                activityProvider()?.applicationContext,
-                            )
-                        },
-                    )
-                }
-                // 补齐末行的空位，否则最后一行的格子会因为 weight 摊分而比上面几行宽。
-                repeat(DISCOVER_KIND_DIALOG_COLUMNS - rowKinds.size) {
-                    row.addView(LinearLayout(context), LinearLayout.LayoutParams(0, 0, 1f))
-                }
-                grid.addView(row)
+            kinds.forEach { kind ->
+                card.addView(discoverDialogAction(context, kind.title, colors) {
+                    dialog.dismiss()
+                    DiscoverState.select(entry.source.id, kind.title, activity.applicationContext)
+                }.apply {
+                    isSelected = kind.title == selection.kindTitle
+                    if (isSelected) background = settingsRoundedRect(colors.primarySoft, settingsDp(context, 8))
+                })
             }
 
-            card.addView(grid)
-            showSettingsDialog(dialog, settingsDialogScroll(context, card), activity, 0.92f)
+            showSettingsDialog(dialog, settingsDialogScroll(context, card), activity, 0.92f, dismissOnThemeChange = true)
         }
     }
 }
 
-/**
- * 书源条目。
- *
- * 文案按「勾选标记 + 源名 +（标识）」拼，与参考图一致：
- * 勾选标记只占位不参与语义；源名是主信息；括号里是对得上书源文件的一组标识
- * （是否需要登录、以及书写别名），用来区分同名源。
- */
 private fun ReaMicroSettingsHook.discoverSourceDialogRow(
     context: Context,
     entry: DiscoverSource,
@@ -185,9 +137,8 @@ private fun ReaMicroSettingsHook.discoverSourceDialogRow(
             settingsDp(context, 10),
         )
         background = settingsRoundedRect(
-            if (selected) colors.primarySoft else colors.field,
+            if (selected) colors.primarySoft else Color.TRANSPARENT,
             settingsDp(context, 8),
-            if (selected) colors.primary else colors.border,
         )
         setOnClickListener { onClick() }
         layoutParams = LinearLayout.LayoutParams(
@@ -196,45 +147,6 @@ private fun ReaMicroSettingsHook.discoverSourceDialogRow(
         ).apply { bottomMargin = settingsDp(context, 8) }
     }
 
-/** 分类格子：三等分宽，选中态换成描边 + 主色文字。 */
-private fun ReaMicroSettingsHook.discoverKindDialogCell(
-    context: Context,
-    kind: DiscoverKind,
-    selected: Boolean,
-    colors: SettingsDialogColors,
-    onClick: () -> Unit,
-): TextView =
-    TextView(context).apply {
-        text = kind.title
-        textSize = 14f
-        gravity = Gravity.CENTER
-        maxLines = 1
-        setTextColor(if (selected) colors.primaryText else colors.title)
-        setPadding(
-            settingsDp(context, 6),
-            settingsDp(context, 12),
-            settingsDp(context, 6),
-            settingsDp(context, 12),
-        )
-        background = settingsRoundedRect(
-            if (selected) colors.card else Color.TRANSPARENT,
-            settingsDp(context, 8),
-            if (selected) colors.primary else Color.TRANSPARENT,
-        )
-        setOnClickListener { onClick() }
-        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-            marginStart = settingsDp(context, 5)
-            marginEnd = settingsDp(context, 5)
-            bottomMargin = settingsDp(context, 8)
-        }
-    }
-
-/**
- * 筛选：匹配源名与标识。
- *
- * 只做大小写不敏感的子串匹配——书源列表通常十几个，用户输入的也多是名字里连续的一小段，
- * 上模糊匹配（分词、拼音）只会让结果更难预测。
- */
 private fun DiscoverSource.matchesSourceFilter(keyword: String): Boolean {
     if (keyword.isBlank()) return true
     val needle = keyword.lowercase()
@@ -243,14 +155,9 @@ private fun DiscoverSource.matchesSourceFilter(keyword: String): Boolean {
         source.aliases.any { it.lowercase().contains(needle) }
 }
 
-/**
- * 括号里的标识：**短**书写别名，用来区分同名源。
- * 曾经还带 `api` 标识（源配置了登录项就显示），但主流书源基本都带登录配置，
- * 弹窗里三个源全挂「（api）」反而是噪音，已移除。
- */
 private fun DiscoverSource.sourceBadge(): String = buildList {
     source.aliases.forEach { alias ->
-        // 别名里混着 `online_<16 位哈希>` 这类内部标识，既长又对用户无意义，直接滤掉。
+
         val short = alias.trim().removePrefix(DISCOVER_SOURCE_ALIAS_PREFIX)
         if (short.isNotEmpty() && short.length <= DISCOVER_SOURCE_BADGE_MAX && short !in this) add(short)
     }
@@ -258,7 +165,7 @@ private fun DiscoverSource.sourceBadge(): String = buildList {
 
 private const val DISCOVER_SOURCE_DIALOG_TITLE = "书源"
 
-private const val DISCOVER_KIND_DIALOG_TITLE = "选择"
+private const val DISCOVER_KIND_DIALOG_TITLE = "分类分组"
 
 private const val DISCOVER_SOURCE_FILTER_HINT = "筛选发现源"
 
@@ -266,49 +173,21 @@ private const val DISCOVER_SOURCE_NO_MATCH = "没有匹配的书源"
 
 private const val DISCOVER_SOURCE_CHECKED_MARK = "✓ "
 
-/** 未选中时用等宽空白占位，让两行文案左边缘对齐。 */
 private const val DISCOVER_SOURCE_UNCHECKED_MARK = "\u2003\u2003"
 
-/** 书写别名里 `online_` 是导入时写入的内部前缀，展示前剥掉。 */
 private const val DISCOVER_SOURCE_ALIAS_PREFIX = "online_"
 
-/** 别名超过这个长度就不展示（内部哈希 id 动辄 16 位）。 */
 private const val DISCOVER_SOURCE_BADGE_MAX = 10
 
-/** 分类弹窗的列数，与参考图一致。 */
-private const val DISCOVER_KIND_DIALOG_COLUMNS = 3
-
-// ── 配置弹窗（书源切换 + 多重组合筛选） ───────────────────────────────────────
-
-/**
- * 发现页配置弹窗：顶栏齿轮点开。
- *
- * 结构（自上而下）：
- *
- * ```
- * [发现配置                    晚风里 ▾]   ← 右上角书源切换按钮，与原来书源行的观感一致
- * [● 发现筛选 ●]                          ← 仅「多重标签筛选」源（晚风里类 @js: 聚合源）
- * [排序　字数最多　　　　　　　　　　▾]
- * [平台　全部　　　　　　　　　　　　▾]
- * [分类　全部　　　　　　　　　　　　▾]
- * [标签　全部　　　　　　　　　　　　▾]
- * [打开当前筛选结果]
- * ```
- *
- * 弹窗不持有状态：组选项的工作副本只在弹窗内存活，点「打开当前筛选结果」才一次性交给
- * [DiscoverState.applyFilterSelection]（落盘 + 生成合成分类 + 触发加载）。
- * 换源通过 [openDiscoverSourceDialog] 的回调就地重建筛选区，不用关掉重开。
- */
 internal fun ReaMicroSettingsHook.openDiscoverConfigDialog(activity: Activity) {
     if (DiscoverState.sources.isEmpty()) return
     activity.runOnUiThread {
         runCatching {
             val context: Context = activity
-            val colors = SettingsDialogColors(activity)
+            val colors = SettingsDialogColors(activity, discoverDialogPalette(activity))
             val dialog = Dialog(activity)
-            val card = settingsDialogCard(context, colors)
+            val card = discoverDialogCard(context, colors)
 
-            // 标题行：左侧标题，右侧书源切换按钮（源名 + ▾，观感与原书源行一致）。
             val titleView = settingsDialogTitle(context, DISCOVER_CONFIG_DIALOG_TITLE, colors)
             titleView.layoutParams = LinearLayout.LayoutParams(
                 0,
@@ -321,6 +200,7 @@ internal fun ReaMicroSettingsHook.openDiscoverConfigDialog(activity: Activity) {
                 maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 setPadding(
                     settingsDp(context, 8),
                     settingsDp(context, 4),
@@ -356,7 +236,7 @@ internal fun ReaMicroSettingsHook.openDiscoverConfigDialog(activity: Activity) {
                     filterHost.addView(settingsDialogHint(context, DISCOVER_CONFIG_NO_FILTER, colors))
                     return
                 }
-                // 工作副本只在弹窗内存活：改选项只刷新行，「打开当前筛选结果」才落盘生效。
+
                 val working = DiscoverState.filterSelection(sourceId).toMutableMap()
 
                 fun buildFilterSection() {
@@ -383,12 +263,8 @@ internal fun ReaMicroSettingsHook.openDiscoverConfigDialog(activity: Activity) {
                             context,
                             colors,
                             onReset = {
-                                DiscoverState.resetFilterSelection(
-                                    sourceId,
-                                    activityProvider()?.applicationContext,
-                                )
                                 working.clear()
-                                working.putAll(DiscoverState.filterSelection(sourceId))
+                                working.putAll(filter.defaultSelection())
                                 buildFilterSection()
                             },
                             onApply = {
@@ -410,14 +286,13 @@ internal fun ReaMicroSettingsHook.openDiscoverConfigDialog(activity: Activity) {
             }
             rebuild()
 
-            showSettingsDialog(dialog, settingsDialogScroll(context, card), activity, 0.92f)
+            showSettingsDialog(dialog, settingsDialogScroll(context, card), activity, 0.92f, dismissOnThemeChange = true)
         }.onFailure {
             XposedBridge.log("$DISCOVER_LOG_PREFIX config dialog failed: ${it.stackTraceToString()}")
         }
     }
 }
 
-/** 「● 发现筛选 ●」小节标，与源自己的面板措辞一致。 */
 private fun ReaMicroSettingsHook.discoverConfigSectionLabel(
     context: Context,
     text: String,
@@ -426,7 +301,7 @@ private fun ReaMicroSettingsHook.discoverConfigSectionLabel(
     TextView(context).apply {
         this.text = text
         textSize = 13f
-        gravity = Gravity.CENTER
+        gravity = Gravity.START
         setTextColor(colors.body)
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -434,68 +309,49 @@ private fun ReaMicroSettingsHook.discoverConfigSectionLabel(
         ).apply { bottomMargin = settingsDp(context, 10) }
     }
 
-/**
- * 一个筛选维度行：左组名、右当前选项 + ▾，整块可点（点开选项弹窗）。
- *
- * 外观对齐书源弹窗的条目（圆角描边块），也呼应参考图里的下拉行。
- */
 private fun ReaMicroSettingsHook.discoverConfigGroupRow(
     context: Context,
     groupName: String,
     selectedTitle: String,
     colors: SettingsDialogColors,
     onClick: () -> Unit,
-): LinearLayout =
-    LinearLayout(context).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(
-            settingsDp(context, 12),
-            settingsDp(context, 10),
-            settingsDp(context, 12),
-            settingsDp(context, 10),
-        )
-        background = settingsRoundedRect(colors.field, settingsDp(context, 8), colors.border)
-        addView(TextView(context).apply {
-            text = groupName
-            textSize = 14f
-            setTextColor(colors.body)
-        })
-        addView(
-            TextView(context),
-            LinearLayout.LayoutParams(0, 0, 1f),
-        )
-        addView(TextView(context).apply {
-            text = selectedTitle.ifBlank { DISCOVER_CONFIG_OPTION_FALLBACK }
-            textSize = 14f
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            setTextColor(colors.title)
-        })
-        addView(TextView(context).apply {
-            text = DISCOVER_CONFIG_ROW_SUFFIX
-            textSize = 12f
-            setTextColor(colors.body)
-            setPadding(settingsDp(context, 6), 0, 0, 0)
-        })
-        setOnClickListener { onClick() }
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { bottomMargin = settingsDp(context, 8) }
-    }
+): LinearLayout = LinearLayout(context).apply {
+    orientation = LinearLayout.HORIZONTAL
+    gravity = Gravity.CENTER_VERTICAL
+    minimumHeight = settingsDp(context, 52)
+    setPadding(0, settingsDp(context, 12), 0, settingsDp(context, 12))
+    addView(TextView(context).apply {
+        text = groupName
+        textSize = 15f
+        setTextColor(colors.title)
+        maxLines = 2
+        ellipsize = android.text.TextUtils.TruncateAt.END
+    }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    addView(TextView(context).apply {
+        text = selectedTitle.ifBlank { DISCOVER_CONFIG_OPTION_FALLBACK }
+        textSize = 14f
+        gravity = Gravity.END
+        maxLines = 2
+        ellipsize = android.text.TextUtils.TruncateAt.END
+        setTextColor(colors.body)
+    }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    addView(TextView(context).apply {
+        text = " ›"
+        textSize = 18f
+        setTextColor(colors.body)
+    })
+    setOnClickListener { onClick() }
+    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+}
 
-/** 底部操作行：「重置」恢复默认选择并清掉合成分类，「筛选」应用当前组合并关窗。 */
 private fun ReaMicroSettingsHook.discoverConfigApplyRow(
     context: Context,
     colors: SettingsDialogColors,
     onReset: () -> Unit,
     onApply: () -> Unit,
 ): LinearLayout {
-    val resetButton = settingsDialogButton(context, DISCOVER_CONFIG_RESET, colors, SettingsDialogButtonRole.Neutral)
-    val applyButton = settingsDialogButton(context, DISCOVER_CONFIG_APPLY, colors, SettingsDialogButtonRole.Primary)
-    resetButton.setOnClickListener { onReset() }
-    applyButton.setOnClickListener { onApply() }
+    val resetButton = discoverTextButton(context, DISCOVER_CONFIG_RESET, colors, onReset)
+    val applyButton = discoverTextButton(context, DISCOVER_CONFIG_APPLY, colors, onApply)
     return settingsDialogButtonRow(context, listOf(resetButton, applyButton)).apply {
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -504,11 +360,6 @@ private fun ReaMicroSettingsHook.discoverConfigApplyRow(
     }
 }
 
-/**
- * 筛选维度的选项弹窗：标题是维度名，下面是单选列表。
- *
- * 与书源弹窗同构（勾选标记 + 选中高亮），只是没有筛选框——选项最多二十来个，一屏够用。
- */
 private fun ReaMicroSettingsHook.openDiscoverFilterOptionDialog(
     activity: Activity,
     group: com.reamicro.fix.discover.DiscoverFilterGroup,
@@ -518,9 +369,9 @@ private fun ReaMicroSettingsHook.openDiscoverFilterOptionDialog(
     activity.runOnUiThread {
         runCatching {
             val context: Context = activity
-            val colors = SettingsDialogColors(activity)
+            val colors = SettingsDialogColors(activity, discoverDialogPalette(activity))
             val dialog = Dialog(activity)
-            val card = settingsDialogCard(context, colors)
+            val card = discoverDialogCard(context, colors)
             card.addView(settingsDialogTitle(context, group.name, colors))
             val listHost = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
             group.options.forEach { option ->
@@ -541,9 +392,8 @@ private fun ReaMicroSettingsHook.openDiscoverFilterOptionDialog(
                             settingsDp(context, 10),
                         )
                         background = settingsRoundedRect(
-                            if (selected) colors.primarySoft else colors.field,
+                            if (selected) colors.primarySoft else Color.TRANSPARENT,
                             settingsDp(context, 8),
-                            if (selected) colors.primary else colors.border,
                         )
                         setOnClickListener {
                             dialog.dismiss()
@@ -557,16 +407,16 @@ private fun ReaMicroSettingsHook.openDiscoverFilterOptionDialog(
                 )
             }
             card.addView(listHost)
-            showSettingsDialog(dialog, settingsDialogScroll(context, card), activity, 0.92f)
+            showSettingsDialog(dialog, settingsDialogScroll(context, card), activity, 0.92f, dismissOnThemeChange = true)
         }
     }
 }
 
-private const val DISCOVER_CONFIG_DIALOG_TITLE = "配置"
+private const val DISCOVER_CONFIG_DIALOG_TITLE = "筛选管理"
 
-private const val DISCOVER_CONFIG_FILTER_SECTION = "● 发现筛选 ●"
+private const val DISCOVER_CONFIG_FILTER_SECTION = "筛选条件"
 
-private const val DISCOVER_CONFIG_APPLY = "筛选"
+private const val DISCOVER_CONFIG_APPLY = "应用"
 
 private const val DISCOVER_CONFIG_RESET = "重置"
 
@@ -574,82 +424,101 @@ private const val DISCOVER_CONFIG_NO_FILTER = "当前书源不支持组合筛选
 
 private const val DISCOVER_NO_SOURCE_TEXT = "未选择书源"
 
-/** 书源切换按钮的后缀箭头，与原来书源行的「▾」一致。 */
 private const val DISCOVER_CONFIG_SOURCE_SUFFIX = " ▾"
-
-private const val DISCOVER_CONFIG_ROW_SUFFIX = "▾"
 
 private const val DISCOVER_CONFIG_OPTION_FALLBACK = "全部"
 
-/**
- * 下载确认弹窗：标题是书名，下面三颗按钮（整本下载 / 逐章加载 / 取消）。
- *
- * 为什么不直接按书源偏好静默开始下载：点下去什么反馈都没有（部分 ROM 上 Toast 还会被吞），
- * 用户看到的就是「点了没反应」。这里先给一次明确确认 + 模式选择，再把任务交给宿主既有的
- * 在线补全下载链路（限流、通知、任务记录都由那条链路负责）。
- */
-internal fun ReaMicroSettingsHook.openDiscoverDownloadDialog(
-    activity: Activity,
-    source: DiscoverSource,
-    book: DiscoverBook,
-) {
+internal fun ReaMicroSettingsHook.openDiscoverBookDialog(activity: Activity, source: DiscoverSource, book: DiscoverBook) {
     activity.runOnUiThread {
+        if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
         runCatching {
-            val context: Context = activity
-            val colors = SettingsDialogColors(activity)
+            val colors = SettingsDialogColors(activity, discoverDialogPalette(activity))
             val dialog = Dialog(activity)
-            val card = settingsDialogCard(context, colors)
-
-            val fullButton = settingsDialogButton(context, "整本下载", colors, SettingsDialogButtonRole.Primary)
-            val onDemandButton = settingsDialogButton(context, "逐章加载", colors, SettingsDialogButtonRole.Neutral)
-            val cancelButton = settingsDialogButton(context, "取消", colors, SettingsDialogButtonRole.Neutral)
-
+            val card = discoverDialogCard(activity, colors)
+            card.addView(settingsDialogTitle(activity, book.name, colors))
+            card.addView(settingsDialogHint(activity, listOf(book.author, source.name).filter { it.isNotBlank() }.joinToString(" · "), colors))
+            val tags = discoverTagLine(book, source)
+            if (tags.isNotBlank()) card.addView(settingsDialogHint(activity, tags, colors))
+            if (book.intro.isNotBlank()) {
+                val introView = settingsDialogHint(activity, book.intro.trim(), colors).apply {
+                    setTextIsSelectable(true)
+                }
+                val introScroll = object : ScrollView(activity) {
+                    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                        val maximum = introView.lineHeight * 6
+                        val height = if (MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.UNSPECIFIED) maximum
+                            else minOf(maximum, MeasureSpec.getSize(heightMeasureSpec))
+                        super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(height, MeasureSpec.AT_MOST))
+                    }
+                }.apply {
+                    overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+                    addView(introView, ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ))
+                }
+                card.addView(introScroll, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+                ).apply { bottomMargin = settingsDp(activity, 10) })
+            }
             fun startDownload(mode: OnlineBookDownloadMode) {
-                dialog.dismiss()
-                val hook = com.reamicro.fix.hook.WebDavDriveHook.activeInstance
+                val hook = WebDavDriveHook.activeInstance
                 if (hook == null) {
                     showToast("在线书源模块未就绪")
                     return
                 }
+                dialog.dismiss()
                 runCatching { hook.startOnlineCompletionDownload(discoverDownloadTarget(source, book), mode) }
-                    .onFailure { XposedBridge.log("$DISCOVER_LOG_PREFIX start download failed: ${it.message}") }
+                    .onFailure {
+                        XposedBridge.log("$DISCOVER_LOG_PREFIX start download failed: ${it.message}")
+                        showToast("无法启动下载，请重试")
+                    }
             }
-
-            card.addView(settingsDialogTitle(context, book.name.ifBlank { DISCOVER_DOWNLOAD_TITLE }, colors))
-            val subtitle = listOf(book.author, source.name).filter { it.isNotBlank() }.joinToString(" · ")
-            if (subtitle.isNotBlank()) {
-                card.addView(settingsDialogHint(context, subtitle, colors))
+            val close = discoverTextButton(activity, "关闭", colors) { dialog.dismiss() }
+            val onDemand = discoverTextButton(activity, "逐章加载", colors) {
+                startDownload(OnlineBookDownloadMode.ON_DEMAND)
             }
-            // 与书单行同一套标签串（状态/字数/章节/平台/时间/分类），下载前信息对齐列表所见。
-            val tagLine = discoverTagLine(book, source)
-            if (tagLine.isNotBlank()) {
-                card.addView(settingsDialogHint(context, tagLine, colors))
+            val full = discoverTextButton(activity, "整本下载", colors) {
+                startDownload(OnlineBookDownloadMode.FULL)
             }
-            // 简介：弹窗里能看全貌再决定下不下。全文展示（作者分段换行保留），
-            // 限高 + 内层滚动——超长简介在框里滑，不再用省略号截断。
-            if (book.intro.isNotBlank()) {
-                val intro = book.intro.trim()
-                val text = if (intro.length > DISCOVER_INTRO_MAX_CHARS) {
-                    intro.take(DISCOVER_INTRO_MAX_CHARS) + DISCOVER_INTRO_ELLIPSIS
-                } else {
-                    intro
-                }
-                card.addView(discoverDownloadIntro(context, text, colors))
-            }
-            card.addView(settingsDialogButtonRow(context, listOf(fullButton, onDemandButton, cancelButton)))
-
-            fullButton.setOnClickListener { startDownload(OnlineBookDownloadMode.FULL) }
-            onDemandButton.setOnClickListener { startDownload(OnlineBookDownloadMode.ON_DEMAND) }
-            cancelButton.setOnClickListener { dialog.dismiss() }
-
-            showSettingsDialog(dialog, settingsDialogScroll(context, card), activity)
+            card.addView(settingsDialogButtonRow(activity, listOf(close, onDemand, full)))
+            showSettingsDialog(dialog, card, activity, dismissOnThemeChange = true)
         }.onFailure {
-            XposedBridge.log("$DISCOVER_LOG_PREFIX download dialog failed: ${it.stackTraceToString()}")
+            XposedBridge.log("$DISCOVER_LOG_PREFIX book dialog failed: ${it.message}")
+            showToast("无法打开书籍面板，请重试")
         }
     }
 }
 
-/** 把发现页条目折成在线补全链路认识的下载目标。 */
+private fun ReaMicroSettingsHook.discoverDialogCard(context: Context, colors: SettingsDialogColors): LinearLayout =
+    settingsDialogCard(context, colors).apply {
+        background = settingsRoundedRect(colors.card, settingsDp(context, 16))
+    }
+
+private fun ReaMicroSettingsHook.discoverDialogAction(
+    context: Context, title: String, colors: SettingsDialogColors, onClick: () -> Unit,
+): LinearLayout = LinearLayout(context).apply {
+    orientation = LinearLayout.VERTICAL
+    minimumHeight = settingsDp(context, 52)
+    setPadding(settingsDp(context, 12), settingsDp(context, 12), settingsDp(context, 12), settingsDp(context, 12))
+    addView(TextView(context).apply {
+        text = title
+        textSize = 15f
+        setTextColor(colors.title)
+    })
+    setOnClickListener { onClick() }
+}
+
+private fun ReaMicroSettingsHook.discoverTextButton(
+    context: Context, title: String, colors: SettingsDialogColors, onClick: () -> Unit,
+): TextView = TextView(context).apply {
+    text = title
+    textSize = 14f
+    gravity = Gravity.CENTER
+    minimumHeight = settingsDp(context, 48)
+    setTextColor(colors.primaryText)
+    setOnClickListener { onClick() }
+}
+
 private fun discoverDownloadTarget(source: DiscoverSource, book: DiscoverBook): OnlineDownloadTarget =
     OnlineDownloadTarget(
         source = source.source,
@@ -668,60 +537,5 @@ private fun discoverDownloadTarget(source: DiscoverSource, book: DiscoverBook): 
             platformName = "",
         ),
     )
-
-private const val DISCOVER_DOWNLOAD_TITLE = "下载"
-
-/**
- * 下载弹窗的简介区：全文 + 限高内滚。
- *
- * 曾经只给 `settingsDialogHint` 一行普通 TextView：书源简介动辄几百字，150 字往后
- * 直接省略号截断，用户看不到全貌。现在全文放进内层 `ScrollView`：
- * - 内容矮于上限时按内容高度走，弹窗不会凭空多出一截空白；
- * - 超过上限就固定在 220dp 里滚动（外层弹窗 ScrollView 会抢滚动事件，触摸时按住 disallow）。
- * 只有 `ScrollView` 的 WRAP_CONTENT 是按内容全高度量的，限高必须在 `onMeasure` 里钳。
- */
-private fun ReaMicroSettingsHook.discoverDownloadIntro(
-    context: Context,
-    text: String,
-    colors: SettingsDialogColors,
-): View =
-    object : ScrollView(context) {
-        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            super.onMeasure(widthMeasureSpec, View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
-            val cap = settingsDp(context, DISCOVER_INTRO_MAX_HEIGHT_DP)
-            if (measuredHeight > cap) setMeasuredDimension(measuredWidth, cap)
-        }
-    }.apply {
-        isVerticalFadingEdgeEnabled = true
-        setFadingEdgeLength(settingsDp(context, 18))
-        isVerticalScrollBarEnabled = true
-        setOnTouchListener { v, event ->
-            // 内层滚动时阻止外层弹窗 ScrollView 抢走触摸，否则简介滚不动。
-            v.parent?.requestDisallowInterceptTouchEvent(true)
-            false
-        }
-        addView(
-            TextView(context).apply {
-                this.text = text
-                textSize = 13f
-                setTextColor(colors.body)
-                setLineSpacing(0f, 1.18f)
-            },
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        )
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { bottomMargin = settingsDp(context, 10) }
-    }
-
-/** 弹窗里简介的保险截断长度（字符）——只防病态超长简介，正常简介全文展示。 */
-private const val DISCOVER_INTRO_MAX_CHARS = 1000
-
-/** 简介滚动区的高度上限（dp）。 */
-private const val DISCOVER_INTRO_MAX_HEIGHT_DP = 220
-
-private const val DISCOVER_INTRO_ELLIPSIS = "…"
 
 private const val DISCOVER_LOG_PREFIX = "[ReaMicro]"

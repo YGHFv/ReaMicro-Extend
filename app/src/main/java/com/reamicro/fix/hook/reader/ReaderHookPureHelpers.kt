@@ -3,9 +3,6 @@ package com.reamicro.fix.hook.reader
 import java.io.File
 import com.reamicro.fix.hook.reader.*
 
-// 从 ReaderHook 提升出来的纯工具函数。
-//
-// 它们不依赖 hook 状态，但被同样提升到本子包的成员扩展函数调用，留在类里就调不到。
 internal fun sameSearchContentPath(relative: String, href: String): Boolean {
     val left = normalizePath(relative).substringBefore('#')
     val right = normalizePath(href).substringBefore('#')

@@ -1,9 +1,3 @@
-"""后台统一外壳与样式。
-
-后台曾有四套互不相同的 CSS（主页面、内容子页、审计日志、登录页），点进子页就变样。
-现在所有页面共用 _admin_layout：同一套侧栏、顶栏和 CSS，子页额外给返回入口。
-错误页按 Accept 头区分：浏览器给可读 HTML，API 客户端给 JSON。
-"""
 import html
 from typing import Any
 
@@ -11,16 +5,9 @@ from fastapi.responses import HTMLResponse
 
 from app import runtime
 from app.config_store import load_config
-from app.labels import _admin_kind_label
 from app.admin.format import admin_section_path
 from app.admin.style import ADMIN_AUTH_STYLE, ADMIN_STYLE
 from app.packages import _admin_package_records
-
-
-# 登录和初始化页没有侧栏，但配色、控件和圆角与后台一致。
-
-
-# 后台全站共用一套样式，子页面（编辑、预览、历史、差异、日志、审计）与主页面外观保持一致。
 
 
 ADMIN_ERROR_HINTS = {
@@ -53,7 +40,7 @@ ADMIN_NAV_LABELS = [
 
 
 def _admin_auth_shell(title: str, subtitle: str, body: str) -> str:
-    """登录与初始化页的外壳。没有侧栏，但配色和控件与后台一致。"""
+
     esc = lambda value: html.escape(str(value), quote=True)
     return (
         f"<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
@@ -63,10 +50,6 @@ def _admin_auth_shell(title: str, subtitle: str, body: str) -> str:
         f"<p class='eyebrow'>ReaMicro API 管理后台</p><h1>{esc(title)}</h1>"
         f"<p class='muted'>{esc(subtitle)}</p>{body}</main></body></html>"
     )
-
-
-
-# 后台全站共用一套样式，子页面（编辑、预览、历史、差异、日志、审计）与主页面外观保持一致。
 
 
 def _admin_layout(
@@ -79,7 +62,7 @@ def _admin_layout(
     records: list[dict[str, Any]] | None = None,
     title: str = "ReaMicro API 管理后台",
 ) -> str:
-    """后台统一外壳：侧栏、顶栏、提示区加内容。所有后台页面都经过这里。"""
+
     esc = lambda value: html.escape(str(value), quote=True)
     counts = records if records is not None else _admin_package_records()
     nav_html = "".join(
@@ -119,7 +102,7 @@ def _admin_shell(
     back_href: str = "",
     back_label: str = "返回内容列表",
 ) -> str:
-    """后台子页面（编辑、预览、历史、差异、日志）的统一外壳，与主页面同一套侧栏和样式。"""
+
     esc = lambda value: html.escape(str(value), quote=True)
     back = f"<a class='button subtle' href='{esc(back_href)}'>← {esc(back_label)}</a>" if back_href else ""
     description_html = f"<p class='muted'>{esc(description)}</p>" if description else ""
@@ -135,7 +118,7 @@ def admin_html(page: str, status_code: int = 200) -> HTMLResponse:
 
 
 def admin_error_page(status_code: int, message: str, request_id: str = "") -> str:
-    """后台错误提示页。此前后台任何异常都直接返回裸 JSON，浏览器里无法阅读。"""
+
     esc = lambda value: html.escape(str(value), quote=True)
     hint = ADMIN_ERROR_HINTS.get(status_code, "操作没有完成。")
     request_note = f"<small>请求 ID：{esc(request_id)}</small>" if request_id else ""
@@ -185,7 +168,7 @@ def admin_setup_page(message: str = "", actor: dict[str, Any] | None = None) -> 
 
 
 def admin_csrf_token(config: dict[str, Any], actor: dict[str, Any]) -> str:
-    """延迟导入 security：外壳要渲染 CSRF 隐藏域，而 security 又要用外壳渲染错误页。"""
+
     from app.security import admin_csrf_token as issue
 
     return issue(config, actor)

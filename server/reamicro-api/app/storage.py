@@ -1,7 +1,3 @@
-"""服务器事务型状态存储。
-
-单机部署默认使用 SQLite WAL；上层仅通过命名空间读写 JSON 对象，便于后续替换 PostgreSQL。
-"""
 import json
 import sqlite3
 import threading

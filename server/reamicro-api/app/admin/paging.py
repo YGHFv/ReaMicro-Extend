@@ -1,9 +1,3 @@
-"""列表分页与大文件尾部读取。
-
-后台原先把审计日志整个文件 `read_text()` 进内存再取最后 800 行全部渲染。
-文件长到几十 MB 时这一下就是几十 MB 的临时字符串，页面也长得没法用。
-内容列表同样是一次渲染全部条目。
-"""
 import html
 from pathlib import Path
 from typing import Any
@@ -29,10 +23,7 @@ def normalize_page_size(value: Any, default: int = DEFAULT_PAGE_SIZE) -> int:
 
 
 def paginate(items: list[Any], page: int, page_size: int = DEFAULT_PAGE_SIZE) -> tuple[list[Any], dict[str, Any]]:
-    """切出当前页，并返回渲染分页控件所需的信息。
 
-    页码越界时回落到最后一页，而不是给出空列表——删掉数据后停在末页仍能看到内容。
-    """
     total = len(items)
     page_size = normalize_page_size(page_size)
     pages = max(1, (total + page_size - 1) // page_size)
@@ -49,7 +40,7 @@ def paginate(items: list[Any], page: int, page_size: int = DEFAULT_PAGE_SIZE) ->
 
 
 def pager_html(info: dict[str, Any], base_path: str, extra: dict[str, str] | None = None) -> str:
-    """渲染分页控件。只有一页时返回计数说明，不显示无用的翻页按钮。"""
+
     esc = lambda value: html.escape(str(value), quote=True)
     params = {key: value for key, value in (extra or {}).items() if str(value).strip()}
 
@@ -79,11 +70,7 @@ def pager_html(info: dict[str, Any], base_path: str, extra: dict[str, str] | Non
 
 
 def read_tail_lines(path: Path, max_lines: int, chunk_size: int = 64 * 1024) -> list[str]:
-    """从文件末尾按块回读，只解码需要的部分。
 
-    审计日志是只追加的 JSONL，通常只关心最近的记录。整文件 read_text() 在文件长了以后
-    会一次性吃掉几十 MB 内存，这里改为从尾部按 64 KB 回读直到凑够行数。
-    """
     if not path.is_file():
         return []
     try:
@@ -104,7 +91,7 @@ def read_tail_lines(path: Path, max_lines: int, chunk_size: int = 64 * 1024) -> 
     except OSError:
         return []
     lines = buffer.decode("utf-8", errors="replace").splitlines()
-    # 第一行可能被块边界截断，除非正好读到文件开头。
+
     if position > 0 and len(lines) > 1:
         lines = lines[1:]
     return lines[-max_lines:]

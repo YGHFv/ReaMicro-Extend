@@ -4,24 +4,11 @@ import android.app.Dialog
 import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
 import android.view.View
 import android.widget.TextView
 import java.io.File
 import com.reamicro.fix.hook.reader.*
-
-// 从 ReaderHook 提升出来的嵌套类型。
-//
-// 拆分成同包扩展函数后，这些类型要在多个文件里出现；提升到子包顶层配合包级
-// star import，引用点无需加限定名。inner class 需要外部实例，仍留在原类里。
-internal data class SearchRenderState(
-    val keyword: String,
-    val currentIndex: Int?,
-    val renderedCount: Int,
-    val lastVolumeKey: String?,
-    val lastGroupKey: String?,
-)
 
 internal data class ReaderHighlightSheetRequest(
     val globalRules: Boolean,
@@ -51,6 +38,7 @@ internal data class NativeSelectionPayload(
 internal data class SearchIndexState(
     val bookKey: String,
     val documents: List<SearchDocument>,
+    val completedQuery: SearchState? = null,
 )
 
 internal data class SearchDocument(
@@ -60,9 +48,10 @@ internal data class SearchDocument(
     val chapterTitle: String,
     val readAloudChapterTitle: String,
     val text: String,
-    val lowerText: String,
     val indexedText: IndexedSearchText,
     val chapterAnchors: List<ChapterAnchor>,
+    val sourceLastModified: Long = file.lastModified(),
+    val sourceLength: Long = file.length(),
 )
 
 internal data class ReadAloudSegment(
@@ -149,11 +138,6 @@ internal data class SearchSnippet(
     val matchEnd: Int,
 )
 
-internal data class NormalizedNodeText(
-    val text: String,
-    val leadingTrim: Int,
-)
-
 internal data class CfiBase(
     val spineIndex: Int,
     val itemRefIndex: Int,
@@ -165,20 +149,6 @@ internal data class OnDemandPageLocation(
     val href: String,
 )
 
-internal data class BlockState(
-    val path: List<Int>,
-    var offset: Int = 0,
-)
-
-internal data class ElementFrame(
-    val name: String,
-    val step: Int,
-    val path: List<Int>,
-    var elementChildCount: Int = 0,
-    var textChildCount: Int = 0,
-    val block: BlockState? = null,
-)
-
 internal data class TextSpan(
     val start: Int,
     val end: Int,
@@ -186,43 +156,35 @@ internal data class TextSpan(
     val elementSteps: List<Int>,
     val textStep: Int,
     val textOffset: Int,
+    val sourceCfiPrefix: String? = null,
 )
 
 internal data class IndexedSearchText(
     val text: String,
     val spans: List<TextSpan>,
+    val sourceDigest: String = "",
 ) {
-    fun cfiAt(index: Int): String? {
-        val span = spans.firstOrNull { index >= it.start && index < it.end } ?: return null
-        return span.cfiAt(index - span.start)
+    private fun spanAt(index: Int): TextSpan? {
+        var low = 0; var high = spans.lastIndex
+        while (low <= high) {
+            val mid = (low + high) ushr 1
+            val span = spans[mid]
+            if (index < span.start) high = mid - 1
+            else if (index >= span.end) low = mid + 1
+            else return span
+        }
+        return null
     }
+    fun cfiAt(index: Int): String? = spanAt(index)?.let { it.cfiAt(index - it.start) }
 
     fun cfiAtBoundary(index: Int): String? {
         val bounded = index.coerceIn(0, text.length)
-        val span = spans.firstOrNull { bounded > it.start && bounded <= it.end }
-            ?: spans.firstOrNull { bounded >= it.start && bounded < it.end }
-            ?: return null
+        val span = spanAt(bounded - 1) ?: spanAt(bounded) ?: return null
         return span.cfiAt(bounded - span.start)
     }
 
-    fun cfiAtSearchJump(startIndex: Int, length: Int): String? {
-        if (text.isEmpty()) return null
-        val safeStart = startIndex.coerceIn(0, text.lastIndex)
-        val safeLength = length.coerceAtLeast(1)
-        val safeEnd = safeStart + safeLength
-        val lastMatchIndex = (safeStart + safeLength - 1).coerceIn(safeStart, text.lastIndex)
-        val candidates = listOf(
-            safeEnd + 16,
-            safeEnd + 4,
-            safeEnd,
-            lastMatchIndex,
-            (safeStart + safeLength / 2).coerceIn(safeStart, lastMatchIndex),
-            safeStart,
-        ).distinct()
-        return candidates.firstNotNullOfOrNull { cfiAtBoundary(it) ?: cfiAt(it.coerceAtMost(text.lastIndex)) }
-    }
-
     private fun TextSpan.cfiAt(relativeIndex: Int): String {
+        sourceCfiPrefix?.let { return "$it${(textOffset + relativeIndex).coerceAtLeast(0)})" }
         val elementPath = elementSteps.joinToString(separator = "") { "/$it" }
         val offset = (textOffset + relativeIndex).coerceAtLeast(0)
         return "epubcfi(/${base.spineIndex}/${base.itemRefIndex}/4$elementPath/${textStep}:$offset)"
@@ -242,6 +204,7 @@ internal data class FullTextSearchResult(
     val snippetMatchStart: Int,
     val snippetMatchEnd: Int,
     val matchText: String,
+    val sourceDigest: String = "",
 )
 
 internal data class DictionaryDialogHandle(
@@ -252,53 +215,6 @@ internal data class DictionaryDialogHandle(
     var currentPresetId: String,
 ) {
     var requestId: Long = 0L
-}
-
-internal class SearchMenuButtonView(context: Context) : View(context) {
-    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-    }
-    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = dp(context, 1).toFloat()
-    }
-    private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = dp(context, 3).toFloat()
-        strokeCap = Paint.Cap.ROUND
-    }
-
-    init {
-        refreshColors()
-    }
-
-    fun refreshColors() {
-        val colors = DialogColors(context)
-        fillPaint.color = colors.cardBackground
-        strokePaint.color = colors.stroke
-        iconPaint.color = colors.actionBackground
-        invalidate()
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        val cx = width / 2f
-        val cy = height / 2f
-        val radius = (minOf(width, height) / 2f) - dp(context, 1)
-        canvas.drawCircle(cx, cy, radius, fillPaint)
-        canvas.drawCircle(cx, cy, radius, strokePaint)
-        val lensRadius = dp(context, 7).toFloat()
-        val lensCx = cx - dp(context, 3)
-        val lensCy = cy - dp(context, 3)
-        canvas.drawCircle(lensCx, lensCy, lensRadius, iconPaint)
-        canvas.drawLine(
-            lensCx + lensRadius * 0.72f,
-            lensCy + lensRadius * 0.72f,
-            lensCx + lensRadius * 1.55f,
-            lensCy + lensRadius * 1.55f,
-            iconPaint,
-        )
-    }
 }
 
 internal class ReadAloudMenuButtonView(context: Context) : View(context) {
@@ -369,20 +285,19 @@ internal class ReadAloudMenuButtonView(context: Context) : View(context) {
 }
 
 internal class DialogColors(context: Context) {
-    val dark: Boolean = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-        Configuration.UI_MODE_NIGHT_YES
-    private val theme: ThemeColors? = latestThemeColors
-    val pageBackground: Int = theme?.pageBackground ?: if (dark) Color.rgb(17, 19, 24) else Color.WHITE
-    val cardBackground: Int = theme?.cardBackground ?: if (dark) Color.rgb(38, 38, 38) else Color.WHITE
-    val inputBackground: Int = theme?.inputBackground ?: if (dark) Color.rgb(44, 44, 44) else Color.WHITE
-    val primaryText: Int = theme?.primaryText ?: if (dark) Color.rgb(238, 238, 238) else Color.rgb(25, 25, 25)
-    val secondaryText: Int = theme?.secondaryText ?: if (dark) Color.rgb(170, 170, 170) else Color.rgb(118, 118, 118)
-    val stroke: Int = theme?.stroke ?: if (dark) Color.rgb(68, 68, 68) else Color.rgb(228, 228, 228)
-    val searchChipBackground: Int = theme?.chipBackground ?: if (dark) Color.rgb(42, 42, 42) else Color.rgb(246, 246, 248)
-    val inputStroke: Int = if (dark) Color.rgb(236, 162, 100) else Color.rgb(238, 118, 62)
-    val actionBackground: Int = theme?.action ?: if (dark) Color.rgb(180, 112, 64) else Color.rgb(238, 118, 62)
-    val actionText: Int = Color.WHITE
-    val accent: Int = actionBackground
+    private val palette = com.reamicro.fix.hook.ModuleDialogTheme.palette(context)
+    val dark: Boolean = palette.dark ?: ((context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES)
+    val pageBackground = palette.pageBackground
+    val cardBackground = palette.rowBackground
+    val inputBackground = palette.rowBackground
+    val primaryText = palette.title
+    val secondaryText = palette.body
+    val stroke = palette.border
+    val searchChipBackground = palette.rowBackground
+    val inputStroke = palette.border
+    val actionBackground = palette.primary
+    val actionText = palette.onPrimary
+    val accent = palette.primary
 }
 
 internal data class ThemeColors(

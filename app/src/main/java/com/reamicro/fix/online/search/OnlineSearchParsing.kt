@@ -1,72 +1,29 @@
 package com.reamicro.fix.online.search
 
-import android.content.Context
-import android.graphics.BitmapFactory
-import android.graphics.Color
-import android.os.Handler
-import android.os.Looper
-import android.text.TextUtils
 import android.util.Base64
-import android.util.TypedValue
-import android.view.Gravity
-import android.view.View
-import android.view.ViewGroup
-import android.widget.ImageView
-import android.widget.LinearLayout
-import android.widget.TextView
-import android.widget.Toast
-import com.reamicro.fix.online.OnlineConcurrentRateLimiter
-import com.reamicro.fix.online.OnlineSourceAuth
 import com.reamicro.fix.online.OnlineSourceEntry
-import com.reamicro.fix.online.OnlineSourceLoginConfig
 import com.reamicro.fix.online.OnlineJsonPathCompat
-import com.reamicro.fix.online.OnlineSourceScriptCompat
-import com.reamicro.fix.online.OnlineSourceTrxsCompat
-import com.reamicro.fix.online.search.applyOnlineChapterListRuleCompat
-import com.reamicro.fix.online.search.cleanOnlineChapterTitleValue
-import com.reamicro.fix.online.search.evaluateQqReaderCoverRule
 import com.reamicro.fix.online.search.formatOnlineWordCountValue
 import com.reamicro.fix.online.search.inferOnlineStatusFromLastChapterTitle
-import com.reamicro.fix.online.search.isOnlineChapterCountSelector
-import com.reamicro.fix.online.search.onlineSearchRelevanceScore
-import com.reamicro.fix.online.search.onlineHttpErrorDetail
-import com.reamicro.fix.online.download.OnlineSourceHttpException
-import com.reamicro.fix.online.search.parseOnlineUrlRequestCompat
-import com.reamicro.fix.online.search.resolveOnlineChapterListRuleCompat
 import com.reamicro.fix.online.search.resolveOnlineUrlCompat
 import com.reamicro.fix.xposed.XC_MethodHook
 import com.reamicro.fix.xposed.XposedBridge
-import java.lang.ref.WeakReference
-import java.lang.reflect.Method
-import java.net.HttpURLConnection
 import java.net.URI
-import java.net.URL
-import java.net.URLEncoder
-import java.nio.charset.Charset
 import java.text.SimpleDateFormat
 import java.util.Locale
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import org.json.JSONArray
 import org.json.JSONObject
 import com.reamicro.fix.hook.webdav.*
 
-// 在线源搜索的解析引擎。
-//
-// 按书源规则解析 JSON/HTML 搜索结果、抽取书名作者封面、格式化字数与更新时间、
-// 归一化连载状态。
-//
-// 这些函数不依赖 hook 实例——由 已移除的一次性生成工具 编译验证：逐个去掉
-// 接收者后整仓仍能编译。
 internal fun sanitizeHostCloudSearchResults(param: XC_MethodHook.MethodHookParam, map: Map<*, *>) {
     runCatching {
-        // 仅保留 host 原生可渲染的键（WebDAV / 本地库），补全键交给我们自己渲染。
+
         val hasOnlineEntry = map.containsKey(BACKUP_TYPE_ONLINE_COMPLETION)
         if (!hasOnlineEntry) return
         val sanitized = LinkedHashMap<Any?, Any?>()
         map.forEach { (key, value) ->
             if (key == BACKUP_TYPE_ONLINE_COMPLETION) return@forEach
-            // 空列表也剔除，避免任何 host 版本对空 list 做 get(0)
+
             if (value is List<*> && value.isEmpty()) return@forEach
             sanitized[key] = value
         }
@@ -76,9 +33,8 @@ internal fun sanitizeHostCloudSearchResults(param: XC_MethodHook.MethodHookParam
     }
 }
 
-// 定位 legado searchUrl 中 options block 的起始逗号位置（",{" 之前）。
 internal fun indexOfOptionsBlock(raw: String): Int {
-    // 避免误匹配 URL 自身的查询参数；legado options 块以 ",{" 或 ", {" 开头且是合法 JSON 对象。
+
     val candidates = listOf(",{", ", {")
     for (sep in candidates) {
         val idx = raw.indexOf(sep)
@@ -368,9 +324,7 @@ internal fun replaceFanqieCover(raw: String): String {
         .trimStart('/')
     val imagePath = when {
         path.isBlank() -> return ""
-        // bookmall 长路径（reading/bookapi/bookmall/cell/change/v1/novel-pic/<hash>）在
-        // /origin/ 下会 403，同一 hash 挂 novel-pic/ 短路径可取（实测 200）——
-        // 统一截到最后一段 novel-pic/ 再拼。
+
         else -> path.substringAfterLast("novel-pic/", path).ifBlank { path }.let { normalized ->
             when {
                 normalized.startsWith("novel-pic/", ignoreCase = true) -> normalized

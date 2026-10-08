@@ -15,7 +15,7 @@ import java.io.File
 import java.util.concurrent.Executors
 
 internal object RootTaskBridge {
-    // 保留旧 prefs 名，避免升级后丢失用户已有的执行模式状态（改名会读不到旧值）。
+
     @Volatile var lastInspection: RootModuleStatus? = null
         private set
     fun wasAccessRequested(context: Context): Boolean =
@@ -33,10 +33,8 @@ internal object RootTaskBridge {
 
     private fun prepareTransport(context: Context) = RootCommandRunner.setCustomSuPath(customSuPath(context))
     private const val PREFS = "reamicro_ksu_tasks"
-    private const val RUNNER = "${RootTaskRepository.MODULE_DIRECTORY}/runner.sh"
-    /** 内置模块包在 APK assets 里的目录；打包任务会放一个 `ReaMicro-Automation-Root-*.zip`。 */
+
     private const val BUNDLED_MODULE_DIRECTORY = "module"
-    private const val MODULE_UPDATE_DIRECTORY = RootModuleManager.UPDATE_DIRECTORY
     private const val LOG_TAG = "ReaMicroRoot"
     private val syncLock = Any()
     private var syncQueued = false
@@ -46,7 +44,6 @@ internal object RootTaskBridge {
 
     fun isEnabled(context: Context): Boolean = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("enabled", false)
 
-    // New status values are language-neutral. Legacy Chinese values remain readable on upgrade.
     private const val STATUS_SWITCHING = "handoff_to_ksu"
     private const val STATUS_DISABLED = "root_disabled"
     private const val STATUS_RUNNING = "daemon_running"
@@ -58,7 +55,6 @@ internal object RootTaskBridge {
         return prefs.getString("statusError", "").orEmpty()
     }
 
-    /** Read-only. Permission budget is separate from the constant-time module inspection. */
     @Synchronized
     fun inspect(context: Context, authorizationTimeoutSeconds: Long = 60): RootModuleStatus {
         prepareTransport(context)
@@ -94,10 +90,6 @@ internal object RootTaskBridge {
         RootModuleManager.parse(RootCommandRunner.run(RootModuleManager.detectionScript(RootCommandRunner.selectedExecutable()), timeoutSeconds = 15))
             ?: error(context.moduleString(R.string.error_ksu_missing_ksud))
 
-    /**
-     * Install/update the SAME module ID through its manager. The manager replaces the staged
-     * directory; never run uninstall.sh or delete an active module as part of an update.
-     */
     private fun lifecycle(context: Context) = RootModuleLifecycle(
         inspect = { inspect(context, authorizationTimeoutSeconds = 15) },
         manager = { manager(context) },
@@ -122,7 +114,6 @@ internal object RootTaskBridge {
             RootModuleInstallDecision.INSTALL -> error("模块准备状态错误")
         }
 
-    /** Install/update without changing task ownership. */
     @Synchronized
     fun installOrUpdate(context: Context): String {
         require(android.os.Process.myUid() / 100000 == 0) { context.moduleString(R.string.error_ksu_primary_user) }
@@ -132,7 +123,6 @@ internal object RootTaskBridge {
         return hint ?: context.moduleString(R.string.execution_module_up_to_date)
     }
 
-    /** Exactly one checked bundle; stale generated assets must never win firstOrNull(). */
     private fun extractBundledModule(context: Context): File {
         val names = context.assets.list(BUNDLED_MODULE_DIRECTORY).orEmpty()
             .filter { it.startsWith("ReaMicro-Automation-Root-") && it.endsWith(".zip", ignoreCase = true) }
@@ -161,12 +151,10 @@ internal object RootTaskBridge {
             check(status.rootAvailable) { status.error.ifBlank { context.moduleString(R.string.execution_root_permission_hint) } }
             check(status.inspectionComplete) { status.error }
             if (wasRoot) {
-                // Persist the disabled state only after the in-flight Root execution has drained
-                // and its final, credential-redacted snapshot has been restored.
+
                 handoff(context).disable()
             } else if (status.statePresent) {
-                // Cancel stale Root ownership/credentials, but do not overwrite current app
-                // task state with an old Root snapshot.
+
                 command(context, "disable", timeoutSeconds = 60)
             }
             cleanupLegacyWake(context)
@@ -272,8 +260,7 @@ internal object RootTaskBridge {
         }
         worker.execute {
             while (true) {
-                // Requests arriving during a pass get their own pass and keep their callbacks;
-                // previously every callback but the first was silently dropped.
+
                 val callbacks = synchronized(syncLock) {
                     syncDirty = false
                     syncCallbacks.toList().also { syncCallbacks.clear() }

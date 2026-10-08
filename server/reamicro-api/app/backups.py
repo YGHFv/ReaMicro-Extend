@@ -1,8 +1,3 @@
-"""服务器快照与加密密钥轮换。
-
-快照包含 SQLite 数据库与 server.json，带完整性清单可校验。轮换密钥时会用旧密钥
-解出全部密文再用新密钥写回，并在动手前自动留一份安全快照。
-"""
 import hashlib
 import json
 import re
@@ -16,10 +11,9 @@ from typing import Any
 from fastapi import HTTPException
 
 from app import runtime
-from app.audit import audit_event
-from app.config_store import bounded_config_int, load_config, save_config
+from app.config_store import load_config, save_config
 from app.responses import response
-from app.crypto import decrypt_secret, encrypt_secret, secret_key_id, validate_admin_password
+from app.crypto import decrypt_secret, encrypt_secret, validate_admin_password
 from app.state import load_credentials, load_tasks, save_credentials, save_tasks
 
 
@@ -102,7 +96,7 @@ def verify_server_snapshot(path: Path) -> dict[str, Any]:
 
 
 def resolve_snapshot_path(filename: str) -> Path:
-    """校验快照文件名并返回数据卷内的实际路径。"""
+
     if not re.fullmatch(r"reamicro-server-[0-9TZ-]+\.zip", filename):
         raise HTTPException(status_code=400, detail=response(code="BACKUP_INVALID", message="备份文件名无效"))
     path = (runtime.SERVER_BACKUP_ROOT / filename).resolve()
@@ -112,7 +106,7 @@ def resolve_snapshot_path(filename: str) -> Path:
 
 
 def restore_server_snapshot(filename: str) -> dict[str, Any]:
-    """校验并恢复服务器快照；恢复前先自动创建一份安全快照。"""
+
     path = resolve_snapshot_path(filename)
     verification = verify_server_snapshot(path)
     if not verification.get("valid"):
@@ -135,4 +129,3 @@ def restore_server_snapshot(filename: str) -> dict[str, Any]:
     with runtime.state_store_lock:
         state_store = None
     return {"restored": True, "filename": filename, "safetySnapshot": safety_snapshot.name}
-

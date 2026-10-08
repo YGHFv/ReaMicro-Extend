@@ -2,7 +2,6 @@
     <string name="module_name">阅微补全计划</string>
     <string name="module_description">Make ReaMicro Great Again!</string>
 
-    <!-- 语言 -->
     <string name="section_language">语言</string>
     <string name="pref_app_language_title">应用语言</string>
     <string name="pref_app_language_summary">选择界面显示的语言</string>
@@ -10,7 +9,6 @@
     <string name="language_zh">简体中文</string>
     <string name="language_en">English</string>
 
-    <!-- 界面 -->
     <string name="section_interface">界面</string>
     <string name="pref_theme_title">主题</string>
     <string name="pref_theme_summary">选择应用的主题模式</string>
@@ -24,7 +22,6 @@
     <string name="pref_liquid_glass_title">液态玻璃</string>
     <string name="pref_liquid_glass_summary">启用悬浮底栏的液态玻璃效果</string>
 
-    <!-- 个性化 -->
     <string name="section_personalization">个性化</string>
     <string name="pref_app_icon_title">切换应用图标</string>
     <string name="pref_hide_recent_title">隐藏后台卡片</string>
@@ -37,7 +34,6 @@
     <string name="toast_icon_switch_failed">切换图标失败，当前系统可能限制了组件管理</string>
     <string name="toast_icon_multiple">检测到多个桌面入口，已按当前配色对齐；若仍异常可执行 am start -n %1$s/%2$s</string>
 
-    <!-- 手势 -->
     <string name="section_gesture">手势</string>
     <string name="pref_predictive_back_title">预测性返回手势</string>
     <string name="pref_predictive_back_summary">启用对预测性返回手势的支持</string>
@@ -49,7 +45,6 @@
     <string name="pager_gesture_cross">跨轴拦截</string>
     <string name="pager_gesture_ios">iOS 风格</string>
 
-    <!-- Module pages and task dialogs -->
     <string name="task_daily_lore">每日轶闻</string>
     <string name="task_auto_wish">自动祈愿</string>
     <string name="task_auto_read">自动阅读</string>
@@ -197,7 +192,6 @@
     <string name="icon_violet">紫罗</string>
     <string name="icon_slate">石青</string>
 
-    <!-- Diagnostics and record presentation -->
     <string name="pawn_empty">暂无可选期物</string>
     <string name="pawn_none_locked">未锁定任何项（全部可典当）</string>
     <string name="pawn_item_with_hint">%1$s（%2$s）</string>

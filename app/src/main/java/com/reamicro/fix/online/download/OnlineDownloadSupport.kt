@@ -1,57 +1,18 @@
 package com.reamicro.fix.online.download
 
-import com.reamicro.fix.hook.WebDavDriveHook.OnlineChapterBatchSession
-import android.app.Notification
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
-import android.content.Intent
-import android.graphics.Path
-import android.os.Handler
-import android.os.Looper
 import android.os.SystemClock
-import android.os.Build
 import android.util.Base64
-import android.widget.Toast
-import com.reamicro.fix.R
-import com.reamicro.fix.online.FanqieParagraphCommentApi
-import com.reamicro.fix.online.OnlineConcurrentRateLimiter
-import com.reamicro.fix.online.OnlineParagraphCommentCache
 import com.reamicro.fix.online.OnlineParagraphCommentCacheStore
-import com.reamicro.fix.online.OnlineParagraphCommentCount
-import com.reamicro.fix.online.OnlineParagraphIndexMapper
-import com.reamicro.fix.online.OnlineSourceDailyLimitException
-import com.reamicro.fix.online.OnlineSourceDownloadPolicyStore
-import com.reamicro.fix.online.OnlineSourceAuth
-import com.reamicro.fix.online.OnlineSourceEntry
-import com.reamicro.fix.online.OnlineSourceScriptCompat
-import com.reamicro.fix.online.OnlineSourceStore
-import com.reamicro.fix.online.OnlineSourceTrxsCompat
-import com.reamicro.fix.notification.cancelOnlineCompletionNotificationIfDone
-import com.reamicro.fix.notification.onlineCompletionDownloadBigText
-import com.reamicro.fix.notification.onlineCompletionDownloadText
-import com.reamicro.fix.notification.onlineCompletionDownloadTitle
-import com.reamicro.fix.logging.ModuleLogState
 import com.reamicro.fix.cloud.webdav.CacheDeleteStat
 import com.reamicro.fix.cloud.webdav.CancellableWebDavDownload
 import com.reamicro.fix.online.epub.OnlineChapterImageMarkup
 import com.reamicro.fix.online.search.cleanOnlineChapterContentValue
 import com.reamicro.fix.online.search.decodeOnlineHtmlEntities
-import com.reamicro.fix.online.search.evaluateOnlineChapterUrlRule
-import com.reamicro.fix.online.download.isPermanentOnlineChapterFailure
-import com.reamicro.fix.online.download.onlineHttpRetryDelayMs
-import com.reamicro.fix.online.download.onlineHttpRetryKind
-import com.reamicro.fix.online.download.OnlineHttpRetryKind
-import com.reamicro.fix.cloud.webdav.NativeCloudDownload
 import com.reamicro.fix.cloud.webdav.OnlineCompletionDownloadCancelledException
 import com.reamicro.fix.cloud.webdav.OnlineCompletionDownloadTask
 import com.reamicro.fix.cloud.webdav.OnlineDownloadedChapter
-import com.reamicro.fix.online.download.OnlineBookDownloadMode
-import com.reamicro.fix.online.download.OnlineChapterState
-import com.reamicro.fix.online.download.OnlineOnDemandChapter
-import com.reamicro.fix.online.download.OnlineOnDemandChapterRequest
-import com.reamicro.fix.online.download.OnlineOnDemandMetadata
-import com.reamicro.fix.online.download.OnlineOnDemandMetadataStore
 import com.reamicro.fix.online.download.OnlineChapterContentValidator
 import com.reamicro.fix.online.download.OnlineChapterUpdatePlanner
 import com.reamicro.fix.online.download.RemoteOnlineChapter
@@ -60,43 +21,19 @@ import com.reamicro.fix.xposed.XposedBridge
 import java.io.BufferedInputStream
 import java.io.File
 import java.lang.reflect.Method
-import java.lang.reflect.Modifier
-import java.net.HttpURLConnection
-import java.net.URL
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
-import java.util.Locale
 import java.util.UUID
 import java.util.zip.ZipInputStream
 import org.json.JSONArray
 import org.json.JSONObject
 import com.reamicro.fix.hook.webdav.*
-import com.reamicro.fix.online.epub.onlineSourceIdFromUuid
-import com.reamicro.fix.online.epub.safeOnlineFileName
-import com.reamicro.fix.online.epub.defaultOnlineChapterHrefs
-import com.reamicro.fix.online.search.parseOnlineJsonRoot
-import com.reamicro.fix.online.search.resolveOnlineUrl
-import com.reamicro.fix.online.search.onlineJsonRuleValues
 import com.reamicro.fix.online.search.onlineJsonString
-import com.reamicro.fix.online.epub.onlineVolumeSegments
-import com.reamicro.fix.online.epub.onlineCompletionExistingCoverExt
-import com.reamicro.fix.online.epub.onlineTocNcx
-import com.reamicro.fix.online.epub.onlineContentOpf
-import com.reamicro.fix.online.epub.existingOnlineChapterImageHrefs
-import com.reamicro.fix.online.epub.chapterXhtml
-import com.reamicro.fix.online.epub.onlineBookUuid
-import com.reamicro.fix.online.epub.onlineImportedBookBackupId
 import com.reamicro.fix.hook.cloudPathOf
 import com.reamicro.fix.hook.onlineCompletionFailedLogFile
 import com.reamicro.fix.hook.sendOnlineCompletionCancelBroadcastToModule
 import com.reamicro.fix.logging.logWebDav
 
-// 在线补全下载的纯逻辑部分。
-//
-// 章节索引与失败记录的读写、目录解析、重试退避、进度文案、按需下载地址推导、
-// 下载缓存清理。
-//
-// 这些函数不依赖 hook 实例——由 已移除的一次性生成工具 编译验证。
 internal fun throwIfOnlineCompletionDownloadCancelled(task: OnlineCompletionDownloadTask) {
     if (task.cancelRequested || Thread.currentThread().isInterrupted) {
         throw OnlineCompletionDownloadCancelledException()
@@ -149,16 +86,6 @@ internal fun staleTopLevelImportCacheDirs(cacheDir: File): List<File> {
         .orEmpty()
 }
 
-/**
- * 头图目录里当前设置没有引用的残留文件。
- *
- * 「本地背景图片」每次导入都会写一份新文件到 filesDir/profile_background 并把绝对路径存进
- * KEY_PROFILE_BACKGROUND_IMAGE。用户在设置里重置头图（把该 key 清空）后，磁盘上的文件不会
- * 跟着删除，于是一份份堆在那儿。这里只挑「不是当前设置所指向的那一份」，正在用的头图不会被动。
- *
- * [activeImagePath] 传 snapshot.profileBackgroundImage：为空表示当前没有启用本地头图，
- * 整个目录都是残留。
- */
 internal fun orphanProfileBackgroundFiles(filesDir: File, activeImagePath: String): List<File> {
     val dir = File(filesDir, PROFILE_BACKGROUND_FILES_DIR)
     if (!dir.isDirectory) return emptyList()
@@ -173,11 +100,6 @@ internal fun orphanProfileBackgroundFiles(filesDir: File, activeImagePath: Strin
         .orEmpty()
 }
 
-/**
- * 段评缓存目录。段评功能已暂停，这些 JSON 只是历史抓取结果，删掉不影响正文与阅读进度。
- *
- * 注意写入方用的是 filesDir 而不是 cacheDir（见 OnlineParagraphCommentCacheStore 的调用点）。
- */
 internal fun paragraphCommentCacheDir(filesDir: File): File =
     File(filesDir, OnlineParagraphCommentCacheStore.DIRECTORY_NAME)
 
@@ -443,7 +365,6 @@ internal fun fallbackOnlineChapterRawUrl(node: Any?): String =
         .firstOrNull { it.isNotBlank() }
         .orEmpty()
 
-/** 书旗目录固定为 data.chapterList[0].volumeList，大数组场景直接读取。 */
 internal fun shuqiChapterListNodes(root: Any, chapterListRule: String): List<Any?> {
     if (!chapterListRule.substringBefore("<js>").trim()
             .equals("$.data.chapterList[0].volumeList", ignoreCase = true)
@@ -779,21 +700,18 @@ internal fun importCacheFile(cacheDir: File?, root: String, fileName: String): F
     )
 
 internal fun enqueueNativeImport(workerManager: Any, platformFile: Any): Any? {
-    // 阅微 2.3.0 起 WorkerManager.enqueueImport 由 1 参 (PlatformFile) 变为
-    // 2 参 (PlatformFile, boolean) 或 3 参 (PlatformFile, String, boolean)。
-    // 兼容多种签名，避免旧版 .first{ size==1 } 找不到匹配抛 NoSuchElementException 导致导入无反应。
+
     val candidates = (workerManager.javaClass.methods.asSequence() +
         workerManager.javaClass.declaredMethods.asSequence())
         .filter { it.name == WORKER_ENQUEUE_IMPORT_METHOD }
         .distinct()
         .toList()
 
-    // 优先旧版 1 参
     candidates.firstOrNull { it.parameterTypes.size == 1 }?.let {
         it.isAccessible = true
         return it.invoke(workerManager, platformFile)
     }
-    // 2 参 (PlatformFile, boolean)：boolean 传 false
+
     candidates.firstOrNull {
         it.parameterTypes.size == 2 &&
             (it.parameterTypes[1] == java.lang.Boolean.TYPE || it.parameterTypes[1] == java.lang.Boolean::class.java)
@@ -801,7 +719,7 @@ internal fun enqueueNativeImport(workerManager: Any, platformFile: Any): Any? {
         it.isAccessible = true
         return it.invoke(workerManager, platformFile, false)
     }
-    // 3 参 (PlatformFile, String, boolean)：书名传 null，boolean 传 false
+
     candidates.firstOrNull {
         it.parameterTypes.size == 3 &&
             it.parameterTypes[1] == String::class.java &&
@@ -810,7 +728,7 @@ internal fun enqueueNativeImport(workerManager: Any, platformFile: Any): Any? {
         it.isAccessible = true
         return it.invoke(workerManager, platformFile, null, false)
     }
-    // 兜底：取参数最少的一个 enqueueImport，非首参用默认值填充
+
     val fallback = candidates.minByOrNull { it.parameterTypes.size }
         ?: error("WorkerManager.$WORKER_ENQUEUE_IMPORT_METHOD not found")
     fallback.isAccessible = true
@@ -834,9 +752,3 @@ internal fun findImportBookMethod(bookshelf: Any): Method =
         .minByOrNull { it.parameterTypes.size }
         ?.apply { isAccessible = true }
         ?: error("阅微 importBook 方法未找到")
-
-/**
- * 按 importBook 实际参数个数组织调用实参（不含末尾 Continuation，由 invokeSuspendBlocking 追加）。
- * 顺序固定为 PlatformFile, Path, Opf, String(url), Long(size)[, Function1 进度回调]。
- * 2.3.0 起在 size 与 Continuation 之间新增进度回调，用无副作用的 Function1 代理补齐。
- */

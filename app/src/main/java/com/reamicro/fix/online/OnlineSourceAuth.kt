@@ -23,7 +23,6 @@ object OnlineSourceAuth {
     fun supportsCredentialLogin(source: OnlineSourceEntry): Boolean =
         loginEndpoint(source) != null || loginFields(source).isNotEmpty()
 
-    /** 存在真实登录端点时必须执行账号密码请求，不能退化成仅保存 loginUi 字段。 */
     fun usesAccountPasswordLogin(source: OnlineSourceEntry): Boolean =
         loginEndpoint(source) != null
 
@@ -132,8 +131,7 @@ object OnlineSourceAuth {
             val cookie = prefs(context)?.getString(KEY_COOKIE_PREFIX + source.id, "").orEmpty()
             if (cookie.isNotBlank()) headers["Cookie"] = cookie
         }
-        // 一些 JSON 书源把 API 密钥写在 header 的内联 JS 中；原先只保存了密钥，
-        // 但普通 HTTP 请求没有执行这段 JS，导致详情接口持续 401，章节数无法补全。
+
         headers.putAll(credentialHeaders(source.header, loginInfo(context, source)))
         if (OnlineSourceTrxsCompat.shouldAuthorize(source, requestUrl)) {
             sourceVariable(context, source).takeIf { it.isNotBlank() }?.let { token ->
@@ -150,8 +148,6 @@ object OnlineSourceAuth {
         return if (apiKey.isBlank()) emptyMap() else mapOf("X-API-Key" to apiKey)
     }
 
-    // 登录字段名各源不一（密钥 / apiKey / X-Key ...），这里按多重回退解析出真正的 API 密钥，
-    // 否则 loginUi 用 "X-Key" 之类字段名时取不到值 → 请求缺 X-API-Key → 接口持续 401。
     private val API_KEY_ALIASES = listOf(
         "密钥", "秘钥", "apiKey", "api_key", "apikey", "qq_api_key",
         "key", "x-key", "x_key", "xkey", "token", "授权码", "令牌", "access_key",
@@ -161,18 +157,18 @@ object OnlineSourceAuth {
         fun pickByName(name: String): String? =
             loginInfo.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }
                 ?.value?.trim()?.takeIf { it.isNotBlank() }
-        // 1) header 内联 JS 明确 getLoginInfoMap().get("字段名") 引用的字段
+
         OnlineSourceLoginConfig.referencedLoginFieldNames(rawHeader).forEach { name ->
             pickByName(name)?.let { return it }
         }
-        // 2) 常见密钥字段别名（含 X-Key）
+
         API_KEY_ALIASES.forEach { alias -> pickByName(alias)?.let { return it } }
-        // 3) 字段名符合“密钥/key/token/apiKey”特征
+
         loginInfo.entries
             .firstOrNull { it.value.isNotBlank() && OnlineSourceLoginConfig.looksLikeCredentialName(it.key) }
             ?.value?.trim()?.takeIf { it.isNotBlank() }
             ?.let { return it }
-        // 4) 只有唯一一个非空登录字段时直接用它
+
         loginInfo.values.map { it.trim() }.filter { it.isNotBlank() }.singleOrNull()?.let { return it }
         return ""
     }
@@ -196,7 +192,7 @@ object OnlineSourceAuth {
         val username = preferences.getString(KEY_USER_PREFIX + source.id, "").orEmpty()
         val password = preferences.getString(KEY_PASSWORD_PREFIX + source.id, "").orEmpty()
         if (username.isNotBlank() || password.isNotBlank()) return username to password
-        // 1.3.8 曾把账号密码源误分流到通用字段保存；从该位置回读，避免用户重新输入。
+
         return accountPasswordFromLoginInfo(loginInfo(context, source), loginFields(source))
     }
 

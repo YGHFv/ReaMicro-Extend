@@ -79,8 +79,6 @@ internal class WebDavRemoteClient(
         }
     }
 
-    // 直接使用 PROPFIND href 解析出的绝对 URL 下载，绕过 buildUrl 的重新编码，
-    // 避免请求名与服务器原始编码不一致导致的 404。
     fun requestToFileByUrl(
         credentials: WebDavCredentials,
         absoluteUrl: String,
@@ -151,10 +149,6 @@ internal class WebDavRemoteClient(
             log("AList upload fallback failed path=$path error=${it.message}")
         }.getOrDefault(false)
 
-    // 部分 OpenList/AList 部署的 WebDAV 端点根 = 某个挂载点内容（如 dav 根直接是 OnedriveE5），
-    // 而 AList /api/fs 命名空间需要完整挂载路径（/OnedriveE5/...）。搜索走 fs API 拿到的 path
-    // 带挂载前缀，拿去请求 WebDAV GET 会 404。这里用 fs/get 拿免鉴权直链 raw_url 再下载，
-    // 与搜索使用的 AList API 命名空间一致，绕过 WebDAV 路径前缀差异。成功返回 true。
     fun tryAlistDownloadFallback(
         credentials: WebDavCredentials,
         path: String,
@@ -275,8 +269,6 @@ internal class WebDavRemoteClient(
         return base.resolve(encodedPath + suffix).toURL()
     }
 
-    // 把 PROPFIND 返回的 href（可能是绝对 URL 或以 / 开头的绝对路径）解析为可直接请求的
-    // 绝对 URL，保留服务器原始百分号编码，避免解码后再编码造成的字符不一致。
     fun absoluteUrlFromHref(baseUrl: String, href: String): String =
         runCatching {
             val base = URI(baseUrl.trimEnd('/') + "/")

@@ -32,12 +32,6 @@ import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
-// 设置页弹窗构件簇。
-//
-// 与宿主风格一致的对话框卡片、标题、选项行、按钮、滚动容器，以及文件选择器。
-//
-// 从 ReaMicroSettingsHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的
-// 结果重新缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaMicroSettingsHook.openHookInstallReportDialog() {
     val activity = activityProvider() ?: return
     activity.runOnUiThread {
@@ -369,6 +363,7 @@ internal fun ReaMicroSettingsHook.settingsDialogInput(
             settingsDp(context, 8),
         )
         background = settingsRoundedRect(colors.field, settingsDp(context, 8), colors.border)
+        EmbeddedHostUi.thoughtInput(this)
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -451,7 +446,6 @@ internal fun ReaMicroSettingsHook.settingsDialogHint(
 ): TextView =
     settingsDialogStatus(context, message, colors)
 
-/** 弹窗内的开关行，外观与在线源配置弹窗里的策略开关一致。 */
 internal fun ReaMicroSettingsHook.settingsDialogSwitchRow(
     context: Context,
     title: String,
@@ -473,7 +467,7 @@ internal fun ReaMicroSettingsHook.settingsDialogSwitchRow(
             settingsDp(context, 6),
         )
         background = settingsRoundedRect(colors.field, settingsDp(context, 8), colors.border)
-        // 配色复用书源配置弹窗的策略开关，两处观感保持一致。
+
         thumbTintList = onlineSourcePolicySwitchThumbColors(colors)
         trackTintList = onlineSourcePolicySwitchTrackColors(colors)
         layoutParams = LinearLayout.LayoutParams(
@@ -518,7 +512,7 @@ internal fun ReaMicroSettingsHook.showSettingsDialog(
     }
     dialog.show()
     if (dismissOnThemeChange) {
-        // API 弹窗使用静态 View；主题配置改变时关闭旧实例，避免继续显示混合配色。
+
         val callbacks = object : ComponentCallbacks {
             override fun onConfigurationChanged(newConfig: Configuration) {
                 ModuleDialogTheme.invalidate()
@@ -806,6 +800,7 @@ internal fun ReaMicroSettingsHook.openImagePresetDialog(target: AiImagePresetTar
 }
 
 internal fun ReaMicroSettingsHook.updateModuleDialogTheme(composer: Any) {
+    EmbeddedHostUi.captureTypography(classLoader, composer)
     runCatching {
         val scheme = colorScheme(composer)
         val pageBackground = composeColorToArgb(backgroundDim(composer))

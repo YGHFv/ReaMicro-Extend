@@ -1,13 +1,7 @@
-"""模块设置备份与账号密钥备份。
-
-账号密钥备份在模块本机用口令派生密钥加密，服务器只存密文、无法解密。
-"""
-
 from typing import Any
 
-from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request, UploadFile, File, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
-from fastapi.security import HTTPBasicCredentials
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse
 
 from app import runtime
 import hashlib

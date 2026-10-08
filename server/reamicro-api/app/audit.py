@@ -1,8 +1,3 @@
-"""审计事件与任务日志。
-
-审计只记不含敏感值的管理与安全事件，落 `events.jsonl`（每行一条 JSON）。
-任务日志按任务 ID 分文件，供 /v1/tasks/{id}/logs 和后台日志页读取。
-"""
 import json
 from datetime import datetime, timezone
 from typing import Any
@@ -11,7 +6,7 @@ from app import runtime
 
 
 def audit_event(action: str, actor: str = "system", request_id: str = "", success: bool = True, metadata: dict[str, Any] | None = None) -> None:
-    """记录不含敏感值的管理与安全事件。"""
+
     try:
         runtime.AUDIT_ROOT.mkdir(parents=True, exist_ok=True)
         event = {

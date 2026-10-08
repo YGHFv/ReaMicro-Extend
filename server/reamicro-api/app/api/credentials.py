@@ -1,13 +1,6 @@
-"""阅微同步密钥的增删、验证与启停。
-
-明文密钥只在上传时接收，落盘即加密，任何响应都不回传明文。
-"""
-
 from typing import Any
 
-from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request, UploadFile, File, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
-from fastapi.security import HTTPBasicCredentials
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import executors, runtime
 import secrets
@@ -71,7 +64,7 @@ async def save_reamicro_credential(request: Request, owner: str = Depends(task_o
     credentials = load_credentials()
     requested_id = str(payload.get("id", "")).strip()
     requested_existing = credentials.get(requested_id) if requested_id else None
-    # 旧客户端可能携带上一个账号的 ID，禁止因此覆盖其他账号的同步密钥。
+
     if (
         isinstance(requested_existing, dict)
         and requested_existing.get("owner") == owner
@@ -88,7 +81,7 @@ async def save_reamicro_credential(request: Request, owner: str = Depends(task_o
     ]
     matching_items.sort(key=lambda pair: (bounded_config_int(pair[1].get("updatedAt", 0), 0, 0), pair[0]), reverse=True)
     matching_id = matching_items[0][0] if matching_items else ""
-    # 账号 ID 是同步密钥的唯一业务键；优先复用按账号找到的记录，兼容旧客户端携带的过期 ID。
+
     credential_id = matching_id or requested_id or "rea_" + secrets.token_hex(10)
     existing = credentials.get(credential_id, {})
     if existing and existing.get("owner") != owner:

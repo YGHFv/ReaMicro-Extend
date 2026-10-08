@@ -7,7 +7,6 @@ import android.graphics.Typeface
 import android.os.Handler
 import android.os.Looper
 import android.text.TextUtils
-import android.util.Base64
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -20,22 +19,17 @@ import com.reamicro.fix.online.OnlineConcurrentRateLimiter
 import com.reamicro.fix.online.OnlineSourceAuth
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.OnlineSourceLoginConfig
-import com.reamicro.fix.online.OnlineJsonPathCompat
 import com.reamicro.fix.online.OnlineSourceScriptCompat
 import com.reamicro.fix.online.OnlineSourceTrxsCompat
 import com.reamicro.fix.online.search.applyOnlineChapterListRuleCompat
 import com.reamicro.fix.online.search.cleanOnlineChapterTitleValue
 import com.reamicro.fix.online.search.evaluateQqReaderCoverRule
-import com.reamicro.fix.online.search.formatOnlineWordCountValue
-import com.reamicro.fix.online.search.inferOnlineStatusFromLastChapterTitle
 import com.reamicro.fix.online.search.isOnlineChapterCountSelector
 import com.reamicro.fix.online.search.onlineSearchRelevanceScore
 import com.reamicro.fix.online.search.onlineHttpErrorDetail
 import com.reamicro.fix.online.download.OnlineSourceHttpException
 import com.reamicro.fix.online.search.parseOnlineUrlRequestCompat
 import com.reamicro.fix.online.search.resolveOnlineChapterListRuleCompat
-import com.reamicro.fix.online.search.resolveOnlineUrlCompat
-import com.reamicro.fix.xposed.XC_MethodHook
 import com.reamicro.fix.xposed.XposedBridge
 import java.lang.ref.WeakReference
 import java.lang.reflect.Method
@@ -44,8 +38,6 @@ import java.net.URI
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.Charset
-import java.text.SimpleDateFormat
-import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import org.json.JSONArray
@@ -74,12 +66,6 @@ import com.reamicro.fix.online.download.fallbackOnlineChapterRawUrl
 import com.reamicro.fix.online.download.onlineChapterVolumeTitle
 import com.reamicro.fix.logging.logWebDav
 
-// WebDavDriveHook 的在线源搜索簇。
-//
-// 按书源规则构造搜索请求、解析 JSON/HTML 结果、补全字数章节数等元数据。
-//
-// 从 WebDavDriveHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun WebDavDriveHook.renderOnlineCompletionCloudBookSearchRow(book: Any, target: OnlineDownloadTarget, composer: Any) {
     val textColors = onlineCompletionSearchTextColors(composer)
     val factory = functionProxy("OnlineCompletionSearchRowAndroidView", FUNCTION1_CLASS) { args ->
@@ -171,8 +157,7 @@ internal fun WebDavDriveHook.createOnlineCompletionSearchRowView(
     applyOnlineCompletionSearchTypeface(texts)
     val path = cloudPathOf(book)
     onlineCompletionSearchRowViews[path] = WeakReference(row)
-    // 详情请求可能在 AndroidView 真正创建前已经完成。登记 View 后再读取一次最新结果，
-    // 避免工厂闭包携带的旧结果覆盖已补全的章节数、字数等信息。
+
     onlineCompletionSearchTargets[path]
         ?.takeIf { it != target }
         ?.let { latestTarget -> applyOnlineCompletionSearchRow(row, latestTarget, colors = null) }
@@ -198,10 +183,6 @@ internal fun WebDavDriveHook.applyOnlineCompletionSearchRow(row: View, target: O
     applyOnlineCompletionSearchTypeface(textContainer)
 }
 
-/**
- * 在线源搜索结果行是原生 View 拼出来的，不在全局字体 hook 的 Compose / Dialog 覆盖范围内，
- * 这里显式套用同一个全局字体；保持原有字重，等宽字体（代码/标记）不动。
- */
 internal fun WebDavDriveHook.applyOnlineCompletionSearchTypeface(textContainer: ViewGroup) {
     val base = globalTypefaceProvider() ?: return
     for (index in 0 until textContainer.childCount) {
@@ -525,7 +506,7 @@ internal fun WebDavDriveHook.buildOnlineSearchRequest(source: OnlineSourceEntry,
         if (url.isBlank()) error("暂不支持脚本型 searchUrl")
         return OnlineSearchRequest(url)
     }
-    // 解析 legado options block：url,{"method":"POST","body":"searchkey={{key}}","charset":"gbk","headers":{...}}
+
     val splitIdx = indexOfOptionsBlock(raw)
     val urlPart = if (splitIdx < 0) raw else raw.substring(0, splitIdx).trim()
     val optionsJson = if (splitIdx < 0) null else raw.substring(splitIdx).trim().removePrefix(",").trim()
@@ -687,9 +668,7 @@ internal fun WebDavDriveHook.requestOnlineSearch(source: OnlineSourceEntry, requ
 internal fun WebDavDriveHook.parseOnlineHeaders(raw: String): Map<String, String> {
     val text = raw.trim()
     if (text.isBlank()) return emptyMap()
-    // Legado 的 @js:/<js> header 是脚本指令而非真实请求头；模块不执行 JS，若按“冒号分割”会拼出一个
-    // 名为 "@js" 的非法头。API 主机会忽略它，但封面所在的字节跳动 CDN 会直接判 400，导致封面/图片全部
-    // 加载失败。真正的密钥头由 credentialHeaders 单独注入，这里遇到脚本头直接跳过。
+
     if (text.startsWith("@js:", ignoreCase = true) || text.startsWith("<js>", ignoreCase = true)) {
         return emptyMap()
     }
@@ -711,7 +690,6 @@ internal fun WebDavDriveHook.parseOnlineHeaders(raw: String): Map<String, String
     }
 }
 
-// 只接受合法的 HTTP header 名（RFC 7230 token），过滤掉 @js 之类会被 CDN/WAF 判 400 的非法头名。
 internal fun WebDavDriveHook.isValidHttpHeaderName(name: String): Boolean =
     name.isNotBlank() && HTTP_HEADER_NAME_REGEX.matches(name)
 
@@ -948,7 +926,7 @@ internal fun WebDavDriveHook.applyOnlineTemplate(
             expr.equals("page", ignoreCase = true) -> page.toString()
             expr.equals("key", ignoreCase = true) || expr.equals("keyword", ignoreCase = true) ->
                 query?.let { if (encodeQuery) URLEncoder.encode(it, encodeCharset) else it }.orEmpty()
-            // legado JS：java.put('var', key) —— 存变量并原地返回 key，等价于直接用搜索词
+
             Regex("""^java\.put\(\s*['"][^'"]*['"]\s*,\s*(key|keyword|searchKey)\s*\)$""", RegexOption.IGNORE_CASE)
                 .matchEntire(expr) != null ->
                 query?.let { if (encodeQuery) URLEncoder.encode(it, encodeCharset) else it }.orEmpty()
@@ -960,16 +938,12 @@ internal fun WebDavDriveHook.applyOnlineTemplate(
 internal fun WebDavDriveHook.normalizeOnlineCoverUrl(source: OnlineSourceEntry, baseUrl: String, value: String): String {
     val raw = value.trim()
     if (raw.isBlank()) return ""
-    // 番茄封面常是相对的 novel-images/novel-pic/novel-static 路径，直接按 baseUrl 拼会落到 API 域名下
-    // （如 https://api.yuezhi.me/v1/books/novel-images/...）而 404；这类路径统一走字节跳动图片源。
+
     if (!raw.startsWith("http", ignoreCase = true) && FANQIE_IMAGE_PATH_REGEX.containsMatchIn(raw)) {
         replaceFanqieCover(raw).takeIf { it.isNotBlank() }?.let { return it }
     }
     val resolved = resolveOnlineUrl(baseUrl.ifBlank { sourceBaseUrl(source) }, value)
-    // 字节跳动图片 CDN 的绝对 URL：bookmall 长路径（/origin/reading/bookapi/.../novel-pic/<hash>）
-    // 在 /origin/ 下会 403，同一 hash 挂 novel-pic/ 短路径可取（实测 200）。发现页拿到的
-    // 常是这种绝对 URL，这里直接重写成短路径；已是 novel-pic/ 短路径的重写幂等，不受影响。
-    // 番茄系 API 域名（fqnovel/fanqienovel）偶尔也会直接吐 novel-pic 图片路径，一并归一化。
+
     runCatching {
         val uri = URI(resolved)
         val host = uri.host.orEmpty()
@@ -984,7 +958,7 @@ internal fun WebDavDriveHook.normalizeOnlineCoverUrl(source: OnlineSourceEntry, 
         }
     }
     if (!resolved.startsWith("http://", ignoreCase = true)) {
-        // 已被错误拼到 API 域名下的番茄图片路径，纠正为字节跳动图片源。
+
         val misrouted = runCatching { URI(resolved) }.getOrNull()
         val apiHost = runCatching { URI(sourceBaseUrl(source).ifBlank { baseUrl }) }.getOrNull()?.host
         if (misrouted != null && !apiHost.isNullOrBlank() &&

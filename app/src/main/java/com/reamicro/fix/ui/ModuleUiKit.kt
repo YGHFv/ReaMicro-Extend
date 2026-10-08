@@ -14,10 +14,8 @@ import android.widget.ScrollView
 import android.widget.TextView
 import com.reamicro.fix.hook.ModuleDialogTheme
 
-/** 多选列表里的一项：value 是落盘值，label 是给人看的名字，color 非空时按品质着色。 */
 internal data class MultiSelectOption(val value: String, val label: String, val color: Int? = null)
 
-/** 多选按钮上的一句话摘要：锁了几项，或者一项都没锁（= 全部可典当）。 */
 internal fun multiSelectSummary(options: List<MultiSelectOption>, selected: Set<String>): String {
     val locked = options.count { it.value in selected }
     return when {
@@ -27,14 +25,6 @@ internal fun multiSelectSummary(options: List<MultiSelectOption>, selected: Set<
     }
 }
 
-/**
- * 模块主界面的轻量视图工具。
- *
- * 为什么不复用设置页那套 `settingsDialog*`：它们是 `ReaMicroSettingsHook` 的成员扩展函数，
- * 必须绑定宿主（阅微）的 Activity 实例——而这里是模块自己的进程、自己的 Activity。所以只共享
- * 真正独立可用的部分（配色来自 [ModuleDialogTheme.palette]），视图构建在这里重写一套等价实现，
- * 保持与设置页一致的观感。
- */
 internal class ModuleUiKit(private val context: Context) {
     private val dp = context.resources.displayMetrics.density
     val palette = ModuleDialogTheme.palette(context)
@@ -49,8 +39,7 @@ internal class ModuleUiKit(private val context: Context) {
         return ScrollView(context).apply {
             setBackgroundColor(palette.pageBackground)
             addView(column)
-            // targetSdk 35 起系统强制 edge-to-edge，内容会画到状态栏/导航栏底下。
-            // 之前没避让，标题被状态栏压掉一截。这里把系统栏高度加成内边距。
+
             setOnApplyWindowInsetsListener { _, insets ->
                 val top: Int
                 val bottom: Int
@@ -83,12 +72,6 @@ internal class ModuleUiKit(private val context: Context) {
         setPadding(px(8), px(18), px(8), px(6))
     }
 
-    /**
-     * 卡片容器；卡片内部再放若干行。
-     *
-     * 卡片自己带下外边距与左右边距：此前没有外边距，多张卡在页面上直接贴在一起（实机上看起来
-     * 就是"卡片互相堆叠重合"）。间距统一收在这里，调用方不用每处都写 layoutParams。
-     */
     fun card(rows: List<View>): View = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
         background = rounded(palette.rowBackground, 12f)
@@ -100,11 +83,6 @@ internal class ModuleUiKit(private val context: Context) {
         ).apply { bottomMargin = px(10) }
     }
 
-    /**
-     * 一行：标题 + 副标题，右侧可选按钮。
-     *
-     * 副标题承载"当前状态/为什么"——自检项光显示一行状态用户不知道该怎么办。
-     */
     fun row(
         title: String,
         subtitle: String = "",
@@ -128,14 +106,6 @@ internal class ModuleUiKit(private val context: Context) {
         }
     }
 
-    /**
-     * 操作按钮。
-     *
-     * 填充用**页面底色**而不是卡片底色：`primarySoft` 在深色配色里就等于卡片底色，按钮会和卡片
-     * 糊在一起，完全看不出是个可点的控件（实机见过）。页面底色与卡片底色在两种配色下都不同，
-     * 再加一圈描边，按钮在任何配色下都能看出来。
-     */
-    /** 按钮配色角色。尺寸与间距对所有角色一致，只有文字颜色不同。 */
     enum class Role { Primary, Neutral, Danger }
 
     fun button(label: String, role: Role = Role.Primary, onClick: () -> Unit): TextView =
@@ -149,8 +119,7 @@ internal class ModuleUiKit(private val context: Context) {
             },
         ).apply {
             gravity = Gravity.CENTER
-            // 文字左右必须留内边距：只给固定宽高的话，"立即执行"这种四字标签会顶到边框上，
-            // 一排按钮的宽度还各不相同，看起来就"丑且不统一"。
+
             setPadding(px(16), 0, px(16), 0)
             background = rounded(palette.pageBackground, 8f).apply {
                 setStroke((1.2f * dp).toInt(), palette.border)
@@ -163,12 +132,6 @@ internal class ModuleUiKit(private val context: Context) {
             ).apply { rightMargin = px(8) }
         }
 
-    /**
-     * 按按钮文案推断配色角色。
-     *
-     * 调用方只给「文案 to 回调」，不必每处都标角色；危险操作（清空/停用/取消）统一走红色，
-     * 这样同一个动作在哪个页面都是同一个颜色。
-     */
     private fun buttonRoleOf(label: String): Role = when (label) {
         "清空", "停用", "取消" -> Role.Danger
         "关闭", "刷新", "重算下次时刻" -> Role.Neutral
@@ -187,20 +150,12 @@ internal class ModuleUiKit(private val context: Context) {
             if (bold) typeface = android.graphics.Typeface.DEFAULT_BOLD
         }
 
-    /** 卡片与弹窗统一用这个圆角半径，避免"详情弹窗看着比卡片方"这种不一致。 */
     fun rounded(color: Int, radiusDp: Float = CARD_CORNER_DP): GradientDrawable = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
         cornerRadius = radiusDp * dp
         setColor(color)
     }
 
-    /**
-     * 详情弹窗：标题 + 可滚动正文。
-     *
-     * 正文用等宽感的分行文本即可——记录与日志都是「一行一条」，不需要列表控件。
-     * 正文高度按屏幕比例给定值：用 weight 填充的话，外层 card 是 wrap_content，
-     * 高度为 0 的子项会被压成不可见。
-     */
     fun contentDialog(title: String, content: CharSequence, actions: List<Pair<String, () -> Unit>>, bodySizeSp: Float = 12f): Dialog {
         val dialog = Dialog(context)
         val metrics = context.resources.displayMetrics
@@ -238,8 +193,7 @@ internal class ModuleUiKit(private val context: Context) {
         }
         dialog.setContentView(card)
         dialog.setOnShowListener {
-            // 窗口自身也要透明：默认背景是有颜色的直角矩形，会把卡片的圆角盖住，
-            // 看起来就是"弹窗比卡片方"。
+
             dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
             dialog.window?.setLayout(
                 (metrics.widthPixels * 0.9f).toInt(),
@@ -254,12 +208,6 @@ internal class ModuleUiKit(private val context: Context) {
         android.widget.Toast.makeText(context.applicationContext, message, android.widget.Toast.LENGTH_SHORT).show()
     }
 
-    /**
-     * 页面骨架：可滚动内容 + 底部页签栏。
-     *
-     * 底栏固定在窗口底部，内容区自己滚动——页签切换就是换内容，不重建底栏，
-     * 所以切页不会闪。
-     */
     fun scaffold(content: View, tabs: List<String>, selectedIndex: Int, onSelect: (Int) -> Unit): View {
         val bar = bottomBar(tabs, selectedIndex, onSelect)
         return LinearLayout(context).apply {
@@ -267,7 +215,7 @@ internal class ModuleUiKit(private val context: Context) {
             setBackgroundColor(palette.pageBackground)
             addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             addView(bar)
-            // 内容区的顶部避让由 page() 自己处理；底栏要单独避让手势导航条，否则会被压在下面点不到。
+
             setOnApplyWindowInsetsListener { _, insets ->
                 val bottom = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     insets.getInsets(WindowInsets.Type.systemBars()).bottom
@@ -317,12 +265,6 @@ internal class ModuleUiKit(private val context: Context) {
             }
         }
 
-    /**
-     * 一条「通知样式」的列表项：标题 / 正文 / 时间，整块可点。
-     *
-     * 任务记录用它而不是普通行，是为了和系统通知的长相接近——用户已经在通知栏见过这些内容，
-     * 样式一致时更容易对上"哪条通知对应哪次执行"。
-     */
     fun listItem(
         title: String,
         body: String,
@@ -335,8 +277,7 @@ internal class ModuleUiKit(private val context: Context) {
         setPadding(px(14), px(12), px(14), px(12))
         isClickable = true
         setOnClickListener { onClick() }
-        // 左右不留外边距：页面已经有 16dp 内边距，这里再加 16dp 会让记录卡片比其它卡片窄一圈
-        // （实机上就是"通知卡片的边距和其他页面不一样"）。
+
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -356,12 +297,6 @@ internal class ModuleUiKit(private val context: Context) {
         }
     }
 
-    /**
-     * 编辑弹窗：一行一个输入框（标签 + 提示 + 初值）。
-     *
-     * [register] 把每个输入框按标签交回调用方读取——标签是唯一键，调用方按同一套标签取值，
-     * 不用维护两份下标。
-     */
     fun editDialog(
         title: String,
         build: (
@@ -386,9 +321,7 @@ internal class ModuleUiKit(private val context: Context) {
             setPadding(px(18), px(18), px(18), px(14))
         }
         card.addView(textView(title, 18f, palette.title, bold = true).apply { setPadding(0, 0, 0, px(10)) })
-        // 注意：form 只能挂到一个父容器上（下面挂进 ScrollView），
-        // 先 card.addView(form) 再 scroll.addView(form) 会直接抛
-        // "The specified child already has a parent" 崩掉。
+
         val form = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         build(
             { label, hint, value ->
@@ -405,7 +338,7 @@ internal class ModuleUiKit(private val context: Context) {
                     if (options.size > 1) {
                         val next = (options.indexOfFirst { it.first == selected?.first } + 1) % options.size
                         selected = options[next]
-                        // 文案随选中项变，用户看到的一直是中文名，wire 值只在内部分发。
+
                         picker.text = selected?.second ?: "未选择"
                     }
                 }
@@ -415,11 +348,10 @@ internal class ModuleUiKit(private val context: Context) {
             { label, hint, options, selected, refresh ->
                 form.addView(fieldRow(label, hint))
                 var picked = selected
-                // 选项会被「刷新期物清单」换掉，摘要也要跟着按新清单算，所以这里用可变引用。
+
                 var shown = options
                 val summary = button(multiSelectSummary(shown, picked), role = Role.Neutral) {}
-                // 刷新成功后把新清单也记在 shown 上：摘要里的「已锁定 n/m 项」用的是它，
-                // 不跟着换就会显示成旧的分母。
+
                 val refreshAndTrack = refresh?.let { load ->
                     { load()?.also { shown = it } }
                 }
@@ -437,7 +369,7 @@ internal class ModuleUiKit(private val context: Context) {
                     }
                 }
                 form.addView(summary)
-                // 落盘还是同一份 ID 集合，只是沿用「按标签取字符串」这条既有通道回传。
+
                 register(label) { picked.sortedWith(compareBy({ it.toLongOrNull() ?: Long.MAX_VALUE }, { it })).joinToString(",") }
             },
         )
@@ -466,16 +398,6 @@ internal class ModuleUiKit(private val context: Context) {
         return dialog
     }
 
-    /**
-     * 多选弹窗：一行一个选项，点一下就切换锁定状态。
-     *
-     * 「禁当期物」这种配置天然是一组开关——让用户手打 propId 既记不住也看不见，
-     * 所以直接把期物列出来点选。[onConfirm] 拿到的是确认后的取值集合，取消则原样保留。
-     *
-     * [refresh] 非空时顶部多一个刷新按钮：期物清单只能问服务端要（名字与品质不在客户端里），
-     * 用户刚装好模块、任务还没跑过时点一下就能补齐，不必等任务跑一轮。刷新在后台线程执行，
-     * 回来后原地重绘列表；返回 null 表示这次什么都没读到。
-     */
     fun multiSelectDialog(
         title: String,
         hint: String,
@@ -499,7 +421,7 @@ internal class ModuleUiKit(private val context: Context) {
         val picked = selected.toMutableSet()
         var shown = options
         val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        // 清单可能被刷新换掉，所以画一次抽成函数，刷新回来原地重绘而不是重开弹窗。
+
         fun renderRows() {
             list.removeAllViews()
             shown.forEach { option ->
@@ -512,7 +434,7 @@ internal class ModuleUiKit(private val context: Context) {
                 val state = textView("", 12f, palette.body)
                 row.addView(name)
                 row.addView(state)
-                // 锁定状态同时改文案、配色和底色：只改一个的话，彩色期物名会让人看不出哪行被锁了。
+
                 fun apply() {
                     val locked = option.value in picked
                     state.text = if (locked) "已锁定" else "可典当"
@@ -542,8 +464,7 @@ internal class ModuleUiKit(private val context: Context) {
                 refreshing = true
                 refreshButton.text = "正在读取…"
                 background(
-                    // 用 Result 兜住异常而不是让 background 自己 toast：那样就不会回调 then，
-                    // 按钮会永远停在"正在读取…"。
+
                     work = { runCatching { refresh() } },
                     then = { result ->
                         refreshing = false
@@ -555,8 +476,7 @@ internal class ModuleUiKit(private val context: Context) {
                             toast("没有读到清单，稍后再试")
                         } else {
                             shown = updated
-                            // 刻意不清掉"刷新后不在清单里"的锁定项：期物可能只是今天已经典当光或
-                            // 临时从背包里消失，用户锁它的意思还在，等它再出现时应当仍然是锁着的。
+
                             renderRows()
                             toast("清单已更新，共 ${updated.size} 项")
                         }
@@ -610,7 +530,6 @@ internal class ModuleUiKit(private val context: Context) {
             maxLines = 6
         }
 
-    /** 当前配色是不是深色底。用于把状态栏图标调成相反色，否则深底上的黑图标看不见。 */
     val isDarkPage: Boolean
         get() {
             val red = android.graphics.Color.red(palette.pageBackground) / 255.0
@@ -619,13 +538,6 @@ internal class ModuleUiKit(private val context: Context) {
             return 0.2126 * red + 0.7152 * green + 0.0722 * blue < 0.45
         }
 
-    /**
-     * 在后台线程跑一段事，回到主线程更新。
-     *
-     * root 探测（要起 su 进程）与任务执行（要走网络）都不能卡 UI，所以统一走这里。
-     * 结果是任意类型，调用方直接拿到对象——不要为了传值把多个字段拼成字符串再拆开，
-     * 那样两端的字段顺序/数量一旦不一致就会渲染出互相矛盾的内容。
-     */
     fun <T> background(work: () -> T, then: (T) -> Unit) {
         Thread {
             runCatching(work)

@@ -4,7 +4,7 @@ STATE=/data/adb/reamicro-automation
 umask 077
 . "$MODDIR/common.sh"
 . "$MODDIR/lifecycle.sh"
-# Must also work after the APK has been removed. Do not call pm, app_process or runner disable here.
+
 if [ -d "$STATE" ]; then
   chmod 700 "$STATE" || exit 1
   touch "$STATE/stop" || exit 1
@@ -21,7 +21,6 @@ fi
 reamicro_stop daemon || exit 1
 reamicro_stop executor || exit 1
 reamicro_cleanup_legacy || exit 1
-# Only the module's own private state is removed, after its processes are gone.
-# The manager, not this script, removes MODDIR and handles its own module bookkeeping.
+
 rm -rf "$STATE" || exit 1
 echo "ReaMicro: scheduler, legacy wake script and private credentials removed"

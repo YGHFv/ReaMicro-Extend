@@ -4,7 +4,6 @@ import java.io.File
 import java.io.InputStream
 import java.nio.charset.Charset
 
-/** Bounded, read-only list decoration; never loads/hashes a complete chapter. */
 internal object EpubChapterTitlePreview {
     const val MAX_BYTES = 64 * 1024
     private val ignored = Regex("<!--.*?-->|<(script|style)\\b[^>]*>.*?</\\1\\s*>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))

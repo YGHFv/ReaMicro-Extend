@@ -1,12 +1,3 @@
-"""按阅微账号 ID 区分的用户档案。
-
-服务器此前只有一个扁平的 `hostAccountAllowlist`（一串 ID）和 `moduleUploadAllowlist`，
-看不出某个用户传了什么、有几个任务、什么时候来过，也没法单独停用一个人或限额。
-这里把用户提升为一等实体：阅微 ID 是主键，档案与配置分开存放，便于后续加字段。
-
-**归属对齐**：用户 ID 与 `state.canonical_owner_of` 的 `host:<id>` 一一对应，
-统计与配额都按这个 ID 归集，认证模式变更不影响。
-"""
 import json
 from datetime import datetime, timezone
 from typing import Any
@@ -16,8 +7,7 @@ from app.audit import audit_event
 from app.config_store import bounded_config_int, load_config, save_config
 from app.state import load_credentials, load_notifications, load_presence, load_tasks
 
-# 用户级权限。与 API Key 的 scope 分开：这是"这个人能做什么"，
-# 而 scope 是"这把钥匙能做什么"。
+
 USER_CAPABILITIES = (
     "content:upload",
     "tasks:use",
@@ -30,8 +20,7 @@ USER_CAPABILITY_LABELS = {
     "backup:use": "使用备份",
 }
 
-# 新建档案默认拥有全部功能。白名单才是"能不能用"的授权来源，
-# 用户档案的作用是**收回**权限——所以默认不能比白名单更严，否则一加档案就把人锁在外面。
+
 DEFAULT_CAPABILITIES = USER_CAPABILITIES
 
 
@@ -59,7 +48,7 @@ def save_users(users: dict[str, dict[str, Any]]) -> None:
 
 
 def normalize_account_id(value: Any) -> str:
-    """阅微账号 ID 只允许数字与有限符号，且要参与路径无关的键名。"""
+
     text = str(value or "").strip()
     if not text or len(text) > 64:
         return ""
@@ -87,7 +76,7 @@ def default_user(account_id: str, note: str = "") -> dict[str, Any]:
         "updatedAt": now,
         "firstSeenAt": 0,
         "lastSeenAt": 0,
-        # 0 表示不限；单位为个数。
+
         "uploadQuota": 0,
     }
 
@@ -97,7 +86,7 @@ def get_user(account_id: str) -> dict[str, Any] | None:
 
 
 def upsert_user(account_id: str, **fields) -> dict[str, Any]:
-    """新建或更新用户档案。未知字段会被忽略，避免后台表单写入任意键。"""
+
     account_id = normalize_account_id(account_id)
     if not account_id:
         raise ValueError("阅微账号 ID 无效")
@@ -134,7 +123,7 @@ def delete_user(account_id: str) -> bool:
 
 
 def touch_user(account_id: str) -> dict[str, Any] | None:
-    """记录一次活跃。首次出现时自动建档，省去管理员手工录入。"""
+
     account_id = normalize_account_id(account_id)
     if not account_id:
         return None
@@ -151,7 +140,7 @@ def touch_user(account_id: str) -> dict[str, Any] | None:
 
 
 def user_enabled(account_id: str) -> bool:
-    """未建档的用户视为允许：访问控制仍由认证模式的白名单负责，档案只做管理。"""
+
     user = get_user(account_id)
     return True if user is None else bool(user.get("enabled", True))
 
@@ -166,7 +155,7 @@ def user_has_capability(account_id: str, capability: str) -> bool:
 
 
 def user_upload_quota(account_id: str) -> int:
-    """该用户可拥有的内容包上限。0 表示不限。"""
+
     user = get_user(account_id)
     if user is None:
         return 0
@@ -174,11 +163,7 @@ def user_upload_quota(account_id: str) -> int:
 
 
 def count_user_uploads(account_id: str) -> int:
-    """统计该用户当前拥有的内容包数量。
 
-    按 `uploadOwner` 归集并折叠历史归属写法，与 `user_statistics` 用同一套判定，
-    避免两处口径不一致导致界面显示的数字和实际限额对不上。
-    """
     from app.state import canonical_owner_of
 
     account_id = normalize_account_id(account_id)
@@ -198,11 +183,7 @@ def count_user_uploads(account_id: str) -> int:
 
 
 def check_upload_quota(account_id: str) -> tuple[bool, str, dict[str, int]]:
-    """检查是否还能再新建一个内容包。
 
-    只拦**新建**：关联到已有内容包不占额度，否则用户想更新自己的源反而会被自己的配额挡住。
-    返回 (是否允许, 拒绝原因, 用量信息)。
-    """
     quota = user_upload_quota(account_id)
     used = count_user_uploads(account_id)
     usage = {"quota": quota, "used": used, "remaining": max(0, quota - used) if quota else 0}
@@ -214,7 +195,7 @@ def check_upload_quota(account_id: str) -> tuple[bool, str, dict[str, int]]:
 
 
 def user_statistics(account_id: str) -> dict[str, Any]:
-    """归集某个用户的使用情况，供后台用户页展示。"""
+
     account_id = normalize_account_id(account_id)
     owner = f"host:{account_id}"
     from app.state import canonical_owner_of
@@ -250,7 +231,7 @@ def user_statistics(account_id: str) -> dict[str, Any]:
 
 
 def known_account_ids() -> list[str]:
-    """已建档 + 从白名单和实际数据里发现的全部阅微 ID。"""
+
     config = load_config()
     found = set(load_users())
     for key in ("hostAccountAllowlist", "moduleUploadAllowlist"):
@@ -265,7 +246,7 @@ def known_account_ids() -> list[str]:
 
 
 def sync_users_from_activity() -> int:
-    """把白名单与实际数据里出现过、但尚未建档的阅微 ID 补建档案。"""
+
     users = load_users()
     added = 0
     for account_id in known_account_ids():
@@ -280,7 +261,7 @@ def sync_users_from_activity() -> int:
 
 
 def set_allowlist_membership(account_id: str, allow_access: bool, allow_upload: bool) -> dict[str, Any]:
-    """同步用户在两份白名单里的成员资格，避免后台两处分别维护后不一致。"""
+
     account_id = normalize_account_id(account_id)
     if not account_id:
         raise ValueError("阅微账号 ID 无效")

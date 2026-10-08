@@ -26,7 +26,6 @@ import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
-/** Thin composition helpers, not copies of miuix's drawing/interaction implementations. */
 @Composable
 internal fun GroupTitle(text: String) = SmallTitle(text = text)
 
@@ -71,7 +70,6 @@ internal fun SectionCard(
     }
 }
 
-/** KSU module action sizing; retain the library Button semantics and interaction. */
 @Composable
 internal fun CapsuleButton(icon: ImageVector, label: String, onClick: () -> Unit) {
     Button(onClick = onClick, minWidth = 35.dp, minHeight = 35.dp, cornerRadius = 50.dp,

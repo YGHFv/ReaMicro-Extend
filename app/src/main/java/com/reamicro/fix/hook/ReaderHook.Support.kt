@@ -20,23 +20,15 @@ import com.reamicro.fix.online.OnlineReaderContextBridge
 import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.xposed.XposedHelpers
 import java.io.ByteArrayOutputStream
-import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.io.File
 import java.lang.reflect.Proxy
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.Locale
-import java.util.concurrent.CountDownLatch
 import org.xmlpull.v1.XmlPullParser
 import com.reamicro.fix.hook.reader.*
 
-// ReaderHook 的支撑簇。
-//
-// 反射调用宿主 Compose 构件与协程、取当前书籍与页面、内存回收、各类小工具。
-//
-// 从 ReaderHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaderHook.releaseReaderStrongReferences(reason: String, releaseEpub: Boolean) {
     currentPageStrong = null
     if (releaseEpub) currentEpubStrong = null
@@ -53,7 +45,7 @@ internal fun ReaderHook.releaseReaderMemory(reason: String, releaseEpub: Boolean
     onDemandPrefetchInFlight.clear()
     onDemandPrefetchRetryCount.clear()
     onDemandRefreshPending.clear()
-    onDemandRefreshInFlight.clear()
+    invalidateOnDemandRefreshes()
     renderingEpubPage.remove()
     if (releaseEpub) {
         currentEpubRef = null
@@ -93,10 +85,7 @@ internal fun ReaderHook.handleHomeBookshelfRendered(source: String) {
         returnToSearchOrigin(clearNavigation = true, removeBar = false)
     }
     removeReadAloudMenuButton()
-    // HomeScreen/BookshelfScreen 这两个 Composable 会在阅读页仍在前台时被 Compose 后台重组，
-    // 若无条件清空 epub/page 强引用与搜索上下文，会导致"同一本书忽然搜不了"的间歇性失败。
-    // 仅当 ReaderViewModel 已销毁（真正离开阅读页，onCleared 未覆盖时的兜底）才清空这些引用；
-    // 否则保留，等切书时由 Epub.read 的换书检测或 onCleared 负责重置。
+
     val readerGone = currentViewModelRef?.get() == null
     if (readerGone) {
         currentEpubRef = null
@@ -275,7 +264,6 @@ internal fun ReaderHook.modifierInstance(): Any =
 internal fun ReaderHook.udp(value: Int): Float =
     udpMethod().invoke(null, value) as Float
 
-/** dp→px 换算方法。每次 loadClass + declaredMethods 全扫太贵，解析一次存下来。 */
 private fun ReaderHook.udpMethod(): Method =
     synchronized(composeMethodCache) {
         composeMethodCache.getOrPut("$UNIT_EXT_KT_CLASS#$UDP_METHOD/int") {
@@ -285,12 +273,6 @@ private fun ReaderHook.udpMethod(): Method =
         }
     }
 
-/**
- * 换算结果按 dp 值缓存，失败返回 null。
- *
- * 供每帧级别的热路径使用（例如挂在 Modifier.height() 上的 hook）：那里连一次反射调用
- * 都不该有。换算结果只取决于 dp 值，进程内不变。
- */
 internal fun ReaderHook.cachedUdp(value: Int): Float? {
     synchronized(udpValueCache) {
         udpValueCache[value]?.let { return it }
@@ -317,7 +299,7 @@ internal fun ReaderHook.composeMethod(className: String, methodName: String, par
     }
 }
 
-internal fun ReaderHook.cacheThemeColors(composer: Any) {
+internal fun ReaderHook.cacheThemeColors(composer: Any, captureSearchTheme: Boolean = false) {
     runCatching {
         val colorScheme = hostColorScheme(composer)
         cachedThemeColors = ThemeColors(
@@ -331,6 +313,12 @@ internal fun ReaderHook.cacheThemeColors(composer: Any) {
             action = hostColorSchemeColor(colorScheme, "getPrimary-0d7_KjU"),
         )
         latestThemeColors = cachedThemeColors
+        if (captureSearchTheme) StructureHost232Colors.readerSnapshot(colorScheme)?.let { snapshot ->
+            if (readerSearchTheme != snapshot) {
+                readerSearchTheme = snapshot
+                searchNavigationView?.updateTheme(snapshot)
+            }
+        }
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX cache host theme colors failed: ${it.stackTraceToString()}")
     }
@@ -397,7 +385,7 @@ internal fun ReaderHook.nativeFunction0(block: () -> Unit): Any {
     return Proxy.newProxyInstance(classLoader, arrayOf(function0Class)) { _, method, _ ->
         when (method.name) {
             "invoke" -> {
-                block()
+                com.reamicro.fix.core.InjectedModuleContext.runUiAction(activityProvider(), block)
                 targetKotlinUnit()
             }
             "toString" -> "ReaMicroEditAction"
@@ -422,7 +410,14 @@ internal fun ReaderHook.resultCardLayoutParams(activity: Activity): LinearLayout
     }
 
 internal fun ReaderHook.currentReadingTarget(): ReadingTarget? {
-    val page = currentPageRef?.get() ?: return null
+    currentScrollElement?.let { element ->
+        val id = callNoArg(element, "getId")?.toString().orEmpty()
+        if (id.isNotBlank()) return ReadingTarget(id,
+            (callNoArg(element, "getChapterIndex") as? Number)?.toInt() ?: 0, callString(element, "getTitle"), "")
+    }
+    val nativePage = if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
+        currentViewModelRef?.get()?.let { searchPageBridge?.page(it) } else null
+    val page = nativePage ?: currentPageRef?.get() ?: return null
     val cfi = callString(page, "getAnchor")
         .ifBlank { callNoArg(page, "getStart")?.toString().orEmpty() }
         .takeIf { it.isNotBlank() }
@@ -449,16 +444,6 @@ internal fun ReaderHook.forceRefreshReaderWindow(source: String): Boolean {
 
 internal fun ReaderHook.idOrNull(mark: Any?): Long? =
     mark?.let(::searchResultHighlightMarkId)
-
-internal fun ReaderHook.dispatchTapDirection(receiver: Any?, viewModel: Any?, next: Boolean): Boolean =
-    runCatching {
-        val intentClass = classLoader.loadClass("$READER_UI_INTENT_CLASS\$TapDirection")
-        val direction = System.currentTimeMillis() * if (next) 1L else -1L
-        val intent = intentClass.getDeclaredConstructor(Long::class.javaPrimitiveType).newInstance(direction)
-        dispatchReaderIntent(receiver, viewModel, intent, if (next) "TapDirectionNext" else "TapDirectionPrev")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX full-text search tap direction correction failed: ${it.stackTraceToString()}")
-    }.getOrDefault(false)
 
 internal fun ReaderHook.textRange(start: Int, end: Int): Long? =
     runCatching {
@@ -857,24 +842,6 @@ internal fun ReaderHook.htmlAnchorTextStart(raw: String, anchor: String): Int? {
     return htmlToSearchText(raw.substring(0, match.range.first)).length
 }
 
-internal fun ReaderHook.snippetFor(text: String, start: Int, end: Int): SearchSnippet {
-    val compactRadius = if (text.any { it.code > 127 }) {
-        SEARCH_CJK_SNIPPET_RADIUS + SEARCH_SNIPPET_EXTRA_RADIUS
-    } else {
-        SEARCH_SNIPPET_RADIUS + SEARCH_SNIPPET_EXTRA_RADIUS
-    }
-    val from = (start - compactRadius).coerceAtLeast(0)
-    val to = (end + compactRadius).coerceAtMost(text.length)
-    val prefix = if (from > 0) "\u2026" else ""
-    val suffix = if (to < text.length) "\u2026" else ""
-    val body = text.substring(from, to).replace(Regex("\\s+"), " ").trim()
-    val leadingTrim = text.substring(from, start).length -
-        text.substring(from, start).replace(Regex("^\\s+"), "").length
-    val matchStart = prefix.length + (start - from - leadingTrim).coerceAtLeast(0)
-    val matchEnd = (matchStart + (end - start)).coerceAtMost(prefix.length + body.length)
-    return SearchSnippet(prefix + body + suffix, matchStart, matchEnd)
-}
-
 internal fun ReaderHook.bodyOnlyHtml(value: String): String =
     Regex("<body\\b[^>]*>([\\s\\S]*?)</body>", RegexOption.IGNORE_CASE)
         .find(value)
@@ -982,6 +949,7 @@ internal fun ReaderHook.createThoughtStyleEditor(
             InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         setPadding(0, 0, 0, dp(10))
         background = null
+        EmbeddedHostUi.thoughtInput(this)
     }
 
 internal fun ReaderHook.thoughtStyleSaveButton(
@@ -1108,60 +1076,11 @@ internal fun ReaderHook.escapeXmlText(value: String): String =
         .replace("<", "&lt;")
         .replace(">", "&gt;")
 
-internal fun ReaderHook.invokeSuspendBlocking(method: Method, target: Any?, vararg args: Any?): Any? {
-    val latch = CountDownLatch(1)
-    var value: Any? = null
-    var error: Throwable? = null
-    val continuationClass = XposedHelpers.findClass(KOTLIN_CONTINUATION_CLASS, classLoader)
-    val throwOnFailure = XposedHelpers.findClass(KOTLIN_RESULT_KT_CLASS, classLoader).declaredMethods.first {
-        it.name == "throwOnFailure" && it.parameterTypes.size == 1
-    }.apply { isAccessible = true }
-    val continuation = Proxy.newProxyInstance(classLoader, arrayOf(continuationClass)) { proxy, proxyMethod, proxyArgs ->
-        when (proxyMethod.name) {
-            "getContext" -> emptyCoroutineContext()
-            "resumeWith" -> {
-                val result = proxyArgs?.getOrNull(0)
-                runCatching {
-                    throwOnFailure.invoke(null, result)
-                    value = result
-                }.onFailure {
-                    error = if (it is InvocationTargetException) it.targetException ?: it else it
-                }
-                latch.countDown()
-                targetUnit()
-            }
-            "toString" -> "ReaMicroReaderContinuation"
-            "hashCode" -> System.identityHashCode(proxy)
-            "equals" -> proxy === proxyArgs?.getOrNull(0)
-            else -> null
-        }
-    }
-    val returned = try {
-        method.invoke(target, *args.toMutableList().apply { add(continuation) }.toTypedArray())
-    } catch (e: InvocationTargetException) {
-        throw e.targetException ?: e
-    }
-    if (returned !== coroutineSuspended()) return returned
-    latch.await()
-    error?.let { throw it }
-    return value
-}
-
 internal fun ReaderHook.emptyCoroutineContext(): Any =
     XposedHelpers.findClass(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS, classLoader)
         .getDeclaredField("INSTANCE")
         .apply { isAccessible = true }
         .get(null)
-
-internal fun ReaderHook.coroutineSuspended(): Any =
-    runCatching {
-        XposedHelpers.findClass(KOTLIN_INTRINSICS_CLASS, classLoader).methods.first {
-            it.name == "getCOROUTINE_SUSPENDED" && it.parameterTypes.isEmpty()
-        }.apply { isAccessible = true }.invoke(null)
-    }.getOrElse {
-        (XposedHelpers.findClass(KOTLIN_COROUTINE_SINGLETONS_CLASS, classLoader).enumConstants ?: emptyArray())
-            .first { value -> value.toString() == "COROUTINE_SUSPENDED" }
-    }
 
 internal fun ReaderHook.targetUnit(): Any? = runCatching {
     XposedHelpers.findClass(KOTLIN_UNIT_CLASS, classLoader)
@@ -1170,13 +1089,6 @@ internal fun ReaderHook.targetUnit(): Any? = runCatching {
         .get(null)
 }.getOrNull()
 
-/**
- * 无参方法调用。方法查找按「类名#方法名」缓存，包括查不到的负结果。
- *
- * ReaderHook 簇有一百多个调用点，其中不少在排版/绘制路径上。原先每次调用都要
- * javaClass.methods 全量扫一遍（ART 每次返回新的 Method[] 副本），是热路径上的
- * 固定税，也是 GC 的持续来源。
- */
 internal fun ReaderHook.callNoArg(target: Any?, name: String): Any? {
     target ?: return null
     val method = noArgMethod(target, name) ?: return null

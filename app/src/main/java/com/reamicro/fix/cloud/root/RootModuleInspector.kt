@@ -1,9 +1,5 @@
 package com.reamicro.fix.cloud.root
 
-/**
- * Permission and module health are different stages. An unreadable module or failed scan must
- * never erase the already verified UID 0 result. Inspect only our PID, never every Android process.
- */
 internal object RootModuleInspector {
     fun inspect(access: RootAccessReport, run: (String) -> RootCommandResult): RootModuleStatus {
         if (!access.granted) return RootModuleStatus(access = access, error = access.detail)
@@ -86,7 +82,7 @@ internal object RootModuleInspector {
             tr '\000' '\n' <"/proc/${'$'}pid/cmdline" 2>/dev/null | grep -Fxq "${'$'}2"
         }
         matching_pid "${'$'}state/daemon.pid" "${'$'}module/watchdog.sh" && echo daemon=1
-        # BusyBox timeout and runner.sh may exec in-place: the recorded PID then belongs to Java.
+
         if matching_pid "${'$'}state/runner.pid" "${'$'}module/runner.sh"; then
             echo running=1
         elif matching_pid "${'$'}state/runner.pid" 'com.reamicro.fix.cloud.root.RootTaskMain' &&

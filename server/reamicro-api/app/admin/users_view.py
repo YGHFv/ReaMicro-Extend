@@ -1,13 +1,7 @@
-"""后台用户管理页。
-
-按阅微账号 ID 列出用户，显示各自的凭据、任务、上传数与在线状态，
-并允许逐个开关访问、上传权限与停用。
-"""
 import html
 from typing import Any
 
-from app import runtime
-from app.admin.format import _admin_time_detail, _admin_time_label
+from app.admin.format import _admin_time_detail
 from app.admin.layout import _admin_layout, admin_csrf_token
 from app.config_store import bounded_config_int, load_config
 from app.users import (

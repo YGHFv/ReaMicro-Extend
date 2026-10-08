@@ -3,7 +3,6 @@ package com.reamicro.fix.cloud.root
 import androidx.annotation.StringRes
 import com.reamicro.fix.R
 
-/** Independently verified authorization, module lifecycle, and scheduler liveness. */
 internal data class RootModuleStatus(
     val rootAvailable: Boolean = false,
     val checkedAt: Long = 0L,
@@ -37,7 +36,7 @@ internal data class RootModuleStatus(
         RootAccessState.TIMEOUT -> R.string.execution_root_timeout
         RootAccessState.ERROR -> R.string.execution_root_probe_error
     }
-    /** Installation state only: independent of the task switch or process activity. */
+
     @StringRes
     fun moduleResource(): Int = when {
         !rootAvailable -> R.string.execution_root_unavailable

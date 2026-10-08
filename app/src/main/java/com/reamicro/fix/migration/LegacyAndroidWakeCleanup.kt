@@ -8,10 +8,6 @@ import android.content.Intent
 import com.reamicro.fix.logging.ModuleAndroidLog
 import java.io.File
 
-/**
- * Upgrade-only tombstone, NOT a wake implementation. It cannot create an alarm or a job.
- * Legacy identifiers are kept here solely to cancel objects created by previously installed APKs.
- */
 object LegacyAndroidWakeCleanup {
     private const val PREFS = "root_enhancement_migrations"
     @Synchronized
@@ -23,7 +19,7 @@ object LegacyAndroidWakeCleanup {
         val result = runCatching {
             cancelLegacyAlarms(app)
             checkNotNull(app.getSystemService(JobScheduler::class.java)) { "Job service unavailable for cleanup" }.let { jobs ->
-                // Only this app's retired wake jobs, never other jobs or other packages.
+
                 listOf(260915, 260917, 260931).forEach(jobs::cancel)
             }
             listOf("reamicro-task-wake", "device-job-diagnostic").forEach { name ->
@@ -39,13 +35,12 @@ object LegacyAndroidWakeCleanup {
             check(state.edit().putBoolean("android_wake_removed_v1", true).remove("error").commit())
         }
         result.onFailure {
-            // No implicit Root request or task-mode change. Retry on a later process startup.
+
             state.edit().putString("error", it.javaClass.simpleName).apply()
             ModuleAndroidLog.error("ReaMicroUpgrade", "Retired wake cleanup pending: ${it.javaClass.simpleName}")
         }
     }
-    /** Older injected versions could have created the same alarm under the host UID.
-     * Cancel only the exact module-targeted PendingIntents; never touch the host's jobs/data. */
+
     @Synchronized
     fun runForHost(context: Context) {
         val app = context.applicationContext

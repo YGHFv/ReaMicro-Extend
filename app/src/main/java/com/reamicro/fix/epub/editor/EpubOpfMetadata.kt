@@ -12,7 +12,6 @@ import javax.xml.transform.TransformerFactory
 import javax.xml.transform.dom.DOMSource
 import javax.xml.transform.stream.StreamResult
 
-/** The six fields shown by ReaMicro 1.3 EpubMetadataScreen, including EPUB3 refinements. */
 internal object EpubOpfMetadata {
     private const val DC = "http://purl.org/dc/elements/1.1/"
     private val tags = mapOf(
@@ -26,6 +25,7 @@ internal object EpubOpfMetadata {
     }
 
     fun update(text: String, field: String, value: String): String {
+        EpubMetadataFields.validate(field, value)
         val tag = requireNotNull(tags[field]) { "不支持的元数据字段" }
         val document = parse(text)
         val metadata = metadata(document)
@@ -51,7 +51,7 @@ internal object EpubOpfMetadata {
             }
         }
         element.textContent = value
-        // Only serialize metadata: manifest, spine, guide and XML encoding declaration remain untouched.
+
         val output = StringWriter()
         val factory = TransformerFactory.newInstance()
         runCatching { factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true) }
@@ -64,7 +64,106 @@ internal object EpubOpfMetadata {
         return text.replaceRange(range, output.toString())
     }
 
-    private fun parse(text: String): Document {
+    fun coverHref(text: String): String {
+        val doc = parse(text)
+        val metas = doc.getElementsByTagNameNS("*", "meta")
+        val coverId = (0 until metas.length).map { metas.item(it) as Element }
+            .firstOrNull { it.getAttribute("name") == "cover" }?.getAttribute("content")
+        val nodes = doc.getElementsByTagNameNS("*", "item")
+        val items = (0 until nodes.length).map { nodes.item(it) as Element }
+        return (items.firstOrNull { !coverId.isNullOrBlank() && it.getAttribute("id") == coverId }
+            ?: items.firstOrNull { "cover-image" in it.getAttribute("properties").split(Regex("\\s+")) })
+            ?.getAttribute("href").orEmpty()
+    }
+
+    fun packagePath(container: String): String {
+        val doc = parse(container)
+        val nodes = doc.getElementsByTagNameNS("*", "rootfile")
+        val roots = (0 until nodes.length).map { nodes.item(it) as Element }
+        return (roots.firstOrNull { it.getAttribute("media-type") == "application/oebps-package+xml" }
+            ?: roots.firstOrNull())?.getAttribute("full-path").orEmpty()
+    }
+
+    fun spineHrefs(text: String): List<String> {
+        val doc = parse(text)
+        val manifest = doc.getElementsByTagNameNS("*", "manifest").item(0) as? Element
+            ?: return emptyList()
+        val spine = doc.getElementsByTagNameNS("*", "spine").item(0) as? Element
+            ?: return emptyList()
+        val items = manifest.getElementsByTagNameNS("*", "item")
+        val hrefById = linkedMapOf<String, String>()
+        for (index in 0 until items.length) {
+            val item = items.item(index) as Element
+            val id = item.getAttribute("id")
+            val href = item.getAttribute("href")
+            if (id.isNotBlank() && href.isNotBlank() && id !in hrefById) hrefById[id] = href
+        }
+        val refs = spine.getElementsByTagNameNS("*", "itemref")
+        return (0 until refs.length).mapNotNull { index ->
+
+            hrefById[(refs.item(index) as Element).getAttribute("idref")]
+        }
+    }
+
+    fun updateCover(text: String, href: String, mediaType: String): String {
+        require(href.isNotBlank()) { "封面路径为空" }
+        val doc = parse(text)
+        val manifest = doc.getElementsByTagNameNS("*", "manifest").item(0) as? Element
+            ?: error("缺少 manifest 节点")
+        val metadata = metadata(doc)
+        val nodes = manifest.getElementsByTagNameNS("*", "item")
+        val items = (0 until nodes.length).map { nodes.item(it) as Element }
+        fun decoded(value: String) = runCatching {
+            java.net.URLDecoder.decode(value.replace("+", "%2b"), "UTF-8")
+        }.getOrDefault(value)
+        var target = items.firstOrNull { decoded(it.getAttribute("href")) == decoded(href) }
+        if (target == null) {
+            target = doc.createElementNS(manifest.namespaceURI, manifest.prefix?.let { "$it:item" } ?: "item")
+            target.setAttribute("href", href)
+            target.setAttribute("media-type", mediaType)
+            manifest.appendChild(target)
+        }
+        var id = target.getAttribute("id")
+        if (id.isBlank()) {
+            val all = doc.getElementsByTagName("*")
+            val ids = (0 until all.length).map { (all.item(it) as Element).getAttribute("id") }.toSet()
+            id = "reamicro-cover"
+            while (id in ids) id += "-1"
+            target.setAttribute("id", id)
+        }
+        (items + target).distinct().forEach { item ->
+            val props = item.getAttribute("properties").split(Regex("\\s+"))
+                .filter { it.isNotBlank() && it != "cover-image" }.toMutableList()
+            if (item === target) props.add("cover-image")
+            if (props.isEmpty()) item.removeAttribute("properties")
+            else item.setAttribute("properties", props.joinToString(" "))
+        }
+        val metas = metadata.getElementsByTagNameNS("*", "meta")
+        val covers = (0 until metas.length).map { metas.item(it) as Element }
+            .filter { it.getAttribute("name") == "cover" }
+        if (covers.isEmpty()) {
+            val meta = doc.createElementNS(metadata.namespaceURI, metadata.prefix?.let { "$it:meta" } ?: "meta")
+            meta.setAttribute("name", "cover")
+            meta.setAttribute("content", id)
+            metadata.appendChild(meta)
+        } else covers.forEach { it.setAttribute("content", id) }
+        return replaceElement(replaceElement(text, "metadata", metadata), "manifest", manifest)
+    }
+
+    internal fun replaceElement(text: String, name: String, node: Element): String {
+        val output = StringWriter()
+        val factory = TransformerFactory.newInstance()
+        runCatching { factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true) }
+        factory.newTransformer().apply {
+            setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes")
+            setOutputProperty(OutputKeys.INDENT, "no")
+        }.transform(DOMSource(node), StreamResult(output))
+        val range = Regex("""(?s)<((?:[\w.-]+:)?${Regex.escape(name)})\b[^>]*>.*?</\1\s*>""")
+            .find(text)?.range ?: error("无法定位 $name 节点")
+        return text.replaceRange(range, output.toString())
+    }
+
+    internal fun parse(text: String): Document {
         require(!Regex("""<!DOCTYPE""", RegexOption.IGNORE_CASE).containsMatchIn(text)) {
             "为避免外部实体，暂不编辑带 DOCTYPE 的 OPF"
         }

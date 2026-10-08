@@ -17,12 +17,6 @@ import java.io.FileOutputStream
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
-// 字体设置簇。
-//
-// 全局界面字体与阅读正文字体的导入、选择、按文本样式分别指定。
-//
-// 从 ReaMicroSettingsHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的
-// 结果重新缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaMicroSettingsHook.renderFontSettingsContent(innerPaddings: Any, composer: Any) {
     val listContent = functionProxy("FontSettingsList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
@@ -291,7 +285,8 @@ internal fun ReaMicroSettingsHook.settingsDialogFontChoiceRow(
         text = if (subtitle.isNullOrBlank()) title else "$title\n$subtitle"
         textSize = 14f
         setTextColor(colors.title)
-        typeface = androidTypefaceForFontSelection(selection) ?: Typeface.DEFAULT
+        typeface = androidTypefaceForFontSelection(selection) ?: EmbeddedHostUi.nativeTypeface(context) ?: Typeface.DEFAULT
+        if (selection.isNotBlank()) tag = "reamicro-font-preview"
         setSingleLine(false)
         setPadding(
             settingsDp(context, 12),

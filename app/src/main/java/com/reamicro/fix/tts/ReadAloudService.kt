@@ -1,4 +1,5 @@
 package com.reamicro.fix.tts
+import com.reamicro.fix.notification.setReaMicroSmallIcon
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -358,23 +359,6 @@ class ReadAloudService : Service() {
         clearPlaybackSession()
         stopForegroundCompat(removeNotification = true)
         stopSelf()
-    }
-
-    private fun jumpBy(delta: Int) {
-        synchronized(stateLock) {
-            currentIndex = (currentIndex + delta).coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
-            verifiedProgressIndex = -1
-            playbackGeneration++
-        }
-        cancelNetworkPrefetch()
-        clearNetworkAudioCache()
-        tts?.stop()
-        releasePlayer()
-        paused = false
-        stopRequested = false
-        acquireWakeLock()
-        startWorkerIfNeeded()
-        ensureForeground(status = "\u6b63\u5728\u5207\u6362")
     }
 
     private fun jumpChapter(delta: Int) {
@@ -852,7 +836,7 @@ class ReadAloudService : Service() {
         val progress = if (paragraphs.isNotEmpty()) "${(currentIndex + 1).coerceAtMost(paragraphs.size)}/${paragraphs.size}" else status
         updateMediaSession(chapterTitle, progress, done)
         builder
-            .setSmallIcon(R.drawable.ic_notification_reamicro)
+            .setReaMicroSmallIcon()
             .setContentTitle(chapterTitle)
             .setContentText(bookTitle)
             .setSubText(progress)

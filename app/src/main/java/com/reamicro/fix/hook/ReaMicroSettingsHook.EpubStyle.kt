@@ -35,12 +35,6 @@ import org.json.JSONObject
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
-// 在线补全 EPUB 样式设置簇。
-//
-// 样式的增删改、CSS 分段编辑、实时预览、导入导出与配图选择。
-//
-// 从 ReaMicroSettingsHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的
-// 结果重新缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubStyle) {
     val activity = activityProvider() ?: return
     activity.runOnUiThread {
@@ -69,7 +63,7 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
                     syncPreview.invoke()
                 }
             }
-            // 字体两种模式：嵌入会把字体文件复制进 EPUB，仅声明只写 font-family 名。
+
             val fontModeRow = settingsDialogChipRow(activity)
             lateinit var syncFontModeRow: () -> Unit
             syncFontModeRow = {
@@ -84,13 +78,13 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
                     )
                 }
             }
-            // 分段草稿：切走时写回当前段，切入时载入目标段，保证每段都能完整填写。
+
             val drafts = LinkedHashMap<String, String>()
             OnlineEpubStyleDefaults.selectors(style.kind).forEach { drafts[it] = "" }
             OnlineEpubCssBlocks.parse(style.css.ifBlank { OnlineEpubStyleDefaults.blankCss(style.kind) })
                 .forEach { drafts[it.selector] = it.declarations }
             val selectors = drafts.keys.toList()
-            // 分段默认全不选中：点击某段才展开编辑框，再点一次收起。
+
             var activeSelector = ""
             val cssInput = settingsDialogInput(activity, "CSS 声明", singleLine = false, colors = colors).apply {
                 minLines = 4
@@ -100,8 +94,7 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
             val preview = WebView(activity).apply {
                 setBackgroundColor(Color.TRANSPARENT)
                 webViewClient = WebViewClient()
-                // Android 11 起 allowFileAccess 默认 false，合成好的头图与设备字体都走 file://，
-                // 不放开的话图片静默加载失败；头图 figure 又是 line-height:0，失败后高度归零就整个不见了。
+
                 settings.allowFileAccess = true
                 @Suppress("DEPRECATION")
                 settings.allowFileAccessFromFileURLs = true
@@ -125,7 +118,7 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
                     null,
                 )
             }
-            // 分割装饰图与头图原图的选择入口，仅在该样式确实需要图片时出现。
+
             val assetButton = settingsDialogButton(activity, "", colors, SettingsDialogButtonRole.Neutral)
             lateinit var syncAssetButton: () -> Unit
             syncAssetButton = {
@@ -143,7 +136,7 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
                     syncPreview.invoke()
                 }
             }
-            // 头图套用范围，仅头图样式可见。
+
             val headerScopeRow = settingsDialogChipRow(activity)
             lateinit var syncHeaderScopeRow: () -> Unit
             syncHeaderScopeRow = {
@@ -160,7 +153,7 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
                 }
             }
             lateinit var syncSectionRow: () -> Unit
-            /** 展开某一段：只载入不回写，供首次进入与切段复用。 */
+
             fun loadSection(selector: String) {
                 activeSelector = selector
                 if (selector.isBlank()) {
@@ -173,7 +166,7 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
                 syncSectionRow.invoke()
                 syncPreview.invoke()
             }
-            /** 点分段：先把编辑框内容回写到当前段，再展开目标段；点已展开的段则收起。 */
+
             fun toggleSection(selector: String) {
                 if (activeSelector.isNotBlank()) {
                     drafts[activeSelector] = cssInput.text?.toString().orEmpty().trim()
@@ -214,7 +207,7 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
             val cancelButton = settingsDialogButton(activity, "取消", colors, SettingsDialogButtonRole.Neutral)
             card.addView(settingsDialogTitle(activity, style.kind.title, colors))
             card.addView(nameInput)
-            // 只有标题与卷标承载成段文字，其余类别不给字体设置。
+
             if (style.supportsFont) {
                 syncFontStatus.invoke()
                 card.addView(fontStatus)
@@ -263,7 +256,7 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
                 listOf(deleteButton, applyButton, finishButton, cancelButton)
             }
             card.addView(settingsDialogButtonRow(activity, buttons))
-            // 分段一律以收起状态进入，用户点哪段才展开哪段。
+
             loadSection("")
             fun edited(): OnlineEpubStyle {
                 if (activeSelector.isNotBlank()) {
@@ -274,7 +267,7 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
             exportButton.setOnClickListener { exportOnlineEpubStyle(edited()) }
             resetButton.setOnClickListener {
                 val source = builtInSource ?: return@setOnClickListener
-                // 丢掉这条内置样式的全部改写记录，重新打开时读回内置库的原始 CSS。
+
                 OnlineEpubStyleStore.resetToBuiltIn(onlineEpubStyleContext(), source.id)
                 bumpOnlineEpubStyleVersion()
                 dialog.dismiss()
@@ -306,12 +299,6 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
     }
 }
 
-/**
- * 弹窗内横排 chip 的容器。
- *
- * 定义留在本簇（最早为标题样式的分段切换写的），但高亮规则弹窗的类型选择也用它，
- * 属于通用弹窗构件，不要再各处另写一份。
- */
 internal fun ReaMicroSettingsHook.settingsDialogChipRow(activity: Activity): LinearLayout =
     LinearLayout(activity).apply {
         orientation = LinearLayout.HORIZONTAL
@@ -321,7 +308,6 @@ internal fun ReaMicroSettingsHook.settingsDialogChipRow(activity: Activity): Lin
         ).apply { bottomMargin = settingsDp(activity, 8) }
     }
 
-/** 分段切换按钮，选中态复用设置弹窗的圆角背景。 */
 internal fun ReaMicroSettingsHook.settingsDialogChip(
     activity: Activity,
     text: String,
@@ -352,7 +338,6 @@ internal fun ReaMicroSettingsHook.settingsDialogChip(
         ).apply { rightMargin = settingsDp(activity, 8) }
     }
 
-/** 预览文档：与成书完全一致的 CSS，外加一层模拟阅读页的纸张外观。 */
 internal fun ReaMicroSettingsHook.onlineEpubStylePreviewHtml(draft: OnlineEpubStyle): String {
     val fontFile = File(draft.fontFamily)
     val assetUrl = if (draft.kind == OnlineEpubStyleKind.Header) {
@@ -367,13 +352,6 @@ internal fun ReaMicroSettingsHook.onlineEpubStylePreviewHtml(draft: OnlineEpubSt
         fontUrl = if (draft.supportsFont && fontFile.isFile) "file://${fontFile.absolutePath}" else "",
     )
 }
-
-/**
- * 头图预览：先按该样式的蒙版把原图合成一遍，预览看到的就是成书里的样子。
- *
- * 还没选原图时用示意色块合成，至少能看清蒙版裁出的形状。合成结果按样式与原图缓存，
- * 避免每次输入 CSS 都重算一遍上百万像素。
- */
 
 internal fun ReaMicroSettingsHook.onlineEpubHeaderPreviewUrl(draft: OnlineEpubStyle): String {
     val activity = activityProvider() ?: return ""
@@ -447,7 +425,6 @@ internal fun ReaMicroSettingsHook.exportOnlineEpubStyle(style: OnlineEpubStyle) 
     }
 }
 
-/** 样式关联图片（分割装饰图 / 头图原图）的选择入口。 */
 internal fun ReaMicroSettingsHook.openOnlineEpubStyleImagePicker(activity: Activity, onPicked: (File) -> Unit) {
     runCatching {
         pendingOnlineEpubStyleImagePick = onPicked
@@ -488,7 +465,6 @@ internal fun ReaMicroSettingsHook.onlineEpubStyleImageExtension(activity: Activi
         else -> "png"
     }
 
-/** 样式关联图片统一放模块私有目录，导出导入都以此为落点。 */
 internal fun ReaMicroSettingsHook.onlineEpubStyleAssetDir(context: Context): File =
     File(context.filesDir, ONLINE_EPUB_STYLE_ASSET_DIR)
 
@@ -540,7 +516,6 @@ internal fun ReaMicroSettingsHook.bumpOnlineEpubStyleVersion() {
         ?.invoke(state, value + 1)
 }
 
-/** 某一类成书样式的列表页：结构与「高亮样式」页一致。 */
 internal fun ReaMicroSettingsHook.renderOnlineEpubStyleListContent(
     kind: OnlineEpubStyleKind,
     innerPaddings: Any,

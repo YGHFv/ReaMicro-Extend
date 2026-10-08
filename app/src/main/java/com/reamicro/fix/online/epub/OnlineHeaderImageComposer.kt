@@ -14,18 +14,8 @@ import android.graphics.Shader
 import java.io.ByteArrayOutputStream
 import java.io.File
 
-/**
- * 章节头图合成。
- *
- * 与 TEpub-Editor `buildProcessedHeaderFromAsset` 同一套算法：按样式的样板尺寸建画布，用户图
- * cover 缩放居中绘制，再用样板图的 alpha 做 `DST_IN` 裁切，得到贴边渐隐、撕边等效果。
- * 模块里的蒙版是样板图提取出来的灰度图（见 tools/gen-header-masks.mjs），灰度值即原 alpha。
- */
 internal object OnlineHeaderImageComposer {
-    /**
-     * @param maskBitmap 蒙版灰度图，为 null 时只做 cover 裁切不套蒙版。
-     * @return PNG 字节；源图无法解码时返回 null。
-     */
+
     fun compose(
         sourceFile: File,
         maskBitmap: Bitmap?,
@@ -52,9 +42,6 @@ internal object OnlineHeaderImageComposer {
         }
     }
 
-    /**
-     * 没选原图时的预览底图：画一张示意色块再套蒙版，让用户先看清蒙版裁出的形状。
-     */
     fun composePlaceholder(
         maskBitmap: Bitmap?,
         sampleWidth: Int,
@@ -78,7 +65,6 @@ internal object OnlineHeaderImageComposer {
         }
     }
 
-    /** 斜向渐变加一道地平线，形状简单但足以看出蒙版边缘。 */
     private fun drawPlaceholder(canvas: Canvas, width: Int, height: Int) {
         val background = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             shader = LinearGradient(
@@ -111,7 +97,6 @@ internal object OnlineHeaderImageComposer {
         )
     }
 
-    /** 按 max(w/iw, h/ih) 缩放并居中，等价于 CSS 的 object-fit: cover。 */
     private fun drawCover(canvas: Canvas, source: Bitmap, width: Int, height: Int) {
         val scale = maxOf(width.toFloat() / source.width, height.toFloat() / source.height)
         val drawWidth = source.width * scale
@@ -126,11 +111,6 @@ internal object OnlineHeaderImageComposer {
         )
     }
 
-    /**
-     * 用蒙版裁切已绘制的内容。
-     *
-     * 蒙版是灰度图，先按灰度值重建 alpha 再做 DST_IN；样板图本身若已带 alpha 通道也能直接用。
-     */
     private fun applyMask(canvas: Canvas, mask: Bitmap, width: Int, height: Int) {
         val alphaMask = toAlphaMask(mask, width, height)
         try {
@@ -147,7 +127,6 @@ internal object OnlineHeaderImageComposer {
         }
     }
 
-    /** 把蒙版拉伸到目标尺寸，并把灰度值转成 alpha。 */
     private fun toAlphaMask(mask: Bitmap, width: Int, height: Int): Bitmap {
         val scaled = Bitmap.createScaledBitmap(mask, width, height, true)
         val pixels = IntArray(width * height)
@@ -156,14 +135,13 @@ internal object OnlineHeaderImageComposer {
         for (index in pixels.indices) {
             val pixel = pixels[index]
             val alpha = pixel ushr 24
-            // 灰度蒙版整幅不透明，此时取亮度当 alpha；本身带 alpha 的样板图则沿用其 alpha。
+
             val value = if (alpha == 0xFF) pixel and 0xFF else alpha
             pixels[index] = value shl 24
         }
         return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
     }
 
-    /** 整幅完全不透明的蒙版没有裁切意义，直接跳过（与 TEpub 的 alpha < 250 判断一致）。 */
     private fun hasTransparency(mask: Bitmap): Boolean {
         val step = maxOf(1, mask.width * mask.height / SAMPLE_LIMIT)
         var index = 0
@@ -178,6 +156,5 @@ internal object OnlineHeaderImageComposer {
         return false
     }
 
-    /** 判透明只需抽样，整幅逐像素读对上百万像素的样板图太慢。 */
     private const val SAMPLE_LIMIT = 20_000
 }

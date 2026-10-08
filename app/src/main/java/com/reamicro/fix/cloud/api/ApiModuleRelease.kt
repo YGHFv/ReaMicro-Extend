@@ -35,9 +35,7 @@ data class ApiModuleUpdateCheck(
 )
 
 fun checkModuleUpdate(client: ApiServerClient): ApiModuleUpdateCheck = runCatching {
-    // 必须读模块自己的 BuildConfig：本函数运行在阅微宿主进程内，
-    // 用 context.packageManager.getPackageInfo(context.packageName) 拿到的是阅微的版本号，
-    // 会把宿主版本当成模块版本来比较。
+
     val currentVersionName = BuildConfig.VERSION_NAME
     val currentVersionCode = BuildConfig.VERSION_CODE.toLong()
     val currentBuildTime = BuildConfig.BUILD_TIME
@@ -45,8 +43,7 @@ fun checkModuleUpdate(client: ApiServerClient): ApiModuleUpdateCheck = runCatchi
     val available = when {
         release.versionCode > 0 && release.versionCode > currentVersionCode -> true
         release.versionCode > 0 && release.versionCode < currentVersionCode -> false
-        // 服务器版本号不是语义版本号（例如 CI 的 ci-123-1）时只能比构建时间：
-        // 这类字符串会被解析成 0.0.0，直接比较会永远判定"已是最新版本"。
+
         !isSemanticVersion(release.versionName) -> release.buildTime > currentBuildTime
         comparePackageVersions(release.versionName, currentVersionName) > 0 -> true
         comparePackageVersions(release.versionName, currentVersionName) < 0 -> false

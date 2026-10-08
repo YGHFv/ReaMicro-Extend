@@ -72,19 +72,11 @@ import com.reamicro.fix.cloud.webdav.normalizeWebDavPath
 import com.reamicro.fix.cloud.webdav.webDavBookUrl
 import com.reamicro.fix.logging.logWebDav
 
-// WebDavDriveHook 的宿主对象构造与杂项支撑簇。
-//
-// 伪造宿主需要的 PagingData/Flow/Result/CloudBook 等对象、反射取宿主仓库与
-// ViewModel、书籍备份打包、以及各类小工具。
-//
-// 从 WebDavDriveHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的结果重新
-// 缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun WebDavDriveHook.install() {
     logWebDav("install start")
     WebDavDriveHook.activeInstance = this
     OnlineOnDemandBridge.attach(::downloadOnlineCompletionOnDemandChapter)
-    // 逐个登记安装结果：宿主升级导致某个 hook 装不上时，靠启动汇总即可定位，
-    // 且单个 hook 失败不再中断后续 hook 的安装。
+
     HookInstallReport.installAll(
         FEATURE_ID,
         listOf(
@@ -97,7 +89,6 @@ internal fun WebDavDriveHook.install() {
             "homeViewModelDependencies" to ::hookHomeViewModelDependencies,
             "webDavRowIcon" to ::hookWebDavRowIcon,
             "webDavYun115Icon" to ::hookWebDavYun115Icon,
-            "webDavFileFolderIcon" to ::hookWebDavFileFolderIcon,
             "webDavCloudTreeIcon" to ::hookWebDavCloudTreeIcon,
             "importCloudRowLabels" to ::hookImportCloudRowLabels,
             "importCloudRowDetail" to ::hookImportCloudRowDetail,
@@ -113,7 +104,7 @@ internal fun WebDavDriveHook.install() {
             "cloudStorageWebDavData" to ::hookCloudStorageWebDavData,
             "cloudStorageWebDavStrings" to ::hookCloudStorageWebDavStrings,
             "cloudStorageWebDavTitle" to ::hookCloudStorageWebDavTitle,
-            "cloudStorageWebDavScreenScope" to ::hookCloudStorageWebDavScreenScope,
+            "cloudStorageWebDavRefresh" to ::hookCloudStorageWebDavRefresh,
             "cloudStorageWebDavAuthTips" to ::hookCloudStorageWebDavAuthTips,
             "cloudStorageWebDavViewModelState" to ::hookCloudStorageWebDavViewModelState,
             "webDavCloudTap" to ::hookWebDavCloudTap,
@@ -183,7 +174,7 @@ internal fun WebDavDriveHook.canUseCloudExtendedDisplay(): Boolean =
 
 internal fun isBookLocalSheetBookContextMethod(method: Method): Boolean {
     if (method.name == BOOK_LOCAL_SHEET_METHOD && method.parameterTypes.size == 5) return true
-    // A14 moved the sheet body into a generated lambda; hook any BookLocalSheet lambda that carries Book + Composer.
+
     return method.name.startsWith("BookLocalSheet\$lambda\$") &&
         method.parameterTypes.firstOrNull()?.name == BOOK_CLASS &&
         method.parameterTypes.any { it.name == COMPOSER_CLASS }
@@ -754,12 +745,11 @@ internal fun copyHomeUiStateWithCloudResults(state: Any, cloudResults: Map<Any?,
         runCatching {
             copyMethod.isAccessible = true
             val paramTypes = copyMethod.parameterTypes
-            // 逐个取 componentN，失败保留 null（不会中断整体，避免错位）
+
             val baseArgs = Array<Any?>(paramTypes.size) { index ->
                 runCatching { state.invokeNoArg("component${index + 1}") }.getOrNull()
             }
-            // 收集所有“可接受 Map”的候选参数位。引用相等/单例空 Map 会误判，
-            // 因此改为逐个候选注入后用 getCloudSearchResults() 验证输出是否真正生效。
+
             val candidateIndices = paramTypes.indices.filter { i ->
                 Map::class.java.isAssignableFrom(paramTypes[i])
             }
@@ -768,8 +758,7 @@ internal fun copyHomeUiStateWithCloudResults(state: Any, cloudResults: Map<Any?,
                     "no Map parameter for ${paramTypes.size}-arg HomeUiState.copy",
                 )
             }
-            // 候选排序：当前值 === cloudSearchResults 的优先（多为真实位），
-            // 其余按声明顺序，最后逐个尝试并验证输出。
+
             val orderedCandidates = candidateIndices.sortedByDescending { i ->
                 if (baseArgs[i] != null && baseArgs[i] === currentCloudResults) 1 else 0
             }
@@ -784,13 +773,13 @@ internal fun copyHomeUiStateWithCloudResults(state: Any, cloudResults: Map<Any?,
                     }
                     lastCopied = copied
                     val resultMap = runCatching { homeCloudSearchResults(copied) }.getOrNull()
-                    // 验证：注入后的 cloudSearchResults 必须真正包含我们写入的键
+
                     val verified = resultMap != null && expectedKeys.all { resultMap.containsKey(it) }
                     if (verified) copied else null
                 }.getOrNull()
                 if (attemptResult != null) return attemptResult
             }
-            // 全部候选都未通过验证：若期望为空（清空场景），接受最后一次可用结果
+
             if (expectedKeys.isEmpty() && lastCopied != null) return lastCopied!!
             failures += "${paramTypes.size}: no verified cloud index in ${orderedCandidates.joinToString(",")}"
         }.onFailure {
@@ -977,12 +966,7 @@ internal fun WebDavDriveHook.newOnlineCompletionCloudBook(
 internal fun WebDavDriveHook.newOnlineCompletionLocalBook(path: String, result: OnlineBookSearchResult): Any {
     val now = System.currentTimeMillis()
     val bookClass = cls(BOOK_CLASS)
-    // 2.2.0 起 Book 主构造为 25 参（旧版 23/24），且存在带 Serialization/DefaultConstructorMarker
-    // 的重载。此处不再写死参数个数，改为取“首参为 long 的最长构造器”（即真实全参构造，
-    // 规避首参为 int 位掩码的序列化构造），按类型填默认值后仅设置关键字段（按 Book 字段声明顺序），
-    // 抗后续字段增减。字段顺序：id,uuid,uid,title,subtitle,author,cover,size,uri,group,created,
-    // cfiVersion,embeddedFonts,epubcfi,chapter,progress,total,finished,updated,pinnedAt,cloudId,
-    // backupType,backupId,backupCode,publisher
+
     val constructor = bookClass.declaredConstructors
         .filter { it.parameterTypes.size >= 23 && it.parameterTypes[0] == java.lang.Long.TYPE }
         .maxByOrNull { it.parameterTypes.size }
@@ -1007,16 +991,16 @@ internal fun WebDavDriveHook.newOnlineCompletionLocalBook(path: String, result: 
     fun set(index: Int, value: Any?) {
         if (index in args.indices) args[index] = value
     }
-    set(0, 0L) // id
-    set(1, UUID.nameUUIDFromBytes(path.toByteArray(Charsets.UTF_8)).toString()) // uuid
-    set(3, result.name) // title
-    set(5, result.author) // author
-    set(6, result.coverUrl) // cover
-    set(8, result.detailUrl.ifBlank { path }) // uri
-    set(10, now) // created
-    set(21, BACKUP_TYPE_ONLINE_COMPLETION) // backupType
-    set(22, path) // backupId
-    set(24, result.sourceName) // publisher
+    set(0, 0L)
+    set(1, UUID.nameUUIDFromBytes(path.toByteArray(Charsets.UTF_8)).toString())
+    set(3, result.name)
+    set(5, result.author)
+    set(6, result.coverUrl)
+    set(8, result.detailUrl.ifBlank { path })
+    set(10, now)
+    set(21, BACKUP_TYPE_ONLINE_COMPLETION)
+    set(22, path)
+    set(24, result.sourceName)
     return constructor.newInstance(*args)
 }
 
@@ -1389,8 +1373,7 @@ internal fun WebDavDriveHook.refreshOnlineCompletionCatalogTables(book: Any, boo
     if (itemRefs.isEmpty()) {
         error("阅微目录条目解析为空，已阻止刷新目录表")
     }
-    // 阅微 2.3.0 为目录解析新增了可空 Function2<Int, Int, Unit> 进度回调；
-    // 同时兼容旧版三参数签名。宿主默认参数实现同样向第四参传 null。
+
     val chapterMethod = managerMethods
         .filter {
             it.name == "getChapters" &&
@@ -1894,8 +1877,6 @@ internal fun <T> sortStorageEntries(
     return entries.filter(isDirectory).sortedWith(comparator) + entries.filterNot(isDirectory).sortedWith(comparator)
 }
 
-// 生成用于模糊匹配的「骨架」：Unicode NFC 后，仅保留字母/数字/汉字（Letter/Digit），
-// 丢弃所有标点、括号、空白、省略号。彻底消除请求名与服务器名之间的等价字符差异。
 internal fun skeletonForMatch(value: String): String {
     val nfc = java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFC)
     val sb = StringBuilder(nfc.length)
@@ -2008,13 +1989,6 @@ internal fun WebDavDriveHook.method(className: String, methodName: String, param
         }
     }
 }
-
-/**
- * 按签名解析首页搜索结果行的点击回调。
- * 2.2.0 起该 lambda 名从 SearchResult$lambda$0$0$1$0$0$0 变化，段数随混淆浮动，
- * 因此不再写死方法名，改为匹配 HomeSearchBarKt 内签名为 (IntentReceiver, CloudBook) 且
- * 名称以 SearchResult 开头的静态方法（唯一真实目标，另一个同签名为 $r8$lambda 合成桥接）。
- */
 
 internal fun WebDavDriveHook.staticObject(className: String, fieldName: String): Any {
     val clazz = cls(className)

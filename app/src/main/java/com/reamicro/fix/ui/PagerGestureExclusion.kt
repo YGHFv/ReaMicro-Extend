@@ -14,14 +14,6 @@ import androidx.compose.ui.platform.InspectorInfo
 import androidx.compose.ui.unit.IntSize
 import top.yukonga.miuix.kmp.utils.horizontalPagerSwipeOverride
 
-/**
- * Filter a complete touch stream before miuix's Initial-pass cross-axis interceptor sees it.
- * The actual paging, fling, accessibility and settling still belong to miuix.
- *
- * miuix 0.9.4 exposes its interceptor as one ModifierNodeElement, but no exclusion predicate.
- * DelegatingNode dispatches pointer events to this implementing node; we explicitly forward
- * only non-excluded streams to the attached library delegate. No recomposition race on DOWN.
- */
 internal fun Modifier.crossAxisPagerWithExclusion(
     pagerState: PagerState,
     enabled: Boolean,
@@ -74,7 +66,7 @@ private class PagerExclusionNode(
             }
         }
         if (!excluded) libraryPointer.onPointerEvent(pointerEvent, pass, bounds)
-        // Keep ownership until every finger has lifted, including the final event pass.
+
         if (pass == PointerEventPass.Final && pointerEvent.changes.none { it.pressed }) {
             inGesture = false
             excluded = false

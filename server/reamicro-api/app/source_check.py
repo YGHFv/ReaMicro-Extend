@@ -1,15 +1,3 @@
-"""书源可用性检测与多地址支持。
-
-内容库里的书源会随站点改版、换域名、跑路而失效，此前后台完全看不出哪些已经不能用。
-这里做两件事：
-
-1. **多地址**：一个书源常有主域名与若干镜像。清单里的 `domains` 现在是有序列表，
-   第一个视为主地址，其余为备用；检测会逐个探测并给出各自结果。
-2. **可用性检测**：对每个地址发一次轻量请求，判断是否可达。
-
-**SSRF 防护**：检测目标来自上传的书源内容，等于让服务器访问任意 URL。
-所以只允许 http/https、拒绝私有网段与回环地址、不跟随跨主机跳转、限制响应体大小与超时。
-"""
 import ipaddress
 import json
 import socket
@@ -27,7 +15,7 @@ CHECK_TIMEOUT_SECONDS = 10
 CHECK_MAX_BYTES = 64 * 1024
 CHECK_USER_AGENT = "ReaMicro-Server-SourceCheck/1.0"
 
-# 检测结果状态
+
 STATUS_OK = "ok"
 STATUS_SLOW = "slow"
 STATUS_UNREACHABLE = "unreachable"
@@ -46,7 +34,7 @@ SLOW_THRESHOLD_MS = 3_000
 
 
 def is_public_host(host: str) -> bool:
-    """拒绝回环、私有网段与链路本地地址，避免检测被用来探测内网。"""
+
     if not host:
         return False
     try:
@@ -65,7 +53,7 @@ def is_public_host(host: str) -> bool:
 
 
 def check_url(url: str, timeout: int = CHECK_TIMEOUT_SECONDS) -> dict[str, Any]:
-    """探测单个地址。返回状态、耗时与简短说明，绝不抛异常。"""
+
     started = datetime.now(timezone.utc)
     result = {"url": url, "status": STATUS_SKIPPED, "httpStatus": 0, "elapsedMs": 0, "message": ""}
     parsed = urllib.parse.urlparse(url if "://" in url else f"https://{url}")
@@ -82,7 +70,7 @@ def check_url(url: str, timeout: int = CHECK_TIMEOUT_SECONDS) -> dict[str, Any]:
     })
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        """不跟随跨主机跳转，避免绕过上面的内网检查。"""
+
 
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             if urllib.parse.urlparse(newurl).hostname != parsed.hostname:
@@ -108,7 +96,7 @@ def check_url(url: str, timeout: int = CHECK_TIMEOUT_SECONDS) -> dict[str, Any]:
         result["status"] = STATUS_SLOW if elapsed >= SLOW_THRESHOLD_MS else STATUS_OK
         result["message"] = f"HTTP {code}"
     elif code in (401, 403):
-        # 需要登录或有反爬，但站点是活的。
+
         result.update(status=STATUS_SLOW, message=f"HTTP {code}（站点可达但拒绝匿名访问）")
     else:
         result.update(status=STATUS_UNREACHABLE, message=f"HTTP {code}")
@@ -116,13 +104,13 @@ def check_url(url: str, timeout: int = CHECK_TIMEOUT_SECONDS) -> dict[str, Any]:
 
 
 def manifest_check_targets(manifest: dict[str, Any]) -> list[str]:
-    """从清单里取出要检测的地址，按主地址在前排序。"""
+
     targets: list[str] = []
     for value in manifest.get("domains", []) or []:
         domain = normalize_source_domain(str(value))
         if domain and domain not in targets:
             targets.append(domain)
-    # 没有域名的关联源之类，退化用 contentId 里的 URL（若有）
+
     if not targets:
         fallback = normalize_source_domain(str(manifest.get("contentId", "")))
         if fallback:
@@ -131,7 +119,7 @@ def manifest_check_targets(manifest: dict[str, Any]) -> list[str]:
 
 
 def check_package(kind: str, package_id: str, timeout: int = CHECK_TIMEOUT_SECONDS) -> dict[str, Any]:
-    """检测一个内容包的全部地址，并把结果写回清单。"""
+
     kind = safe_package_segment(kind)
     package_id = safe_package_segment(package_id)
     manifest_path = runtime.PACKAGE_ROOT / kind / package_id / "manifest.json"
@@ -163,7 +151,7 @@ def check_package(kind: str, package_id: str, timeout: int = CHECK_TIMEOUT_SECON
 
 
 def summarize(results: list[dict[str, Any]]) -> str:
-    """多地址取最好结果：只要有一个可用就算这个源还能用。"""
+
     if not results:
         return STATUS_SKIPPED
     for status in (STATUS_OK, STATUS_SLOW):
@@ -175,7 +163,7 @@ def summarize(results: list[dict[str, Any]]) -> str:
 
 
 def check_kind(kind: str, timeout: int = CHECK_TIMEOUT_SECONDS, limit: int = 200) -> list[dict[str, Any]]:
-    """批量检测某一类内容包。"""
+
     kind = safe_package_segment(kind)
     reports = []
     for path, manifest in _package_manifests(kind)[:limit]:
@@ -189,7 +177,7 @@ def check_kind(kind: str, timeout: int = CHECK_TIMEOUT_SECONDS, limit: int = 200
 
 
 def stored_health(manifest: dict[str, Any]) -> dict[str, Any]:
-    """读回上次检测结果，供列表页显示，不触发新的网络请求。"""
+
     health = manifest.get("healthCheck")
     if not isinstance(health, dict):
         return {"status": STATUS_SKIPPED, "checkedAt": 0, "results": []}

@@ -22,12 +22,6 @@ import java.util.Locale
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
-// 我的页背景与阅读页背景的设置簇。
-//
-// 颜色与图片选择、裁剪位置、显示模式、模糊与透明度。
-//
-// 从 ReaMicroSettingsHook 机械外移而来，函数体逐字未改：搬迁脚本会把反缩进后的
-// 结果重新缩进回去与原文逐字节比对，不一致直接中止（已移除的一次性生成工具）。
 internal fun ReaMicroSettingsHook.profileBackgroundColorSummary(value: String): String =
     profileBackgroundArgbHex(profileBackgroundColorValue(value))
 
@@ -388,8 +382,7 @@ internal fun ReaMicroSettingsHook.removeProfileBackgroundImage() {
         return
     }
     runCatching {
-        // \u6e05\u9664\u56fe\u7247\u6587\u4ef6\u5e76\u590d\u4f4d\u4e3b\u9875\u80cc\u666f\u76f8\u5173\u5f00\u5173\uff0c
-        // \u4f7f canShowProfileBackground \u81ea\u52a8\u5931\u6548\uff0c\u6240\u6709\u4e3b\u9875\u8865\u5168\u80cc\u666f\u529f\u80fd\u4e0d\u518d\u751f\u6548\u3002
+
         File(activity.filesDir, "profile_background").listFiles()?.forEach { it.delete() }
         settings.setProfileBackgroundImage("")
         settings.setProfileBackgroundImageUrl("")

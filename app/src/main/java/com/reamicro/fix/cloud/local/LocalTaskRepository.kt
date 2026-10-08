@@ -36,7 +36,7 @@ internal fun localTaskFromJson(taskType: String, obj: JSONObject): LocalTask {
         merchantCityCode = obj.optString("merchantCityCode"),
         merchantPrincipal = obj.optLong("merchantPrincipal", 0L).coerceAtLeast(0L),
         merchantTransportId = obj.optLong("merchantTransportId", 0L).coerceAtLeast(0L),
-        // 老配置没有这个字段时沿用默认禁当清单；显式保存成空数组表示"不禁止任何期物"。
+
         forbiddenPawnPropIds = obj.optJSONArray(LocalTaskStore.KEY_FORBIDDEN_PAWN_PROP_IDS)?.let { array ->
             (0 until array.length()).mapNotNull { index ->
                 array.optString(index).trim().takeIf { it.isNotEmpty() }

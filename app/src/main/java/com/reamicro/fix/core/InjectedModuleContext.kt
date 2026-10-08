@@ -5,15 +5,10 @@ import android.content.ContextWrapper
 import android.content.pm.ApplicationInfo
 import com.reamicro.fix.BuildConfig
 import com.reamicro.fix.R
+import android.widget.Toast
+import java.io.File
+import com.reamicro.fix.xposed.XposedBridge
 
-/**
- * Resources for a module-owned Compose island, without looking up the module by package name.
- *
- * A scoped/hidden module can be loaded by LSPosed while createPackageContext(packageName)
- * fails in the host. getResourcesForApplication(ApplicationInfo) uses the APK paths already
- * supplied by the framework instead of doing that filtered package lookup.
- * Never add module assets to the host's Resources and never change its AppOps identity.
- */
 object InjectedModuleContext {
     @Volatile private var moduleInfo: ApplicationInfo? = null
 
@@ -24,11 +19,29 @@ object InjectedModuleContext {
         }
     }
 
-    fun create(base: Context): Context {
+    fun runUiAction(base: Context?, action: () -> Unit) {
+        ModuleResourceRecovery.run(action) { error ->
+            XposedBridge.logError("Module resource generation expired; restart the host instead of loading another APK", error)
+            base?.let { Toast.makeText(it, ModuleResourceRecovery.RESTART_MESSAGE, Toast.LENGTH_LONG).show() }
+        }
+    }
+
+    fun create(base: Context): Context = try {
+        createPinned(base)
+    } catch (error: ModuleResourcesUnavailableException) {
+        throw error
+    } catch (error: Exception) {
+
+        throw ModuleResourcesUnavailableException(ModuleResourceRecovery.RESTART_MESSAGE, error)
+    }
+
+    private fun createPinned(base: Context): Context {
         val info = moduleInfo
         if (info == null && base.packageName == BuildConfig.APPLICATION_ID) return base
         checkNotNull(info) { "模块资源尚未初始化，请完全重启阅微后重试" }
         check(!info.sourceDir.isNullOrBlank()) { "模块 APK 路径无效，请重启阅微" }
+        check(File(info.sourceDir).isFile) { "Pinned module APK is no longer present" }
+
         val resources = base.packageManager.getResourcesForApplication(info)
         check(resources.getResourceEntryName(R.string.module_name) == "module_name") {
             "模块资源版本不匹配，请重启阅微"
@@ -41,7 +54,7 @@ object InjectedModuleContext {
             override fun getAssets() = resources.assets
             override fun getTheme() = theme
             override fun getClassLoader() = InjectedModuleContext::class.java.classLoader!!
-            // packageName, applicationContext and system services deliberately retain base identity.
+
         }
     }
 }

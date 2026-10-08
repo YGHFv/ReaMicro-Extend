@@ -15,9 +15,6 @@ import top.yukonga.miuix.kmp.blur.highlight.LightSource
 import top.yukonga.miuix.kmp.blur.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.blur.runtimeShaderEffect
 
-// 液态玻璃效果组：移植自 KernelSU 管理器的 ui/component/liquid/Lens.kt
-// 与其 FloatingBottomBar 的胶囊配方。
-
 fun BackdropEffectScope.vibrancy() {
     colorControls(brightness = 0f, contrast = 1f, saturation = 1.5f)
 }
