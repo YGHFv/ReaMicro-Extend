@@ -3,13 +3,13 @@ package com.reamicro.fix.external.source;
 import com.reamicro.fix.association.model.BookSearchResult;
 import com.reamicro.fix.association.model.BookSource;
 import com.reamicro.fix.association.provider.BookAssociationSearchProvider;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import org.json.*;
 
 public final class FanQieSourceProvider implements BookAssociationSearchProvider {
-    static final String REFERENCE_VERSION = "5.5.16";
     static final String[] HOSTS = {
         "http://219.154.201.122:5006", "https://api.langge.cf", "https://v2.czyl.cf",
         "https://20.langge.tk", "https://v4.czyl.cf", "https://v5.czyl.cf",
@@ -40,6 +40,11 @@ public final class FanQieSourceProvider implements BookAssociationSearchProvider
         String query = normalizeKeyword(keyword);
         if (query.isEmpty() || limit <= 0 || Thread.currentThread().isInterrupted()) return Collections.emptyList();
         int count = Math.min(limit, 50);
+        try {
+            List<BookSearchResult> direct = parseNovelSearch(transport.get(novelSearchUrl(query), 1800, 3000), count);
+            if (!direct.isEmpty()) return direct;
+        } catch (Exception ignored) { }
+        if (Thread.currentThread().isInterrupted()) return Collections.emptyList();
         List<BookSearchResult> results = searchMirrors(query, count);
         if (!results.isEmpty() || Thread.currentThread().isInterrupted()) return results;
         try {
@@ -63,6 +68,32 @@ public final class FanQieSourceProvider implements BookAssociationSearchProvider
         return host.replaceAll("/+$", "") + "/search?title=" + SourceUtils.encode(query)
             + "&tab=" + SourceUtils.encode("小说") + "&source=" + SourceUtils.encode("番茄")
             + "&page=1&disabled_sources=0";
+    }
+
+    static String novelSearchUrl(String query) {
+        return "https://novel.snssdk.com/api/novel/channel/homepage/search/search/v1/"
+            + "?device_platform=android&parent_enterfrom=novel_channel_search.tab.&offset=0&aid=1967&q="
+            + SourceUtils.encode(query);
+    }
+
+    static List<BookSearchResult> parseNovelSearch(String body, int limit) throws JSONException {
+        JSONObject root = new JSONObject(body);
+        if (!"0".equals(root.optString("code"))) return Collections.emptyList();
+        JSONArray rows = SourceUtils.array(root, "data", "ret_data");
+        JSONArray books = new JSONArray();
+        if (rows != null) for (int i = 0; i < rows.length(); i++) {
+            JSONObject row = rows.optJSONObject(i);
+            if (row == null) continue;
+            // 搜索接口混合音频/视频，仅接收网文和出版小说；状态枚举与旧镜像不同。
+            String genre = SourceUtils.first(row, "genre");
+            if (!genre.isEmpty() && !"0".equals(genre) && !"6".equals(genre)) continue;
+            String state = SourceUtils.first(row, "creation_status");
+            if ("1".equals(state)) row.put("status", "连载");
+            else if ("0".equals(state)) row.put("status", "完结");
+            else if ("4".equals(state)) row.put("status", "已断更");
+            books.put(row);
+        }
+        return parseResponse(books.toString(), limit, "https://fanqienovel.com");
     }
 
     private List<BookSearchResult> requestHost(String host, String query, int limit) {
@@ -140,7 +171,7 @@ public final class FanQieSourceProvider implements BookAssociationSearchProvider
             List<String> tags = tags(row);
             BookSearchResult result = new BookSearchResult(
                 title, SourceUtils.clean(SourceUtils.first(row, "author", "author_name", "authorName")), SOURCE,
-                "番茄:" + id, coverUrl(SourceUtils.first(row, "thumb_url", "thumbUrl", "cover", "cover_url", "coverUrl"), host),
+                "番茄:" + id, coverUrl(SourceUtils.first(row, "thumb_url", "thumbUrl", "cover", "cover_url", "coverUrl", "thumb_uri"), host),
                 detail, SourceUtils.clean(SourceUtils.first(row, "abstract", "book_abstract", "description", "intro")),
                 SourceUtils.words(SourceUtils.first(row, "word_number", "word_count", "wordCount", "words")),
                 SourceUtils.status(SourceUtils.first(row, "status", "creation_status", "creationStatus", "book_status")),
@@ -182,12 +213,28 @@ public final class FanQieSourceProvider implements BookAssociationSearchProvider
     }
 
     static String coverUrl(String raw, String host) {
-        String value = SourceUtils.unescapeTransport(raw).trim();
+        String value = SourceUtils.unescapeTransport(raw).trim().replace("&amp;", "&");
+        String resolved = SourceUtils.httpUrl(value, host);
+        if (resolved.isEmpty()) return "";
         String path = value.replaceFirst("^/+", "");
-        if (path.startsWith("novel-pic/") || path.startsWith("novel-images/") || path.startsWith("novel-static/")) {
-            return "https://p3-novel.byteimg.com/origin/" + path;
+        boolean relative = !value.startsWith("//") && !URI.create(value).isAbsolute();
+        if (!relative || (!isNovelImagePath(path) && !path.startsWith("origin/") && !path.startsWith("img/"))) {
+            URI uri = URI.create(resolved);
+            String domain = uri.getHost().toLowerCase(Locale.ROOT);
+            // 只转换已知番茄 CDN，不能删除其他站点图片的必要签名或把它们映射到番茄。
+            if (!domain.matches("p[0-9]+[-a-z0-9]*\\.(byteimg\\.com|bytecdn\\.cn|fqnovelpic\\.com)")) return resolved;
+            path = uri.getRawPath().replaceFirst("^/+", "");
         }
-        return SourceUtils.httpUrl(value, host);
+        path = path.split("[~?#]", 2)[0];
+        if (path.startsWith("origin/")) path = path.substring(7);
+        else if (path.startsWith("img/")) path = path.substring(4);
+        if (!isNovelImagePath(path) || path.endsWith("/") || path.contains("%") || path.contains("\\")
+            || Arrays.asList(path.split("/", -1)).contains("..") || Arrays.asList(path.split("/", -1)).contains(".")) return resolved;
+        return "https://p6-novel.byteimg.com/origin/" + path;
+    }
+
+    private static boolean isNovelImagePath(String path) {
+        return path.startsWith("novel-pic/") || path.startsWith("novel-images/") || path.startsWith("novel-static/");
     }
 
     static List<String> tags(JSONObject row) {
