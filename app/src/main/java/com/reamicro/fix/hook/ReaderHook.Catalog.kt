@@ -175,7 +175,7 @@ internal fun ReaderHook.catalogChapterFields(chapter: Any): String =
 internal fun ReaderHook.indexedCatalogChapters(
     catalog: List<Any>,
     root: File? = null,
-    epubTitlePaths: Map<String, String> = root?.let(::epubCatalogTitlePaths).orEmpty(),
+    epubTitlePaths: Map<String, List<String>> = root?.let(::epubCatalogTitlePaths).orEmpty(),
 ): List<CatalogChapterEntry> {
     val parentTitlePaths = catalogParentTitlePaths(catalog)
     val titleStack = ArrayList<String>()
@@ -200,16 +200,21 @@ internal fun ReaderHook.indexedCatalogChapters(
         } else {
             ""
         }
+        val structuralTitleParts = epubTitlePath.ifEmpty {
+            parentTitlePaths[id].orEmpty().takeIf { it.size > 1 }
+                ?: titleStack.filter { it.isNotBlank() }.dedupeAdjacent()
+        }
         CatalogChapterEntry(
             index = index,
             chapter = chapter,
-            titlePath = epubTitlePath.ifBlank {
-                parentTitlePaths[id].orEmpty().ifBlank {
+            titlePath = epubTitlePath.joinToString(" ").ifBlank {
+                parentTitlePaths[id].orEmpty().joinToString(" ").ifBlank {
                     sequentialTitlePath.ifBlank {
                         titleStack.filter { it.isNotBlank() }.dedupeAdjacent().joinToString(" ")
                     }
                 }
             },
+            titleParts = structuralTitleParts,
         )
     }
 }
@@ -226,25 +231,24 @@ internal fun ReaderHook.isChapterCatalogTitle(value: String): Boolean {
         Regex("""^(序章|楔子|终章|尾声|后记).*""").matches(compact)
 }
 
-internal fun ReaderHook.catalogParentTitlePaths(catalog: List<Any>): Map<Long, String> {
+internal fun ReaderHook.catalogParentTitlePaths(catalog: List<Any>): Map<Long, List<String>> {
     val byId = catalog.mapNotNull { chapter ->
         val id = catalogChapterId(chapter).takeIf { it != 0L } ?: return@mapNotNull null
         id to chapter
     }.toMap()
-    val result = linkedMapOf<Long, String>()
-    fun pathFor(chapter: Any, visiting: Set<Long> = emptySet()): String {
+    val result = linkedMapOf<Long, List<String>>()
+    fun pathFor(chapter: Any, visiting: Set<Long> = emptySet()): List<String> {
         val id = catalogChapterId(chapter)
         result[id]?.let { return it }
         val title = catalogChapterTitle(chapter).normalizeChapterTitle()
         val parentId = catalogChapterParentId(chapter).takeIf { it != 0L && it != id }
         val parent = parentId?.takeIf { it !in visiting }?.let { byId[it] }
         val path = if (parent != null) {
-            listOf(pathFor(parent, visiting + id), title)
+            (pathFor(parent, visiting + id) + title)
                 .filter { it.isNotBlank() }
                 .dedupeAdjacent()
-                .joinToString(" ")
         } else {
-            title
+            listOf(title).filter { it.isNotBlank() }
         }
         if (id != 0L) result[id] = path
         return path
@@ -253,8 +257,8 @@ internal fun ReaderHook.catalogParentTitlePaths(catalog: List<Any>): Map<Long, S
     return result
 }
 
-internal fun ReaderHook.epubCatalogTitlePaths(root: File): Map<String, String> {
-    val result = linkedMapOf<String, String>()
+internal fun ReaderHook.epubCatalogTitlePaths(root: File): Map<String, List<String>> {
+    val result = linkedMapOf<String, List<String>>()
     root.walkTopDown()
         .filter { it.isFile && it.extension.equals("ncx", ignoreCase = true) }
         .forEach { file -> result.putAll(parseNcxTitlePaths(root, file)) }
@@ -508,6 +512,7 @@ internal fun ReaderHook.chapterAnchorsForFile(raw: String, chapters: List<Indexe
             index = chapter.index,
             chapter = chapter.entry.chapter,
             title = chapter.entry.titlePath,
+            titleParts = chapter.entry.titleParts,
         )
     }.sortedBy { it.textStart }
 

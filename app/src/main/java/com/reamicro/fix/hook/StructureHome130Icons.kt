@@ -40,6 +40,8 @@ internal object StructureHome130Icons {
         ).toNodes(), fill = null, stroke = SolidColor(Color(0xFF231F20)),
             strokeLineWidth = 2f, strokeLineCap = StrokeCap.Round)
     }.build()
+    val SearchResults = icon("SearchNavigation.List",
+        "M3,5 H5 V7 H3 Z M8,5 H21 V7 H8 Z M3,11 H5 V13 H3 Z M8,11 H21 V13 H8 Z M3,17 H5 V19 H3 Z M8,17 H21 V19 H8 Z")
     val Edit2 = icon("Edit2",
         "M19,20 H5 a1,1 0 0,0 0,2 H19 a1,1 0 0,0 0,-2 Z " +
         "M5,18 h0.09 l4.17,-0.38 a2,2 0 0,0 1.21,-0.57 l9,-9 a1.92,1.92 0 0,0 -0.07,-2.71 h0 L16.66,2.6 A2,2 0 0,0 14,2.53 l-9,9 a2,2 0 0,0 -0.57,1.21 L4,16.91 a1,1 0 0,0 0.29,0.8 A1,1 0 0,0 5,18 Z " +

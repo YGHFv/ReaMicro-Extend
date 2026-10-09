@@ -116,6 +116,7 @@ class ReaderHook(
     internal val renderingEpubPage = ThreadLocal<Any?>()
     @Volatile internal var lastCatalogContext: CatalogContext? = null
     @Volatile internal var lastSearchState: SearchState? = null
+    internal var lastSearchListPosition: ReaderSearchListPosition? = null
     @Volatile internal var activeSearchNavigation: SearchNavigationState? = null
     @Volatile internal var currentVisiblePageSignature: String? = null
     @Volatile internal var currentVisiblePageNumber: Int? = null
@@ -127,6 +128,7 @@ class ReaderHook(
     @Volatile internal var searchIndexState: SearchIndexState? = null
     @Volatile internal var searchStateGeneration: Long = 0L
     @Volatile internal var searchRunSeq: Long = 0L
+    @Volatile internal var searchInProgress = false
     @Volatile internal var activeSearchPageToken: Long = 0L
     @Volatile internal var activeSearchPageUpdate: ((SearchState, Boolean) -> Unit)? = null
     @Volatile internal var readerBottomMenuVisible: Boolean = false
@@ -207,7 +209,7 @@ class ReaderHook(
         releaseReaderMemory("system low memory", releaseEpub = true)
     }
 
-    internal val readerBottomBarDepth = ThreadLocal.withInitial { 0 }
+    internal val readerBottomBarComposeScope = ReaderBottomBarComposeScope()
     internal var readerInlineSearchClick: Any? = null
     @Volatile internal var currentSearchPagerMode: Int? = null
     @Volatile internal var nextIconIsReaderBack = false

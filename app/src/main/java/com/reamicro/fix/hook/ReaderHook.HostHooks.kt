@@ -338,7 +338,33 @@ internal fun ReaderHook.hookReaderBottomBar() {
                 }
             })
         }
+        hookReaderBottomBarContent(cls)
         XposedBridge.log("$LOG_PREFIX reader bottom search hook installed: ${methods.size}")
+    }
+}
+
+internal fun ReaderHook.hookReaderBottomBarContent(bottomBarClass: Class<*>) {
+    HookInstallReport.install(FEATURE_ID, "hookReaderBottomBarContent") {
+        val methods = bottomBarClass.declaredMethods.mapNotNull { method ->
+            readerBottomBarContentBinding(method.name, method.parameterTypes.map { it.name })
+                ?.let { method to it }
+        }
+        check(methods.isNotEmpty()) { "ReaderBottomBar content callbacks not found" }
+        methods.forEach { (method, binding) ->
+            XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    beginReaderSearchBar(
+                        param.args?.getOrNull(binding.receiverIndex),
+                        param.args?.getOrNull(binding.bookIndex),
+                    )
+                }
+
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    endReaderSearchBar()
+                }
+            })
+        }
+        XposedBridge.log("$LOG_PREFIX reader bottom search content hooks installed: ${methods.size}")
     }
 }
 
@@ -367,7 +393,7 @@ internal fun ReaderHook.hookInlineSearchIcon() {
             method.isAccessible = true
             XposedBridge.hookMethod(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!nextIconIsAutoPage && readerBottomBarDepth.get() == 0) return
+                    if (!nextIconIsAutoPage && !readerBottomBarComposeScope.active) return
                     val args = param.args ?: return
                     val vectorName = callString(args.getOrNull(0), "getName")
                     if (nextIconIsAutoPage && vectorName.endsWith(".ArrowBack")) {
@@ -389,7 +415,7 @@ internal fun ReaderHook.hookInlineSearchIcon() {
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (readerBottomBarDepth.get() == 0) return
+                        if (!readerBottomBarComposeScope.active) return
                         val onClick = param.args?.getOrNull(5) ?: return
                         extractNavGraphScopeFromLambda(onClick)?.let { currentReaderNavGraphScopeRef = WeakReference(it) }
                         param.args[5] = bindReaderThemeClick(onClick)
@@ -669,29 +695,32 @@ internal fun ReaderHook.hookCurrentEpub() {
 internal fun ReaderHook.hookCurrentEpubPage() {
     HookInstallReport.install(FEATURE_ID, "hookCurrentEpubPage") {
         val containerClass = classLoader.loadClass("app.zhendong.reamicro.ui.reader.components.EpubContainerKt")
-        containerClass.declaredMethods
-            .filter { it.name == "EpubContainer" && it.parameterTypes.size >= 2 }
-            .forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val page = param.args?.getOrNull(1)
-                        renderingEpubPage.set(page)
-                        currentHighlightBookIdentity()?.let { (bookKey, bookTitle) ->
-                            updateReaderHighlightBookContext(bookKey, bookTitle, "page rendered")
-                        }
-                        val args = param.args ?: return
-                        val marksIndex = 4
-                        val originalMarks = args.getOrNull(marksIndex) as? List<*> ?: return
-                        val nextMarks = appendActiveSearchHighlightMark(originalMarks, "EpubContainer") ?: return
-                        args[marksIndex] = nextMarks
+        val methods = containerClass.declaredMethods.filter {
+            it.name == "EpubContainer" && it.parameterTypes.size >= 2
+        }
+        check(methods.isNotEmpty()) { "EpubContainer not found" }
+        methods.forEach { method ->
+            val marksIndex = epubContainerMarksIndex(method.parameterTypes)
+            check(marksIndex >= 0) { "EpubContainer marks parameter not found: $method" }
+            method.isAccessible = true
+            XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val page = param.args?.getOrNull(1)
+                    renderingEpubPage.set(page)
+                    currentHighlightBookIdentity()?.let { (bookKey, bookTitle) ->
+                        updateReaderHighlightBookContext(bookKey, bookTitle, "page rendered")
                     }
+                    val args = param.args ?: return
+                    val originalMarks = args.getOrNull(marksIndex) as? List<*> ?: return
+                    val nextMarks = appendActiveSearchHighlightMark(originalMarks, "EpubContainer") ?: return
+                    args[marksIndex] = nextMarks
+                }
 
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        renderingEpubPage.remove()
-                    }
-                })
-            }
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    renderingEpubPage.remove()
+                }
+            })
+        }
         XposedBridge.log("$LOG_PREFIX current EpubPage hook installed")
     }
 }

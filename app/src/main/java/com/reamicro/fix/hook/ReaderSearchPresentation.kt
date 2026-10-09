@@ -4,6 +4,37 @@ import java.io.File
 
 internal object ReaderSearchPresentation {
     private val contentDirectories = setOf("OEBPS", "OPS", "EPUB")
+    private val whitespace = Regex("\\s+")
+    private val contentFilename = Regex("(?i).*\\.(xhtml|html|htm|xml|txt)$")
+
+    data class Titles(val volume: String, val chapter: String)
+    data class Section(val volume: String, val start: Int, val endExclusive: Int)
+
+    fun titles(parts: List<String>, directChapter: String = "", filename: String = ""): Titles {
+        val nodes = parts.map { it.replace(whitespace, " ").trim() }.filter { it.isNotBlank() }
+        val direct = directChapter.replace(whitespace, " ").trim()
+        fun chapterLabel(value: String): String = value.takeUnless {
+            it.isBlank() || it == filename || contentFilename.matches(it)
+        } ?: "未命名章节"
+        // 卷标来自目录父节点，章节来自叶节点；不按文字、空格或分隔符猜测层级。
+        return Titles(nodes.dropLast(1).joinToString(" "), chapterLabel(nodes.lastOrNull() ?: direct))
+    }
+
+    fun sections(volumes: List<String>): List<Section> = buildList {
+        var start = 0
+        while (start < volumes.size) {
+            val volume = volumes[start]
+            var end = start + 1
+            while (end < volumes.size && volumes[end] == volume) end++
+            add(Section(volume, start, end))
+            start = end
+        }
+    }
+
+    fun listIndex(volumes: List<String>, resultIndex: Int): Int? {
+        if (resultIndex !in volumes.indices) return null
+        return resultIndex + sections(volumes).count { it.start <= resultIndex }
+    }
 
     fun status(query: String, keyword: String, searching: Boolean, count: Int, error: String?): String? = when {
         error != null -> error
@@ -35,8 +66,4 @@ internal object ReaderSearchPresentation {
         return parts.lastOrNull().orEmpty()
     }
 
-    fun body(chapter: String, snippet: String): String =
-        if (chapter.isBlank()) snippet else chapter.trim() + "\n" + snippet
-
-    fun snippetOffset(chapter: String): Int = if (chapter.isBlank()) 0 else chapter.trim().length + 1
 }

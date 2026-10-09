@@ -534,12 +534,12 @@ internal fun ReaderHook.dispatchReaderIntent(receiver: Any?, viewModel: Any?, in
     return false
 }
 
-internal fun ReaderHook.parseNcxTitlePaths(root: File, file: File): Map<String, String> = runCatching {
+internal fun ReaderHook.parseNcxTitlePaths(root: File, file: File): Map<String, List<String>> = runCatching {
     val parser = Xml.newPullParser()
     parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
     parser.setInput(file.inputStream().bufferedReader(StandardCharsets.UTF_8))
     val stack = ArrayList<TocNode>()
-    val result = linkedMapOf<String, String>()
+    val result = linkedMapOf<String, List<String>>()
     var captureText = false
     val text = StringBuilder()
     while (parser.eventType != XmlPullParser.END_DOCUMENT) {
@@ -569,12 +569,12 @@ internal fun ReaderHook.parseNcxTitlePaths(root: File, file: File): Map<String, 
     result
 }.getOrDefault(emptyMap())
 
-internal fun ReaderHook.parseNavTitlePaths(root: File, file: File): Map<String, String> = runCatching {
+internal fun ReaderHook.parseNavTitlePaths(root: File, file: File): Map<String, List<String>> = runCatching {
     val parser = Xml.newPullParser()
     parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
     parser.setInput(file.inputStream().bufferedReader(StandardCharsets.UTF_8))
     val stack = ArrayList<TocNode>()
-    val result = linkedMapOf<String, String>()
+    val result = linkedMapOf<String, List<String>>()
     var tocNavDepth = 0
     var captureDepth = 0
     val text = StringBuilder()
@@ -588,8 +588,8 @@ internal fun ReaderHook.parseNavTitlePaths(root: File, file: File): Map<String, 
                 when {
                     tocNavDepth == 0 -> Unit
                     name == "li" -> stack.add(TocNode())
-                    name == "a" && stack.isNotEmpty() -> {
-                        stack.last().href = normalizeHref(parser.getAttributeValue(null, "href").orEmpty())
+                    (name == "a" || name == "span") && stack.isNotEmpty() && captureDepth == 0 -> {
+                        if (name == "a") stack.last().href = normalizeHref(parser.getAttributeValue(null, "href").orEmpty())
                         captureDepth = 1
                         text.setLength(0)
                     }
@@ -629,7 +629,7 @@ internal fun ReaderHook.tagHasTocType(parser: XmlPullParser): Boolean {
 }
 
 internal fun ReaderHook.putTocNodeTitlePath(
-    result: MutableMap<String, String>,
+    result: MutableMap<String, List<String>>,
     root: File,
     source: File,
     stack: List<TocNode>,
@@ -646,8 +646,7 @@ internal fun ReaderHook.putTocNodeTitlePath(
     val path = (stack.map { it.title.normalizeChapterTitle() } + title)
         .filter { it.isNotBlank() }
         .dedupeAdjacent()
-        .joinToString(" ")
-    if (key.isNotBlank() && path.isNotBlank()) {
+    if (key.isNotBlank() && path.isNotEmpty()) {
         result.putIfAbsent(key, path)
         result.putIfAbsent(fileKey, path)
     }

@@ -48,6 +48,7 @@ import com.reamicro.fix.online.download.OnlineOnDemandMetadata
 import com.reamicro.fix.online.download.OnlineOnDemandMetadataStore
 import com.reamicro.fix.online.download.OnlineChapterContentValidator
 import com.reamicro.fix.online.download.OnlineChapterUpdatePlanner
+import com.reamicro.fix.online.download.onlineChapterUpdateMessage
 import com.reamicro.fix.xposed.XposedBridge
 import java.io.File
 import java.lang.reflect.Method
@@ -345,19 +346,7 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(book: Any, info:
                     progressNotifier.running(progress, message)
                 },
             )
-            val message = when {
-                result.added > 0 && result.retried > 0 && result.failed > 0 ->
-                    "已重试 ${result.retried} 章，已更新 ${result.added} 章，${result.failed} 章失败"
-                result.added > 0 && result.retried > 0 ->
-                    "已重试 ${result.retried} 章，已更新 ${result.added} 章"
-                result.added > 0 && result.failed > 0 -> "已更新 ${result.added} 章，${result.failed} 章失败"
-                result.failed > 0 && result.retried > 0 -> "已重试 ${result.retried} 章，${result.failed} 章失败"
-                result.failed > 0 -> "仍有 ${result.failed} 章失败"
-                result.retried > 0 -> "已重试 ${result.retried} 章"
-                result.styled -> "章节已是最新，默认样式已同步"
-                result.added <= 0 -> "已是最新章节"
-                else -> "已更新 ${result.added} 章"
-            }
+            val message = onlineChapterUpdateMessage(result.added, result.failed, result.retried, result.styled)
             progressNotifier.finish(message, detailUrl, success = true)
             Handler(Looper.getMainLooper()).post {
                 Toast.makeText(appContext, "$message：$title", Toast.LENGTH_SHORT).show()

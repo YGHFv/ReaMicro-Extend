@@ -19,14 +19,12 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
     }
     private val worker = LatestSearchWorker("ReaMicroSearchNavigation")
     private var deadline: Runnable? = null
-    private val resolver = ReaderSearchResolver(reader)
     @Volatile var requestedIndex: Int? = null
         private set
     @Volatile var cursorIndex: Int? = null
         private set
     @Volatile var failedIndex: Int? = null
         private set
-    @Volatile private var cacheReset = false
 
     fun cancel() {
         deadline?.let(main::removeCallbacks)
@@ -35,7 +33,7 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
         requestedIndex = null
         cursorIndex = null
         failedIndex = null
-        cacheReset = true
+        reader.searchScrollBridge?.clearCache()
     }
     fun submit(result: FullTextSearchResult, index: Int): Boolean {
         val vm = reader.currentViewModelRef?.get() ?: return false
@@ -50,7 +48,6 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
         val ticket = worker.submit { ticket ->
             val work = Work(request, ticket)
             try {
-                if (cacheReset) { resolver.clear(); cacheReset = false }
                 navigate(work)
             } catch (error: Throwable) {
                 fail(work, error)
@@ -89,7 +86,11 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
         val loaded = onMain {
             if (valid(r) && work.ticket.isCurrent()) reader.searchScrollBridge?.snapshot(r.vm) else null
         }
-        val resolved = resolver.resolve(r.result, r.index, r.vm, r.epub, loaded) { valid(r) && work.ticket.isCurrent() }
+        // 解析器持有宿主 DOM 和排版对象，只在本次定位中保留，不跨跳转缓存整章。
+        val resolver = ReaderSearchResolver(reader)
+        val resolved = try {
+            resolver.resolve(r.result, r.index, r.vm, r.epub, loaded) { valid(r) && work.ticket.isCurrent() }
+        } finally { resolver.clear() }
         XposedBridge.log("ReaMicro search resolved seq=${work.sequence} index=${r.index} ms=${SystemClock.elapsedRealtime() - startedAt}")
         if (!dispatch(work, resolved)) return
         val arrived = awaitPage(work, resolved)
@@ -130,6 +131,7 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
         reader.applySearchResultHighlight(r.vm, mark, resolved.ranges, r.epub, r.generation)
         if (!valid(r) || !work.ticket.isCurrent()) return
         reader.activeSearchNavigation = reader.activeSearchNavigation?.copy(currentIndex = r.index)
+        reader.lastSearchState?.let { reader.activeSearchPageUpdate?.invoke(it, !it.complete) }
         requestedIndex = null
         failedIndex = null
         reader.activityProvider()?.let { reader.ensureSearchNavigationBar(it) }

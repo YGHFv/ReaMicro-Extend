@@ -99,8 +99,8 @@ internal val ARRANGEMENT_SPACED_BY_METHOD_CANDIDATES = listOf(
 )
 internal const val MAX_SEARCH_RESULTS = 2000
 internal const val MAX_MATCHES_PER_FILE = 200
-internal const val SEARCH_SNIPPET_RADIUS = 16
-internal const val SEARCH_CJK_SNIPPET_RADIUS = 7
+internal const val SEARCH_SNIPPET_RADIUS = 32
+internal const val SEARCH_CJK_SNIPPET_RADIUS = 16
 internal const val SEARCH_SNIPPET_EXTRA_RADIUS = 3
 internal const val SEARCH_EMIT_INTERVAL_MS = 120L
 internal const val SEARCH_NAV_BAR_TAG = 0x524d5331

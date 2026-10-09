@@ -19,9 +19,7 @@ internal class SearchDocumentCache(private val maxWeight: Long = 32L * 1024 * 10
     }
     @Synchronized fun put(document: SearchDocument, owner: Any?) {
         if (owner == null) return
-        val size = 1024L + document.text.length * 2L + document.indexedText.spans.sumOf {
-            112L + (it.sourceCfiPrefix?.length ?: 0) * 2L
-        }
+        val size = document.searchMemoryWeight()
         entries.remove(document.file.path)?.let { weight -= it.weight }
         if (size > maxWeight) return
         entries[document.file.path] = Entry(WeakReference(owner), document, size); weight += size
@@ -32,3 +30,8 @@ internal class SearchDocumentCache(private val maxWeight: Long = 32L * 1024 * 10
     @Synchronized fun clear() { entries.clear(); weight = 0 }
     @Synchronized fun isNotEmpty(): Boolean = entries.isNotEmpty()
 }
+
+internal fun SearchDocument.searchMemoryWeight(): Long =
+    1024L + text.length * 2L + (if (text === indexedText.text) 0L else indexedText.text.length * 2L) +
+        indexedText.spans.sumOf { 160L + (it.sourceCfiPrefix?.length ?: 0) * 2L + it.elementSteps.size * 24L } +
+        chapterAnchors.size * 256L

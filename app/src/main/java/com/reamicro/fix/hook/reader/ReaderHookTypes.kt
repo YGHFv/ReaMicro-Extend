@@ -26,6 +26,7 @@ internal data class SearchState(
     val bookKey: String,
     val keyword: String,
     val results: List<FullTextSearchResult>,
+    val complete: Boolean = true,
 )
 
 internal data class NativeSelectionPayload(
@@ -52,6 +53,7 @@ internal data class SearchDocument(
     val chapterAnchors: List<ChapterAnchor>,
     val sourceLastModified: Long = file.lastModified(),
     val sourceLength: Long = file.length(),
+    val titleParts: List<String> = emptyList(),
 )
 
 internal data class ReadAloudSegment(
@@ -118,6 +120,7 @@ internal data class CatalogChapterEntry(
     val index: Int,
     val chapter: Any,
     val titlePath: String,
+    val titleParts: List<String> = emptyList(),
 )
 
 internal data class ChapterAnchor(
@@ -125,6 +128,7 @@ internal data class ChapterAnchor(
     val index: Int,
     val chapter: Any,
     val title: String,
+    val titleParts: List<String> = emptyList(),
 )
 
 internal data class TocNode(
@@ -205,6 +209,8 @@ internal data class FullTextSearchResult(
     val snippetMatchEnd: Int,
     val matchText: String,
     val sourceDigest: String = "",
+    val volumeTitle: String = "",
+    val displayChapterTitle: String = chapterTitle,
 )
 
 internal data class DictionaryDialogHandle(

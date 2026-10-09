@@ -39,14 +39,14 @@ internal fun Intent.setReadAloudService(): Intent =
 internal fun Intent.setReadAloudCommandActivity(): Intent =
     setClassName(ReadAloudIntents.MODULE_PACKAGE_NAME, ReadAloudIntents.COMMAND_ACTIVITY_CLASS_NAME)
 
-internal fun Map<String, String>.titlePathForHref(href: String): String {
-    if (href.isBlank()) return ""
+internal fun Map<String, List<String>>.titlePathForHref(href: String): List<String> {
+    if (href.isBlank()) return emptyList()
     get(href)?.let { return it }
     get(href.substringBefore('#'))?.let { return it }
     return entries.firstOrNull { (key, _) -> sameSearchContentPath(href, key) }?.value.orEmpty()
 }
 
-internal fun Map<String, String>.titlePathForFile(root: File, file: File): String {
+internal fun Map<String, List<String>>.titlePathForFile(root: File, file: File): List<String> {
     val relative = normalizePath(relativePath(root, file))
     return titlePathForHref(relative)
 }

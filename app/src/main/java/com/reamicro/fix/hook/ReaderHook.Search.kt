@@ -54,6 +54,7 @@ internal fun ReaderHook.hasFullTextSearchState(): Boolean =
 
 internal fun ReaderHook.resetFullTextSearchState(reason: String, removeOverlays: Boolean) {
     searchWorker.cancel()
+    searchInProgress = false
     currentSearchPagerMode = null
     searchNavigator?.cancel()
     searchNavigator = null
@@ -70,6 +71,7 @@ internal fun ReaderHook.resetFullTextSearchState(reason: String, removeOverlays:
     bottomSearchBookRef = null
     lastCatalogContext = null
     lastSearchState = null
+    lastSearchListPosition = null
     searchNavigationState = null
     pendingSearchReturnCaptures = 0
     activeSearchNavigation = null
@@ -175,67 +177,97 @@ internal fun ReaderHook.openBottomSearchPage() {
 internal fun ReaderHook.cancelSearchPageWork() {
     searchWorker.cancel()
     searchRunSeq += 1
-    lastSearchState = null
+    searchInProgress = false
 }
 
-internal fun ReaderHook.closeSearchPage() {
+internal fun ReaderHook.closeSearchPage(cancelWork: Boolean = true) {
     searchPageDialogRef?.get()?.dismiss()
     searchPageDialogRef = null
-    cancelSearchPageWork()
+    if (cancelWork) cancelSearchPageWork()
     activeSearchPageToken = 0L
     activeSearchPageUpdate = null
 }
 
-internal fun ReaderHook.showFullTextSearchPage(activity: Activity, context: CatalogContext) {
-    if (activity.isFinishing || activity.isDestroyed) return
-    closeSearchPage()
-    val pageBookKey = bookKey(context)
-    val pageToken = System.nanoTime()
-    clearStaleSearchNavigation()
-    cancelSearchPageWork()
-    var chosen = false
-    lateinit var panel: HostFullTextSearchDialog
-    fun submit(keyword: String) {
-        if (searchPageDialogRef?.get() !== panel) return
-        if (keyword.isBlank()) {
-            cancelSearchPageWork()
-            panel.render("", emptyList(), false)
-            return
+internal fun ReaderHook.publishSearchState(state: SearchState) {
+    lastSearchState = state
+    val previous = searchNavigationState
+    if (previous?.bookKey == state.bookKey && previous.keyword == state.keyword) {
+        searchNavigationState = state
+        activityProvider()?.let(::ensureSearchNavigationBar)
+    }
+    activeSearchPageUpdate?.invoke(state, !state.complete)
+}
+
+internal fun ReaderHook.startFullTextSearch(keyword: String, context: CatalogContext, retainedResults: List<FullTextSearchResult>) {
+    val key = bookKey(context)
+    val request = ReaderSearchRequest(searchStateGeneration, searchRunSeq, activeSearchPageToken)
+    val activity = activityProvider() ?: return
+    val updates = LatestSearchUpdate<SearchState>(post = { activity.runOnUiThread(it) }) { state ->
+        if (request.acceptsSearch(searchStateGeneration, searchRunSeq)) {
+            if (state.complete) searchInProgress = false
+            publishSearchState(state)
         }
-        if (lastCatalogContext?.let(::bookKey)?.let { it != pageBookKey } == true) { panel.error("图书已切换，请重新打开搜索"); return }
-        val generation = searchStateGeneration
-        val runSeq = System.nanoTime()
-        searchRunSeq = runSeq
-        panel.render(keyword, emptyList(), true)
-        val weakPanel = WeakReference(panel)
-        val request = ReaderSearchRequest(generation, runSeq, pageToken)
-        searchWorker.submit work@ {
-            runCatching {
-                searchFullTextStreaming(keyword, context, request) { results, done ->
-                    activity.runOnUiThread {
-                        if (!request.accepts(searchStateGeneration, searchRunSeq, activeSearchPageToken,
-                            searchPageDialogRef?.get() === weakPanel.get())) return@runOnUiThread
-                        val state = SearchState(pageBookKey, keyword, results)
-                        lastSearchState = state
-                        activeSearchPageUpdate?.invoke(state, !done)
-                    }
-                }
-            }.onFailure { failure ->
-                if (!request.accepts(searchStateGeneration, searchRunSeq, activeSearchPageToken, true)) return@work
-                XposedBridge.log("$LOG_PREFIX full-text search failed: ${failure.javaClass.simpleName}")
-                activity.runOnUiThread {
-                    if (request.accepts(searchStateGeneration, searchRunSeq, activeSearchPageToken, searchPageDialogRef?.get() === weakPanel.get())) {
-                        lastSearchState = null
-                        if (activeSearchPageToken == pageToken) weakPanel.get()?.error("搜索失败：${failure.message.orEmpty()}")
-                    }
+    }
+    searchInProgress = true
+    searchWorker.submit work@ {
+        runCatching {
+            searchFullTextStreaming(keyword, context, request) { results, done ->
+                if (done || results.size >= retainedResults.size)
+                    updates.offer(SearchState(key, keyword, results, complete = done))
+            }
+        }.onFailure { failure ->
+            if (!request.acceptsSearch(searchStateGeneration, searchRunSeq)) return@work
+            XposedBridge.log("$LOG_PREFIX full-text search failed: ${failure.javaClass.simpleName}")
+            activity.runOnUiThread {
+                if (request.acceptsSearch(searchStateGeneration, searchRunSeq)) {
+                    searchInProgress = false
+                    (searchPageDialogRef?.get() as? HostFullTextSearchDialog)?.error("搜索失败：${failure.message.orEmpty()}")
                 }
             }
         }
     }
-    panel = HostFullTextSearchDialog(activity, currentEpubRoot(), "", 0,
+}
+
+internal fun ReaderHook.showFullTextSearchPage(activity: Activity, context: CatalogContext) {
+    if (activity.isFinishing || activity.isDestroyed) return
+    closeSearchPage(cancelWork = false)
+    val pageBookKey = bookKey(context)
+    val pageToken = System.nanoTime()
+    val restored = lastSearchState?.takeIf { it.bookKey == pageBookKey }
+        ?.let { it.copy(results = it.resultsForReceiver(context.intentReceiver)) }
+    if (restored == null && searchInProgress) cancelSearchPageWork()
+    val position = restored?.let { lastSearchListPosition?.forSearch(pageBookKey, it.keyword) }
+    if (activeSearchNavigation?.bookKey?.let { it != pageBookKey } == true) clearStaleSearchNavigation()
+    lastSearchState = restored
+    var chosen = false
+    lateinit var panel: HostFullTextSearchDialog
+    fun submit(keyword: String, resume: Boolean = false) {
+        if (searchPageDialogRef?.get() !== panel) return
+        if (!resume && keyword.isNotBlank() && keyword == lastSearchState?.keyword && lastSearchState?.bookKey == pageBookKey &&
+            (searchInProgress || lastSearchState?.complete == true)) return
+        cancelSearchPageWork()
+        if (!resume) {
+            clearStaleSearchNavigation()
+            lastSearchState = null
+            lastSearchListPosition = null
+        }
+        if (keyword.isBlank()) {
+            panel.render("", emptyList(), false, resetScroll = true)
+            return
+        }
+        if (lastCatalogContext?.let(::bookKey)?.let { it != pageBookKey } == true) { panel.error("图书已切换，请重新打开搜索"); return }
+        val retainedResults = if (resume) restored?.results.orEmpty() else emptyList()
+        lastSearchState = SearchState(pageBookKey, keyword, retainedResults, complete = false)
+        panel.render(keyword, retainedResults, true, activeSearchNavigation?.currentIndex ?: -1, resetScroll = !resume)
+        startFullTextSearch(keyword, context, retainedResults)
+    }
+    val active = activeSearchNavigation?.currentIndex ?: -1
+    val selectedRow = restored?.let { ReaderSearchPresentation.listIndex(it.results.map { r -> r.volumeTitle }, active) }
+    panel = HostFullTextSearchDialog(activity, currentEpubRoot(), restored?.keyword.orEmpty(),
+        selectedRow?.let { (it - 1).coerceAtLeast(0) } ?: position?.index ?: 0, if (selectedRow != null) 0 else position?.offset ?: 0,
         initialTheme = readerSearchTheme,
         fontSelection = { if (settingsProvider().canUseFontSettings) settings?.fontSettings()?.globalFamily.orEmpty() else "" },
-        onSearch = ::submit,
+        onSearch = { submit(it) },
         onChoose = { result, index ->
             if (lastCatalogContext?.let(::bookKey)?.let { it != pageBookKey } == true) {
                 panel.error("图书已切换，请重新打开搜索"); false
@@ -252,11 +284,12 @@ internal fun ReaderHook.showFullTextSearchPage(activity: Activity, context: Cata
                 chosen
             }
         },
-        onClosed = { _ ->
+        onClosed = { index, offset ->
 
             if (activeSearchPageToken == pageToken) {
-                cancelSearchPageWork()
-                if (!chosen) clearStaleSearchNavigation()
+                lastSearchState?.takeIf { it.bookKey == pageBookKey }?.let {
+                    lastSearchListPosition = ReaderSearchListPosition(pageBookKey, it.keyword, index, offset)
+                }
                 activeSearchPageToken = 0L
                 activeSearchPageUpdate = null
             }
@@ -269,7 +302,9 @@ internal fun ReaderHook.showFullTextSearchPage(activity: Activity, context: Cata
         }
     }
     searchPageDialogRef = WeakReference(panel)
+    restored?.let { panel.render(it.keyword, it.results, !it.complete, activeSearchNavigation?.currentIndex ?: -1) }
     panel.show()
+    if (restored?.complete == false && !searchInProgress) submit(restored.keyword, resume = true)
 }
 
 internal fun ReaderHook.isSearchHighlightContentOverlayMethod(method: Method): Boolean {
@@ -309,6 +344,16 @@ internal fun ReaderHook.returnToSearchOrigin(
         clearStaleSearchNavigation()
         return
     }
+    // 先结束搜索并释放索引，再让宿主加载原章节；清掉持久化标记以阻止重入恢复。
+    cancelSearchPageWork()
+    searchDocumentCache.clear()
+    searchIndexState = null
+    val previousState = searchNavigationState
+    activeSearchNavigation = null
+    clearPersistedSearchOrigin()
+    clearHostSearchJump()
+    pendingSearchReturnCaptures = 0
+    clearSearchResultHighlight()
     val target = navigation.returnTarget
     val jumped = runCatching {
         jumpToSearchCfi(
@@ -322,13 +367,16 @@ internal fun ReaderHook.returnToSearchOrigin(
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX full-text search return failed: ${it.stackTraceToString()}")
     }.getOrDefault(false)
-    if (clearNavigation) { activeSearchNavigation = null; searchNavigationState = null }
-    if (jumped || clearNavigation) clearPersistedSearchOrigin()
-    clearSearchResultHighlight()
+    if (jumped && clearNavigation) searchNavigationState = null
+    else {
+        activeSearchNavigation = navigation
+        searchNavigationState = previousState
+        if (!jumped) persistSearchOrigin(navigation)
+    }
     activityProvider()?.let { activity ->
         activity.runOnUiThread {
             if (!jumped) Toast.makeText(activity, "\u8fd4\u56de\u8fdb\u5ea6\u5931\u8d25", Toast.LENGTH_SHORT).show()
-            if (removeBar) removeSearchNavigationBar()
+            if (removeBar && jumped) removeSearchNavigationBar()
         }
     }
 }
@@ -386,6 +434,11 @@ internal fun ReaderHook.isSearchNavigationCurrent(navigation: SearchNavigationSt
 internal fun ReaderHook.clearStaleSearchNavigation() {
     searchNavigator?.cancel()
     val owned = activeSearchNavigation != null || searchNavigationState != null
+    if (owned) {
+        cancelSearchPageWork()
+        searchDocumentCache.clear()
+        searchIndexState = null
+    }
     activeSearchNavigation = null
     searchNavigationState = null
     if (owned || activeSearchHighlightSession != null) {
@@ -408,6 +461,7 @@ internal fun ReaderHook.scheduleRestorePersistedSearchOrigin(reason: String) {
 }
 
 internal fun ReaderHook.restorePersistedSearchOrigin(reason: String) {
+    if (activeSearchNavigation != null) { pendingSearchOriginRestore = false; return }
     val persisted = readPersistedSearchOrigin()
     if (persisted == null) {
         pendingSearchOriginRestore = false

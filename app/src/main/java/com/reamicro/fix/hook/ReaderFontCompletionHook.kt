@@ -8,23 +8,8 @@ import com.reamicro.fix.xposed.XC_MethodHook
 import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.xposed.XposedHelpers
 import java.io.File
-import java.lang.ref.WeakReference
 import java.lang.reflect.Field
 import java.lang.reflect.Method
-
-internal fun readerEpubConfig230TrailingArguments(
-    globalEmbeddedFonts: Boolean,
-    bookEmbeddedFonts: Int,
-    embeddedFonts: Boolean,
-    buildInFonts: Boolean,
-    boldFont: Boolean,
-): Array<Any> = arrayOf(
-    globalEmbeddedFonts,
-    bookEmbeddedFonts,
-    embeddedFonts,
-    buildInFonts,
-    boldFont,
-)
 
 class ReaderFontCompletionHook(
     private val classLoader: ClassLoader,
@@ -36,79 +21,18 @@ class ReaderFontCompletionHook(
     private val fontFamilyCache = HashMap<String, Any>()
     private val failedFontFamilyLogKeys = HashSet<String>()
     private val appliedMappingLogKeys = HashSet<String>()
-    @Volatile private var activeReader: ActiveReader? = null
     @Volatile private var lastMappingNamesLogKey: String = ""
 
     fun install() {
-        hookReaderViewModel()
-        hookPagerInput()
+        // 字体映射只依赖 FontProvider，不重建宿主配置，保留新版边距及后续新增字段。
         hookFontProvider()
     }
 
-    private fun hookReaderViewModel() {
-        HookInstallReport.install("ReaderFontCompletionHook", "hookReaderViewModel") {
-            val readerViewModelClass = cls(READER_VIEW_MODEL_CLASS)
-            XposedBridge.hookAllConstructors(readerViewModelClass, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val bookId = (param.args?.getOrNull(0) as? Number)?.toLong() ?: return
-                    activeReader = ActiveReader(
-                        bookId = bookId,
-                        viewModelRef = WeakReference(param.thisObject),
-                    )
-                    XposedBridge.log("$LOG_PREFIX font completion reader captured: bookId=$bookId")
-                }
-            })
-            hookViewModelCleared(readerViewModelClass) { viewModel ->
-                val active = activeReader ?: return@hookViewModelCleared
-                if (active.viewModelRef.get() !== viewModel) return@hookViewModelCleared
-                activeReader = null
-            }
-            val applyConfig = readerViewModelClass.declaredMethods.firstOrNull {
-                it.name == APPLY_EPUB_CONFIG_METHOD && it.parameterTypes.size == 1
-            } ?: error("$APPLY_EPUB_CONFIG_METHOD not found")
-            applyConfig.isAccessible = true
-            XposedBridge.hookMethod(applyConfig, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val config = param.args?.getOrNull(0) ?: return
-                    val snapshot = settings.snapshot()
-                    if (!snapshot.canRunFontCompletion) return
-                    val current = readResolvedTypeSetting(config)
-                    val active = activeReader?.takeIf { it.viewModelRef.get() === param.thisObject }
-
-                    val prepared = active?.takeIf { it.lastRenderConfig == current }?.lastEffectiveConfig
-                    val effective = prepared ?: current
-                    param.args[0] = newReaderEpubConfig(effective)
-                }
-            })
-            XposedBridge.log("$LOG_PREFIX font completion ReaderViewModel hook installed")
-        }
-    }
-
-    private fun hookPagerInput() {
-        runCatching {
-            val pagerInputClass = cls(READER_PAGER_INPUT_CLASS)
-            XposedBridge.hookAllConstructors(pagerInputClass, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val config = param.args?.getOrNull(1) ?: return
-                    val snapshot = settings.snapshot()
-                    if (!snapshot.canRunFontCompletion) return
-                    val current = readResolvedTypeSetting(config)
-                    val active = activeReader
-                    val effective = current
-                    active?.lastEffectiveConfig = effective
-                    active?.lastRenderConfig = effective
-                    param.args[1] = newReaderEpubConfig(effective)
-                }
-            })
-            XposedBridge.log("$LOG_PREFIX font completion PagerInput hook installed")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX font completion PagerInput hook failed: ${it.stackTraceToString()}")
-        }
-    }
-
     private fun hookFontProvider() {
-        runCatching {
+        HookInstallReport.install("ReaderFontCompletionHook", "hookFontProvider") {
             val fontProviderClass = cls(FONT_PROVIDER_CLASS)
+            check(fontProviderClass.declaredMethods.any { it.name == "withName" }) { "FontProvider.withName not found" }
+            check(fontProviderClass.declaredMethods.any { it.name == "getBuildInFonts" }) { "FontProvider.getBuildInFonts not found" }
             XposedBridge.hookAllMethods(fontProviderClass, "withName", object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val names = fontFamilyArgumentNames(param.args)
@@ -151,8 +75,6 @@ class ReaderFontCompletionHook(
                 }
             })
             XposedBridge.log("$LOG_PREFIX font completion FontProvider hook installed")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX font completion FontProvider hook failed: ${it.stackTraceToString()}")
         }
     }
 
@@ -213,104 +135,6 @@ class ReaderFontCompletionHook(
             if (!appliedMappingLogKeys.add(key)) return
         }
         XposedBridge.log("$LOG_PREFIX font mapping applied: $target -> ${displayFontName(selection)}")
-    }
-
-    private fun readResolvedTypeSetting(config: Any): ResolvedTypeSetting =
-        ResolvedTypeSetting(
-            family = callMethod(config, "getFamily")?.toString().orEmpty(),
-            textSize = (callMethod(config, "getTextSize") as? Number)?.toFloat() ?: 17f,
-            lineHeight = (callMethod(config, "getLineHeight") as? Number)?.toFloat() ?: 1.5f,
-            padding = (callMethod(config, "getPadding") as? Number)?.toInt() ?: 20,
-            globalEmbeddedFonts = callMethod(config, "getGlobalEmbeddedFonts") as? Boolean
-                ?: (callMethod(config, "getEmbeddedFonts") as? Boolean ?: true),
-            bookEmbeddedFonts = (callMethod(config, "getBookEmbeddedFonts") as? Number)?.toInt() ?: 0,
-            embeddedFonts = callMethod(config, "getEmbeddedFonts") as? Boolean ?: true,
-            buildInFonts = callMethod(config, "getBuildInFonts") as? Boolean ?: true,
-
-            paragraphSpacing = (callMethod(config, "getParagraphSpacing") as? Number)?.toInt() ?: 0,
-            letterSpacing = (callMethod(config, "getLetterSpacing") as? Number)?.toInt() ?: 0,
-            boldFont = callMethod(config, "getBoldFont") as? Boolean ?: false,
-        )
-
-    private fun newReaderEpubConfig(value: ResolvedTypeSetting): Any {
-        val configClass = cls(READER_EPUB_CONFIG_CLASS)
-
-        runCatching {
-            configClass
-                .getDeclaredConstructor(
-                    String::class.java,
-                    Float::class.javaPrimitiveType,
-                    Float::class.javaPrimitiveType,
-                    Int::class.javaPrimitiveType,
-                    Int::class.javaPrimitiveType,
-                    Int::class.javaPrimitiveType,
-                    Boolean::class.javaPrimitiveType,
-                    Int::class.javaPrimitiveType,
-                    Boolean::class.javaPrimitiveType,
-                    Boolean::class.javaPrimitiveType,
-                    Boolean::class.javaPrimitiveType,
-                )
-                .apply { isAccessible = true }
-                .newInstance(
-                    value.family,
-                    value.textSize,
-                    value.lineHeight,
-                    value.paragraphSpacing,
-                    value.letterSpacing,
-                    value.padding,
-                    *readerEpubConfig230TrailingArguments(
-                        globalEmbeddedFonts = value.globalEmbeddedFonts,
-                        bookEmbeddedFonts = value.bookEmbeddedFonts,
-                        embeddedFonts = value.embeddedFonts,
-                        buildInFonts = value.buildInFonts,
-                        boldFont = value.boldFont,
-                    ),
-                )
-        }.getOrNull()?.let { return it }
-
-        runCatching {
-            configClass
-                .getDeclaredConstructor(
-                    String::class.java,
-                    Float::class.javaPrimitiveType,
-                    Float::class.javaPrimitiveType,
-                    Int::class.javaPrimitiveType,
-                    Boolean::class.javaPrimitiveType,
-                    Int::class.javaPrimitiveType,
-                    Boolean::class.javaPrimitiveType,
-                    Boolean::class.javaPrimitiveType,
-                )
-                .apply { isAccessible = true }
-                .newInstance(
-                    value.family,
-                    value.textSize,
-                    value.lineHeight,
-                    value.padding,
-                    value.globalEmbeddedFonts,
-                    value.bookEmbeddedFonts,
-                    value.embeddedFonts,
-                    value.buildInFonts,
-                )
-        }.getOrNull()?.let { return it }
-
-        return configClass
-            .getDeclaredConstructor(
-                String::class.java,
-                Float::class.javaPrimitiveType,
-                Float::class.javaPrimitiveType,
-                Int::class.javaPrimitiveType,
-                Boolean::class.javaPrimitiveType,
-                Boolean::class.javaPrimitiveType,
-            )
-            .apply { isAccessible = true }
-            .newInstance(
-                value.family,
-                value.textSize,
-                value.lineHeight,
-                value.padding,
-                value.embeddedFonts,
-                value.buildInFonts,
-            )
     }
 
     private fun resolveFontFamily(selection: String): Any? {
@@ -510,34 +334,8 @@ class ReaderFontCompletionHook(
                 .get(null) ?: error("$className.$fieldName is null")
         }
 
-    private data class ActiveReader(
-        val bookId: Long,
-        val viewModelRef: WeakReference<Any>,
-        @Volatile var lastEffectiveConfig: ResolvedTypeSetting? = null,
-        @Volatile var lastRenderConfig: ResolvedTypeSetting? = null,
-    )
-
-    private data class ResolvedTypeSetting(
-        val family: String,
-        val textSize: Float,
-        val lineHeight: Float,
-        val padding: Int,
-        val globalEmbeddedFonts: Boolean,
-        val bookEmbeddedFonts: Int,
-        val embeddedFonts: Boolean,
-        val buildInFonts: Boolean,
-
-        val paragraphSpacing: Int = 0,
-        val letterSpacing: Int = 0,
-        val boldFont: Boolean = false,
-    )
-
     private companion object {
         const val LOG_PREFIX = "ReaMicro LSP"
-        const val READER_VIEW_MODEL_CLASS = HostClasses.Host.READER_VIEW_MODEL
-        const val READER_EPUB_CONFIG_CLASS = "app.zhendong.reamicro.ui.reader.ReaderViewModel\$ReaderEpubConfig"
-        const val READER_PAGER_INPUT_CLASS = "app.zhendong.reamicro.ui.reader.ReaderViewModel\$PagerInput"
-        const val APPLY_EPUB_CONFIG_METHOD = "applyEpubConfig"
         const val FONT_PROVIDER_CLASS = HostClasses.Epub.FONT_PROVIDER
         const val FONT_FAMILY_CLASS = HostClasses.Compose.FONT_FAMILY
         const val FONT_FAMILY_KT_CLASS = HostClasses.Compose.FONT_FAMILY_KT

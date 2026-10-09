@@ -3,7 +3,7 @@ package com.reamicro.fix.hook
 import java.lang.ref.WeakReference
 
 internal fun ReaderHook.beginReaderSearchBar(receiver: Any?, book: Any?) {
-    readerBottomBarDepth.set(readerBottomBarDepth.get() + 1)
+    readerBottomBarComposeScope.enter()
     if (!canRunFullTextSearch()) return
     bottomSearchReceiverRef = receiver?.let { WeakReference(it) }
     bottomSearchBookRef = book?.let { WeakReference(it) }
@@ -11,11 +11,11 @@ internal fun ReaderHook.beginReaderSearchBar(receiver: Any?, book: Any?) {
 }
 
 internal fun ReaderHook.endReaderSearchBar() {
-    readerBottomBarDepth.set((readerBottomBarDepth.get() - 1).coerceAtLeast(0))
+    readerBottomBarComposeScope.exit()
 }
 
 internal fun ReaderHook.canReplaceReaderThemeControl(): Boolean {
-    if (readerBottomBarDepth.get() == 0) return false
+    if (!readerBottomBarComposeScope.active) return false
     val snapshot = settingsProvider()
     return snapshot.moduleEnabled && snapshot.inlineSearchIconEnabled
 }

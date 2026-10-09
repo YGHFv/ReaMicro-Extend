@@ -545,6 +545,7 @@ class AccountCompletionController(
         updatePreference(session, key(PREF_KEYS_CLASS, "getEMBEDDED_FONTS"), snapshot.embeddedFonts)
         updatePreference(session, key(PREF_KEYS_CLASS, "getBUILD_IN_FONTS"), snapshot.builtInFonts)
         updatePreference(session, key(PREF_KEYS_CLASS, "getPADDING"), snapshot.padding)
+        restoreReaderMargins(session, snapshot.readerMargins ?: ReaderMarginsSnapshot.fromJson(null, snapshot.padding))
         updatePreference(session, key(PREF_KEYS_CLASS, "getONLY_NEXT_PAGE"), snapshot.onlyNextPage)
         updatePreference(session, key(PREF_KEYS_CLASS, "getVOLUME_KEY"), snapshot.volumeKey)
         updatePreference(session, key(PREF_KEYS_CLASS, "getTIME_BATTERY"), snapshot.timeBattery)
@@ -576,6 +577,7 @@ class AccountCompletionController(
             embeddedFonts = readPreference(prefs, key(PREF_KEYS_CLASS, "getEMBEDDED_FONTS")) as? Boolean ?: true,
             builtInFonts = readPreference(prefs, key(PREF_KEYS_CLASS, "getBUILD_IN_FONTS")) as? Boolean ?: false,
             padding = (readPreference(prefs, key(PREF_KEYS_CLASS, "getPADDING")) as? Number)?.toInt() ?: 0,
+            readerMargins = captureReaderMargins(prefs),
             onlyNextPage = readPreference(prefs, key(PREF_KEYS_CLASS, "getONLY_NEXT_PAGE")) as? Boolean ?: false,
             volumeKey = readPreference(prefs, key(PREF_KEYS_CLASS, "getVOLUME_KEY")) as? Boolean ?: false,
             timeBattery = readPreference(prefs, key(PREF_KEYS_CLASS, "getTIME_BATTERY")) as? Boolean ?: false,
@@ -590,6 +592,30 @@ class AccountCompletionController(
             aliyunAuth = readPreference(prefs, key(THIRD_PARTY_KEYS_CLASS, "getALIYUN_AUTH")) as? String ?: "",
             yun115Auth = readPreference(prefs, key(THIRD_PARTY_KEYS_CLASS, "getYUN115_AUTH")) as? String ?: "",
         )
+    }
+
+    private fun captureReaderMargins(preferences: Any): ReaderMarginsSnapshot? {
+        val sessionKt = try {
+            Class.forName("${SESSION_CLASS}Kt", false, classLoader)
+        } catch (_: ClassNotFoundException) {
+            return null
+        }
+        val getter = sessionKt.declaredMethods.firstOrNull {
+            it.name == "getReaderMargins" && it.parameterTypes.size == 1
+        } ?: return null
+        val margins = getter.apply { isAccessible = true }.invoke(null, preferences) ?: return null
+        return ReaderMarginsSnapshot.fromHost(margins)
+    }
+
+    private fun restoreReaderMargins(session: Any, snapshot: ReaderMarginsSnapshot) {
+        val update = allMethods(session.javaClass).firstOrNull {
+            it.name == "updateReaderMargins" && it.parameterTypes.size == 2
+        } ?: return
+        val marginsClass = update.parameterTypes[0]
+        val constructor = marginsClass.getDeclaredConstructor(*Array(6) { Integer.TYPE })
+        val margins = constructor.apply { isAccessible = true }.newInstance(*snapshot.arguments())
+        // 使用宿主原子更新，避免旧快照恢复时继续沿用另一账号的独立边距。
+        invokeSuspendMethod(update, session, margins)
     }
 
     private fun captureSharedPrefsSnapshot(activity: Activity, prefsName: String): SharedPrefsSnapshot =
@@ -1954,6 +1980,7 @@ class AccountCompletionController(
         val embeddedFonts: Boolean,
         val builtInFonts: Boolean,
         val padding: Int,
+        val readerMargins: ReaderMarginsSnapshot? = null,
         val onlyNextPage: Boolean,
         val volumeKey: Boolean,
         val timeBattery: Boolean,
@@ -1985,6 +2012,7 @@ class AccountCompletionController(
                 put("embeddedFonts", embeddedFonts)
                 put("builtInFonts", builtInFonts)
                 put("padding", padding)
+                readerMargins?.let { put("readerMargins", it.toJson()) }
                 put("onlyNextPage", onlyNextPage)
                 put("volumeKey", volumeKey)
                 put("timeBattery", timeBattery)
@@ -2069,6 +2097,9 @@ class AccountCompletionController(
                     embeddedFonts = source.optBoolean("embeddedFonts", true),
                     builtInFonts = source.optBoolean("builtInFonts", false),
                     padding = source.optInt("padding", 0),
+                    readerMargins = source.optJSONObject("readerMargins")?.let {
+                        ReaderMarginsSnapshot.fromJson(it, source.optInt("padding", 0))
+                    },
                     onlyNextPage = source.optBoolean("onlyNextPage", false),
                     volumeKey = source.optBoolean("volumeKey", false),
                     timeBattery = source.optBoolean("timeBattery", false),

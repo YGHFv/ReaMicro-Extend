@@ -58,9 +58,14 @@ internal class ReaderSearchNavigationBar(val activity: Activity, private val rea
 
     private fun safeInsets(): Insets {
         val decor = parentDecor ?: return Insets.NONE
-        return ViewCompat.getRootWindowInsets(decor)?.getInsets(
+        val windowInsets = ViewCompat.getRootWindowInsets(decor) ?: return Insets.NONE
+        val safe = windowInsets.getInsets(
             WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.ime()
-        ) ?: Insets.NONE
+        )
+        // 手势区允许贴底；三键导航、横屏刘海和键盘仍需避让。
+        val bottom = windowInsets.getInsets(WindowInsetsCompat.Type.tappableElement() or
+            WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.ime()).bottom
+        return Insets.of(safe.left, safe.top, safe.right, bottom)
     }
 
     private fun bounds(): ReaderSearchBarPlacement.Bounds? {
@@ -203,6 +208,9 @@ internal class ReaderSearchNavigationBar(val activity: Activity, private val rea
             }, shape = RoundedCornerShape(28.dp), color = p.page.copy(alpha = .96f),
                 border = BorderStroke(.5.dp, p.borderVariant), tonalElevation = 0.dp) {
                 Row(Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(modifier = Modifier.size(48.dp), colors = iconColors, onClick = { reader.openBottomSearchPage() }) {
+                        Icon(StructureHome130Icons.SearchResults, "搜索结果列表", Modifier.size(iconSize), tint = p.text)
+                    }
                     IconButton(modifier = Modifier.size(48.dp), colors = iconColors, enabled = index > 0, onClick = { reader.jumpRelativeSearchResult(-1) }) {
                         Icon(StructureHome130Icons.Back, "上一处", Modifier.size(iconSize), tint = if (index > 0) p.text else p.text.copy(alpha = .38f))
                     }
