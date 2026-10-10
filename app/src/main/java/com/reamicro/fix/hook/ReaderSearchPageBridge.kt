@@ -9,7 +9,6 @@ import java.util.ArrayDeque
 
 internal class ReaderSearchPageBridge(private val reader: ReaderHook) {
     private var owner = WeakReference<Any>(null)
-    private var dependencies = WeakReference<Any>(null)
     private var pagerState = WeakReference<Any>(null)
     private var staticPage: Int? = null
     private var mode: Int? = null
@@ -21,12 +20,12 @@ internal class ReaderSearchPageBridge(private val reader: ReaderHook) {
             Triple("SwipePagerKt", "SwipePagerEffects", 0),
             Triple("OverlayPagerKt", "OverlayPagerEffects", 1),
             Triple("StaticPagerKt", "StaticPagerEffects", 2),
-        )) observe(klass, name, { args -> bind(args[0], args[5], args[6], mode) })
+        )) observe(klass, name, { args -> bind(args[0], args[6], mode) })
         observe("CurlPagerKt", "CurlPager", { args ->
             val receiver = args[0]
             curlScopes.get().addLast(receiver ?: this)
             val current = staticPage.takeIf { mode == 4 && owner.get() === receiver }
-            bind(receiver, args[7], current, 4)
+            bind(receiver, current, 4)
         }, { curlScopes.get().pollLast() })
         observe("CurlPager_androidKt", "PlatformCurlPager", { args ->
             if (mode == 4 && owner.get() === curlScopes.get().peekLast() && owner.get() != null) {
@@ -52,12 +51,11 @@ internal class ReaderSearchPageBridge(private val reader: ReaderHook) {
         }
     }
 
-    fun bind(vm: Any?, deps: Any?, current: Any?, kind: Int) {
+    fun bind(vm: Any?, current: Any?, kind: Int) {
         if (vm == null) return
         val active = reader.currentViewModelRef?.get()
         if (active != null && active !== vm) return
         owner = WeakReference(vm)
-        dependencies = WeakReference(deps)
         staticPage = (current as? Number)?.toInt()
         pagerState = WeakReference(if (current is Number) null else current)
         mode = kind
@@ -94,9 +92,9 @@ internal class ReaderSearchPageBridge(private val reader: ReaderHook) {
 
     fun page(vm: Any): Any? {
         if (owner.get() !== vm || mode != reader.currentSearchPagerMode) return null
-        val deps = dependencies.get() ?: return null
         val index = staticPage ?: pagerState.get()?.let { reader.callNoArg(it, "getCurrentPage") as? Number }?.toInt() ?: return null
-        val lookup = reader.callNoArg(deps, "getGetVirtualPage") ?: return null
-        return XposedHelpers.callMethod(lookup, "invoke", index)
+        // getVirtualPage 会为未映射页启动章节加载；跳转期间的旧页码只能查询，不能触发预取。
+        val pages = XposedHelpers.getObjectField(vm, "virtualPages") as? Map<*, *> ?: return null
+        return pages[index]
     }
 }

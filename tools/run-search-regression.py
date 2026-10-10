@@ -25,8 +25,9 @@ compiler += [stdlib, jar("org.jetbrains.kotlin", "kotlin-reflect", "1.6.10"),
 java = str(Path(os.environ["JAVA_HOME"]) / "bin" / ("java.exe" if os.name == "nt" else "java")) if os.environ.get("JAVA_HOME") else shutil.which("java")
 sources = [root / "app/src/main/java/com/reamicro/fix/hook" / name for name in (
     "ReaderSearchPresentation.kt", "ReaderSearchSnippet.kt", "ReaderSearchBarPlacement.kt", "ReaderSearchListPosition.kt",
-    "ReaderSearchRequest.kt", "LatestSearchUpdate.kt", "SearchIndexBudget.kt")]
-sources += sorted((root / "tools/search-tests").glob("*.kt"))
+    "ReaderSearchRequest.kt", "LatestSearchUpdate.kt", "SearchIndexBudget.kt", "ReaderVirtualPageLoadPolicy.kt",
+    "ReaderVirtualPageLoadGuard.kt")]
+sources += sorted((root / "tools/search-tests").rglob("*.kt"))
 # 列表延迟回调不得读取可替换的状态；清空、重搜和报错必须保留旧批次的取值闭包。
 dialog = (root / "app/src/main/java/com/reamicro/fix/hook/HostFullTextSearchDialog.kt").read_text(encoding="utf-8")
 lazy_content = dialog.split("LazyColumn(", 1)[1].split("// 计数固定", 1)[0]
@@ -49,6 +50,15 @@ assert "selected=active" in dialog and 'Text("当前查看"' in dialog
 assert "if(text==null)" in dialog and "window?.setWindowAnimations(0)" in dialog
 navigator = (root / "app/src/main/java/com/reamicro/fix/hook/ReaderSearchNavigator.kt").read_text(encoding="utf-8")
 assert "private val resolver" not in navigator and "finally { resolver.clear() }" in navigator
+bridge = (root / "app/src/main/java/com/reamicro/fix/hook/ReaderSearchPageBridge.kt").read_text(encoding="utf-8")
+lookup = bridge.split("fun page(vm: Any)", 1)[1]
+assert '"getGetVirtualPage"' not in lookup and '"invoke", index' not in lookup
+assert "return pages[index]" in lookup
+guard = (root / "app/src/main/java/com/reamicro/fix/hook/ReaderVirtualPageLoadGuard.kt").read_text(encoding="utf-8")
+assert 'getDeclaredMethod("ensureVirtualPageWindow"' in guard
+assert 'getDeclaredMethod("ensureVirtualPageMapped"' in guard
+assert "if (!epub.isInstance(args.getOrNull(1))) return" in guard
+assert "param.result = unit" in guard
 returning = search.split("internal fun ReaderHook.returnToSearchOrigin", 1)[1].split("internal fun", 1)[0]
 for release in ("cancelSearchPageWork()", "searchDocumentCache.clear()", "searchIndexState = null", "clearPersistedSearchOrigin()", "clearHostSearchJump()"):
     assert returning.index(release) < returning.index("jumpToSearchCfi(")

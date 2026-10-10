@@ -6,6 +6,9 @@ import com.reamicro.fix.xposed.XposedHelpers
 
 internal class ReaderSearchJumpBridge(private val reader: ReaderHook) {
     fun install() {
+        com.reamicro.fix.core.HookInstallReport.install("ReaderHook", "virtualPageLoadGuard") {
+            ReaderVirtualPageLoadGuard(reader).install()
+        }
         reader.searchScrollBridge = ReaderSearchScrollBridge(reader).also { it.install() }
         reader.searchPageBridge = ReaderSearchPageBridge(reader).also { it.install() }
         val loader = reader.classLoader

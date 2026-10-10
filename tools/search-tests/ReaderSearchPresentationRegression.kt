@@ -92,5 +92,7 @@ fun main() {
     check(budget.retain(512) && budget.retain(512))
     check(!budget.retain(1) && !budget.cacheable && !budget.retain(0))
     check(!SearchIndexBudget(1024).retain(Long.MAX_VALUE))
+    runVirtualPageLoadRegression()
+    runVirtualPageLoadGuardRegression()
     println("Search regression passed: presentation, selection, bottom edge, detached search, bounded updates and index memory")
 }
