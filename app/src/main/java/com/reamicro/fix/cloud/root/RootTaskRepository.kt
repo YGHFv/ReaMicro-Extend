@@ -4,6 +4,7 @@ import com.reamicro.fix.cloud.local.LocalTask
 import com.reamicro.fix.cloud.local.LocalTaskRecord
 import com.reamicro.fix.cloud.local.LocalTaskRepository
 import com.reamicro.fix.cloud.local.LocalTaskStore
+import com.reamicro.fix.cloud.local.appendTaskNotification
 import com.reamicro.fix.cloud.local.appendLocalTaskRecord
 import com.reamicro.fix.cloud.local.applyLocalTaskExecution
 import com.reamicro.fix.cloud.local.clearLocalTaskRecordsBefore
@@ -17,7 +18,6 @@ import java.io.RandomAccessFile
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermissions
-import java.util.UUID
 
 internal class RootTaskRepository(
     private val directory: File,
@@ -44,13 +44,14 @@ internal class RootTaskRepository(
             for (key in LocalTaskStore.RUNTIME_STATE_KEYS) if (state.has(key)) current.put(key, state.get(key))
         }
     }
-    override fun recordExecution(accountId: String, task: LocalTask, state: JSONObject, record: LocalTaskRecord) {
+    override fun recordExecution(accountId: String, task: LocalTask, state: JSONObject, record: LocalTaskRecord, notify: Boolean) {
         access(write = true) { root ->
             val account = account(root, accountId) ?: return@access
             val current = task(root, accountId, task.taskType) ?: return@access
             applyLocalTaskExecution(current, task, state)
             appendLocalTaskRecord(account, record)
             root.put("lastRunAt", record.at)
+            if (notify) appendTaskNotification(root, accountId, record)
         }
     }
 
@@ -106,17 +107,6 @@ internal class RootTaskRepository(
         for (index in 1 until requests.length()) remaining.put(requests.get(index))
         root.put("requests", remaining)
         request
-    }
-
-    fun addNotification(accountId: String, taskType: String, result: String, message: String, items: String = "") {
-        access(write = true) { root ->
-            val pending = root.optJSONArray("notifications") ?: JSONArray()
-            pending.put(JSONObject().put("id", UUID.randomUUID().toString()).put("accountId", accountId)
-                .put("taskType", taskType).put("result", result).put("message", message).put("items", items))
-            val trimmed = JSONArray()
-            for (index in (pending.length() - 100).coerceAtLeast(0) until pending.length()) trimmed.put(pending.get(index))
-            root.put("notifications", trimmed)
-        }
     }
 
     fun acknowledge(ids: Set<String>) {

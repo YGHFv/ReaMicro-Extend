@@ -58,7 +58,7 @@ internal class LocalTaskEngine(
                 .put("lastMessage", outcome.message).put("lastRunAt", finished)
             if (task.taskType == "yeshe_draw_card") state.put("drawPending", outcome.result != "success")
             val record = LocalTaskRecord(finished, task.taskType, outcome.result, outcome.message, outcome.detail.toString())
-            store.recordExecution(key.accountId, task, state, record)
+            store.recordExecution(key.accountId, task, state, record, outcome.notify)
             triggerRewardDraws()
             results += record
             runCatching { onCompleted(key.accountId, task, outcome) }
@@ -104,7 +104,7 @@ internal fun localTaskRequest(task: LocalTask): JSONObject = JSONObject().apply 
             put("merchantAutoComplete", task.merchantAutoComplete)
             if (task.merchantCityCode.isNotBlank()) put("merchantCityCode", task.merchantCityCode)
             if (task.merchantPrincipal > 0L) put("merchantPrincipal", task.merchantPrincipal)
-            if (task.merchantTransportId > 0L) put("merchantTransportId", task.merchantTransportId)
+            put("merchantTransportId", task.merchantTransportId)
         }
     }
 }

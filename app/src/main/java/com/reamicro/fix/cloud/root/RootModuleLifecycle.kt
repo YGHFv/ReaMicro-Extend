@@ -6,11 +6,25 @@ internal class RootModuleLifecycle(
     private val execute: (String, Long) -> RootCommandResult,
     private val install: (RootModuleManager) -> Unit,
 ) {
-    fun prepare(requiredVersion: Int): RootModuleInstallDecision {
+    fun prepare(requiredVersion: Int, activate: Boolean): RootModuleInstallDecision {
         var state = checked()
         var provider: RootModuleManager? = null
         fun provider(): RootModuleManager = provider ?: manager().also { provider = it }
-        if (state.disabled || state.pendingRemoval) {
+        check(maxOf(state.installedVersion, state.stagedVersion) <= requiredVersion ||
+            state.copy(disabled = false, pendingRemoval = false).installDecision(requiredVersion) != RootModuleInstallDecision.INSTALL) {
+            "检测到比 APK 内置版本更新的模块，拒绝自动降级；请使用匹配的 APK 或管理器修复"
+        }
+        if (!activate) {
+            check(!state.pendingRemoval && !state.stagedRemoval) { "模块正在卸载，请重启完成卸载，或明确启用后再安装" }
+            if (state.disabled || state.stagedDisabled) {
+                check(state.installed && state.ready && state.installedVersion >= requiredVersion &&
+                    !state.pendingUpdate && !state.stagedPresent) {
+                    "模块已停用，请明确启用后再更新；安装不会自动恢复停用模块"
+                }
+                return RootModuleInstallDecision.READY
+            }
+        }
+        if (activate && (state.disabled || state.pendingRemoval)) {
             command(provider().reactivate(state.pendingRemoval))
             state = checked()
             check(!state.disabled && !state.pendingRemoval) { "管理器未确认恢复模块，请重新检测" }

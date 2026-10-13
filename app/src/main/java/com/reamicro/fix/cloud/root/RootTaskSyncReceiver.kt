@@ -15,7 +15,7 @@ class RootTaskSyncReceiver : BroadcastReceiver() {
         val done = AtomicBoolean(false)
         val main = Handler(Looper.getMainLooper())
         val finish = Runnable { if (done.compareAndSet(false, true)) pending.finish() }
-        main.postDelayed(finish, 8_000L)
+        main.postDelayed(finish, 25_000L)
         try {
             RootTaskBridge.requestSync(context.applicationContext) {
                 main.removeCallbacks(finish)

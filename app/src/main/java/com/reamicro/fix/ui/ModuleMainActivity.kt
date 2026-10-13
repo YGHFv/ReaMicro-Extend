@@ -349,6 +349,8 @@ class ModuleMainActivity : ComponentActivity() {
 
         setTaskExcludedFromRecents(hideRecentTaskEnabled())
         registerRecordObservers()
+        runBg(work = { LocalTaskRunner.retryNotifications(applicationContext) }, then = { refresh() })
+        RootTaskBridge.requestSync(applicationContext) { recordRefreshHandler.post { refresh() } }
         refresh()
     }
 
@@ -1477,7 +1479,7 @@ class ModuleMainActivity : ComponentActivity() {
         if (spec?.merchant == true) {
             put(FIELD_CITY, task.merchantCityCode)
             put(FIELD_PRINCIPAL, task.merchantPrincipal.takeIf { it > 0L }?.toString().orEmpty())
-            put(FIELD_TRANSPORT, task.merchantTransportId.takeIf { it > 0L }?.toString().orEmpty())
+            put(FIELD_TRANSPORT, task.merchantTransportId.toString())
 
             editor.merchantLoading = true
             runBg(work = { runCatching { fetchMerchantChoices(accountId) } }, then = { result ->
@@ -1489,14 +1491,6 @@ class ModuleMainActivity : ComponentActivity() {
                     editor.merchantCities = fetched.cities
                     editor.merchantTransports = fetched.transports
                     editor.merchantNoTransportCapacity = fetched.noTransportCapacity
-                    val savedCity = task.merchantCityCode
-                    val savedTransport = task.merchantTransportId
-                    if (!editor.merchantSelectionEdited && fetched.activeCityCode.isNotBlank() && savedCity.isBlank()) {
-                        put(FIELD_CITY, fetched.activeCityCode)
-                    }
-                    if (!editor.merchantSelectionEdited && fetched.activeTransportId > 0L && savedTransport <= 0L) {
-                        put(FIELD_TRANSPORT, fetched.activeTransportId.toString())
-                    }
                 }
             })
         }
@@ -1756,11 +1750,15 @@ class ModuleMainActivity : ComponentActivity() {
             work = {
                 val result = runCatching(block)
                 val failure = result.exceptionOrNull()
-                val status = when {
-                    failure is com.reamicro.fix.cloud.root.RootAccessException ->
-                        com.reamicro.fix.cloud.root.RootModuleStatus(access = failure.report, error = failure.report.detail)
-                    result.isFailure && RootTaskBridge.lastInspection != null -> RootTaskBridge.lastInspection!!
-                    else -> RootTaskBridge.inspect(applicationContext)
+                val status = if (failure is com.reamicro.fix.cloud.root.RootAccessException) {
+                    com.reamicro.fix.cloud.root.RootModuleStatus(access = failure.report, error = failure.report.detail)
+                } else {
+                    runCatching { RootTaskBridge.inspect(applicationContext) }.getOrElse { error ->
+                        (RootTaskBridge.lastInspection ?: com.reamicro.fix.cloud.root.RootModuleStatus()).copy(
+                            inspectionComplete = false,
+                            error = error.message ?: error.javaClass.simpleName,
+                        )
+                    }
                 }
                 result to status
             },
@@ -1768,6 +1766,7 @@ class ModuleMainActivity : ComponentActivity() {
                 rootBusy.value = false
                 toast(result.getOrElse { it.message ?: it.javaClass.simpleName })
                 rootUi.value = status
+                if (result.isSuccess && !status.inspectionComplete) toast(status.error)
                 refresh()
             },
         )
@@ -2079,7 +2078,6 @@ class ModuleMainActivity : ComponentActivity() {
             emptyLabel = uiText(R.string.selection_none),
             choices = compatible.map { DropdownChoice(it.code, it.label) },
             onSelect = { code ->
-                editor.merchantSelectionEdited = true
                 editor.values[FIELD_CITY] = code
                 val city = compatible.firstOrNull { it.code == code } ?: return@ChoiceDropdownField
                 val current = editor.merchantTransports.firstOrNull {
@@ -2118,7 +2116,6 @@ class ModuleMainActivity : ComponentActivity() {
             choices = listOf(DropdownChoice(MERCHANT_NO_TRANSPORT, uiText(R.string.merchant_transport_none))) +
                 compatible.map { DropdownChoice(it.id, it.label) },
             onSelect = { id ->
-                editor.merchantSelectionEdited = true
                 if (id == MERCHANT_NO_TRANSPORT) {
                     editor.values[FIELD_TRANSPORT] = MERCHANT_NO_TRANSPORT
 
@@ -2490,7 +2487,6 @@ class ModuleMainActivity : ComponentActivity() {
         val spec: CloudAutomationTaskSpec?,
     ) {
         var saving by mutableStateOf(false)
-        var merchantSelectionEdited = false
         val values = mutableStateMapOf<String, String>()
 
         val textFields = mutableStateMapOf<String, TextFieldState>()

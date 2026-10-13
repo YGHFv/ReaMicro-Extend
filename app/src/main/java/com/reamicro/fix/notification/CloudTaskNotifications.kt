@@ -55,24 +55,42 @@ object CloudTaskNotifications {
         )
     }
 
+    @Synchronized
     fun post(context: Context, intent: Intent, source: String): Boolean {
         if (intent.action != ACTION_POST) return false
         val messageId = intent.getStringExtra(EXTRA_ID).orEmpty().ifBlank { return false }
+        val receipts = context.applicationContext.getSharedPreferences("reamicro_task_notification_receipts", Context.MODE_PRIVATE)
+        val receiptKey = "delivered_$messageId"
+        if (receipts.getBoolean(receiptKey, false)) return true
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { "云端任务消息" }
         val text = intent.getStringExtra(EXTRA_TEXT).orEmpty().ifBlank { "任务状态已更新" }
         val result = intent.getStringExtra(EXTRA_RESULT).orEmpty()
         val displayText = cloudTaskNotificationText(text, intent.getStringExtra(EXTRA_ITEMS).orEmpty())
         if (!hasPermission(context)) {
             ModuleAndroidLog.legacy(LOG_TAG, "cloud task notification permission denied source=$source")
-            record(context, title, displayText, result, source, delivered = false, detail = "未授予通知权限")
+            record(context, messageId, title, displayText, result, source, delivered = false, detail = "未授予通知权限")
             return false
         }
-        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return false
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        if (manager == null) {
+            record(context, messageId, title, displayText, result, source, delivered = false, detail = "通知服务不可用")
+            return false
+        }
+        if (!manager.areNotificationsEnabled()) {
+            record(context, messageId, title, displayText, result, source, delivered = false, detail = "应用通知已关闭")
+            return false
+        }
         return runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 manager.createNotificationChannel(
                     NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_DEFAULT),
                 )
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                manager.getNotificationChannel(CHANNEL_ID)?.importance == NotificationManager.IMPORTANCE_NONE
+            ) {
+                record(context, messageId, title, displayText, result, source, delivered = false, detail = "任务通知渠道已关闭")
+                return false
             }
             val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 Notification.Builder(context, CHANNEL_ID)
@@ -89,19 +107,21 @@ object CloudTaskNotifications {
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(true)
 
-            manager.notify(notificationId(messageId), builder.build())
+            manager.notify(messageId, BASE_NOTIFICATION_ID, builder.build())
+            check(receipts.edit().putBoolean(receiptKey, true).commit()) { "通知投递回执保存失败" }
             ModuleAndroidLog.legacy(LOG_TAG, "cloud task notification posted source=$source id=$messageId")
-            record(context, title, displayText, result, source, delivered = true)
+            record(context, messageId, title, displayText, result, source, delivered = true)
             true
         }.getOrElse {
             ModuleAndroidLog.legacy(LOG_TAG, "cloud task notification failed source=$source id=$messageId", it)
-            record(context, title, displayText, result, source, delivered = false, detail = it.message.orEmpty())
+            record(context, messageId, title, displayText, result, source, delivered = false, detail = it.message.orEmpty())
             false
         }
     }
 
     private fun record(
         context: Context,
+        messageId: String,
         title: String,
         text: CharSequence,
         result: String,
@@ -113,6 +133,7 @@ object CloudTaskNotifications {
             NotificationRecordStore { context.applicationContext }.append(
                 NotificationRecord(
                     at = System.currentTimeMillis(),
+                    messageId = messageId,
                     title = title,
                     text = text.toString(),
                     result = result,
@@ -124,7 +145,6 @@ object CloudTaskNotifications {
         }
     }
 
-    private fun notificationId(messageId: String): Int = BASE_NOTIFICATION_ID + (messageId.hashCode() and 0xFFFF)
 
     private const val BASE_NOTIFICATION_ID = 4400
 }

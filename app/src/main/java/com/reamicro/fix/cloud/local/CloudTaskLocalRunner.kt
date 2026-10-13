@@ -60,7 +60,6 @@ object CloudTaskLocalRunner {
         } else "当前没有进行中的行商"
         var detail = if (trip.hasTrip) merchantDetail(trip) else JSONObject()
         var notify = action.notify
-        if (action.notify) state.put(KEY_MERCHANT_NOTIFIED_TRIP, trip.tripId)
         if (action.settle) {
             val settled = runCatching {
                 postReaMicro(
@@ -142,9 +141,11 @@ object CloudTaskLocalRunner {
                 detail.put("新行商运签", blessing.detail.optString("运签"))
                 if (blessEffect.isNotBlank()) detail.put("新行商运签效果", blessEffect)
             }
+            if (action.notify) state.put(KEY_MERCHANT_NOTIFIED_TRIP, trip.tripId)
             return Outcome("success", message, state, detail = detail)
         }
         state.put("nextRunAtOverride", now + TRAVELING_MERCHANT_POLL_MS)
+        if (action.notify) state.put(KEY_MERCHANT_NOTIFIED_TRIP, trip.tripId)
         return Outcome("success", message, state, notify = notify, detail = detail)
     }
 
@@ -184,13 +185,13 @@ object CloudTaskLocalRunner {
     )
 
     internal fun resolveStartConfig(request: JSONObject, remembered: MerchantConfig): MerchantConfig = MerchantConfig(
-        cityCode = request.optString("merchantCityCode").trim().ifBlank { remembered.cityCode },
-        transportId = request.optLong("merchantTransportId", 0L).takeIf { it > 0L } ?: remembered.transportId,
+        cityCode = request.optString("merchantCityCode").trim(),
+        transportId = request.optLong("merchantTransportId", 0L),
         principal = request.optLong("merchantPrincipal", 0L).takeIf { it > 0L } ?: remembered.principal,
     )
 
     private fun merchantStartHint(config: MerchantConfig): String = when {
-        config.cityCode.isBlank() -> "缺少城池，请先跑一趟行商或手动填写 cityCode"
+        config.cityCode.isBlank() -> "缺少城池，请选择地图或手动填写 cityCode"
         config.transportId < 0L -> "车马配置无效"
         config.principal <= 0L -> "缺少本金，请先跑一趟行商或手动填写本金"
         else -> "参数不完整"

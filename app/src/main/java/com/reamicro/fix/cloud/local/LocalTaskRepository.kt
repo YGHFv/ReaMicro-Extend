@@ -12,7 +12,7 @@ interface LocalTaskRepository {
     fun token(accountId: String): String
     fun runtimeState(accountId: String, taskType: String): JSONObject
     fun recordState(accountId: String, taskType: String, state: JSONObject)
-    fun recordExecution(accountId: String, task: LocalTask, state: JSONObject, record: LocalTaskRecord)
+    fun recordExecution(accountId: String, task: LocalTask, state: JSONObject, record: LocalTaskRecord, notify: Boolean = true)
     fun executionEnabled(): Boolean = true
 }
 

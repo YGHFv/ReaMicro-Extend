@@ -3,7 +3,6 @@ package com.reamicro.fix.cloud.root
 import android.os.Process
 import com.reamicro.fix.cloud.local.LocalTaskEngine
 import com.reamicro.fix.cloud.local.LocalTaskKey
-import com.reamicro.fix.cloud.local.CloudTaskLocalRunner
 import com.reamicro.fix.cloud.local.rescheduleLocalTasks
 import org.json.JSONObject
 import java.io.File
@@ -52,14 +51,8 @@ object RootTaskMain {
                         val accountId = request?.optString("accountId").orEmpty()
                         val taskType = request?.optString("taskType").orEmpty()
                         val key = if (accountId.isNotBlank() && taskType.isNotBlank()) LocalTaskKey(accountId, taskType) else null
-                        val engine = LocalTaskEngine(repository, onCompleted = { account, task, outcome ->
-                            if (outcome.notify) {
-                                val items = outcome.detail.optJSONArray(CloudTaskLocalRunner.KEY_REWARD_ITEMS)?.toString().orEmpty()
-                                repository.addNotification(account, task.taskType, outcome.result, outcome.message, items)
-                            }
-                        })
-                        val completed = engine.runDue(force = request?.optBoolean("force") == true, requested = key)
-                        if (completed.isNotEmpty()) notifyModule()
+                        LocalTaskEngine(repository).runDue(force = request?.optBoolean("force") == true, requested = key)
+                        if ((repository.snapshot().optJSONArray("notifications")?.length() ?: 0) > 0) notifyModule()
                     }
                 }
                 else -> error("不支持的 Root 指令")

@@ -295,19 +295,35 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         }
     }
 
-    override fun recordExecution(accountId: String, task: LocalTask, state: JSONObject, record: LocalTaskRecord) {
+    override fun recordExecution(accountId: String, task: LocalTask, state: JSONObject, record: LocalTaskRecord, notify: Boolean) {
         editAccount(accountId) { root, tasks ->
             val current = tasks.optJSONObject(task.taskType) ?: return@editAccount
             applyLocalTaskExecution(current, task, state)
             appendLocalTaskRecord(root, record)
+            if (notify) appendTaskNotification(root, accountId, record)
         }
     }
 
+    internal fun pendingNotifications(): List<JSONObject> = accountIds().flatMap { accountId ->
+        val pending = readAccount(accountId)?.optJSONArray("notifications") ?: JSONArray()
+        (0 until pending.length()).mapNotNull { pending.optJSONObject(it) }
+    }
+    internal fun acknowledgeNotifications(accountId: String, ids: Set<String>) {
+        editAccount(accountId) { root, _ ->
+            val pending = root.optJSONArray("notifications") ?: return@editAccount
+            val remaining = JSONArray()
+            for (index in 0 until pending.length()) {
+                val item = pending.optJSONObject(index) ?: continue
+                if (item.optString("id") !in ids) remaining.put(item)
+            }
+            root.put("notifications", remaining)
+        }
+    }
     internal fun executionPayload(): JSONObject {
         val accounts = JSONObject()
         for (accountId in accountIds()) {
             val root = readAccount(accountId) ?: continue
-            accounts.put(accountId, root.put(KEY_TOKEN, token(accountId)))
+            accounts.put(accountId, root.apply { remove("notifications"); put(KEY_TOKEN, token(accountId)) })
         }
         return JSONObject().put(KEY_ACCOUNTS, accounts)
     }

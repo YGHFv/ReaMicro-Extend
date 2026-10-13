@@ -71,7 +71,7 @@ internal object RootTaskBridge {
         try {
             val access = inspect(context)
             if (!access.rootAvailable) throw RootAccessException(access.access)
-            ensureModuleInstalled(context)?.let { hint ->
+            ensureModuleInstalled(context, activate = true)?.let { hint ->
                 context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                     .putString("status", "module_pending").remove("statusError").commit()
                 return@withTaskControl hint
@@ -107,8 +107,8 @@ internal object RootTaskBridge {
         },
     )
 
-    private fun ensureModuleInstalled(context: Context): String? =
-        when (lifecycle(context).prepare(BuildConfig.ROOT_MODULE_VERSION_CODE)) {
+    private fun ensureModuleInstalled(context: Context, activate: Boolean): String? =
+        when (lifecycle(context).prepare(BuildConfig.ROOT_MODULE_VERSION_CODE, activate)) {
             RootModuleInstallDecision.READY -> null
             RootModuleInstallDecision.REBOOT -> context.moduleString(R.string.ksu_reboot_required)
             RootModuleInstallDecision.INSTALL -> error("模块准备状态错误")
@@ -116,11 +116,22 @@ internal object RootTaskBridge {
 
     @Synchronized
     fun installOrUpdate(context: Context): String {
-        require(android.os.Process.myUid() / 100000 == 0) { context.moduleString(R.string.error_ksu_primary_user) }
-        val status = inspect(context)
-        if (!status.rootAvailable) throw RootAccessException(status.access)
-        val hint = ensureModuleInstalled(context)
-        return hint ?: context.moduleString(R.string.execution_module_up_to_date)
+        try {
+            require(android.os.Process.myUid() / 100000 == 0) { context.moduleString(R.string.error_ksu_primary_user) }
+            val status = inspect(context)
+            if (!status.rootAvailable) throw RootAccessException(status.access)
+            val hint = ensureModuleInstalled(context, activate = false)
+            clearOperationError(context)
+            return hint ?: context.moduleString(R.string.execution_module_up_to_date)
+        } catch (error: Throwable) {
+            recordFailure(context, error)
+            throw error
+        }
+    }
+    private fun clearOperationError(context: Context) {
+        check(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove("statusError").commit()) {
+            "无法清除上次 Root 操作错误"
+        }
     }
 
     private fun extractBundledModule(context: Context): File {
@@ -266,6 +277,8 @@ internal object RootTaskBridge {
                     syncCallbacks.toList().also { syncCallbacks.clear() }
                 }
                 try {
+                    prepareTransport(appContext)
+                    applySnapshot(appContext, command(appContext, "snapshot", timeoutSeconds = 10))
                     synchronize(appContext)
                 } catch (error: Throwable) {
                     ModuleAndroidLog.error(LOG_TAG, "Root 状态同步失败：${error.message}")
@@ -295,8 +308,9 @@ internal object RootTaskBridge {
         for (index in 0 until pending.length()) {
             val item = pending.optJSONObject(index) ?: continue
             val id = item.optString("id")
+            if (id.isBlank()) continue
             val type = item.optString("taskType")
-            val intent = CloudTaskNotifications.intent("ksu_$id", LocalTaskRunner.localTaskTitle(type),
+            val intent = CloudTaskNotifications.intent("ksu_$id", LocalTaskRunner.localTaskTitle(type) + if (item.optString("result") == "success") "" else "异常",
                 item.optString("message"), item.optString("result"), item.optString("items"))
             if (CloudTaskNotifications.post(context, intent, source = "ksu-task-runner")) delivered.put(id)
         }

@@ -3,7 +3,6 @@ package com.reamicro.fix.cloud.local
 import android.content.Context
 import com.reamicro.fix.logging.ModuleAndroidLog
 import com.reamicro.fix.notification.CloudTaskNotifications
-import com.reamicro.fix.xposed.XposedBridge
 import java.util.concurrent.atomic.AtomicBoolean
 
 object LocalTaskRunner {
@@ -16,8 +15,13 @@ object LocalTaskRunner {
             if (com.reamicro.fix.cloud.root.RootTaskBridge.isEnabled(appContext)) {
                 com.reamicro.fix.cloud.root.RootTaskBridge.synchronize(appContext, requested = LocalTaskKey(accountId, taskType))
                 "已提交 Root 后台任务，请稍后查看任务记录"
-            } else engine(appContext).runDue(maxTasks = 1, requested = LocalTaskKey(accountId, taskType))
-                .firstOrNull()?.message ?: "任务不存在"
+            } else {
+                retryNotifications(appContext)
+                val result = engine(appContext).runDue(maxTasks = 1, requested = LocalTaskKey(accountId, taskType))
+                    .firstOrNull()?.message ?: "任务不存在"
+                retryNotifications(appContext)
+                result
+            }
         } finally {
             running.set(false)
         }
@@ -33,19 +37,25 @@ object LocalTaskRunner {
         return LocalTaskEngine(store, onCompleted = { accountId, task, outcome ->
             ModuleAndroidLog.legacy("ReaMicroLocalTask",
                 "type=${task.taskType} result=${outcome.result} nextRunAt=${store.get(accountId, task.taskType)?.nextRunAt} message=${outcome.message}")
-            if (outcome.notify) postNotification(context, accountId, task.taskType, outcome)
+            retryNotifications(context)
         })
     }
 
-    private fun postNotification(context: Context, accountId: String, taskType: String, outcome: CloudTaskLocalRunner.Outcome) {
-        val id = "local_${taskType}_${accountId}_${outcome.message.hashCode()}"
-        val title = localTaskTitle(taskType) + if (outcome.result == "success") "" else "异常"
-
-        val items = outcome.detail.optJSONArray(CloudTaskLocalRunner.KEY_REWARD_ITEMS)?.toString().orEmpty()
-        val intent = CloudTaskNotifications.intent(id, title, outcome.message, outcome.result, items)
-        if (!CloudTaskNotifications.post(context, intent, source = "local-task-runner")) {
-            XposedBridge.log("ReaMicro local task notification failed type=$taskType")
+    @Synchronized
+    internal fun retryNotifications(context: Context) {
+        val store = LocalTaskStore { context }
+        val delivered = mutableMapOf<String, MutableSet<String>>()
+        for (item in store.pendingNotifications()) {
+            val id = item.optString("id").takeIf { it.isNotBlank() } ?: continue
+            val taskType = item.optString("taskType")
+            val result = item.optString("result")
+            val title = localTaskTitle(taskType) + if (result == "success") "" else "异常"
+            val intent = CloudTaskNotifications.intent("local_$id", title, item.optString("message"), result, item.optString("items"))
+            if (CloudTaskNotifications.post(context, intent, source = "local-task-runner")) {
+                delivered.getOrPut(item.optString("accountId")) { mutableSetOf() }.add(id)
+            }
         }
+        for ((accountId, ids) in delivered) store.acknowledgeNotifications(accountId, ids)
     }
 
     internal fun localTaskTitle(taskType: String): String = when (taskType) {

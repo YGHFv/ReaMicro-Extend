@@ -13,15 +13,19 @@ data class NotificationRecord(
     val source: String,
     val delivered: Boolean,
     val detail: String = "",
+    val messageId: String = "",
 )
 
 class NotificationRecordStore(private val contextProvider: () -> Context?) {
 
-    fun append(record: NotificationRecord) {
-        val prefs = prefs() ?: return
+    fun append(record: NotificationRecord) = synchronized(LOCK) {
+        val prefs = prefs() ?: return@synchronized
         runCatching {
             val array = JSONArray(prefs.getString(KEY_RECORDS, null) ?: "[]")
-            array.put(record.toJson())
+            val existing = if (record.messageId.isBlank()) -1 else (0 until array.length()).firstOrNull {
+                array.optJSONObject(it)?.optString("messageId") == record.messageId
+            } ?: -1
+            if (existing >= 0) array.put(existing, record.toJson()) else array.put(record.toJson())
             prefs.edit().putString(KEY_RECORDS, trimNotificationRecords(array).toString()).commit()
         }
     }
@@ -31,7 +35,7 @@ class NotificationRecordStore(private val contextProvider: () -> Context?) {
         return runCatching { parseNotificationRecords(raw) }.getOrDefault(emptyList())
     }
 
-    fun clear() {
+    fun clear() = synchronized(LOCK) {
         prefs()?.edit()?.remove(KEY_RECORDS)?.commit()
     }
 
@@ -41,6 +45,7 @@ class NotificationRecordStore(private val contextProvider: () -> Context?) {
         contextProvider()?.applicationContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     companion object {
+        private val LOCK = Any()
         const val PREFS_NAME = "reamicro_notification_records"
         private const val KEY_RECORDS = "records"
 
@@ -73,10 +78,12 @@ private fun parseNotificationRecord(json: JSONObject): NotificationRecord = Noti
     source = json.optString("source"),
     delivered = json.optBoolean("delivered", false),
     detail = json.optString("detail"),
+    messageId = json.optString("messageId"),
 )
 
 private fun NotificationRecord.toJson(): JSONObject = JSONObject()
     .put("at", at)
+    .put("messageId", messageId)
     .put("title", title)
     .put("text", text)
     .put("result", result)
