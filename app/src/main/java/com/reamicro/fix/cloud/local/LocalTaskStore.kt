@@ -144,6 +144,12 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         return decrypt(root.optString(KEY_TOKEN))
     }
 
+    fun refreshToken(accountId: String, token: String) {
+        require(accountId.isNotBlank()) { "账号不可用，请重新登录" }
+        require(token.isNotBlank()) { "当前阅微登录密钥为空，请重新登录阅微" }
+        editAccount(accountId) { root, _ -> root.put(KEY_TOKEN, encrypt(token)) }
+    }
+
     override fun runtimeState(accountId: String, taskType: String): JSONObject {
         val obj = readAccount(accountId)?.optJSONObject(KEY_TASKS)?.optJSONObject(taskType) ?: return JSONObject()
         val state = JSONObject()

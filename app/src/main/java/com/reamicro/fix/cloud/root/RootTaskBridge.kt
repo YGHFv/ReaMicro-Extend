@@ -213,7 +213,8 @@ internal object RootTaskBridge {
             if (!context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("legacyWakeMigrated", false)) {
                 cleanupLegacyWake(context)
             }
-            val snapshot = command(context, "configure", LocalTaskStore { context }.executionPayload())
+            val payload = LocalTaskStore { context }.executionPayload().put("enable", true)
+            val snapshot = command(context, "configure", payload)
             applySnapshot(context, snapshot)
             check(snapshot.optBoolean("moduleEnabled", true)) { context.moduleString(R.string.error_ksu_disabled) }
             startDaemon(context)

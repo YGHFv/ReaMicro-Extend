@@ -21,8 +21,21 @@ private const val LOCAL_AUTOMATION_LOG_PREFIX = "[ReaMicroFix/LocalAutomation]"
 
 private fun ReaMicroSettingsHook.publishLocalAutomationChange() {
     val appContext = activityProvider()?.applicationContext ?: return
-    val accountId = runCatching { accountController.currentCloudCredential().accountId }.getOrNull().orEmpty()
+    val credential = runCatching { accountController.currentCloudCredential() }.getOrNull()
+    val accountId = credential?.accountId.orEmpty()
     val request = localAutomationRequests.begin(accountId)
+    val credentialRepair = credential?.let {
+        runCatching { LocalTaskStore { appContext }.refreshToken(it.accountId, it.token) }
+    }
+    if (credentialRepair?.isFailure == true) {
+        val current = runCatching { accountController.currentCloudCredential().accountId }.getOrNull().orEmpty()
+        if (localAutomationRequests.accepts(request, current)) {
+            localAutomationError = credentialRepair.exceptionOrNull()?.message ?: "账号凭据恢复失败"
+            bumpLocalAutomationVersion()
+            showToast(localAutomationError)
+        }
+        return
+    }
     LocalTaskMirror.pushWithResult(appContext) { result ->
         val current = runCatching { accountController.currentCloudCredential().accountId }.getOrNull().orEmpty()
         if (!localAutomationRequests.accepts(request, current)) return@pushWithResult

@@ -49,34 +49,45 @@ internal fun ReaderHook.saveAndReloadReaderSelection(
         selectionWindow = window
         val page = (invokeSelectionRecenter(viewModel, method, spinePosition, epub, restoredAnchor) as? Number)?.toInt()
             ?: error("章节重排没有返回有效页码")
-        checkSelectionEditSession(viewModel, epub)
-        val pages = XposedHelpers.getObjectField(viewModel, "virtualPages") as? Map<*, *>
-        val mapping = XposedHelpers.getObjectField(viewModel, "virtualToReal") as? Map<*, *>
-        val typedMapping = mapping.orEmpty().entries.mapNotNull { (key, pair) ->
-            val virtual = (key as? Number)?.toInt() ?: return@mapNotNull null
-            if (pair == null) return@mapNotNull null
-            val spine = (callNoArg(pair, "getFirst") as? Number)?.toInt() ?: return@mapNotNull null
-            val local = (callNoArg(pair, "getSecond") as? Number)?.toInt() ?: return@mapNotNull null
-            virtual to (spine to local)
-        }.toMap()
-        val available = pages.orEmpty().keys.mapNotNull { (it as? Number)?.toInt() }.toSet()
-        val contained = typedMapping.keys.filter { key ->
-            if (typedMapping[key]?.first != spinePosition) return@filter false
-            val range = pages?.get(key)?.let { callNoArg(it, "getRange") }
-            restoredAnchor != null && range != null && XposedHelpers.callMethod(range, "contains", restoredAnchor) == true
-        }.toSet()
-        val target = com.reamicro.fix.epub.editor.selectionSameChapterPage(
-            typedMapping, available, spinePosition, oldLocalPage, contained,
-        ) ?: return ReaderSelectionRefreshResult(null, "原章节已无可阅读页面，请从目录选择阅读位置")
-        val targetPage = pages?.get(target) ?: error("同章目标页面不存在")
-        val freshAnchor = if (target in contained) restoredAnchor!! else
-            callNoArg(targetPage, "getStart") ?: error("重排页面缺少有效锚点")
+        var target: Int? = null
+        var targetPage: Any? = null
+        val readbackDeadline = SystemClock.elapsedRealtime() + 2_000L
+        while (targetPage == null && SystemClock.elapsedRealtime() < readbackDeadline) {
+            checkSelectionEditSession(viewModel, epub)
+            val pages = XposedHelpers.getObjectField(viewModel, "virtualPages") as? Map<*, *>
+            val mapping = XposedHelpers.getObjectField(viewModel, "virtualToReal") as? Map<*, *>
+            val typedMapping = mapping.orEmpty().entries.mapNotNull { (key, pair) ->
+                val virtual = (key as? Number)?.toInt() ?: return@mapNotNull null
+                if (pair == null) return@mapNotNull null
+                val spine = (callNoArg(pair, "getFirst") as? Number)?.toInt() ?: return@mapNotNull null
+                val local = (callNoArg(pair, "getSecond") as? Number)?.toInt() ?: return@mapNotNull null
+                virtual to (spine to local)
+            }.toMap()
+            val available = pages.orEmpty().keys.mapNotNull { (it as? Number)?.toInt() }.toSet()
+            val contained = typedMapping.keys.filter { key ->
+                if (typedMapping[key]?.first != spinePosition) return@filter false
+                val range = pages?.get(key)?.let { callNoArg(it, "getRange") }
+                restoredAnchor != null && range != null && XposedHelpers.callMethod(range, "contains", restoredAnchor) == true
+            }.toSet()
+            target = com.reamicro.fix.epub.editor.selectionSameChapterPage(
+                typedMapping, available, spinePosition, oldLocalPage, contained,
+            )
+            targetPage = target?.let { pages?.get(it) }
+            if (targetPage == null) Thread.sleep(40L)
+        }
+        val resolvedTarget = target ?: return ReaderSelectionRefreshResult(null, "原章节已无可阅读页面，请从目录选择阅读位置")
+        val resolvedPage = targetPage ?: error("同章目标页面不存在")
+        val targetRange = callNoArg(resolvedPage, "getRange")
+        val containsRestoredAnchor = restoredAnchor != null && targetRange != null &&
+            XposedHelpers.callMethod(targetRange, "contains", restoredAnchor) == true
+        val freshAnchor = if (containsRestoredAnchor) restoredAnchor!! else
+            callNoArg(resolvedPage, "getStart") ?: error("重排页面缺少有效锚点")
 
         persistSelectionReadingPosition(viewModel, epub, freshAnchor)
         XposedBridge.log("ReaMicro selection position persisted after file commit and reflow")
         XposedBridge.log("ReaMicro selection window-preserved=${window?.applied == true} oldSlot=$oldKey")
-        XposedBridge.log("ReaMicro selection refresh spine=$spinePosition hostPage=$page target=$target local=${typedMapping[target]?.second} anchorFallback=${target !in contained}")
-        return ReaderSelectionRefreshResult(target)
+        XposedBridge.log("ReaMicro selection refresh spine=$spinePosition hostPage=$page target=$resolvedTarget anchorFallback=${!containsRestoredAnchor}")
+        return ReaderSelectionRefreshResult(resolvedTarget)
     } catch (error: Throwable) {
         if (!saved) throw error
         XposedBridge.logError("ReaMicro LSP selection file saved but refresh failed: ${error.stackTraceToString()}")

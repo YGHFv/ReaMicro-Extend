@@ -24,7 +24,9 @@ object RootTaskMain {
                     val input = readInput()
                     check(repository.withExecutionLock { repository.configure(input, enable = true); true } == true) { "任务正在执行" }
                 }
-                "configure" -> repository.configure(readInput())
+                "configure" -> readInput().let { input ->
+                    repository.configure(input, enable = input.optBoolean("enable", false))
+                }
                 "snapshot" -> Unit
                 "reschedule" -> {
                     check(repository.executionEnabled()) { "Root 后台任务未启用" }
@@ -59,7 +61,9 @@ object RootTaskMain {
             }
             respond(repository.snapshot())
         } catch (error: Throwable) {
-            respond(JSONObject().put("schema", RootTaskRepository.SCHEMA).put("error", error.javaClass.simpleName))
+            val detail = error.message?.take(500).orEmpty()
+            respond(JSONObject().put("schema", RootTaskRepository.SCHEMA)
+                .put("error", if (detail.isBlank()) error.javaClass.simpleName else "${error.javaClass.simpleName}: $detail"))
             exitProcess(1)
         }
     }
