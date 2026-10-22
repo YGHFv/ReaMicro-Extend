@@ -87,7 +87,8 @@ object RootTaskMain {
     }
 
     private fun notifyModule(pending: JSONArray) {
-        // 先把通知直接投递给应用内接收器，避免等待完整 Root 同步后才显示。
+        // 任务跑完立刻直投：广播走快速通道，广播没被接收器确认时改用免界面 Activity 兜底。
+        // 两者 notificationId 相同，接收端按投递回执幂等去重，重复投递不会出两条通知。
         for (index in 0 until pending.length()) {
             val item = pending.optJSONObject(index) ?: continue
             val id = item.optString("id")
@@ -95,22 +96,49 @@ object RootTaskMain {
             val taskType = item.optString("taskType")
             val result = item.optString("result")
             val title = LocalTaskRunner.localTaskTitle(taskType) + if (result == "success") "" else "异常"
-            runCatching {
-                RootCommandRunner.execute(ProcessBuilder(rootTaskNotificationBroadcastArgs(
-                    RootTaskNotificationBroadcast(
-                        id = id,
-                        title = title,
-                        text = item.optString("message"),
-                        result = result,
-                        items = item.optString("items"),
-                    ),
-                )), timeoutSeconds = 10)
+            val message = RootTaskNotificationBroadcast(
+                id = id,
+                title = title,
+                text = item.optString("message"),
+                result = result,
+                items = item.optString("items"),
+            )
+            val delivery = runCatching {
+                val broadcast = runCatching {
+                    RootCommandRunner.execute(
+                        ProcessBuilder(rootTaskNotificationBroadcastArgs(message)), timeoutSeconds = 10,
+                    )
+                }.getOrNull()
+                // 广播被系统冻结时 am 依旧返回 0，只有接收器回执 result=-1 才算真的落地。
+                if (broadcast != null && broadcast.exitCode == 0 && rootTaskBroadcastConfirmed(broadcast.output)) return@runCatching
+                val activity = RootCommandRunner.execute(
+                    ProcessBuilder(rootTaskNotificationActivityArgs(message)), timeoutSeconds = 10,
+                )
+                check(activity.exitCode == 0) {
+                    "broadcast=${broadcast?.exitCode ?: -1} activity=${activity.exitCode} " +
+                        ((broadcast?.diagnosticOutput.orEmpty() + activity.diagnosticOutput).take(200))
+                }
+            }
+            // 直投失败时保留待发队列，交给后续 Root 同步兜底，并在状态目录留痕便于排查。
+            delivery.exceptionOrNull()?.let { failure ->
+                logFailure("notify_failed $id ${failure.message?.take(200) ?: failure.javaClass.simpleName}")
             }
         }
-        // 通知接收器会先落通知；这里的同步稍后负责把 Root 待发队列确认掉。
+        // 直投已把通知落地；这里的同步稍后负责把 Root 待发队列确认掉。
         runCatching {
             RootCommandRunner.execute(ProcessBuilder("/system/bin/am", "broadcast", "--user", "0", "--include-stopped-packages",
+                "-f", "0x01000000",
                 "-a", RootTaskRepository.SYNC_ACTION, "-n", RootTaskRepository.SYNC_COMPONENT), timeoutSeconds = 10)
+        }.onFailure { logFailure("sync_broadcast ${it.message?.take(200) ?: it.javaClass.simpleName}") }
+    }
+
+    /** 把 Root 侧异常写进状态目录日志，避免静默丢通知后无从排查。 */
+    private fun logFailure(detail: String) {
+        runCatching {
+            val log = File(RootTaskRepository.STATE_DIRECTORY, "daemon.log")
+            val stamp = java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.US)
+                .format(java.util.Date(System.currentTimeMillis()))
+            log.appendText("$stamp ${detail.replace('\n', ' ')}\n", Charsets.UTF_8)
         }
     }
 
