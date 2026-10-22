@@ -2035,11 +2035,7 @@ class ModuleMainActivity : ComponentActivity() {
     private fun cityAccepts(
         city: CloudTaskLocalRunner.MerchantCityOption,
         transport: CloudTaskLocalRunner.MerchantTransportOption?,
-    ): Boolean {
-        val requiresTransport = city.requiredTransportType.isNotBlank()
-        if (transport == null) return !requiresTransport
-        return transport.transportType == CloudTaskLocalRunner.hostExpectedTransportType(city.routeType)
-    }
+    ): Boolean = CloudTaskLocalRunner.merchantCityAccepts(city, transport)
 
     private fun merchantDurationMinutes(
         city: CloudTaskLocalRunner.MerchantCityOption,
@@ -2096,9 +2092,9 @@ class ModuleMainActivity : ComponentActivity() {
         val selectedCity = editor.merchantCities.firstOrNull {
             it.code == editor.values[FIELD_CITY].orEmpty()
         }
-        val compatible = editor.merchantTransports.filter { transport ->
-            transport.owned && (selectedCity == null || cityAccepts(selectedCity, transport))
-        }
+        // 车马列表始终展示全部已拥有项，否则陆路配置会隐藏海船，玩家无法切换到海路。
+        // 选择与当前城池不兼容的车马后，下面的 onSelect 会清空城池并重新展示兼容城池。
+        val compatible = CloudTaskLocalRunner.merchantTransportChoices(editor.merchantTransports, selectedCity)
 
         val selected = compatible.firstOrNull { it.id == editor.values[FIELD_TRANSPORT].orEmpty() }
         val isNoTransport = editor.values[FIELD_TRANSPORT].orEmpty().let { it.isBlank() || it == MERCHANT_NO_TRANSPORT }

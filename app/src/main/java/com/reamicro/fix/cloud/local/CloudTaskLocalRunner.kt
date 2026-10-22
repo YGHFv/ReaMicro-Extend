@@ -987,6 +987,15 @@ object CloudTaskLocalRunner {
     internal fun hostExpectedTransportType(routeType: String): String =
         if (routeType.trim() == "LAND") "HORSE" else "SHIP"
 
+    internal fun merchantCityAccepts(
+        city: MerchantCityOption,
+        transport: MerchantTransportOption?,
+    ): Boolean {
+        val requiresTransport = city.requiredTransportType.isNotBlank()
+        if (transport == null) return !requiresTransport
+        return transport.transportType == hostExpectedTransportType(city.routeType)
+    }
+
     internal data class MerchantTransportOption(
         val id: String,
         val label: String,
@@ -995,6 +1004,18 @@ object CloudTaskLocalRunner {
         val carryingCapacity: Long,
         val speedPercent: Long,
     )
+
+    internal fun selectableMerchantTransports(
+        transports: List<MerchantTransportOption>,
+    ): List<MerchantTransportOption> = transports.filter { it.owned }
+
+    internal fun merchantTransportChoices(
+        transports: List<MerchantTransportOption>,
+        selectedCity: MerchantCityOption?,
+    ): List<MerchantTransportOption> =
+        selectableMerchantTransports(transports).sortedByDescending { transport ->
+            selectedCity != null && merchantCityAccepts(selectedCity, transport)
+        }
 
     internal data class MerchantOptionsFetch(
         val cities: List<MerchantCityOption>,
