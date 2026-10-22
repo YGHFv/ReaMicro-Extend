@@ -3,7 +3,9 @@ package com.reamicro.fix.cloud.root
 import android.os.Process
 import com.reamicro.fix.cloud.local.LocalTaskEngine
 import com.reamicro.fix.cloud.local.LocalTaskKey
+import com.reamicro.fix.cloud.local.LocalTaskRunner
 import com.reamicro.fix.cloud.local.rescheduleLocalTasks
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import kotlin.system.exitProcess
@@ -54,7 +56,7 @@ object RootTaskMain {
                         val taskType = request?.optString("taskType").orEmpty()
                         val key = if (accountId.isNotBlank() && taskType.isNotBlank()) LocalTaskKey(accountId, taskType) else null
                         LocalTaskEngine(repository).runDue(force = request?.optBoolean("force") == true, requested = key)
-                        if ((repository.snapshot().optJSONArray("notifications")?.length() ?: 0) > 0) notifyModule()
+                        repository.snapshot().optJSONArray("notifications")?.takeIf { it.length() > 0 }?.let(::notifyModule)
                     }
                 }
                 else -> error("不支持的 Root 指令")
@@ -84,7 +86,28 @@ object RootTaskMain {
         return JSONObject(text.ifBlank { "{}" })
     }
 
-    private fun notifyModule() {
+    private fun notifyModule(pending: JSONArray) {
+        // 先把通知直接投递给应用内接收器，避免等待完整 Root 同步后才显示。
+        for (index in 0 until pending.length()) {
+            val item = pending.optJSONObject(index) ?: continue
+            val id = item.optString("id")
+            if (id.isBlank()) continue
+            val taskType = item.optString("taskType")
+            val result = item.optString("result")
+            val title = LocalTaskRunner.localTaskTitle(taskType) + if (result == "success") "" else "异常"
+            runCatching {
+                RootCommandRunner.execute(ProcessBuilder(rootTaskNotificationBroadcastArgs(
+                    RootTaskNotificationBroadcast(
+                        id = id,
+                        title = title,
+                        text = item.optString("message"),
+                        result = result,
+                        items = item.optString("items"),
+                    ),
+                )), timeoutSeconds = 10)
+            }
+        }
+        // 通知接收器会先落通知；这里的同步稍后负责把 Root 待发队列确认掉。
         runCatching {
             RootCommandRunner.execute(ProcessBuilder("/system/bin/am", "broadcast", "--user", "0", "--include-stopped-packages",
                 "-a", RootTaskRepository.SYNC_ACTION, "-n", RootTaskRepository.SYNC_COMPONENT), timeoutSeconds = 10)
