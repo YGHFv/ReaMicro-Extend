@@ -97,6 +97,14 @@ class WebDavDriveHook(
     internal val onlineCompletionLocalSheetDepth = ThreadLocal<Int>()
     @Volatile internal var onlineCompletionLastLocalSheetBookRef: WeakReference<Any>? = null
     internal val onlineCompletionUpdateRowInjecting = ThreadLocal<Boolean>()
+    internal data class OnlineCompletionActionCellOverride(
+        val icon: Any,
+        val title: String,
+        val onClick: Any,
+    )
+    internal val onlineCompletionActionCellOverrides =
+        ThreadLocal<List<OnlineCompletionActionCellOverride>?>()
+    internal val onlineCompletionActionCellOverrideIndex = ThreadLocal<Int>()
     @Volatile internal var onlineCompletionCombinedGroupRowHooked = false
     @Volatile internal var onlineCompletionSourceLabelHooked = false
     internal val webDavBackupCardDepth = ThreadLocal<Int>()

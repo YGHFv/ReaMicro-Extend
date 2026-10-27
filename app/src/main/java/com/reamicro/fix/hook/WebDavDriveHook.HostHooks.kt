@@ -226,17 +226,67 @@ internal fun WebDavDriveHook.hookOnlineCompletionBookGroupRow(sheetClass: Class<
             typeMatches(it.parameterTypes.getOrNull(2), FUNCTION0_CLASS) &&
             typeMatches(it.parameterTypes.getOrNull(3), COMPOSER_CLASS)
     }
+    val actionRowMethod = sheetClass.declaredMethods.firstOrNull {
+        it.hostNameMatches(BOOK_ACTION_ROW_METHOD) &&
+            Modifier.isStatic(it.modifiers) &&
+            it.returnType == Void.TYPE &&
+            it.parameterTypes.size == 7 &&
+            it.parameterTypes.getOrNull(0) == java.lang.Boolean.TYPE &&
+            it.parameterTypes.getOrNull(1) == java.lang.Integer.TYPE &&
+            typeMatches(it.parameterTypes.getOrNull(2), FUNCTION0_CLASS) &&
+            typeMatches(it.parameterTypes.getOrNull(3), FUNCTION0_CLASS) &&
+            typeMatches(it.parameterTypes.getOrNull(4), FUNCTION0_CLASS) &&
+            typeMatches(it.parameterTypes.getOrNull(5), COMPOSER_CLASS) &&
+            it.parameterTypes.getOrNull(6) == java.lang.Integer.TYPE
+    }?.apply { isAccessible = true }
+    val actionCellMethod = sheetClass.declaredMethods.firstOrNull {
+        it.hostNameMatches(BOOK_META_ACTION_ROW_METHOD) &&
+            Modifier.isStatic(it.modifiers) &&
+            it.returnType == Void.TYPE &&
+            it.parameterTypes.size == 6 &&
+            typeMatches(it.parameterTypes.getOrNull(0), MODIFIER_CLASS) &&
+            typeMatches(it.parameterTypes.getOrNull(1), IMAGE_VECTOR_CLASS) &&
+            it.parameterTypes.getOrNull(2) == String::class.java &&
+            typeMatches(it.parameterTypes.getOrNull(3), FUNCTION0_CLASS) &&
+            typeMatches(it.parameterTypes.getOrNull(4), COMPOSER_CLASS) &&
+            it.parameterTypes.getOrNull(5) == java.lang.Integer.TYPE
+    }?.apply { isAccessible = true }
     logWebDav(
         "online completion action row candidates=" +
             actionRowMethods.joinToString { candidate ->
                 "${candidate.name}/${candidate.parameterTypes.joinToString { it.simpleName }}"
             } +
+            " combinedAction=" +
+            actionRowMethod?.let { candidate ->
+                "${candidate.name}/${candidate.parameterTypes.joinToString { it.simpleName }}"
+            }.orEmpty() +
+            " cell=" +
+            actionCellMethod?.let { candidate ->
+                "${candidate.name}/${candidate.parameterTypes.joinToString { it.simpleName }}"
+            }.orEmpty() +
             " group=" +
             groupRowMethods.joinToString { candidate ->
                 "${candidate.name}/${candidate.parameterTypes.joinToString { it.simpleName }}"
             },
     )
     val updateRowMethod = actionRowMethods.firstOrNull()
+    // B4 的 BookActionRow(b) 自带两列 Row 与中缝分隔线。调用 b 时，
+    // 在嵌套的 BookMetaActionRow(a) 上临时替换图标、标题和回调，
+    // 即可复用宿主原生布局恢复旧版“更新｜分组”，不再注入额外整行。
+    actionCellMethod?.let { cellMethod ->
+        XposedBridge.hookMethod(cellMethod, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                val overrides = onlineCompletionActionCellOverrides.get() ?: return
+                val index = onlineCompletionActionCellOverrideIndex.get() ?: 0
+                val override = overrides.getOrNull(index) ?: return
+                onlineCompletionActionCellOverrideIndex.set(index + 1)
+                // B4: Modifier, ImageVector, String, onClick, Composer, flags。
+                param.args?.set(1, override.icon)
+                param.args?.set(2, override.title)
+                param.args?.set(3, override.onClick)
+            }
+        })
+    }
     groupRowMethods.forEach { method ->
         method.isAccessible = true
         XposedBridge.hookMethod(method, object : XC_MethodHook() {
@@ -253,35 +303,64 @@ internal fun WebDavDriveHook.hookOnlineCompletionBookGroupRow(sheetClass: Class<
                 book ?: return
                 val info = onlineImportedBookSourceInfo(book) ?: return
                 val groupIcon = param.args?.getOrNull(0) ?: return
+                val groupClick = param.args?.getOrNull(2) ?: return
                 val composer = param.args?.getOrNull(3) ?: return
-                val hostUpdateRowMethod = updateRowMethod ?: return
                 val updateIcon = onlineCompletionUpdateImageVector() ?: groupIcon
-                val updateModifier = paddingModifier(
-                    modifierInstance(),
-                    start = 12,
-                    top = 0,
-                    end = 0,
-                    bottom = 0,
-                )
                 try {
                     onlineCompletionUpdateRowInjecting.set(true)
                     val updateClick = functionProxy("OnlineCompletionChapterUpdateActionRow", FUNCTION0_CLASS) {
                         startOnlineCompletionChapterUpdate(book, info)
                         targetUnit()
                     }
-                    hostUpdateRowMethod.invoke(
-                        null,
-                        updateModifier,
-                        updateIcon,
-                        "更新",
-                        updateClick,
-                        composer,
-                        0,
-                    )
+                    val combinedActionRowMethod = actionRowMethod
+                    if (combinedActionRowMethod != null && actionCellMethod != null) {
+                        val noOp = functionProxy("OnlineCompletionActionRowNoOp", FUNCTION0_CLASS) {
+                            targetUnit()
+                        }
+                        onlineCompletionActionCellOverrides.set(
+                            listOf(
+                                WebDavDriveHook.OnlineCompletionActionCellOverride(updateIcon, "更新", updateClick),
+                                WebDavDriveHook.OnlineCompletionActionCellOverride(groupIcon, "分组", groupClick),
+                            ),
+                        )
+                        onlineCompletionActionCellOverrideIndex.set(0)
+                        combinedActionRowMethod.invoke(
+                            null,
+                            false,
+                            0,
+                            updateClick,
+                            groupClick,
+                            noOp,
+                            composer,
+                            0,
+                        )
+                        // 已由宿主原生两列行代替原“分组”整行，阻止 g 再补画一次。
+                        param.result = targetUnit()
+                    } else {
+                        val hostUpdateRowMethod = updateRowMethod ?: return
+                        val updateModifier = paddingModifier(
+                            modifierInstance(),
+                            start = 12,
+                            top = 0,
+                            end = 0,
+                            bottom = 0,
+                        )
+                        hostUpdateRowMethod.invoke(
+                            null,
+                            updateModifier,
+                            updateIcon,
+                            "更新",
+                            updateClick,
+                            composer,
+                            0,
+                        )
+                    }
                     logWebDav("online completion update/group row rendered title=${book.callString("getTitle")} source=${info.sourceName}")
                 } catch (error: Throwable) {
                     XposedBridge.log("$LOG_PREFIX online completion update/group row render failed: ${error.stackTraceToString()}")
                 } finally {
+                    onlineCompletionActionCellOverrides.remove()
+                    onlineCompletionActionCellOverrideIndex.remove()
                     onlineCompletionUpdateRowInjecting.remove()
                 }
             }

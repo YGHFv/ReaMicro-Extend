@@ -56,6 +56,7 @@ internal const val FILE_BACKUP_METHOD = "FileBackup"
 internal const val BOOK_COMMUNITY_METHOD = "BookCommunity"
 internal const val BOOK_PUBLISHER_METHOD = "BookPublisher"
 internal const val BOOK_META_ACTION_ROW_METHOD = "BookMetaActionRow"
+internal const val BOOK_ACTION_ROW_METHOD = "BookActionRow"
 internal const val BOOK_ACTION_CELL_METHOD = "BookActionCell"
 internal const val FOOTER_CLASS = HostClasses.Host.FOOTER
 internal const val FOOTER_METHOD = "footer"
