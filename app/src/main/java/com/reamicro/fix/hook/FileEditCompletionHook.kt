@@ -9,6 +9,9 @@ import android.os.Looper
 import android.widget.Toast
 import com.reamicro.fix.core.ComposeInterop
 import com.reamicro.fix.core.HostClasses
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.typeMatches
 import com.reamicro.fix.settings.FontSettingsSnapshot
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.xposed.XC_MethodHook
@@ -32,6 +35,10 @@ class FileEditCompletionHook(
         logPrefix = LOG_PREFIX,
     )
 
+    /** 混淆宿主只核实过原生 ABI 门面，明文反射门面在这些宿主里根本不存在。 */
+    private val nativeUi by lazy { com.reamicro.fix.core.B2NativeUi(classLoader) }
+    private val nativeCardLogged = java.util.concurrent.atomic.AtomicBoolean()
+
     private val methodCache = HashMap<String, Method>()
     private val activityResultHookedClasses = HashSet<String>()
     private val injectingRow = ThreadLocal.withInitial { false }
@@ -54,9 +61,9 @@ class FileEditCompletionHook(
         runCatching {
             val itemsClass = cls(BOOK_OVERVIEW_ITEMS_CLASS)
             val methods = itemsClass.declaredMethods.filter { method ->
-                method.name == BOOK_TITLE_AUTHOR_ITEM_METHOD &&
+                method.hostNameMatches(BOOK_TITLE_AUTHOR_ITEM_METHOD) &&
                     method.parameterTypes.size == 6 &&
-                    method.parameterTypes.getOrNull(1)?.name == BOOK_CLASS
+                    typeMatches(method.parameterTypes.getOrNull(1), BOOK_CLASS)
             }
             if (methods.isEmpty()) error("BookTitleAuthorItem composable not found")
             methods.forEach { method ->
@@ -105,6 +112,7 @@ class FileEditCompletionHook(
                 onClickName = "EditBookTitle",
                 onClick = { invokeFunction0(onEditTitle) },
                 trailing = editImageVector(),
+                nativeTrailingGlyph = "\u270E",
             )
             renderDetailsDivider(innerComposer)
             renderDetailsActionRow(
@@ -114,6 +122,7 @@ class FileEditCompletionHook(
                 onClickName = "EditBookAuthor",
                 onClick = { invokeFunction0(onEditAuthor) },
                 trailing = editImageVector(),
+                nativeTrailingGlyph = "\u270E",
             )
             if (displayText.isNotBlank()) {
                 renderDetailsDivider(innerComposer)
@@ -126,6 +135,7 @@ class FileEditCompletionHook(
                     trailing = contentCopyImageVector(),
                     valueWeight = true,
                     middleEllipsis = true,
+                    nativeTrailingGlyph = "\u29C9",
                 )
             }
             targetUnit()
@@ -136,9 +146,9 @@ class FileEditCompletionHook(
         runCatching {
             val itemsClass = cls(BOOK_OVERVIEW_ITEMS_CLASS)
             val methods = itemsClass.declaredMethods.filter { method ->
-                method.name == BOOK_SYNC_SIZE_ITEM_METHOD &&
+                method.hostNameMatches(BOOK_SYNC_SIZE_ITEM_METHOD) &&
                     method.parameterTypes.size == 5 &&
-                    method.parameterTypes.getOrNull(1)?.name == BOOK_CLASS
+                    typeMatches(method.parameterTypes.getOrNull(1), BOOK_CLASS)
             }
             if (methods.isEmpty()) error("BookSyncSizeItem composable not found")
             methods.forEach { method ->
@@ -179,6 +189,7 @@ class FileEditCompletionHook(
                 onClickName = "OpenFileEditDetails",
                 onClick = { openFileEditor(book) },
                 trailing = navigateNextImageVector(),
+                nativeTrailingGlyph = "\u276F",
             )
             renderDetailsDivider(innerComposer)
             renderDetailsActionRow(
@@ -190,13 +201,21 @@ class FileEditCompletionHook(
                 afterValueIcon = syncStorageImageVector(book),
                 secondaryValue = backupTypeName(book),
                 trailing = navigateNextImageVector(),
+                nativeTrailingGlyph = "\u276F",
             )
             targetUnit()
         }
     }
 
     private fun bookIdentifierDisplayText(book: Any): String =
-        bookIdentifierRawText(book)
+        middleEllipsizeIdentifier(bookIdentifierRawText(book))
+
+    private fun middleEllipsizeIdentifier(identifier: String): String {
+        if (identifier.length <= IDENTIFIER_DISPLAY_MAX_CHARS) return identifier
+        return identifier.take(IDENTIFIER_DISPLAY_EDGE_CHARS) +
+            "..." +
+            identifier.takeLast(IDENTIFIER_DISPLAY_EDGE_CHARS)
+    }
 
     private fun bookIdentifierRawText(book: Any): String =
         BookIdentifierText.display(callString(book, "getUuid"))
@@ -378,6 +397,10 @@ class FileEditCompletionHook(
         name: String,
         renderRows: (Any) -> Unit,
     ) {
+        if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
+            renderNativeDetailsCard(composer, name, renderRows)
+            return
+        }
         val shape = roundedShape()
         val modifier = backgroundModifier(
             borderModifier(
@@ -408,6 +431,100 @@ class FileEditCompletionHook(
         )
     }
 
+    /** 详情卡片走已核实的原生 ABI：混淆宿主不存在明文 Compose 门面，反射路径只适用于未混淆构建。 */
+    private fun renderNativeDetailsCard(composer: Any, name: String, renderRows: (Any) -> Unit) {
+        val scheme = nativeUi.theme(composer, "getColorScheme")
+        val modifier = nativeUi.card(
+            nativeUi.modifier(),
+            nativeThemeBackgroundAuto(scheme),
+            nativeThemeBorderVariant(scheme),
+            nativeUi.dp(NATIVE_CARD_BORDER_DP),
+        )
+        val content = composeInterop.functionProxy(name, FUNCTION3_CLASS) { args ->
+            val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
+            renderRows(innerComposer)
+            targetUnit()
+        }
+        nativeUi.column(modifier, nativeUi.top(), nativeUi.start(), content, composer)
+        if (nativeCardLogged.compareAndSet(false, true)) {
+            XposedBridge.logAlways("$LOG_PREFIX file edit details card rendered through native ABI")
+        }
+    }
+
+    private fun nativeThemeBackgroundAuto(scheme: Any): Long =
+        method(THEME_KT_CLASS, BACKGROUND_AUTO_METHOD, 1).invoke(null, scheme) as Long
+
+    private fun nativeThemeBorderVariant(scheme: Any): Long =
+        method(THEME_KT_CLASS, BORDER_VARIANT_METHOD, 1).invoke(null, scheme) as Long
+
+    private fun nativeThemeOnBackgroundVariant(scheme: Any): Long =
+        method(THEME_KT_CLASS, ON_BACKGROUND_VARIANT_METHOD, 1).invoke(null, scheme) as Long
+
+    /** 原生条目：标题在左、取值在右，次要说明作为 supporting 文本，点击复用宿主水波纹。 */
+    private fun renderNativeActionRow(
+        label: String,
+        value: String,
+        secondary: String?,
+        trailingGlyph: String?,
+        composer: Any,
+        onClickName: String,
+        onClick: () -> Unit,
+    ) {
+        val headline = nativeUi.lambda(label.hashCode(),
+            composeInterop.functionProxy("${onClickName}Headline", FUNCTION2_CLASS) { args ->
+                val innerComposer = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+                nativeText(label, innerComposer,
+                    nativeThemeOnBackgroundVariant(nativeUi.theme(innerComposer, "getColorScheme")),
+                    NATIVE_HEADLINE_STYLE)
+                targetUnit()
+            })
+        val trailing = nativeUi.lambda((label + value).hashCode() xor NATIVE_TRAILING_KEY_MASK,
+            composeInterop.functionProxy("${onClickName}Trailing", FUNCTION2_CLASS) { args ->
+                val innerComposer = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+                val trailingText = trailingGlyph?.let { "$value  $it" } ?: value
+                nativeText(trailingText, innerComposer, 0L, NATIVE_VALUE_STYLE)
+                targetUnit()
+            })
+        val supporting = secondary?.takeIf { it.isNotBlank() }?.let { text ->
+            nativeUi.lambda((label + text).hashCode() xor NATIVE_SUPPORTING_KEY_MASK,
+                composeInterop.functionProxy("${onClickName}Supporting", FUNCTION2_CLASS) { args ->
+                    val innerComposer = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+                    nativeText(text, innerComposer, 0L, NATIVE_VALUE_STYLE)
+                    targetUnit()
+                })
+        }
+        val callback = composeInterop.functionProxy(onClickName, FUNCTION0_CLASS) {
+            onClick()
+            targetUnit()
+        }
+        val modifier = nativeUi.clickable(nativeUi.fillWidth(nativeUi.modifier()), callback)
+        // 参数位次与设置页 ActionRow 保持完全一致，复用宿主已核实的 changed/mask 组合。
+        var mask = 4 or 16 or 128 or 256
+        if (supporting == null) mask = mask or 8
+        nativeUi.listItem(arrayOf(headline, modifier, null, supporting, null, trailing,
+            nativeUi.listColors(composer), 0f, 0f, composer, NATIVE_LIST_ITEM_CHANGED, mask))
+    }
+
+    private fun nativeText(value: String, composer: Any, color: Long, styleProperty: String) {
+        val scheme = nativeUi.theme(composer, "getColorScheme")
+        val typography = nativeUi.theme(composer, "getTypography")
+        nativeUi.text(arrayOf(
+            value, null,
+            if (color == 0L) nativeLong(scheme, "getOnBackground") else color,
+            null, 0L, null, null, null, 0L, null, null, 0L,
+            0, false, 0, 0, null,
+            runCatching { nativeAny(typography, styleProperty) }
+                .getOrElse { nativeAny(typography, "getLabelLarge") },
+            composer, 0, 0, NATIVE_TEXT_MASK,
+        ))
+    }
+
+    /** 混淆宿主的 getter 名称同样被改写，必须走带符号解析的调用器，不能按明文名反射。 */
+    private fun nativeAny(target: Any, name: String): Any =
+        requireNotNull(XposedHelpers.callMethod(target, name))
+
+    private fun nativeLong(target: Any, name: String): Long = nativeAny(target, name) as Long
+
     private fun renderDetailsActionRow(
         label: String,
         value: String,
@@ -420,7 +537,20 @@ class FileEditCompletionHook(
         secondaryValue: String? = null,
         valueWeight: Boolean = false,
         middleEllipsis: Boolean = false,
+        nativeTrailingGlyph: String? = null,
     ) {
+        if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
+            renderNativeActionRow(
+                label = label,
+                value = value,
+                secondary = secondaryValue,
+                trailingGlyph = nativeTrailingGlyph,
+                composer = composer,
+                onClickName = onClickName,
+                onClick = onClick,
+            )
+            return
+        }
         val modifier = fillMaxWidthModifier(
             paddingModifier(
                 clickableModifier(modifierInstance(), onClickName, onClick),
@@ -506,6 +636,13 @@ class FileEditCompletionHook(
     }
 
     private fun renderDetailsDivider(composer: Any) {
+        if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
+            nativeUi.divider(
+                nativeUi.padding(nativeUi.modifier(), nativeUi.dp(NATIVE_DIVIDER_START_DP), 0f, 0f, 0f),
+                composer,
+            )
+            return
+        }
         simpleDividerMethod().invoke(
             null,
             paddingModifier(modifierInstance(), start = 16, top = 0, end = 16, bottom = 0),
@@ -620,12 +757,14 @@ class FileEditCompletionHook(
         }
 
     private fun coloredAppIcon(className: String, methodName: String): Any? =
-        runCatching {
-            method(className, methodName, 1).invoke(
-                null,
-                staticObject(APP_ICONS_COLORED_CLASS, "INSTANCE"),
-            )
-        }.getOrNull()
+        runCatching { method(className, methodName, 0).invoke(null) }
+            .recoverCatching {
+                method(className, methodName, 1).invoke(
+                    null,
+                    staticObject(APP_ICONS_COLORED_CLASS, "INSTANCE"),
+                )
+            }
+            .getOrNull()
 
     private fun syncIconTint(composer: Any): Long =
         runCatching { colorUnspecified() }.getOrElse { colorScheme(composer).longMethod("getPrimary") }
@@ -714,14 +853,19 @@ class FileEditCompletionHook(
         composeInterop.functionProxy(name, functionClassName, block)
 
     private fun cls(className: String): Class<*> =
-        XposedHelpers.findClass(className, classLoader)
+        classLoader.hostClass(className)
 
     private fun method(className: String, methodName: String, parameterCount: Int): Method {
         val cacheKey = "$className#$methodName/$parameterCount"
         return synchronized(methodCache) {
             methodCache.getOrPut(cacheKey) {
-                cls(className).declaredMethods.firstOrNull {
-                    it.name == methodName && it.parameterTypes.size == parameterCount
+                val logicalClass = com.reamicro.fix.core.HostSymbols.logicalClass(className)
+                val owner = com.reamicro.fix.core.HostSymbols.resolveMethodOwner(logicalClass, methodName)
+                val actualName = com.reamicro.fix.core.HostSymbols.resolveMethodName(logicalClass, methodName)
+                val candidates = cls(owner).methods.asSequence() + cls(owner).declaredMethods.asSequence()
+                candidates.firstOrNull {
+                    (it.name == actualName || it.hostNameMatches(methodName)) &&
+                        it.parameterTypes.size == parameterCount
                 }?.apply { isAccessible = true }
                     ?: error("$className.$methodName/$parameterCount not found")
             }
@@ -854,5 +998,19 @@ class FileEditCompletionHook(
         const val FILE_EDIT_SUPPORTING_KEY = 0x524D4702
         const val FILE_EDIT_LEADING_KEY = 0x524D4703
         const val FILE_EDIT_TRAILING_KEY = 0x524D4704
+
+        // 原生 ABI 分派所需：这些数值与设置页已核实的调用保持一字不差。
+        const val BORDER_VARIANT_METHOD = "getBorderVariant"
+        const val ON_BACKGROUND_VARIANT_METHOD = "getOnBackgroundVariant"
+        const val NATIVE_CARD_BORDER_DP = 0.8
+        const val NATIVE_DIVIDER_START_DP = 16
+        const val NATIVE_TEXT_MASK = 131066
+        const val NATIVE_HEADLINE_STYLE = "getLabelLarge"
+        const val NATIVE_VALUE_STYLE = "getLabelLarge"
+        const val NATIVE_LIST_ITEM_CHANGED = 196614
+        const val NATIVE_TRAILING_KEY_MASK = 0x0F0F0F0F
+        const val NATIVE_SUPPORTING_KEY_MASK = 0x2468ACE0
+        const val IDENTIFIER_DISPLAY_MAX_CHARS = 34
+        const val IDENTIFIER_DISPLAY_EDGE_CHARS = 15
     }
 }

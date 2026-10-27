@@ -1,5 +1,9 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.typeMatches
+
+
 import com.reamicro.fix.hook.discover.DiscoverIcon
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.xposed.XposedBridge
@@ -32,6 +36,16 @@ internal fun ReaMicroSettingsHook.renderCommunityRow(
     onHostRowClick: () -> Unit,
     onDiscoverClick: () -> Unit,
 ) {
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        // 复用宿主行与主题；B4 已内联 Spacer/背景门面，右半行不走旧 Compose ABI。
+        val callback = functionProxy("B4DiscoverCell", FUNCTION0_CLASS) { onDiscoverClick(); targetUnit() }
+        val clickable = b2Ui.clickable(modifierInstance(), callback)
+        val labelModifier = b2Ui.padding(clickable, udp(16), udp(16), udp(4), udp(16))
+        renderDiscoverLabel(DISCOVER_LABEL, labelModifier, composer)
+        val arrowModifier = b2Ui.padding(clickable, udp(0), udp(16), udp(16), udp(16))
+        renderDiscoverArrow(arrowModifier, composer)
+        return
+    }
     val icon: Any? = runCatching { (cachedDiscoverIcon ?: DiscoverIcon(classLoader).also { cachedDiscoverIcon = it }).imageVectorOrNull() }.getOrNull()
 
     val leftSource = sharedInteractionSource(CELL_LEFT)
@@ -100,9 +114,9 @@ private var cachedIconVectorMethod: Method? = null
 private fun ReaMicroSettingsHook.iconVectorMethod(): Method =
     cachedIconVectorMethod ?: synchronized(DiscoverImageMethodLock) {
         cachedIconVectorMethod ?: cls(ICON_KT_CLASS).declaredMethods.firstOrNull {
-            it.name == ICON_METHOD &&
+            it.hostNameMatches(ICON_METHOD) &&
                 it.parameterTypes.size == ICON_PARAMETER_COUNT &&
-                it.parameterTypes.firstOrNull()?.name == IMAGE_VECTOR_CLASS
+                typeMatches(it.parameterTypes.firstOrNull(), IMAGE_VECTOR_CLASS)
         }?.apply { isAccessible = true }
             ?.also { cachedIconVectorMethod = it }
             ?: error("$ICON_KT_CLASS.$ICON_METHOD ImageVector overload not found")
@@ -173,6 +187,12 @@ internal fun ReaMicroSettingsHook.leftCellSpacerModifier(
     composer: Any,
     onClick: () -> Unit,
 ): Any {
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        val scope = cls("ReaMicroHost.RowScopeInstance")
+        val weighted = scope.getDeclaredMethod("b", cls("androidx.compose.ui.Modifier"), Float::class.javaPrimitiveType)
+            .invoke(rowScope, modifierInstance(), 1f)
+        return b2Ui.clickable(weighted, functionProxy("B4CommunitySpace", FUNCTION0_CLASS) { onClick(); targetUnit() })
+    }
     val weighted = method(ROW_SCOPE_INSTANCE_CLASS, ROW_WEIGHT_METHOD, ROW_WEIGHT_PARAMETER_COUNT)
         .invoke(rowScope, modifierInstance(), 1f, true)
     val clickable = discoverClickable(
@@ -199,6 +219,9 @@ private fun ReaMicroSettingsHook.sizedSquare(base: Any, dp: Int): Any =
     method(SIZE_KT_CLASS, SIZE_METHOD, SIZE_PARAMETER_COUNT).invoke(null, base, udp(dp))
 
 private fun ReaMicroSettingsHook.textNodeCellHeight(base: Any): Any {
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        return b2Ui.height(base, udp(DISCOVER_ICON_SIZE_DP))
+    }
     val fixed = method(SIZE_KT_CLASS, HEIGHT_METHOD, SIZE_PARAMETER_COUNT)
         .invoke(null, base, udp(DISCOVER_ICON_SIZE_DP))
     return method(SIZE_KT_CLASS, WRAP_CONTENT_HEIGHT_METHOD, WRAP_CONTENT_HEIGHT_PARAMETER_COUNT)
@@ -206,6 +229,8 @@ private fun ReaMicroSettingsHook.textNodeCellHeight(base: Any): Any {
 }
 
 internal fun ReaMicroSettingsHook.fillMaxWidthModifier(base: Any): Any =
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") b2Ui.fillWidth(base)
+    else
     method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, FILL_MAX_WIDTH_DEFAULT_PARAMETER_COUNT)
         .invoke(null, base, 0f, FILL_MAX_WIDTH_DEFAULT_MASK, null)
 
@@ -226,8 +251,18 @@ private fun ReaMicroSettingsHook.renderDiscoverIcon(
     )
     val sized = method(SIZE_KT_CLASS, SIZE_METHOD, SIZE_PARAMETER_COUNT).invoke(null, padded, udp(DISCOVER_ICON_SIZE_DP))
 
-    imageVectorMethod().invoke(null, icon, "发现", sized, alignmentCenter(), hostContentScale(),
-        1f, null, composer, IMAGE_CHANGED_MASK, IMAGE_CHANGED2_MASK)
+    // ImageVector 重载的形参个数随宿主 Compose 版本变化：b1 为 10 参（含 Alignment/ContentScale/alpha/ColorFilter），
+    // b2/b3 收窄到 6 参（ImageVector, String, Modifier, Composer, int, int）。按实际形参个数组装调用参数。
+    val imageMethod = imageVectorMethod()
+    val args: Array<Any?> = when (imageMethod.parameterTypes.size) {
+        6 -> arrayOf(icon, "发现", sized, composer, IMAGE_CHANGED_MASK, IMAGE_CHANGED2_MASK)
+        10 -> arrayOf(
+            icon, "发现", sized, alignmentCenter(), hostContentScale(), 1f, null, composer,
+            IMAGE_CHANGED_MASK, IMAGE_CHANGED2_MASK,
+        )
+        else -> error("$IMAGE_KT_CLASS.$IMAGE_METHOD unsupported arity ${imageMethod.parameterTypes.size}")
+    }
+    imageMethod.invoke(null, *args)
 }
 
 private fun ReaMicroSettingsHook.hostContentScale(): Any =
@@ -244,9 +279,9 @@ private var cachedImageVectorMethod: Method? = null
 private fun ReaMicroSettingsHook.imageVectorMethod(): Method =
     cachedImageVectorMethod ?: synchronized(DiscoverImageMethodLock) {
         cachedImageVectorMethod ?: cls(IMAGE_KT_CLASS).declaredMethods.firstOrNull {
-            it.name == IMAGE_METHOD &&
+            it.hostNameMatches(IMAGE_METHOD) &&
                 it.parameterTypes.size == IMAGE_PARAMETER_COUNT &&
-                it.parameterTypes.firstOrNull()?.name == IMAGE_VECTOR_CLASS
+                typeMatches(it.parameterTypes.firstOrNull(), IMAGE_VECTOR_CLASS)
         }?.apply { isAccessible = true }
             ?.also { cachedImageVectorMethod = it }
             ?: error("$IMAGE_KT_CLASS.$IMAGE_METHOD ImageVector overload not found")
@@ -255,8 +290,7 @@ private fun ReaMicroSettingsHook.imageVectorMethod(): Method =
 private val DiscoverImageMethodLock = Any()
 
 private fun ReaMicroSettingsHook.renderDiscoverLabel(text: String, modifier: Any, composer: Any) {
-    method(TEXT_KT_CLASS, TEXT_METHOD, TEXT_PARAMETER_COUNT).invoke(
-        null,
+    renderAbiText(
         text,
         modifier,
         colorScheme(composer).longMethod("getOnBackground"),
@@ -275,6 +309,33 @@ private fun ReaMicroSettingsHook.renderDiscoverLabel(text: String, modifier: Any
         1,
         null,
         typography(composer).method0("getTitleSmall"),
+        composer,
+        0,
+        0,
+        DISCOVER_LABEL_MASK,
+    )
+}
+
+private fun ReaMicroSettingsHook.renderDiscoverArrow(modifier: Any, composer: Any) {
+    renderAbiText(
+        "\u276F",
+        modifier,
+        colorScheme(composer).longMethod("getSurfaceContainerHighest"),
+        null,
+        0L,
+        null,
+        null,
+        null,
+        0L,
+        null,
+        null,
+        0L,
+        0,
+        false,
+        1,
+        1,
+        null,
+        typography(composer).method0("getTitleLarge"),
         composer,
         0,
         0,
@@ -310,6 +371,9 @@ private fun ReaMicroSettingsHook.discoverClickable(
     interactionSource: Any?,
     onClick: () -> Unit,
 ): Any =
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        b2Ui.clickable(base, functionProxy(name, FUNCTION0_CLASS) { onClick(); targetUnit() })
+    } else
     method(CLICKABLE_KT_CLASS, CLICKABLE_DEFAULT_METHOD, CLICKABLE_DEFAULT_PARAMETER_COUNT).invoke(
         null,
         base,
@@ -370,6 +434,9 @@ private fun ReaMicroSettingsHook.clickableBase(): Any =
     paddingSides(modifierInstance(), start = 0, top = 0, end = 0, bottom = 0)
 
 private fun ReaMicroSettingsHook.paddingSides(base: Any, start: Int, top: Int, end: Int, bottom: Int): Any =
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        b2Ui.padding(base, udp(start), udp(top), udp(end), udp(bottom))
+    } else
     method(PADDING_KT_CLASS, PADDING_SIDES_METHOD, PADDING_SIDES_PARAMETER_COUNT).invoke(
         null,
         base,
