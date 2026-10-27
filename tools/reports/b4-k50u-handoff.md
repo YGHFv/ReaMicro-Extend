@@ -126,6 +126,9 @@
   保留 401 重登后的新 Cookie/登录状态，未整文件回滚。
   删除 cache 后任务已无下载产物、通知不再活跃，阅微主进程 `12210` 仍在，
   `ReaMicroOnlineC` 线程处于 futex wait；搜索页停留在 `shuqi` 结果列表。
+   后续快速闭环建议：在模块「在线源 → 下载配置」开启「逐章加载」
+   （`online_download_on_demand_online_fc2ef39cc1d41375=true`）后复测同一结果，
+   该模式首次只落前 3 章，可避开 2918 章 FULL 任务长耗时，直接验证导入可读。
 5. 自动阅读：先确认无后台计时（`reamicro_reader_auto_page.xml`：`interval_seconds=10`、
    `timer_hours=0.0`）；修「更多设置」启动后路由不自动关闭；
    核对 `TapDirection`/`sm8(long)` 与 pager effect；听书相关已不需要适配。
