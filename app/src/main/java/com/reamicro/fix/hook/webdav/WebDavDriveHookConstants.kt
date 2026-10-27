@@ -82,6 +82,7 @@ internal const val OPF_CLASS = HostClasses.Epub.OPF
 internal const val EPUB_FILE_MANAGER_CLASS = HostClasses.Host.EPUB_FILE_MANAGER
 internal const val EPUB_IMPORT_METHOD = "import"
 internal const val OKIO_PATH_CLASS = HostClasses.ThirdParty.OKIO_PATH
+internal const val OKIO_PATHS_CLASS = HostClasses.ThirdParty.OKIO_PATHS
 internal const val WORKER_MANAGER_CLASS = HostClasses.Host.WORKER_MANAGER
 internal const val WORK_TRACKER_CLASS = HostClasses.Host.WORK_TRACKER
 internal const val WORKER_ENQUEUE_DOWNLOAD_METHOD = "enqueueDownload"
@@ -404,5 +405,11 @@ internal val WEBDAV_UPLOAD_RETRY_CODES = setOf(405, 409, 412, 423)
 internal const val WEBDAV_PROPFIND_BODY =
     """<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:displayname/><d:getcontentlength/><d:getlastmodified/><d:resourcetype/><d:getcontenttype/></d:prop></d:propfind>"""
 internal const val WEBDAV_ICON_BODY_PATH = "M5 3.8h14c0.7 0 1.2 0.5 1.2 1.2v14c0 0.7-0.5 1.2-1.2 1.2H5c-0.7 0-1.2-0.5-1.2-1.2V5c0-0.7 0.5-1.2 1.2-1.2z"
+
+/** Material「refresh」24dp 路径，B4 用来复刻在线补全「更新」行图标。 */
+internal const val REFRESH_ICON_PATH =
+    "M17.65,6.35C16.2,4.9 14.21,4 12,4c-4.42,0 -7.99,3.58 -7.99,8s3.57,8 7.99,8" +
+        "c3.73,0 6.84,-2.55 7.73,-6h-2.08c-0.82,2.33 -3.04,4 -5.65,4 -3.31,0 -6,-2.69 -6,-6" +
+        "s2.69,-6 6,-6c1.66,0 3.14,0.69 4.22,1.78L13,11h7V4l-2.35,2.35z"
 internal const val WEBDAV_ICON_CLOUD_PATH = "M8.6 13.8c-1.2 0-2.1-0.9-2.1-2s0.9-2 2.1-2c0.2 0 0.4 0 0.6 0.1C9.8 8.7 10.9 8 12.2 8c1.6 0 3 1.1 3.3 2.6c1 0.1 1.8 1 1.8 2c0 1.1-0.9 2-2 2H8.6z"
 internal const val WEBDAV_ICON_SLOT_PATH = "M7 17h10v1.1H7z"

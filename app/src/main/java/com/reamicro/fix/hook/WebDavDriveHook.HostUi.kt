@@ -392,6 +392,8 @@ internal fun WebDavDriveHook.themeOnBackgroundVariant(composer: Any): Long =
 internal fun WebDavDriveHook.borderVariantColor(composer: Any): Long =
     method(THEME_KT_CLASS, "getBorderVariant", 1).invoke(null, colorScheme(composer)) as Long
 
+private var onlineCompletionRefreshVectorCache: Any? = null
+
 internal fun WebDavDriveHook.onlineCompletionUpdateImageVector(): Any? =
     listOf(
         Triple("androidx.compose.material.icons.filled.RefreshKt", "getRefresh", ICONS_FILLED_CLASS),
@@ -401,6 +403,12 @@ internal fun WebDavDriveHook.onlineCompletionUpdateImageVector(): Any? =
         runCatching {
             method(className, methodName, 1).invoke(null, staticObject(holderClass, "INSTANCE"))
         }.getOrNull()
+    } ?: onlineCompletionRefreshVectorCache ?: run {
+        // B4 混淆了 material icons 门面，回退到与原生图标同构造器的矢量图。
+        if (com.reamicro.fix.core.HostSymbols.profileId != "2.3.3-b4") return@run null
+        runCatching { B4WebDavVector(this).buildRefresh() }.getOrNull()?.also {
+            onlineCompletionRefreshVectorCache = it
+        }
     }
 
 internal fun WebDavDriveHook.navigateNextImageVector(): Any? =
