@@ -101,6 +101,31 @@
 3. 关联补全真实操作（取消关联/重新关联/封面修复）仅在自建书上做。
 4. 在线补全闭环优先复用上述三个真实源，做「搜索→下载→转为可读→删除临时产物」，
    验证前后对 prefs 与 `files/reamicro_online_sources` 做 diff。
+   2026-10-27 已完成搜索入口复测：三个源均被触发；晚风里 0 结果、番茄源返回
+   HTTP 500 JSON 解析失败、💰书旗返回 8 结果（`穿越兽世：兽夫凶猛追着宠` 等）。
+   此前 `of0` 合成书构造异常 `argument 23 has type int, got java.lang.String`
+   已由 27 字段显式构造修复，B4 首页搜索 hook 已能构造 8 条
+   `reamicro-online-book://online_3eb17212acc545f6/*` 结果行。
+   结果行不可见的直接阻断是 B4 宿主把 Compose 类重定位为短名（`j5`/`gf1` 等），
+   `WebDavDriveHook.HostUi.kt` 的 `colorScheme()` 仍反射
+   `androidx.compose.material3.MaterialTheme`，导致每行抛 `ClassNotFoundException`。
+   已改为 B4 走 `B2NativeUi.theme(...)`，并移除 `getOnSurfaceVariant` 失败后的
+   `MaterialThemeKt` 兜底。安装后冷启动仍为 `profile=356/356`、`hooks=131/131`。
+   复测 `abc` 时仅晚风里启用（书旗/番茄源开关当前为 false），返回 0 条；
+   如需复测书旗 8 行，需临时启用该源并在验收后改回。
+  2026-10-27 17:00 继续用晚风里源实测 `shuqi`：搜索返回 5 条并渲染
+  `home search section rendered type=81505 results=5`；点击首行触发
+  `online completion tap path=reamicro-online-book://online_fc2ef39cc1d41375/0?q=shuqi`，
+  启动 FULL 下载任务 `online-e4332819-32e5-40a5-be56-a4e8acb75558`
+  （notification `4301`）。目录解析 `toc nodes=2919`、过滤后 `chapters=2918`，
+  封面 23,998 B；中途 401 后自动重登成功，章节下载持续正常
+  （最后观察到 `880/2918`）。因全书 2918 章预计耗时过长，本轮在确认链路与
+  逐章下载稳定后**主动取消观察并删除 cache**，未杀进程、未写书库、未导入新书；
+  因此「partial/epub ready/导入可读」尚未验收。临时启用的书旗源
+  `online_source_online_3eb17212acc545f6` 已在读取当前 XML 后仅回写为 `false`，
+  保留 401 重登后的新 Cookie/登录状态，未整文件回滚。
+  删除 cache 后任务已无下载产物、通知不再活跃，阅微主进程 `12210` 仍在，
+  `ReaMicroOnlineC` 线程处于 futex wait；搜索页停留在 `shuqi` 结果列表。
 5. 自动阅读：先确认无后台计时（`reamicro_reader_auto_page.xml`：`interval_seconds=10`、
    `timer_hours=0.0`）；修「更多设置」启动后路由不自动关闭；
    核对 `TapDirection`/`sm8(long)` 与 pager effect；听书相关已不需要适配。
@@ -108,7 +133,8 @@
    `ReaderPositionCopy` 27 字段与 `zm8` 16 字段 UiState 保真回归待补测试。
 7. 收尾：新建 `tools/reports/b4-final-progress.md` 并在 `tools/reports/b4-round7-progress.md`
    加指针；写明通过项、残余未覆盖项、旧 ManualEdit 不支持、听书/TTS 已移除。
-   保持全部改动未暂存、未提交、未推送，HEAD 仍 `1f5eec6`。
+   本地提交记录：`1f9d5a1` 固化 B4 字段回归；本轮在线补全搜索渲染修复与
+   2026-10-27 实测记录也已本地提交，具体哈希见 `git log`。仅本地保存，未推送。
 
 ## 8. 取证据速查
 

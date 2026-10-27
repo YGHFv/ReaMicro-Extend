@@ -1,5 +1,12 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.hostClass
+
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostNameMatches
+
+
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -71,6 +78,7 @@ import com.reamicro.fix.online.download.mergeOnlineCompletionFailedChapters
 import com.reamicro.fix.cloud.webdav.normalizeWebDavPath
 import com.reamicro.fix.cloud.webdav.webDavBookUrl
 import com.reamicro.fix.logging.logWebDav
+import com.reamicro.fix.core.typeMatches
 
 internal fun WebDavDriveHook.install() {
     logWebDav("install start")
@@ -129,8 +137,37 @@ internal fun WebDavDriveHook.install() {
             "homeSearchTapCancellation" to ::hookHomeSearchTapCancellation,
             "homeSearchResultWebDavSection" to ::hookHomeSearchResultWebDavSection,
             "thirdAccountWebDavRoute" to ::hookThirdAccountWebDavRoute,
-        ),
+        ).filterNot { (name, _) ->
+            com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4" &&
+                name in setOf(
+                    "backupTypeName",
+                    "onlineCompletionBookRowDuration",
+                    "webDavCloudTreeIcon",
+                    "importCloudRowLabels",
+                    "importCloudRowDetail",
+                    "cloudBookRowExtendedDisplay",
+                    "cloudStorageWebDavStrings",
+                    "cloudStorageWebDavAuthTips",
+                    "syncAuthCardContent",
+                    "webDavSyncUploadRunningCard",
+                    "importAuthorizedList",
+                    "importLocalLibraryRow",
+                    "importUnauthList",
+                    "webDavStorageNavigate",
+                    "thirdLoginWebDavRoute",
+                    "thirdAccountWebDavRoute",
+                )
+        },
     )
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        HookInstallReport.install(FEATURE_ID, "b4RegisteredStorageRoutes") {
+            B4StorageRouteBridge(this).install()
+        }
+        HookInstallReport.install(FEATURE_ID, "b4StorageUi") {
+            B4StorageUiBridge(this).install()
+        }
+    }
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b2") B2StorageUiBridge(this).install()
 }
 
 internal fun WebDavDriveHook.ensureOnlineCompletionCancelReceiver(context: Context) {
@@ -173,10 +210,10 @@ internal fun WebDavDriveHook.canUseCloudExtendedDisplay(): Boolean =
     settingsProvider().canUseCloudExtendedDisplay
 
 internal fun isBookLocalSheetBookContextMethod(method: Method): Boolean {
-    if (method.name == BOOK_LOCAL_SHEET_METHOD && method.parameterTypes.size == 5) return true
+    if (method.hostNameMatches(BOOK_LOCAL_SHEET_METHOD) && method.parameterTypes.size == 5) return true
 
     return method.name.startsWith("BookLocalSheet\$lambda\$") &&
-        method.parameterTypes.firstOrNull()?.name == BOOK_CLASS &&
+        typeMatches(method.parameterTypes.firstOrNull(), BOOK_CLASS) &&
         method.parameterTypes.any { it.name == COMPOSER_CLASS }
 }
 
@@ -245,7 +282,7 @@ internal fun WebDavDriveHook.setTrackedWorkState(
 ) {
     runCatching {
         tracker.javaClass.methods.first {
-            it.name == "setState" && it.parameterTypes.size == 2
+            it.hostNameMatches("setState") && it.parameterTypes.size == 2
         }.apply { isAccessible = true }.invoke(
             tracker,
             id,
@@ -265,7 +302,7 @@ internal fun WebDavDriveHook.cancelOnlineCompletionTrackedWork(task: OnlineCompl
 internal fun WebDavDriveHook.cancelTrackedWork(tracker: Any, id: String) {
     runCatching {
         tracker.javaClass.methods.first {
-            it.name == "cancelWorkById" && it.parameterTypes.size == 1
+            it.hostNameMatches("cancelWorkById") && it.parameterTypes.size == 1
         }.apply { isAccessible = true }.invoke(tracker, id)
     }.onFailure {
         setTrackedWorkState(tracker, id, "Cancelled", 100, null, null, null)
@@ -291,9 +328,16 @@ internal fun cloudTypeTitle(type: Int): String =
 internal fun WebDavDriveHook.findLocalBookById(bookId: Long): Any? {
     val bookshelf = currentBookshelfRepository()
         ?: error("BookshelfRepository not available for WebDAV backup")
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        val dao = bookshelf.javaClass.hostField("bookDao").get(bookshelf)
+        val method = dao.javaClass.getDeclaredMethod(
+            "b", Long::class.javaPrimitiveType, cls("kotlin.coroutines.Continuation"),
+        )
+        return invokeSuspendBlocking(method, dao, bookId)
+    }
     val findMethod = (bookshelf.javaClass.methods.asSequence() + bookshelf.javaClass.declaredMethods.asSequence())
         .first {
-            it.name == "findBookById" &&
+            it.hostNameMatches("findBookById") &&
                 it.parameterTypes.size == 2 &&
                 it.parameterTypes[0] == java.lang.Long.TYPE
         }
@@ -307,7 +351,7 @@ internal fun WebDavDriveHook.findLocalBookByUuid(uid: Long, uuid: String): Any? 
     val bookDao = fieldValue(bookshelf, "bookDao") ?: return null
     val findMethod = (bookDao.javaClass.methods.asSequence() + bookDao.javaClass.declaredMethods.asSequence())
         .firstOrNull { candidate ->
-            candidate.name == "findByUidAndUuid" &&
+            candidate.hostNameMatches("findByUidAndUuid") &&
                 candidate.parameterTypes.size == 3 &&
                 candidate.parameterTypes[0] == java.lang.Long.TYPE &&
                 candidate.parameterTypes[1] == String::class.java
@@ -322,9 +366,9 @@ internal fun WebDavDriveHook.updateLocalBook(book: Any) {
         ?: error("BookshelfRepository not available for WebDAV update")
     val updateMethod = (bookshelf.javaClass.methods.asSequence() + bookshelf.javaClass.declaredMethods.asSequence())
         .first {
-            it.name == BOOKSHELF_UPDATE_BOOK_METHOD &&
+            it.hostNameMatches(BOOKSHELF_UPDATE_BOOK_METHOD) &&
                 it.parameterTypes.size == 2 &&
-                it.parameterTypes[0].name == BOOK_CLASS
+                typeMatches(it.parameterTypes[0], BOOK_CLASS)
         }
         .apply { isAccessible = true }
     invokeSuspendBlocking(updateMethod, bookshelf, book)
@@ -369,8 +413,18 @@ internal fun copyBookWithBackupAndPublisher(
 }
 
 internal fun WebDavDriveHook.copyCloudBookWithType(book: Any, type: Int): Any {
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        val props = listOf("id", "name", "type", "url", "size", "updatedAt", "path", "hash", "local", "workers")
+        val values = props.map { book.javaClass.hostField(it).get(book) }.toMutableList()
+        values[2] = type
+        return book.javaClass.getDeclaredConstructor(
+            String::class.java, String::class.java, Int::class.javaPrimitiveType, String::class.java,
+            Long::class.javaPrimitiveType, Long::class.javaPrimitiveType, String::class.java, String::class.java,
+            cls(FLOW_CLASS), cls(FLOW_CLASS),
+        ).newInstance(*values.toTypedArray())
+    }
     val copyMethod = book.javaClass.methods.first {
-        it.name == "copy" && it.parameterTypes.size == 10
+        it.hostNameMatches("copy") && it.parameterTypes.size == 10
     }.apply { isAccessible = true }
     return copyMethod.invoke(
         book,
@@ -466,12 +520,12 @@ internal fun WebDavDriveHook.setupRouteMethods(): List<Method> {
 internal fun isRouteDestination(backStackEntry: Any, routeClassName: String): Boolean {
     val destination = runCatching {
         backStackEntry.javaClass.methods.firstOrNull {
-            it.name == "getDestination" && it.parameterTypes.isEmpty()
+            it.hostNameMatches("getDestination") && it.parameterTypes.isEmpty()
         }?.apply { isAccessible = true }?.invoke(backStackEntry)
     }.getOrNull() ?: return false
     val route = runCatching {
         destination.javaClass.methods.firstOrNull {
-            it.name == "getRoute" && it.parameterTypes.isEmpty()
+            it.hostNameMatches("getRoute") && it.parameterTypes.isEmpty()
         }?.apply { isAccessible = true }?.invoke(destination)?.toString().orEmpty()
     }.getOrDefault("")
     if (route.isBlank()) return false
@@ -485,11 +539,11 @@ internal fun isRouteDestination(backStackEntry: Any, routeClassName: String): Bo
 internal fun WebDavDriveHook.navBackStackEntryToThirdLogin(backStackEntry: Any): Any {
     val reflectionClass = cls(KOTLIN_REFLECTION_CLASS)
     val routeClass = cls(ROUTE_THIRD_LOGIN_CLASS)
-    val kClass = reflectionClass.getDeclaredMethod("getOrCreateKotlinClass", Class::class.java)
+    val kClass = reflectionClass.hostMethod("getOrCreateKotlinClass", Class::class.java)
         .apply { isAccessible = true }
         .invoke(null, routeClass)
     return cls(NAV_BACK_STACK_ENTRY_KT_CLASS).declaredMethods.first {
-        it.name == NAV_BACK_STACK_ENTRY_TO_ROUTE_METHOD && it.parameterTypes.size == 2
+        it.hostNameMatches(NAV_BACK_STACK_ENTRY_TO_ROUTE_METHOD) && it.parameterTypes.size == 2
     }.apply { isAccessible = true }
         .invoke(null, backStackEntry, kClass)
 }
@@ -497,11 +551,11 @@ internal fun WebDavDriveHook.navBackStackEntryToThirdLogin(backStackEntry: Any):
 internal fun WebDavDriveHook.navBackStackEntryToThirdAccount(backStackEntry: Any): Any {
     val reflectionClass = cls(KOTLIN_REFLECTION_CLASS)
     val routeClass = cls(ROUTE_THIRD_ACCOUNT_CLASS)
-    val kClass = reflectionClass.getDeclaredMethod("getOrCreateKotlinClass", Class::class.java)
+    val kClass = reflectionClass.hostMethod("getOrCreateKotlinClass", Class::class.java)
         .apply { isAccessible = true }
         .invoke(null, routeClass)
     return cls(NAV_BACK_STACK_ENTRY_KT_CLASS).declaredMethods.first {
-        it.name == NAV_BACK_STACK_ENTRY_TO_ROUTE_METHOD && it.parameterTypes.size == 2
+        it.hostNameMatches(NAV_BACK_STACK_ENTRY_TO_ROUTE_METHOD) && it.parameterTypes.size == 2
     }.apply { isAccessible = true }
         .invoke(null, backStackEntry, kClass)
 }
@@ -520,12 +574,19 @@ internal fun WebDavDriveHook.newStorageRoute(type: Int = BACKUP_TYPE_WEBDAV): An
         .newInstance(type)
 
 internal fun WebDavDriveHook.newHomeRoute(): Any =
-    cls(ROUTE_HOME_CLASS).getDeclaredField("INSTANCE")
+    cls(ROUTE_HOME_CLASS).hostField("INSTANCE")
         .apply { isAccessible = true }
         .get(null)
 
-internal fun WebDavDriveHook.newCloudFolderRoute(path: String? = null, bookId: Long? = null, type: Int = BACKUP_TYPE_WEBDAV): Any =
-    cls(ROUTE_CLOUD_FOLDER_CLASS).getDeclaredConstructor(
+internal fun WebDavDriveHook.newCloudFolderRoute(path: String? = null, bookId: Long? = null, type: Int = BACKUP_TYPE_WEBDAV): Any {
+    val route = cls(ROUTE_CLOUD_FOLDER_CLASS)
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        return route.getDeclaredConstructor(
+            Int::class.javaPrimitiveType, String::class.java, java.lang.Long::class.java,
+            Int::class.javaPrimitiveType,
+        ).newInstance(type, path, bookId, 0)
+    }
+    return route.getDeclaredConstructor(
         java.lang.Integer.TYPE,
         String::class.java,
         java.lang.Long::class.java,
@@ -534,53 +595,38 @@ internal fun WebDavDriveHook.newCloudFolderRoute(path: String? = null, bookId: L
         path,
         bookId,
     )
+}
 
 internal fun WebDavDriveHook.navigateStorage(navGraphScope: Any, type: Int = BACKUP_TYPE_WEBDAV) {
-    navGraphScope.javaClass.methods.firstOrNull {
-        it.name == NAVIGATE_METHOD && it.parameterTypes.size == 3
-    }?.apply { isAccessible = true }?.invoke(navGraphScope, newStorageRoute(type), null, null)
+    com.reamicro.fix.core.HostNavigation.navigate(classLoader, navGraphScope, newStorageRoute(type))
 }
 
 internal fun WebDavDriveHook.navigateCloudFolder(navGraphScope: Any, type: Int = BACKUP_TYPE_WEBDAV) {
-    navGraphScope.javaClass.methods.firstOrNull {
-        it.name == NAVIGATE_METHOD && it.parameterTypes.size == 3
-    }?.apply { isAccessible = true }?.invoke(navGraphScope, newCloudFolderRoute(type = type), null, null)
+    com.reamicro.fix.core.HostNavigation.navigate(classLoader, navGraphScope, newCloudFolderRoute(type = type))
 }
 
 internal fun WebDavDriveHook.navigateHome(navGraphScope: Any): Boolean =
     runCatching {
-        navGraphScope.javaClass.methods.first {
-            it.name == NAVIGATE_METHOD && it.parameterTypes.size == 3
-        }.apply { isAccessible = true }.invoke(navGraphScope, newHomeRoute(), null, null)
+        com.reamicro.fix.core.HostNavigation.navigate(classLoader, navGraphScope, newHomeRoute())
         true
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX failed to navigate WebDAV logout home: ${it.stackTraceToString()}")
     }.getOrDefault(false)
 
 internal fun popBackStack(navGraphScope: Any) {
-    navGraphScope.javaClass.methods.firstOrNull {
-        it.name == "popBackStack" && it.parameterTypes.isEmpty()
-    }?.apply { isAccessible = true }?.invoke(navGraphScope)
+    com.reamicro.fix.core.HostNavigation.pop(navGraphScope)
 }
 
 internal fun WebDavDriveHook.flowOf(value: Any): Any {
+    if (com.reamicro.fix.core.HostNativeAbi.hasNativePaging(com.reamicro.fix.core.HostSymbols.profileId)) return com.reamicro.fix.core.B2PagingData(classLoader).singleFlow(value)
     val method = cls(FLOW_KT_CLASS).methods.first {
-        it.name == FLOW_OF_METHOD && it.parameterTypes.size == 1 && it.parameterTypes[0].isArray
+        it.hostNameMatches(FLOW_OF_METHOD) && it.parameterTypes.size == 1 && it.parameterTypes[0].isArray
     }
     return method.invoke(null, arrayOf(value))
 }
 
 internal fun WebDavDriveHook.emptyBaiduAuth(): Any =
-    cls(AUTH_BAIDU_CLASS).getDeclaredConstructor(
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        java.lang.Long.TYPE,
-        java.lang.Long.TYPE,
-        String::class.java,
-        String::class.java,
-    ).apply { isAccessible = true }.newInstance(
+    newBaiduAuth(
         "",
         "time",
         "1",
@@ -592,37 +638,30 @@ internal fun WebDavDriveHook.emptyBaiduAuth(): Any =
     )
 
 internal fun WebDavDriveHook.emptyCloudUserInfo(): Any =
-    cls(CLOUD_USER_INFO_CLASS).getDeclaredConstructor(
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        java.lang.Long.TYPE,
-        java.lang.Long.TYPE,
-    ).apply { isAccessible = true }.newInstance("", "", "", "", "", null, 0L, 0L)
+    newCloudUserInfo("", "", "", "", "", null, 0L, 0L)
 
 internal fun WebDavDriveHook.emptyPagingData(): Any {
+    if (com.reamicro.fix.core.HostNativeAbi.hasNativePaging(com.reamicro.fix.core.HostSymbols.profileId)) return com.reamicro.fix.core.B2PagingData(classLoader).from(emptyList())
     val pagingDataClass = cls(PAGING_DATA_CLASS)
     val companion = pagingDataClass.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
     return companion.javaClass.methods.first {
-        it.name == PAGING_DATA_EMPTY_METHOD && it.parameterTypes.isEmpty()
+        it.hostNameMatches(PAGING_DATA_EMPTY_METHOD) && it.parameterTypes.isEmpty()
     }.apply { isAccessible = true }.invoke(companion)
 }
 
 internal fun WebDavDriveHook.pagingDataFrom(items: List<Any>): Any {
+    if (com.reamicro.fix.core.HostNativeAbi.hasNativePaging(com.reamicro.fix.core.HostSymbols.profileId)) return com.reamicro.fix.core.B2PagingData(classLoader).from(items)
     val pagingDataClass = cls(PAGING_DATA_CLASS)
     val companion = pagingDataClass.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
     val idle = idleLoadStates()
     return companion.javaClass.methods.firstOrNull {
-        it.name == "from" &&
+        it.hostNameMatches("from") &&
             it.parameterTypes.size == 2 &&
             List::class.java.isAssignableFrom(it.parameterTypes[0]) &&
-            it.parameterTypes[1].name == LOAD_STATES_CLASS
+            typeMatches(it.parameterTypes[1], LOAD_STATES_CLASS)
     }?.apply { isAccessible = true }?.invoke(companion, items, idle)
         ?: companion.javaClass.methods.first {
-            it.name == "from" && it.parameterTypes.size == 1 && List::class.java.isAssignableFrom(it.parameterTypes[0])
+            it.hostNameMatches("from") && it.parameterTypes.size == 1 && List::class.java.isAssignableFrom(it.parameterTypes[0])
         }.apply { isAccessible = true }.invoke(companion, items)
 }
 
@@ -631,38 +670,46 @@ internal fun WebDavDriveHook.idleLoadStates(): Any {
     val companion = runCatching {
         loadStatesClass.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
     }.getOrElse {
-        loadStatesClass.getDeclaredField("INSTANCE").apply { isAccessible = true }.get(null)
+        loadStatesClass.hostField("INSTANCE").apply { isAccessible = true }.get(null)
     }
     return companion.javaClass.methods.first {
-        it.name == "getIDLE" && it.parameterTypes.isEmpty()
+        it.hostNameMatches("getIDLE") && it.parameterTypes.isEmpty()
     }.apply { isAccessible = true }.invoke(companion)
 }
 
 internal fun WebDavDriveHook.emptyFlow(): Any =
-    cls(FLOW_KT_CLASS).methods.first {
-        it.name == "emptyFlow" && it.parameterTypes.isEmpty()
+    if (com.reamicro.fix.core.HostNativeAbi.hasNativePaging(com.reamicro.fix.core.HostSymbols.profileId)) cls("ReaMicroHost.EmptyFlow").getDeclaredField("a").get(null)
+    else cls(FLOW_KT_CLASS).methods.first {
+        it.hostNameMatches("emptyFlow") && it.parameterTypes.isEmpty()
     }.apply { isAccessible = true }.invoke(null)
 
-internal fun WebDavDriveHook.kotlinResultSuccess(value: Any?): Any =
-    cls(KOTLIN_RESULT_CLASS).declaredMethods.first {
+internal fun WebDavDriveHook.kotlinResultSuccess(value: Any?): Any? =
+    if (com.reamicro.fix.core.HostSymbols.profileId in setOf("2.3.3-b2", "2.3.3-b4")) value
+    else cls(KOTLIN_RESULT_CLASS).declaredMethods.first {
         it.name.contains("constructor") && it.parameterTypes.size == 1
     }.apply { isAccessible = true }.invoke(null, value)
 
 internal fun WebDavDriveHook.kotlinResultFailure(throwable: Throwable): Any {
+    if (com.reamicro.fix.core.HostSymbols.profileId in setOf("2.3.3-b2", "2.3.3-b4")) {
+        return cls("kotlin.Result\$Failure").getDeclaredConstructor(Throwable::class.java).newInstance(throwable)
+    }
     val failure = cls(KOTLIN_RESULT_KT_CLASS).declaredMethods.first {
-        it.name == "createFailure" && it.parameterTypes.size == 1
+        it.hostNameMatches("createFailure") && it.parameterTypes.size == 1
     }.apply { isAccessible = true }.invoke(null, throwable)
-    return kotlinResultSuccess(failure)
+    return requireNotNull(kotlinResultSuccess(failure))
 }
 
 internal fun WebDavDriveHook.createMutableStateFlow(value: Any): Any =
-    cls(STATE_FLOW_KT_CLASS).methods.first {
-        it.name == "MutableStateFlow" && it.parameterTypes.size == 1
+    if (com.reamicro.fix.core.HostNativeAbi.hasNativePaging(com.reamicro.fix.core.HostSymbols.profileId)) {
+        // 此处输入均非 null，原生 StateFlowImpl 构造器无需 NULL 哨兵转换。
+        cls("kotlinx.coroutines.flow.StateFlowImpl").getDeclaredConstructor(Any::class.java).newInstance(value)
+    } else cls(STATE_FLOW_KT_CLASS).methods.first {
+        it.hostNameMatches("MutableStateFlow") && it.parameterTypes.size == 1
     }.apply { isAccessible = true }.invoke(null, value)
 
 internal fun setMutableStateFlowValue(flow: Any?, value: Any) {
     flow?.javaClass?.methods?.firstOrNull {
-        it.name == "setValue" && it.parameterTypes.size == 1
+        it.hostNameMatches("setValue") && it.parameterTypes.size == 1
     }?.apply { isAccessible = true }?.invoke(flow, value)
 }
 
@@ -734,10 +781,13 @@ internal fun onlineCompletionPlatformName(node: Any?, kind: String): String {
 }
 
 internal fun copyHomeUiStateWithCloudResults(state: Any, cloudResults: Map<Any?, Any?>): Any {
+    if (com.reamicro.fix.core.HostHomeSearchState.isB4(state)) {
+        return com.reamicro.fix.core.HostHomeSearchState.copyCloudResults(state, cloudResults)
+    }
     val currentCloudResults = homeCloudSearchResults(state)
     val stateClass = state.javaClass
     val copyMethods = stateClass.methods
-        .filter { it.name == "copy" && it.returnType == stateClass && it.parameterTypes.isNotEmpty() }
+        .filter { it.hostNameMatches("copy") && it.returnType == stateClass && it.parameterTypes.isNotEmpty() }
         .sortedByDescending { it.parameterTypes.size }
     val expectedKeys = cloudResults.keys
     val failures = mutableListOf<String>()
@@ -792,7 +842,7 @@ internal fun copyHomeUiStateWithCloudResults(state: Any, cloudResults: Map<Any?,
 
 internal fun copyHomeUiStateWithCloudResultsLegacy(state: Any, cloudResults: Map<Any?, Any?>): Any {
     val copyMethod = state.javaClass.methods.firstOrNull {
-        it.name == "copy" && it.parameterTypes.size == 13
+        it.hostNameMatches("copy") && it.parameterTypes.size == 13
     }?.apply { isAccessible = true } ?: return state
     return copyMethod.invoke(
         state,
@@ -813,12 +863,7 @@ internal fun copyHomeUiStateWithCloudResultsLegacy(state: Any, cloudResults: Map
 }
 
 internal fun WebDavDriveHook.newCloudFolder(entry: WebDavEntry): Any =
-    cls(CLOUD_FOLDER_CLASS).getDeclaredConstructor(
-        String::class.java,
-        String::class.java,
-        java.lang.Boolean.TYPE,
-        java.lang.Long.TYPE,
-    ).apply { isAccessible = true }.newInstance(
+    newStorageFolder(
         entry.name,
         normalizeWebDavPath(entry.path),
         false,
@@ -965,51 +1010,50 @@ internal fun WebDavDriveHook.newOnlineCompletionCloudBook(
 
 internal fun WebDavDriveHook.newOnlineCompletionLocalBook(path: String, result: OnlineBookSearchResult): Any {
     val now = System.currentTimeMillis()
-    val bookClass = cls(BOOK_CLASS)
+    val bookClass = classLoader.hostClass(BOOK_CLASS)
 
+    // B4 的 Book 是 27 字段不可变记录；按核实顺序填值，禁止用“最长构造器 + 类型默认值”猜槽位。
     val constructor = bookClass.declaredConstructors
-        .filter { it.parameterTypes.size >= 23 && it.parameterTypes[0] == java.lang.Long.TYPE }
-        .maxByOrNull { it.parameterTypes.size }
-        ?.apply { isAccessible = true }
-        ?: error("Book constructor not found")
+        .single { it.parameterTypes.size == 27 && it.parameterTypes[0] == java.lang.Long.TYPE }
+        .apply { isAccessible = true }
     val types = constructor.parameterTypes
     val args = arrayOfNulls<Any?>(types.size)
-    for (i in types.indices) {
-        args[i] = when (types[i]) {
-            java.lang.Long.TYPE -> 0L
-            java.lang.Integer.TYPE -> 0
-            java.lang.Float.TYPE -> 0f
-            java.lang.Double.TYPE -> 0.0
-            java.lang.Boolean.TYPE -> false
-            java.lang.Byte.TYPE -> 0.toByte()
-            java.lang.Short.TYPE -> 0.toShort()
-            java.lang.Character.TYPE -> ' '
-            String::class.java -> ""
-            else -> null
-        }
-    }
-    fun set(index: Int, value: Any?) {
-        if (index in args.indices) args[index] = value
-    }
-    set(0, 0L)
-    set(1, UUID.nameUUIDFromBytes(path.toByteArray(Charsets.UTF_8)).toString())
-    set(3, result.name)
-    set(5, result.author)
-    set(6, result.coverUrl)
-    set(8, result.detailUrl.ifBlank { path })
-    set(10, now)
-    set(21, BACKUP_TYPE_ONLINE_COMPLETION)
-    set(22, path)
-    set(24, result.sourceName)
+    args[0] = 0L
+    args[1] = UUID.nameUUIDFromBytes(path.toByteArray(Charsets.UTF_8)).toString()
+    args[2] = 0L
+    args[3] = result.name
+    args[4] = ""
+    args[5] = result.author
+    args[6] = result.coverUrl
+    args[7] = 0L
+    args[8] = result.detailUrl.ifBlank { path }
+    args[9] = ""
+    args[10] = now
+    args[11] = 1
+    args[12] = 0
+    args[13] = ""
+    args[14] = ""
+    args[15] = 0f
+    args[16] = 0L
+    args[17] = 0L
+    args[18] = 0L
+    args[19] = 0L
+    args[20] = 0L
+    args[21] = 0L
+    args[22] = BACKUP_TYPE_ONLINE_COMPLETION
+    args[23] = path
+    args[24] = ""
+    args[25] = result.sourceName
+    args[26] = false
     return constructor.newInstance(*args)
 }
 
 internal fun WebDavDriveHook.emptyCloudBook(): Any =
-    cls(CLOUD_BOOK_CLASS).getDeclaredField("INSTANCE")
+    cls(CLOUD_BOOK_CLASS).hostField("INSTANCE")
         .apply { isAccessible = true }
         .get(null)
         .let { companion ->
-            companion.javaClass.methods.first { it.name == "getEmpty" && it.parameterTypes.isEmpty() }
+            companion.javaClass.methods.first { it.hostNameMatches("getEmpty") && it.parameterTypes.isEmpty() }
                 .apply { isAccessible = true }
                 .invoke(companion)
         }
@@ -1349,7 +1393,7 @@ internal fun WebDavDriveHook.refreshOnlineCompletionCatalogTables(book: Any, boo
     val chapterDao = fieldValue(bookshelf, "bookChapterDao") ?: error("阅微章节 DAO 不可用")
     val managerClass = cls(EPUB_FILE_MANAGER_CLASS)
     val manager = runCatching {
-        managerClass.getDeclaredField("INSTANCE").apply { isAccessible = true }.get(null)
+        managerClass.hostField("INSTANCE").apply { isAccessible = true }.get(null)
     }.getOrNull() ?: error("阅微 EpubFileManager INSTANCE 未找到")
     val bookPath = okioPath(bookDir.canonicalFile)
     val opf = obtainOnlineCompletionOpf(bookPath)
@@ -1357,11 +1401,11 @@ internal fun WebDavDriveHook.refreshOnlineCompletionCatalogTables(book: Any, boo
         .distinct()
         .toList()
     val itemRefMethod = managerMethods.firstOrNull {
-        it.name == "getItemRefs" &&
+        it.hostNameMatches("getItemRefs") &&
             it.parameterTypes.size == 3 &&
             it.parameterTypes[0] == java.lang.Long.TYPE &&
-            it.parameterTypes[1].name == OPF_CLASS &&
-            it.parameterTypes[2].name == OKIO_PATH_CLASS
+            typeMatches(it.parameterTypes[1], OPF_CLASS) &&
+            typeMatches(it.parameterTypes[2], OKIO_PATH_CLASS)
     } ?: error(
         "阅微 EpubFileManager.getItemRefs 方法未找到；候选=" +
             methodCandidates(managerMethods, "getItemRefs"),
@@ -1376,12 +1420,12 @@ internal fun WebDavDriveHook.refreshOnlineCompletionCatalogTables(book: Any, boo
 
     val chapterMethod = managerMethods
         .filter {
-            it.name == "getChapters" &&
+            it.hostNameMatches("getChapters") &&
                 (it.parameterTypes.size == 3 || it.parameterTypes.size == 4) &&
                 List::class.java.isAssignableFrom(it.parameterTypes[0]) &&
-                it.parameterTypes[1].name == OPF_CLASS &&
-                it.parameterTypes[2].name == OKIO_PATH_CLASS &&
-                (it.parameterTypes.size == 3 || it.parameterTypes[3].name == FUNCTION2_CLASS)
+                typeMatches(it.parameterTypes[1], OPF_CLASS) &&
+                typeMatches(it.parameterTypes[2], OKIO_PATH_CLASS) &&
+                (it.parameterTypes.size == 3 || typeMatches(it.parameterTypes[3], FUNCTION2_CLASS))
         }
         .minByOrNull { it.parameterTypes.size }
         ?: error(
@@ -1411,17 +1455,17 @@ internal fun WebDavDriveHook.replaceOnlineCompletionDaoRows(dao: Any, bookId: Lo
         .distinct()
         .toList()
     val deleteMethod = daoMethods.firstOrNull {
-        it.name == "deleteByBookId" &&
+        it.hostNameMatches("deleteByBookId") &&
             it.parameterTypes.size == 2 &&
             it.parameterTypes[0] == java.lang.Long.TYPE &&
-            it.parameterTypes[1].name == KOTLIN_CONTINUATION_CLASS
+            typeMatches(it.parameterTypes[1], KOTLIN_CONTINUATION_CLASS)
     }?.apply { isAccessible = true }
         ?: error("阅微 $label DAO.deleteByBookId 方法未找到；候选=${methodCandidates(daoMethods, "deleteByBookId")}")
     val upsertMethod = daoMethods.firstOrNull {
-        it.name == "upsert" &&
+        it.hostNameMatches("upsert") &&
             it.parameterTypes.size == 2 &&
             it.parameterTypes[0].isArray &&
-            it.parameterTypes[1].name == KOTLIN_CONTINUATION_CLASS
+            typeMatches(it.parameterTypes[1], KOTLIN_CONTINUATION_CLASS)
     }?.apply { isAccessible = true }
         ?: error("阅微 $label DAO.upsert 方法未找到；候选=${methodCandidates(daoMethods, "upsert")}")
     val componentType: Class<*> = requireNotNull(upsertMethod.parameterTypes[0].componentType) {
@@ -1435,7 +1479,7 @@ internal fun WebDavDriveHook.replaceOnlineCompletionDaoRows(dao: Any, bookId: Lo
 }
 
 internal fun methodCandidates(methods: List<Method>, name: String): String =
-    methods.filter { it.name == name }
+    methods.filter { it.hostNameMatches(name) }
         .joinToString(prefix = "[", postfix = "]") { method ->
             method.parameterTypes.joinToString(
                 prefix = "${method.name}(",
@@ -1594,7 +1638,7 @@ internal fun onlineCompletionFailedLogFile(bookDir: File): File =
 internal fun WebDavDriveHook.findLocalBookByUrl(bookshelf: Any, url: String): Any? {
     if (url.isBlank()) return null
     val findMethod = (bookshelf.javaClass.methods.asSequence() + bookshelf.javaClass.declaredMethods.asSequence())
-        .firstOrNull { it.name == "findBookByUrl" && it.parameterTypes.size == 2 }
+        .firstOrNull { it.hostNameMatches("findBookByUrl") && it.parameterTypes.size == 2 }
         ?.apply { isAccessible = true }
         ?: return null
     return invokeSuspendBlocking(findMethod, bookshelf, url)
@@ -1602,13 +1646,13 @@ internal fun WebDavDriveHook.findLocalBookByUrl(bookshelf: Any, url: String): An
 
 internal fun currentOnlineCompletionBooksDir(bookshelf: Any): Any {
     val userStorage = fieldValue(bookshelf, "userStorage")
-        ?: bookshelf.javaClass.methods.firstOrNull { it.name == "getUserStorage" && it.parameterTypes.isEmpty() }
+        ?: bookshelf.javaClass.methods.firstOrNull { it.hostNameMatches("getUserStorage") && it.parameterTypes.isEmpty() }
             ?.apply { isAccessible = true }
             ?.invoke(bookshelf)
         ?: error("阅微书库目录不可用：UserStorage 未找到")
     val defaultMethod = (userStorage.javaClass.methods.asSequence() + userStorage.javaClass.declaredMethods.asSequence())
         .firstOrNull {
-            it.name == "userBooksDir\$default" &&
+            it.hostNameMatches("userBooksDir\$default") &&
                 Modifier.isStatic(it.modifiers) &&
                 it.parameterTypes.size == 4
         }
@@ -1619,7 +1663,7 @@ internal fun currentOnlineCompletionBooksDir(bookshelf: Any): Any {
     }
     val uid = fieldValue(userStorage, "uid")
     val method = (userStorage.javaClass.methods.asSequence() + userStorage.javaClass.declaredMethods.asSequence())
-        .first { it.name == "userBooksDir" && it.parameterTypes.size == 1 }
+        .first { it.hostNameMatches("userBooksDir") && it.parameterTypes.size == 1 }
         .apply { isAccessible = true }
     return method.invoke(userStorage, uid) ?: error("阅微书库目录不可用：userBooksDir 返回空")
 }
@@ -1776,7 +1820,7 @@ internal fun WebDavDriveHook.listLocalBooks(repository: Any): Iterable<*>? {
     val bookDao = fieldValue(repository, "bookDao") ?: return null
     val listMethod = (bookDao.javaClass.methods.asSequence() + bookDao.javaClass.declaredMethods.asSequence())
         .firstOrNull { candidate ->
-            candidate.name == "listByUid" &&
+            candidate.hostNameMatches("listByUid") &&
                 candidate.parameterTypes.size == 1 &&
                 candidate.parameterTypes[0] == java.lang.Long.TYPE
         }
@@ -1789,7 +1833,7 @@ internal fun WebDavDriveHook.listLocalBooks(repository: Any): Iterable<*>? {
 internal fun WebDavDriveHook.currentUserId(repository: Any): Long? =
     runCatching {
         val flow = (repository.javaClass.methods.asSequence() + repository.javaClass.declaredMethods.asSequence())
-            .firstOrNull { it.name == "getCurrentUserFlow" && it.parameterTypes.isEmpty() }
+            .firstOrNull { it.hostNameMatches("getCurrentUserFlow") && it.parameterTypes.isEmpty() }
             ?.apply { isAccessible = true }
             ?.invoke(repository)
             ?: fieldValue(repository, "currentUserFlow")
@@ -1801,7 +1845,7 @@ internal fun WebDavDriveHook.currentUserId(repository: Any): Long? =
 
 internal fun WebDavDriveHook.firstFlowValue(flow: Any): Any? {
     val firstMethod = (cls(FLOW_KT_CLASS).methods.asSequence() + cls(FLOW_KT_CLASS).declaredMethods.asSequence())
-        .firstOrNull { it.name == "first" && it.parameterTypes.size == 2 }
+        .firstOrNull { it.hostNameMatches("first") && it.parameterTypes.size == 2 }
         ?.apply { isAccessible = true }
         ?: return null
     return invokeSuspendBlocking(firstMethod, null, flow)
@@ -1812,7 +1856,7 @@ internal fun fieldValue(target: Any?, vararg names: String): Any? {
     for (name in names) {
         var type: Class<*>? = target.javaClass
         while (type != null) {
-            val field = runCatching { type.getDeclaredField(name) }.getOrNull()
+            val field = runCatching { type.hostField(name) }.getOrNull()
             if (field != null) {
                 field.isAccessible = true
                 return runCatching { field.get(target) }.getOrNull()
@@ -1844,7 +1888,7 @@ internal fun WebDavDriveHook.currentContext(): Context? =
 internal fun currentApplicationContext(): Context? =
     runCatching {
         Class.forName("android.app.ActivityThread")
-            .getDeclaredMethod("currentApplication")
+            .hostMethod("currentApplication")
             .apply { isAccessible = true }
             .invoke(null) as? Context
     }.getOrNull()?.applicationContext
@@ -1914,15 +1958,20 @@ internal fun WebDavDriveHook.popOnlineCompletionCloudTitle() {
 }
 
 internal fun WebDavDriveHook.getNativeAndroidOsVector(): Any? =
-    runCatching {
-        method(ANDROID_OS_ICON_CLASS, ANDROID_OS_ICON_METHOD, 1).invoke(
-            null,
-            cls("app.zhendong.reamicro.arch.icons.AppIcons\$Colored")
-                .getDeclaredField("INSTANCE")
-                .apply { isAccessible = true }
-                .get(null),
-        )
-    }.getOrNull()
+    runCatching { method(ANDROID_OS_ICON_CLASS, ANDROID_OS_ICON_METHOD, 0).invoke(null) }
+        .recoverCatching {
+            method(ANDROID_OS_ICON_CLASS, ANDROID_OS_ICON_METHOD, 1).invoke(
+                null,
+                cls("app.zhendong.reamicro.arch.icons.AppIcons\$Colored")
+                    .hostField("INSTANCE")
+                    .apply { isAccessible = true }
+                    .get(null),
+            )
+        }
+        .getOrNull()
+
+internal fun WebDavDriveHook.iconVectorMethod(className: String, methodName: String): Method =
+    runCatching { method(className, methodName, 0) }.getOrElse { method(className, methodName, 1) }
 
 internal fun WebDavDriveHook.addVectorPath(
     builderClass: Class<*>,
@@ -1932,16 +1981,16 @@ internal fun WebDavDriveHook.addVectorPath(
     alpha: Float = 1f,
 ) {
     val vectorKt = cls(VECTOR_KT_CLASS)
-    val nodes = vectorKt.getDeclaredMethod("addPathNodes", String::class.java)
+    val nodes = vectorKt.hostMethod("addPathNodes", String::class.java)
         .apply { isAccessible = true }
         .invoke(null, pathData)
-    val fillType = vectorKt.getDeclaredMethod("getDefaultFillType")
+    val fillType = vectorKt.hostMethod("getDefaultFillType")
         .apply { isAccessible = true }
         .invoke(null) as Int
-    val strokeCap = vectorKt.getDeclaredMethod("getDefaultStrokeLineCap")
+    val strokeCap = vectorKt.hostMethod("getDefaultStrokeLineCap")
         .apply { isAccessible = true }
         .invoke(null) as Int
-    val strokeJoin = vectorKt.getDeclaredMethod("getDefaultStrokeLineJoin")
+    val strokeJoin = vectorKt.hostMethod("getDefaultStrokeLineJoin")
         .apply { isAccessible = true }
         .invoke(null) as Int
     val fill = solidColor(argb)
@@ -1981,9 +2030,13 @@ internal fun WebDavDriveHook.method(className: String, methodName: String, param
     val cacheKey = "$className#$methodName/$parameterCount"
     return synchronized(methodCache) {
         methodCache.getOrPut(cacheKey) {
-            val candidates = cls(className).methods.asSequence() + cls(className).declaredMethods.asSequence()
+            val logicalClass = com.reamicro.fix.core.HostSymbols.logicalClass(className)
+            val owner = com.reamicro.fix.core.HostSymbols.resolveMethodOwner(logicalClass, methodName)
+            val actualName = com.reamicro.fix.core.HostSymbols.resolveMethodName(logicalClass, methodName)
+            val candidates = cls(owner).methods.asSequence() + cls(owner).declaredMethods.asSequence()
             candidates.firstOrNull {
-                it.name == methodName && it.parameterTypes.size == parameterCount
+                (it.name == actualName || it.hostNameMatches(methodName)) &&
+                    it.parameterTypes.size == parameterCount
             }?.apply { isAccessible = true }
                 ?: error("$className.$methodName/$parameterCount not found")
         }
@@ -2008,9 +2061,9 @@ internal fun WebDavDriveHook.staticInt(className: String, fieldName: String): In
 
 internal fun invokeFunction1(function: Any, arg: Any?) {
     val invoke = function.javaClass.methods.firstOrNull {
-        it.name == "invoke" && it.parameterTypes.size == 1
+        it.hostNameMatches("invoke") && it.parameterTypes.size == 1
     } ?: function.javaClass.declaredMethods.first {
-        it.name == "invoke" && it.parameterTypes.size == 1
+        it.hostNameMatches("invoke") && it.parameterTypes.size == 1
     }
     invoke.isAccessible = true
     invoke.invoke(function, arg)
@@ -2018,9 +2071,9 @@ internal fun invokeFunction1(function: Any, arg: Any?) {
 
 internal fun invokeFunction2(function: Any, first: Any?, second: Any?) {
     val invoke = function.javaClass.methods.firstOrNull {
-        it.name == "invoke" && it.parameterTypes.size == 2
+        it.hostNameMatches("invoke") && it.parameterTypes.size == 2
     } ?: function.javaClass.declaredMethods.first {
-        it.name == "invoke" && it.parameterTypes.size == 2
+        it.hostNameMatches("invoke") && it.parameterTypes.size == 2
     }
     invoke.isAccessible = true
     invoke.invoke(function, first, second)
@@ -2029,7 +2082,7 @@ internal fun invokeFunction2(function: Any, first: Any?, second: Any?) {
 internal fun callStringPath(root: Any?, vararg methodNames: String): String {
     var current = root ?: return ""
     methodNames.forEach { name ->
-        current = current.javaClass.methods.firstOrNull { it.name == "get${name.replaceFirstChar(Char::titlecase)}" && it.parameterTypes.isEmpty() }
+        current = current.javaClass.methods.firstOrNull { it.hostNameMatches("get${name.replaceFirstChar(Char::titlecase)}") && it.parameterTypes.isEmpty() }
             ?.apply { isAccessible = true }
             ?.invoke(current)
             ?: return ""
@@ -2042,10 +2095,15 @@ internal fun WebDavDriveHook.newKotlinPair(first: Any?, second: Any?): Any =
         .apply { isAccessible = true }
         .newInstance(first, second)
 
-internal fun WebDavDriveHook.platformFile(file: File): Any =
-    cls(PLATFORM_FILE_ANDROID_KT_CLASS).declaredMethods.first {
-        it.name == PLATFORM_FILE_METHOD && it.parameterTypes.size == 1 && it.parameterTypes[0] == File::class.java
+internal fun WebDavDriveHook.platformFile(file: File): Any {
+    if (com.reamicro.fix.core.HostNativeAbi.fileWrapperField(com.reamicro.fix.core.HostSymbols.profileId) != null) {
+        val wrapper = cls("ReaMicroHost.FileWrapper").getDeclaredConstructor(File::class.java).newInstance(file)
+        return cls("ReaMicroHost.PlatformFile").declaredConstructors.single { it.parameterCount == 1 }.newInstance(wrapper)
+    }
+    return cls(PLATFORM_FILE_ANDROID_KT_CLASS).declaredMethods.first {
+        it.hostNameMatches(PLATFORM_FILE_METHOD) && it.parameterTypes.size == 1 && it.parameterTypes[0] == File::class.java
     }.apply { isAccessible = true }.invoke(null, file)
+}
 
 internal fun WebDavDriveHook.platformFileKeys(platformFile: Any): List<String> =
     listOfNotNull(
@@ -2055,66 +2113,32 @@ internal fun WebDavDriveHook.platformFileKeys(platformFile: Any): List<String> =
 
 internal fun WebDavDriveHook.platformFileString(platformFile: Any, methodName: String): String? =
     runCatching {
+        val fileField = com.reamicro.fix.core.HostNativeAbi.fileWrapperField(com.reamicro.fix.core.HostSymbols.profileId)
+        if (fileField != null) {
+            val wrapper = cls("ReaMicroHost.PlatformFile").getDeclaredField("a").get(platformFile)
+            if (cls("ReaMicroHost.FileWrapper").isInstance(wrapper)) {
+                val file = cls("ReaMicroHost.FileWrapper").getDeclaredField(fileField).get(wrapper) as File
+                return@runCatching if (methodName == PLATFORM_FILE_GET_PATH_METHOD) file.path else file.absolutePath
+            }
+            return@runCatching null
+        }
         cls(PLATFORM_FILE_ANDROID_KT_CLASS).declaredMethods.firstOrNull {
-            it.name == methodName && it.parameterTypes.size == 1
+            it.hostNameMatches(methodName) && it.parameterTypes.size == 1
         }?.apply { isAccessible = true }?.invoke(null, platformFile)?.toString()
     }.getOrNull()
 
-internal fun WebDavDriveHook.invokeSuspendBlocking(method: Method, target: Any?, vararg args: Any?): Any? {
-    val latch = CountDownLatch(1)
-    var value: Any? = null
-    var error: Throwable? = null
-    val continuationClass = cls(KOTLIN_CONTINUATION_CLASS)
-    val throwOnFailure = cls(KOTLIN_RESULT_KT_CLASS).declaredMethods.first {
-        it.name == "throwOnFailure" && it.parameterTypes.size == 1
-    }.apply { isAccessible = true }
-    val continuation = Proxy.newProxyInstance(classLoader, arrayOf(continuationClass)) { proxy, proxyMethod, proxyArgs ->
-        when (proxyMethod.name) {
-            "getContext" -> emptyCoroutineContext()
-            "resumeWith" -> {
-                val result = proxyArgs?.getOrNull(0)
-                runCatching {
-                    throwOnFailure.invoke(null, result)
-                    value = result
-                }.onFailure {
-                    error = if (it is InvocationTargetException) {
-                        it.targetException ?: it
-                    } else {
-                        it
-                    }
-                }
-                latch.countDown()
-                targetUnit()
-            }
-            "toString" -> "ReaMicroWebDavContinuation"
-            "hashCode" -> System.identityHashCode(proxy)
-            "equals" -> proxy === proxyArgs?.getOrNull(0)
-            else -> null
-        }
-    }
-    val fullArgs = args.toMutableList().apply { add(continuation) }.toTypedArray()
-    val returned = try {
-        method.invoke(target, *fullArgs)
-    } catch (e: InvocationTargetException) {
-        throw e.targetException ?: e
-    }
-    if (returned !== coroutineSuspended()) {
-        return returned
-    }
-    latch.await()
-    error?.let { throw it }
-    return value
-}
+internal fun WebDavDriveHook.invokeSuspendBlocking(method: Method, target: Any?, vararg args: Any?): Any? =
+        com.reamicro.fix.core.HostCoroutines.invoke(classLoader, method, target, *args)
 
 internal fun WebDavDriveHook.emptyCoroutineContext(): Any =
-    cls(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS).getDeclaredField("INSTANCE")
+    cls(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS).hostField("INSTANCE")
         .apply { isAccessible = true }
         .get(null)
 
 internal fun WebDavDriveHook.coroutineSuspended(): Any =
     runCatching {
         cls(KOTLIN_INTRINSICS_CLASS).methods.first {
-            it.name == "getCOROUTINE_SUSPENDED" && it.parameterTypes.isEmpty()
+            it.hostNameMatches("getCOROUTINE_SUSPENDED") && it.parameterTypes.isEmpty()
         }.apply { isAccessible = true }.invoke(null)
     }.getOrElse {
         (cls(KOTLIN_COROUTINE_SINGLETONS_CLASS).enumConstants ?: emptyArray()).first { value ->
@@ -2123,12 +2147,10 @@ internal fun WebDavDriveHook.coroutineSuspended(): Any =
     }
 
 internal fun WebDavDriveHook.newWorkHandle(id: String, state: Any): Any =
-    cls(WORK_HANDLE_CLASS).getDeclaredConstructor(String::class.java, cls(STATE_FLOW_CLASS))
-        .apply { isAccessible = true }
-        .newInstance(id, createMutableStateFlow(state))
+    newNativeWorkHandle(id, createMutableStateFlow(state))
 
 internal fun WebDavDriveHook.newWorkState(statusName: String, progress: Int, error: String?, result: String?, name: String?): Any {
-    val status = cls(WORK_STATUS_CLASS).getDeclaredMethod("valueOf", String::class.java)
+    val status = cls(WORK_STATUS_CLASS).hostMethod("valueOf", String::class.java)
         .apply { isAccessible = true }
         .invoke(null, statusName)
     return cls(WORK_STATE_CLASS).getDeclaredConstructor(
@@ -2148,7 +2170,7 @@ internal fun WebDavDriveHook.cls(className: String): Class<*> =
 
 internal fun WebDavDriveHook.targetUnit(): Any? = runCatching {
     val clazz = cls("kotlin.Unit")
-    val field = clazz.getDeclaredField("INSTANCE")
+    val field = clazz.hostField("INSTANCE")
     field.isAccessible = true
     field.get(null)
 }.getOrNull()

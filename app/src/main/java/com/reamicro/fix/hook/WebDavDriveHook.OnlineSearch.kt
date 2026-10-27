@@ -1,5 +1,9 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.typeMatches
+
+
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -82,17 +86,7 @@ internal fun WebDavDriveHook.renderOnlineCompletionCloudBookSearchRow(book: Any,
         targetUnit()
     }
     runCatching {
-        cls(ANDROID_VIEW_KT_CLASS).declaredMethods.first {
-            it.name == ANDROID_VIEW_METHOD && it.parameterTypes.size == 6
-        }.apply { isAccessible = true }.invoke(
-            null,
-            factory,
-            fillMaxWidthModifier(),
-            update,
-            composer,
-            0,
-            0,
-        )
+        androidViews.render(factory, fillMaxWidthModifier(), composer, update)
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX failed to render online completion search row: ${it.stackTraceToString()}")
     }
@@ -992,9 +986,9 @@ internal fun WebDavDriveHook.updateHomeOnlineCompletionSearchResults(viewModel: 
     rememberHomeViewModelDependencies(viewModel)
     runCatching {
         val updateMethod = viewModel.javaClass.superclass?.methods?.firstOrNull {
-            it.name == "updateUiState" && it.parameterTypes.size == 1
+            it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
         } ?: viewModel.javaClass.methods.first {
-            it.name == "updateUiState" && it.parameterTypes.size == 1
+            it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
         }
         updateMethod.apply { isAccessible = true }.invoke(
             viewModel,
@@ -1225,7 +1219,7 @@ internal fun WebDavDriveHook.onlineCompletionSearchTextColors(composer: Any): In
         val scheme = colorScheme(composer)
         val title = composeColorToArgb(scheme.longMethod("getOnBackground"))
         val author = runCatching { composeColorToArgb(scheme.longMethod("getOnSurfaceVariant")) }
-            .getOrElse { composeColorToArgb(themeOnBackgroundVariant(composer)) }
+            .getOrElse { title }
         intArrayOf(title, author, withAlpha(author, 210))
     }.getOrElse {
         XposedBridge.log("$LOG_PREFIX failed to resolve online completion search theme colors: ${it.stackTraceToString()}")
@@ -1254,8 +1248,8 @@ internal fun WebDavDriveHook.homeSearchTapMethod(): Method = synchronized(method
         val matched = candidates.filter { candidate ->
             val types = candidate.parameterTypes
             types.size == 2 &&
-                types[0].name == INTENT_RECEIVER_CLASS &&
-                types[1].name == CLOUD_BOOK_CLASS
+                typeMatches(types[0], INTENT_RECEIVER_CLASS) &&
+                typeMatches(types[1], CLOUD_BOOK_CLASS)
         }.toList()
         (
             matched.firstOrNull { it.name.startsWith("SearchResult") }

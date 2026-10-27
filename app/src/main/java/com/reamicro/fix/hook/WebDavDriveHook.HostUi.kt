@@ -1,4 +1,12 @@
 package com.reamicro.fix.hook
+
+import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.B2NativeUi
+import com.reamicro.fix.core.HostSymbols
+
+import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.typeMatches
+
 import com.reamicro.fix.notification.setReaMicroSmallIcon
 
 import android.app.Notification
@@ -169,17 +177,7 @@ internal fun WebDavDriveHook.renderBookLocalActionDivider(composer: Any) {
             (args?.getOrNull(0) as? View)?.setBackgroundColor(color)
             targetUnit()
         }
-        cls(ANDROID_VIEW_KT_CLASS).declaredMethods.first {
-            it.name == ANDROID_VIEW_METHOD && it.parameterTypes.size == 6
-        }.apply { isAccessible = true }.invoke(
-            null,
-            factory,
-            heightModifier(widthModifier(modifierInstance(), 0.8f), 56f),
-            update,
-            composer,
-            0,
-            0,
-        )
+        androidViews.render(factory, heightModifier(widthModifier(modifierInstance(), 0.8f), 56f), composer, update)
     }.onFailure {
         logWebDav("failed to render update/group divider: ${it.message}")
     }
@@ -277,9 +275,9 @@ internal fun WebDavDriveHook.iconImageVectorMethod(): Method =
     synchronized(methodCache) {
         methodCache.getOrPut("$ICON_KT_CLASS#$ICON_METHOD/ImageVector") {
             cls(ICON_KT_CLASS).declaredMethods.firstOrNull {
-                it.name == ICON_METHOD &&
+                it.hostNameMatches(ICON_METHOD) &&
                     it.parameterTypes.size == 7 &&
-                    it.parameterTypes.firstOrNull()?.name == IMAGE_VECTOR_CLASS
+                    typeMatches(it.parameterTypes.firstOrNull(), IMAGE_VECTOR_CLASS)
             }?.apply { isAccessible = true }
                 ?: error("$ICON_KT_CLASS.$ICON_METHOD ImageVector overload not found")
         }
@@ -307,7 +305,7 @@ internal fun WebDavDriveHook.renderOnlineCompletionUpdateDivider(composer: Any) 
 
 internal fun WebDavDriveHook.rowWeightModifier(rowScope: Any, modifier: Any): Any =
     rowScope.javaClass.methods.first {
-        it.name == "weight" && it.parameterTypes.size == 3
+        it.hostNameMatches("weight") && it.parameterTypes.size == 3
     }.invoke(rowScope, modifier, 1f, true)
 
 internal fun WebDavDriveHook.sizeModifier(baseModifier: Any, size: Int): Any =
@@ -405,19 +403,26 @@ internal fun WebDavDriveHook.navigateNextImageVector(): Any? =
     }.getOrNull()
 
 internal fun WebDavDriveHook.colorScheme(composer: Any): Any {
+    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
+        return B2NativeUi(classLoader).theme(composer, "getColorScheme")
+    }
     val materialTheme = staticObject(MATERIAL_THEME_CLASS, "INSTANCE")
     val stable = staticInt(MATERIAL_THEME_CLASS, "\$stable")
     return method(MATERIAL_THEME_CLASS, "getColorScheme", 2).invoke(materialTheme, composer, stable)
 }
 
 internal fun WebDavDriveHook.typography(composer: Any): Any {
+    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
+        return B2NativeUi(classLoader).theme(composer, "getTypography")
+    }
     val materialTheme = staticObject(MATERIAL_THEME_CLASS, "INSTANCE")
     val stable = staticInt(MATERIAL_THEME_CLASS, "\$stable")
     return method(MATERIAL_THEME_CLASS, "getTypography", 2).invoke(materialTheme, composer, stable)
 }
 
 internal fun WebDavDriveHook.modifierInstance(): Any =
-    staticObject(MODIFIER_CLASS, "INSTANCE")
+    if (HostSymbols.profileId == "2.3.3-b4") B2NativeUi(classLoader).modifier()
+    else staticObject(MODIFIER_CLASS, "INSTANCE")
 
 internal fun WebDavDriveHook.showToast(message: String) {
     val activity = activityProvider()
@@ -433,10 +438,14 @@ internal fun WebDavDriveHook.showToast(message: String) {
 }
 
 internal fun WebDavDriveHook.fillMaxSizeModifier(): Any {
+    if (HostSymbols.profileId == "2.3.3-b4") {
+        val ui = B2NativeUi(classLoader)
+        return ui.fillSize(ui.modifier())
+    }
     val modifier = emptyModifier()
     return runCatching {
         cls(SIZE_KT_CLASS).declaredMethods.first {
-        it.name == FILL_MAX_SIZE_METHOD && it.parameterTypes.size == 2
+        it.hostNameMatches(FILL_MAX_SIZE_METHOD) && it.parameterTypes.size == 2
         }.apply { isAccessible = true }.invoke(null, modifier, 1f)
     }.getOrElse {
         XposedBridge.log("$LOG_PREFIX failed to apply fillMaxSize modifier: ${it.stackTraceToString()}")
@@ -445,10 +454,14 @@ internal fun WebDavDriveHook.fillMaxSizeModifier(): Any {
 }
 
 internal fun WebDavDriveHook.fillMaxWidthModifier(): Any {
+    if (HostSymbols.profileId == "2.3.3-b4") {
+        val ui = B2NativeUi(classLoader)
+        return ui.fillWidth(ui.modifier())
+    }
     val modifier = emptyModifier()
     return runCatching {
         cls(SIZE_KT_CLASS).declaredMethods.first {
-            it.name == FILL_MAX_WIDTH_METHOD && it.parameterTypes.size == 2
+            it.hostNameMatches(FILL_MAX_WIDTH_METHOD) && it.parameterTypes.size == 2
         }.apply { isAccessible = true }.invoke(null, modifier, 1f)
     }.getOrElse {
         XposedBridge.log("$LOG_PREFIX failed to apply fillMaxWidth modifier: ${it.stackTraceToString()}")
@@ -460,7 +473,7 @@ internal fun WebDavDriveHook.startPaddingModifier(startDp: Int): Any {
     val modifier = emptyModifier()
     return runCatching {
         cls(PADDING_KT_CLASS).declaredMethods.first {
-            it.name == PADDING_ABSOLUTE_DEFAULT_METHOD && it.parameterTypes.size == 7
+            it.hostNameMatches(PADDING_ABSOLUTE_DEFAULT_METHOD) && it.parameterTypes.size == 7
         }.apply { isAccessible = true }.invoke(
             null,
             modifier,
@@ -480,16 +493,17 @@ internal fun WebDavDriveHook.startPaddingModifier(startDp: Int): Any {
 internal fun WebDavDriveHook.udp(value: Int): Float =
     runCatching {
         cls(UNIT_EXT_KT_CLASS).declaredMethods.first {
-            it.name == UDP_METHOD && it.parameterTypes.size == 1 && it.parameterTypes[0] == java.lang.Integer.TYPE
+            it.hostNameMatches(UDP_METHOD) && it.parameterTypes.size == 1 && it.parameterTypes[0] == java.lang.Integer.TYPE
         }.apply { isAccessible = true }.invoke(null, value) as Float
     }.getOrDefault(value.toFloat())
 
 internal fun WebDavDriveHook.udp(value: Float): Float = value
 
 internal fun WebDavDriveHook.emptyModifier(): Any {
+    if (HostSymbols.profileId == "2.3.3-b4") return B2NativeUi(classLoader).modifier()
     val modifierClass = cls(MODIFIER_CLASS)
     return runCatching {
-        modifierClass.getField("INSTANCE").apply { isAccessible = true }.get(null)
+        modifierClass.hostField("INSTANCE").apply { isAccessible = true }.get(null)
     }.recoverCatching {
         modifierClass.getField("Companion").apply { isAccessible = true }.get(null)
     }.recoverCatching {
@@ -527,10 +541,7 @@ internal fun WebDavDriveHook.onlineCompletionRenderTypeForSource(source: OnlineS
 internal fun WebDavDriveHook.isOnlineCompletionRenderType(type: Int): Boolean =
     onlineCompletionRenderTitles.containsKey(type)
 
-internal fun cloudPathOf(value: Any?): String =
-    value?.javaClass?.methods?.firstOrNull {
-        it.name == "getPath" && it.parameterTypes.isEmpty()
-    }?.apply { isAccessible = true }?.invoke(value)?.toString().orEmpty()
+internal fun cloudPathOf(value: Any?): String = value?.callString("getPath").orEmpty()
 
 internal fun setOnlineCompletionSmallIcon(builder: Notification.Builder) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -562,9 +573,9 @@ internal fun WebDavDriveHook.withAlpha(color: Int, alpha: Int): Int =
 internal fun WebDavDriveHook.solidColor(argb: Long): Any {
     val colorKt = cls(COLOR_KT_CLASS)
     val colorMethod = colorKt.declaredMethods.firstOrNull {
-        it.name == "Color" && it.parameterTypes.size == 1 && it.parameterTypes[0] == java.lang.Long.TYPE
+        it.hostNameMatches("Color") && it.parameterTypes.size == 1 && it.parameterTypes[0] == java.lang.Long.TYPE
     } ?: colorKt.declaredMethods.first {
-        it.name == "Color" && it.parameterTypes.size == 1 && it.parameterTypes[0] == java.lang.Integer.TYPE
+        it.hostNameMatches("Color") && it.parameterTypes.size == 1 && it.parameterTypes[0] == java.lang.Integer.TYPE
     }
     colorMethod.isAccessible = true
     val color = if (colorMethod.parameterTypes[0] == java.lang.Long.TYPE) {
