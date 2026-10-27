@@ -26,6 +26,8 @@ internal data class HomeSearchRenderContext(
     val intentReceiver: Any,
     val generation: Long,
     var rendered: Boolean = false,
+    var wrapped: Boolean = false,
+    val navGraphScope: Any? = null,
 )
 
 internal data class HomeSearchSection(
