@@ -169,3 +169,17 @@
 - **下一步**：用户验收通过后继续 B4 其余功能适配（文件编辑→图书结构→
   关联补全→阅读高亮），然后推进 RC2+ 版本的 dexkit 动态识别。
 
+## 10. 2026-10-28 卡片样式与点击双修复（已实测）
+
+- 用户复查发现第 9 节把整行交还宿主后，在线补全结果卡片恢复成宿主原生样式，
+  标题字号、作者/元信息行和卡片留白均与模块样式不一致。
+- 修复改为继续短路 B4 宿主 `CloudBookRow` 并渲染模块自定义 AndroidView 卡片；
+  在 AndroidView 外层 Compose `Modifier` 上通过 `B2NativeUi.clickable` 注入点击，
+  不再依赖 AndroidView 子 View 的 `setOnClickListener`。
+- K50U 实测：搜索 `shuqi` 返回 5 条，卡片恢复“标题 / 作者 / 连载、字数、章节”三行样式；
+  点击首条产生 `online completion tap` 并启动 `mode=FULL` 下载任务。
+  验证后已 force-stop 并重新启动阅微以终止长任务，未重启手机、未操作 MT。
+- 回归：`testDebugUnitTest` + `assembleRelease` 通过；
+  release SHA-256 `D7F14C670179147F6C531C78CFCF9CD417F696933E56CD07F0A754D91795CAB8`。
+  新进程 `14600`：`profile=2.3.3-b4 mapped=357/357`、`hooks=131/131`。
+

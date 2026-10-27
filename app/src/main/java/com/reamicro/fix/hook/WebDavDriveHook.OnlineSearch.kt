@@ -86,7 +86,19 @@ internal fun WebDavDriveHook.renderOnlineCompletionCloudBookSearchRow(book: Any,
         targetUnit()
     }
     runCatching {
-        androidViews.render(factory, fillMaxWidthModifier(), composer, update)
+        val baseModifier = fillMaxWidthModifier()
+        val rowModifier = if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+            // AndroidView 内部的 Android 点击在 B4 Compose 树中会被拦截，
+            // 在 Compose 层补点击语义，同时继续渲染模块自定义卡片。
+            val click = functionProxy("OnlineCompletionSearchRowClick", FUNCTION0_CLASS) {
+                handleOnlineCompletionSearchTap(book)
+                targetUnit()
+            }
+            com.reamicro.fix.core.B2NativeUi(classLoader).clickable(baseModifier, click)
+        } else {
+            baseModifier
+        }
+        androidViews.render(factory, rowModifier, composer, update)
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX failed to render online completion search row: ${it.stackTraceToString()}")
     }

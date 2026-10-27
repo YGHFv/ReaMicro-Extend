@@ -387,7 +387,6 @@ internal fun WebDavDriveHook.hookOnlineCompletionHomeCloudBookRow() {
             it.hostNameMatches(HOME_CLOUD_BOOK_ROW_METHOD) &&
                 it.parameterTypes.size in setOf(6, 7)
         }.apply { isAccessible = true }
-        val isB4 = com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4"
         XposedBridge.hookMethod(method, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 // B4 CloudBookRow 签名仍是 (scope, book, enabled, tap, composer, changed)。
@@ -395,28 +394,7 @@ internal fun WebDavDriveHook.hookOnlineCompletionHomeCloudBookRow() {
                 val path = cloudPathOf(book)
                 val target = onlineCompletionSearchTargets[path] ?: return
                 val composer = param.args?.getOrNull(4) ?: return
-                if (isB4) {
-                    // B4 行内不再包含在线补全卡片所需的扩展信息，宿主实现会把
-                    // CloudBook 当本地书渲染；注入宿主可点击委托后由宿主原生行承载
-                    // 点击，回调同时驱动宿主导航与模块下载，避免整行替换后
-                    // Compose 点击链被吞。
-                    val hostTap = param.args?.getOrNull(3)
-                    val delegate = functionProxy("OnlineCompletionSearchTapDelegate", FUNCTION1_CLASS) { args ->
-                        runCatching {
-                            hostTap?.let { tap ->
-                                tap.javaClass.methods.first { it.hostNameMatches("invoke") && it.parameterTypes.size == 1 }
-                                    .apply { isAccessible = true }
-                                    .invoke(tap, args?.getOrNull(0))
-                            }
-                        }.onFailure {
-                            XposedBridge.log("$LOG_PREFIX failed to delegate online completion tap: ${it.stackTraceToString()}")
-                        }
-                        handleOnlineCompletionSearchTap(book)
-                        targetUnit()
-                    }
-                    param.args[3] = delegate
-                    return
-                }
+                // 保留模块卡片样式；B4 的 Compose 点击语义由 AndroidView 外层 Modifier 提供。
                 renderOnlineCompletionCloudBookSearchRow(book, target, composer)
                 param.result = targetUnit()
             }
