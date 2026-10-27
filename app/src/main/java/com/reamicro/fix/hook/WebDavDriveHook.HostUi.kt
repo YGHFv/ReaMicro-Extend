@@ -27,7 +27,9 @@ import com.reamicro.fix.logging.logWebDav
 internal fun WebDavDriveHook.renderOnlineCompletionUpdateRowFromLocalSheet(composer: Any?) {
     if (onlineCompletionUpdateRowInjecting.get() == true) return
     if (onlineCompletionCombinedGroupRowHooked) return
-    val book = onlineCompletionLocalSheetBook.get() ?: run {
+    val book = onlineCompletionLocalSheetBook.get()
+        ?: onlineCompletionLastLocalSheetBookRef?.get()
+        ?: run {
         logWebDav("online completion update row skipped: no local sheet book composer=${composer != null}")
         return
     }
@@ -345,14 +347,21 @@ internal fun WebDavDriveHook.paddingModifier(
     end: Int,
     bottom: Int,
 ): Any =
-    method(PADDING_KT_CLASS, PADDING_METHOD, 5).invoke(
-        null,
-        baseModifier,
-        udp(start),
-        udp(top),
-        udp(end),
-        udp(bottom),
-    )
+    // B4 的 PaddingKt 没有保留 padding-qDBjuR0 门面名，改走已核实的原生 ABI，避免注入时抛异常被吞。
+    if (HostSymbols.profileId == "2.3.3-b4") {
+        val ui = B2NativeUi(classLoader)
+        runCatching { ui.padding(baseModifier, ui.dp(start), ui.dp(top), ui.dp(end), ui.dp(bottom)) }
+            .getOrNull() ?: baseModifier
+    } else {
+        method(PADDING_KT_CLASS, PADDING_METHOD, 5).invoke(
+            null,
+            baseModifier,
+            udp(start),
+            udp(top),
+            udp(end),
+            udp(bottom),
+        )
+    }
 
 internal fun WebDavDriveHook.clickableModifier(baseModifier: Any, name: String, onClick: () -> Unit): Any =
     method(CLICKABLE_KT_CLASS, CLICKABLE_DEFAULT_METHOD, 9).invoke(

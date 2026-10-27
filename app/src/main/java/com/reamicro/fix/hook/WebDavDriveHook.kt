@@ -58,6 +58,7 @@ class WebDavDriveHook(
     )
 
     internal val methodCache = mutableMapOf<String, Method>()
+    internal val androidViews by lazy { com.reamicro.fix.core.HostAndroidViews(classLoader) }
 
     internal val syncAuthCardRender = ThreadLocal<SyncAuthCardRenderContext?>()
     internal val importUnauthRender = ThreadLocal<ImportUnauthRenderContext?>()
@@ -94,6 +95,7 @@ class WebDavDriveHook(
     internal val onlineCompletionBookRowInfoDepth = ThreadLocal<Int>()
     internal val onlineCompletionLocalSheetBook = ThreadLocal<Any?>()
     internal val onlineCompletionLocalSheetDepth = ThreadLocal<Int>()
+    @Volatile internal var onlineCompletionLastLocalSheetBookRef: WeakReference<Any>? = null
     internal val onlineCompletionUpdateRowInjecting = ThreadLocal<Boolean>()
     @Volatile internal var onlineCompletionCombinedGroupRowHooked = false
     @Volatile internal var onlineCompletionSourceLabelHooked = false

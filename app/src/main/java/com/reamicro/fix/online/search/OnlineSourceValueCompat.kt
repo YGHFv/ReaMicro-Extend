@@ -159,14 +159,18 @@ internal fun inferOnlineStatusFromLastChapterTitle(raw: String): String {
     }
 }
 
-internal fun cleanOnlineChapterTitleValue(raw: String): String =
-    raw.replace(
-        Regex("""\s*[（(]\s*[零〇一二三四五六七八九十百两0-9]+\s*更\s*[）)]\s*$"""),
-        "",
-    ).trim()
+// 目录映射对每章都会调用，正则复用避免反复编译 Pattern。
+private val ONLINE_CHAPTER_UPDATE_SUFFIX_REGEX =
+    Regex("""\s*[（(]\s*[零〇一二三四五六七八九十百两0-9]+\s*更\s*[）)]\s*$""")
+private val ONLINE_CHAPTER_END_TAG_REGEX = Regex("""[（(]\s*本[章韋韦]完\s*[）)]""")
+
+internal fun cleanOnlineChapterTitleValue(raw: String): String {
+    if (raw.isBlank()) return ""
+    return ONLINE_CHAPTER_UPDATE_SUFFIX_REGEX.replace(raw, "").trim()
+}
 
 internal fun cleanOnlineChapterContentValue(raw: String): String =
-    raw.replace(Regex("""[（(]\s*本[章韋韦]完\s*[）)]"""), " ")
+    ONLINE_CHAPTER_END_TAG_REGEX.replace(raw, " ")
 
 internal fun onlineHttpErrorDetail(rawBody: String): String {
     val text = rawBody.trim()

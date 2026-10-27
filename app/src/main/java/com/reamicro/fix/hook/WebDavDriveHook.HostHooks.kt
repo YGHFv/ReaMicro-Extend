@@ -23,6 +23,7 @@ import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.xposed.XposedHelpers
 import com.reamicro.fix.xposed.callbacks.XCallback
 import java.lang.ref.WeakReference
+import java.lang.reflect.Modifier
 import java.net.URL
 import java.util.UUID
 import kotlin.math.max
@@ -87,11 +88,14 @@ internal fun WebDavDriveHook.hookOnlineCompletionBookLocalSheet() {
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
+                        val book = param.args?.getOrNull(0) ?: return
                         onlineCompletionLocalSheetDepth.set((onlineCompletionLocalSheetDepth.get() ?: 0) + 1)
-                        onlineCompletionLocalSheetBook.set(param.args?.getOrNull(0))
+                        onlineCompletionLocalSheetBook.set(book)
+                        // B4 的 f 返回后才调用 g，ThreadLocal 会被清空；保留弱引用供同一菜单后续组合读取。
+                        onlineCompletionLastLocalSheetBookRef = WeakReference(book)
                         logWebDav(
                             "online completion local sheet book captured via=${method.name} " +
-                                "title=${param.args?.getOrNull(0)?.callString("getTitle").orEmpty()}",
+                                "title=${book.callString("getTitle").orEmpty()}",
                         )
                     }
 
@@ -103,6 +107,7 @@ internal fun WebDavDriveHook.hookOnlineCompletionBookLocalSheet() {
                 })
             }
 
+        hookOnlineCompletionBookGroupRow(sheetClass)
         val fileBackupMethods = sheetClass.declaredMethods.filter {
             it.hostNameMatches(FILE_BACKUP_METHOD) && it.parameterTypes.size == 5
         }
@@ -153,7 +158,6 @@ internal fun WebDavDriveHook.hookOnlineCompletionBookLocalSheet() {
             }
         }
         hookOnlineCompletionBookSourceLabel()
-        hookOnlineCompletionBookGroupRow(sheetClass)
         logWebDav(
             "online completion local sheet hook installed " +
                 "contexts=${localSheetContextMethods.size} backups=${fileBackupMethods.size}",
@@ -180,7 +184,9 @@ internal fun WebDavDriveHook.hookOnlineCompletionBookSourceLabel() {
             method.isAccessible = true
             XposedBridge.hookMethod(method, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    val book = onlineCompletionLocalSheetBook.get() ?: return
+                    val book = onlineCompletionLocalSheetBook.get()
+                        ?: onlineCompletionLastLocalSheetBookRef?.get()
+                        ?: return
                     val info = onlineImportedBookSourceInfo(book) ?: return
                     val sourceName = info.sourceName.takeUnless { it.isBlank() || it == "未知源" } ?: return
                     if (param.result == sourceName) return
@@ -203,40 +209,87 @@ internal fun WebDavDriveHook.hookOnlineCompletionBookSourceLabel() {
 }
 
 internal fun WebDavDriveHook.hookOnlineCompletionBookGroupRow(sheetClass: Class<*>) {
-    val methods = sheetClass.declaredMethods.filter {
+    val actionRowMethods = sheetClass.declaredMethods.filter {
         it.hostNameMatches(BOOK_META_ACTION_ROW_METHOD) &&
-            it.parameterTypes.size == 6 &&
-            it.parameterTypes.getOrNull(1) == String::class.java &&
+            it.parameterTypes.size >= 5 &&
             it.parameterTypes.getOrNull(2) == String::class.java &&
-            it.parameterTypes.getOrNull(3)?.name == FUNCTION0_CLASS &&
-            it.parameterTypes.getOrNull(4)?.name == COMPOSER_CLASS
+            typeMatches(it.parameterTypes.getOrNull(3), FUNCTION0_CLASS) &&
+            typeMatches(it.parameterTypes.getOrNull(4), COMPOSER_CLASS)
     }
-    methods.forEach { method ->
+    // B4 的 BookMetaActionRow(a) 是通用参数化行，实际固定绘制“分组”的
+    // 5 参数 Composable(g) 不带 Modifier；按 ABI 识别，避免把逻辑名只映射到 a。
+    val groupRowMethods = sheetClass.declaredMethods.filter {
+        Modifier.isStatic(it.modifiers) &&
+            it.returnType == Void.TYPE &&
+            it.parameterTypes.size == 5 &&
+            it.parameterTypes.getOrNull(1) == String::class.java &&
+            typeMatches(it.parameterTypes.getOrNull(2), FUNCTION0_CLASS) &&
+            typeMatches(it.parameterTypes.getOrNull(3), COMPOSER_CLASS)
+    }
+    logWebDav(
+        "online completion action row candidates=" +
+            actionRowMethods.joinToString { candidate ->
+                "${candidate.name}/${candidate.parameterTypes.joinToString { it.simpleName }}"
+            } +
+            " group=" +
+            groupRowMethods.joinToString { candidate ->
+                "${candidate.name}/${candidate.parameterTypes.joinToString { it.simpleName }}"
+            },
+    )
+    val updateRowMethod = actionRowMethods.firstOrNull()
+    groupRowMethods.forEach { method ->
         method.isAccessible = true
         XposedBridge.hookMethod(method, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 if (onlineCompletionUpdateRowInjecting.get() == true) return
-                if (param.args?.getOrNull(1)?.toString() != "分组") return
-                val book = onlineCompletionLocalSheetBook.get() ?: return
+                // B4 的 g 已把“分组”写在方法体内，String 参数是分组名而不是行标题。
+                // 这里只按已识别的 ABI 触发，避免沿用旧版 args[1] == "分组" 判定。
+                val book = onlineCompletionLocalSheetBook.get()
+                    ?: onlineCompletionLastLocalSheetBookRef?.get()
+                logWebDav(
+                    "online completion group row invoked group=${param.args?.getOrNull(1)?.toString().orEmpty()} " +
+                        "book=${book?.callString("getTitle").orEmpty()}",
+                )
+                book ?: return
                 val info = onlineImportedBookSourceInfo(book) ?: return
                 val groupIcon = param.args?.getOrNull(0) ?: return
-                val groupClick = param.args?.getOrNull(3) ?: return
-                val composer = param.args?.getOrNull(4) ?: return
-                onlineCompletionUpdateRowInjecting.set(true)
-                runCatching {
-                    renderOnlineCompletionUpdateGroupActionRow(book, info, groupIcon, groupClick, composer)
-                    param.result = targetUnit()
+                val composer = param.args?.getOrNull(3) ?: return
+                val hostUpdateRowMethod = updateRowMethod ?: return
+                val updateIcon = onlineCompletionUpdateImageVector() ?: groupIcon
+                val updateModifier = paddingModifier(
+                    modifierInstance(),
+                    start = 12,
+                    top = 0,
+                    end = 0,
+                    bottom = 0,
+                )
+                try {
+                    onlineCompletionUpdateRowInjecting.set(true)
+                    val updateClick = functionProxy("OnlineCompletionChapterUpdateActionRow", FUNCTION0_CLASS) {
+                        startOnlineCompletionChapterUpdate(book, info)
+                        targetUnit()
+                    }
+                    hostUpdateRowMethod.invoke(
+                        null,
+                        updateModifier,
+                        updateIcon,
+                        "更新",
+                        updateClick,
+                        composer,
+                        0,
+                    )
                     logWebDav("online completion update/group row rendered title=${book.callString("getTitle")} source=${info.sourceName}")
-                }.onFailure {
-                    XposedBridge.log("$LOG_PREFIX online completion update/group row render failed: ${it.stackTraceToString()}")
+                } catch (error: Throwable) {
+                    XposedBridge.log("$LOG_PREFIX online completion update/group row render failed: ${error.stackTraceToString()}")
+                } finally {
+                    onlineCompletionUpdateRowInjecting.remove()
                 }
-                onlineCompletionUpdateRowInjecting.remove()
             }
         })
     }
-    onlineCompletionCombinedGroupRowHooked = methods.isNotEmpty()
-    if (methods.isNotEmpty()) {
-        logWebDav("online completion update/group row hook installed: ${methods.size}")
+    onlineCompletionCombinedGroupRowHooked = groupRowMethods.isNotEmpty()
+    if (groupRowMethods.isNotEmpty()) {
+        logWebDav("online completion update/group row hook installed: ${groupRowMethods.size}")
     }
 }
 

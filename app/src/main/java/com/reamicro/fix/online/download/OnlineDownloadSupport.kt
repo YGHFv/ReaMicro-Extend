@@ -1,5 +1,10 @@
 package com.reamicro.fix.online.download
 
+import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.xposed.XposedHelpers
+
 import android.app.NotificationManager
 import android.content.Context
 import android.os.SystemClock
@@ -33,6 +38,7 @@ import com.reamicro.fix.hook.cloudPathOf
 import com.reamicro.fix.hook.onlineCompletionFailedLogFile
 import com.reamicro.fix.hook.sendOnlineCompletionCancelBroadcastToModule
 import com.reamicro.fix.logging.logWebDav
+import com.reamicro.fix.core.typeMatches
 
 internal fun throwIfOnlineCompletionDownloadCancelled(task: OnlineCompletionDownloadTask) {
     if (task.cancelRequested || Thread.currentThread().isInterrupted) {
@@ -104,6 +110,38 @@ internal fun paragraphCommentCacheDir(filesDir: File): File =
     File(filesDir, OnlineParagraphCommentCacheStore.DIRECTORY_NAME)
 
 internal fun cancelExistingBackupTasks(tracker: Any, bookId: Long) {
+    if (HostSymbols.profileId == "2.3.3-b4") {
+        val loader = tracker.javaClass.classLoader
+        val gate = tracker.javaClass.getDeclaredField("a").get(tracker)
+        val lock = gate.javaClass.getDeclaredField("a").get(gate) as java.util.concurrent.locks.ReentrantLock
+        lock.lock()
+        try {
+            val flow = tracker.javaClass.getDeclaredField("d").get(tracker)
+            val works = XposedHelpers.callMethod(flow, "getValue") as List<*>
+            val statusClass = loader.hostClass(WORK_STATUS_CLASS)
+            val running = statusClass.enumConstants.single { (it as Enum<*>).name == "Running" }
+            val cancelled = statusClass.enumConstants.single { (it as Enum<*>).name == "Cancelled" }
+            val stateClass = loader.hostClass(WORK_STATE_CLASS)
+            val constructor = stateClass.getDeclaredConstructor(
+                statusClass, Int::class.javaPrimitiveType, String::class.java, String::class.java, String::class.java,
+            )
+            val update = tracker.javaClass.getDeclaredMethod("d", String::class.java, stateClass)
+            works.filterNotNull().forEach { work ->
+                val kind = work.javaClass.getDeclaredField("b").get(work) as String
+                val label = work.javaClass.getDeclaredField("c").get(work) as String
+                val status = work.javaClass.getDeclaredField("d").get(work)
+                if (kind.startsWith("backup") && label == bookId.toString() && status == running) {
+                    val id = work.javaClass.getDeclaredField("a").get(work) as String
+                    val progress = work.javaClass.getDeclaredField("e").getInt(work)
+                    val name = work.javaClass.getDeclaredField("h").get(work) as? String
+                    update.invoke(tracker, id, constructor.newInstance(cancelled, progress, null, null, name))
+                }
+            }
+        } finally {
+            lock.unlock()
+        }
+        return
+    }
     runCatching {
         val worksFlow = tracker.javaClass.methods.first {
             it.name == "works" && it.parameterTypes.isEmpty()
@@ -351,7 +389,7 @@ internal fun onlineChapterVolumeTitle(node: Any?): String =
         "group_name",
         "groupName",
     ).asSequence()
-        .map { onlineJsonString(node, it).cleanOnlineText() }
+        .mapNotNull { rule -> onlineJsonString(node, rule).takeIf { it.isNotBlank() }?.cleanOnlineText() }
         .firstOrNull { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
         .orEmpty()
 
@@ -703,7 +741,7 @@ internal fun enqueueNativeImport(workerManager: Any, platformFile: Any): Any? {
 
     val candidates = (workerManager.javaClass.methods.asSequence() +
         workerManager.javaClass.declaredMethods.asSequence())
-        .filter { it.name == WORKER_ENQUEUE_IMPORT_METHOD }
+        .filter { it.hostNameMatches(WORKER_ENQUEUE_IMPORT_METHOD) }
         .distinct()
         .toList()
 
@@ -745,9 +783,9 @@ internal fun enqueueNativeImport(workerManager: Any, platformFile: Any): Any? {
 internal fun findImportBookMethod(bookshelf: Any): Method =
     (bookshelf.javaClass.methods.asSequence() + bookshelf.javaClass.declaredMethods.asSequence())
         .filter {
-            it.name == BOOKSHELF_IMPORT_BOOK_METHOD &&
+            it.hostNameMatches(BOOKSHELF_IMPORT_BOOK_METHOD) &&
                 it.parameterTypes.size >= 6 &&
-                it.parameterTypes.last().name == KOTLIN_CONTINUATION_CLASS
+                typeMatches(it.parameterTypes.last(), KOTLIN_CONTINUATION_CLASS)
         }
         .minByOrNull { it.parameterTypes.size }
         ?.apply { isAccessible = true }

@@ -1,5 +1,14 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.hostStaticMethod
+import com.reamicro.fix.core.HostDexKit
+
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.typeMatches
+
+
 import com.reamicro.fix.hook.WebDavDriveHook.OnlineChapterBatchSession
 
 import android.app.Notification
@@ -239,6 +248,13 @@ internal fun WebDavDriveHook.onlineImportedBookSourceInfo(book: Any): OnlineImpo
     val publisher = book.callString("getPublisher")
     val uri = book.callString("getUri")
     val epubMetadata = onlineCompletionGeneratedEpubMetadata(book)
+    logWebDav(
+        "online completion source probe title=${book.callString("getTitle")} " +
+            "dirOk=${runCatching { bookDirectory(book).canonicalFile.isDirectory }.getOrDefault(false)} " +
+            "opfOk=${runCatching { File(bookDirectory(book).canonicalFile, "OEBPS/content.opf").isFile }.getOrDefault(false)} " +
+            "marker=${epubMetadata.hasMarker} srcId=${epubMetadata.sourceId} detail=${epubMetadata.detailUrl.take(60)} " +
+            "uuid=${book.callString("getUuid")} backupId=${bookBackupIdOf(book).take(60)}",
+    )
     val sourceIdCandidates = listOf(
         epubMetadata.sourceId,
         onlineSourceIdFromEncodedValue(backupCode),
@@ -756,7 +772,7 @@ internal fun WebDavDriveHook.createOnlineCompletionTrackedTask(tracker: Any, boo
     runCatching {
         val id = "online-${UUID.randomUUID()}"
         tracker.javaClass.methods.first {
-            it.name == "createTask" && it.parameterTypes.size == 4
+            it.hostNameMatches("createTask") && it.parameterTypes.size == 4
         }.apply { isAccessible = true }.invoke(
             tracker,
             id,
@@ -1179,14 +1195,21 @@ internal fun WebDavDriveHook.loadOnlineCompletionToc(
     target: OnlineDownloadTarget,
     onProgress: (Int, String) -> Unit,
 ): OnlineTocSnapshot {
+    val startedAt = System.nanoTime()
     val detailUrl = target.result.detailUrl.ifBlank { error("搜索结果缺少详情页地址") }
     onProgress(3, "读取详情页")
+    val detailStartedAt = System.nanoTime()
     val detail = OnlineConcurrentRateLimiter.withLimitBlocking(target.source) {
         requestOnlineSearch(target.source, detailUrl)
     }
-    logWebDav("online completion detail ok url=${detail.url} bytes=${detail.body.length}")
+    val detailElapsedMs = (System.nanoTime() - detailStartedAt) / 1_000_000
+    logWebDav(
+        "online completion detail ok url=${detail.url} bytes=${detail.body.length} " +
+            "elapsedMs=$detailElapsedMs",
+    )
     val tocUrl = buildOnlineTocUrl(target.source, detail.url, detail.body)
     logWebDav("online completion toc url=${tocUrl.ifBlank { detail.url }}")
+    val tocStartedAt = System.nanoTime()
     val toc = if (tocUrl.isBlank() || tocUrl == detail.url) {
         detail
     } else {
@@ -1195,6 +1218,13 @@ internal fun WebDavDriveHook.loadOnlineCompletionToc(
             requestOnlineSearch(target.source, tocUrl)
         }
     }
+    if (tocUrl.isNotBlank() && tocUrl != detail.url) {
+        logWebDav(
+            "online completion toc request ok bytes=${toc.body.length} " +
+                "elapsedMs=${(System.nanoTime() - tocStartedAt) / 1_000_000}",
+        )
+    }
+    val parseStartedAt = System.nanoTime()
     val chapters = parseOnlineToc(target.source, target.result, toc.url, toc.body)
     if (chapters.isEmpty()) {
         val hint = if (target.result.chapterCount > 0) {
@@ -1204,7 +1234,14 @@ internal fun WebDavDriveHook.loadOnlineCompletionToc(
         }
         error("在线源目录为空$hint，已停止导入：${target.source.name}")
     }
+    val parseElapsedMs = (System.nanoTime() - parseStartedAt) / 1_000_000
+    val enrichStartedAt = System.nanoTime()
     enrichOnlineTargetFromDetail(target, detail.body, detail.url, chapters.size)
+    logWebDav(
+        "online completion toc loaded chapters=${chapters.size} parseMs=$parseElapsedMs " +
+            "enrichMs=${(System.nanoTime() - enrichStartedAt) / 1_000_000} " +
+            "totalMs=${(System.nanoTime() - startedAt) / 1_000_000}",
+    )
     return OnlineTocSnapshot(detail = detail, toc = toc, chapters = chapters)
 }
 
@@ -1363,10 +1400,19 @@ internal fun WebDavDriveHook.isOnlineTocVolumeNode(
     title: String,
     hasChapterUrl: Boolean,
     baseUrl: String,
+    loginInfo: Map<String, String>? = null,
 ): Boolean {
     val explicitVolume = isVolumeRule.trim()
         .takeIf { it.isNotBlank() }
-        ?.let { onlineRuleValue(node, it, baseUrl, source = source).trim().lowercase(Locale.ROOT) }
+        ?.let {
+            onlineRuleValue(
+                node,
+                it,
+                baseUrl,
+                source = source,
+                loginInfo = loginInfo,
+            ).trim().lowercase(Locale.ROOT)
+        }
         ?.let { value ->
             when (value) {
                 "true", "1", "yes", "volume", "vol", "part", "group", "section" -> true
@@ -1376,7 +1422,7 @@ internal fun WebDavDriveHook.isOnlineTocVolumeNode(
         }
     val nodeType = listOf("$.type", "$.kind", "$.nodeType", "$.node_type", "type", "kind", "nodeType", "node_type")
         .asSequence()
-        .map { onlineJsonString(node, it).cleanOnlineText() }
+        .mapNotNull { rule -> onlineJsonString(node, rule).takeIf { it.isNotBlank() }?.cleanOnlineText() }
         .firstOrNull { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
         .orEmpty()
     return OnlineChapterUpdatePlanner.isVolumeNode(explicitVolume, nodeType, title, hasChapterUrl)
@@ -1740,9 +1786,18 @@ internal fun WebDavDriveHook.importOnlineCompletionBookLocked(file: File, target
         val unzipDirFile = unzipOnlineCompletionEpub(file)
         val unzipDir = okioPath(unzipDirFile)
         val booksDir = currentOnlineCompletionBooksDir(bookshelf)
+        logWebDav(
+            "online completion import target uid=${currentUserId(bookshelf) ?: -1L} " +
+                "booksDir=$booksDir",
+        )
         val imported = importOnlineCompletionEpubDirectory(unzipDir, booksDir)
         val bookDir = imported.first
         val opf = imported.second
+        val expectedRoot = booksDir.toString().trimEnd('/')
+        val actualBookDir = bookDir.toString()
+        if (actualBookDir != expectedRoot && !actualBookDir.startsWith("$expectedRoot/")) {
+            error("阅微 EPUB 导入目录越界：expected=$expectedRoot actual=$actualBookDir")
+        }
         val platformFile = platformFile(file)
         rememberPendingWebDavImport(
             platformFile = platformFile,
@@ -1756,22 +1811,41 @@ internal fun WebDavDriveHook.importOnlineCompletionBookLocked(file: File, target
                 "uuid=${callStringPath(opf, "metadata", "uuid", "value")}",
         )
         val importMethod = findImportBookMethod(bookshelf)
+        val importArgs = importBookArgs(
+            importMethod,
+            platformFile,
+            bookDir,
+            opf,
+            sourceUrl,
+            java.lang.Long.valueOf(file.length()),
+        )
+        logWebDav(
+            "online completion importBook invoking uid=${currentUserId(bookshelf) ?: -1L} " +
+                "method=${importMethod.name}/${importMethod.parameterTypes.size} " +
+                "argTypes=${importArgs.joinToString { it?.javaClass?.simpleName ?: "null" }} " +
+                "bookDir=${bookDir.toString().take(160)} opf=${opf.javaClass.simpleName}",
+        )
         val result = invokeSuspendBlocking(
             importMethod,
             bookshelf,
-            *importBookArgs(
-                importMethod,
-                platformFile,
-                bookDir,
-                opf,
-                sourceUrl,
-                java.lang.Long.valueOf(file.length()),
-            ),
+            *importArgs,
+        )
+        logWebDav(
+            "online completion importBook raw result=${result?.javaClass?.name ?: "null"} " +
+                "value=$result",
+        )
+        val importedRowId = onlineCompletionImportRowId(result)
+        logWebDav(
+            "online completion importBook result parts=" +
+                "first=${result?.let { onlineCompletionImportPart(it, "getFirst", "a") }?.let { "${it.javaClass.name}:$it" }} " +
+                "second=${result?.let { onlineCompletionImportPart(it, "getSecond", "b") }?.let { "${it.javaClass.name}:$it" }} " +
+                "rowId=${importedRowId ?: -1L}",
         )
         val importedBook = syncOnlineCompletionImportedBookMetadata(
             bookshelf = bookshelf,
             target = target,
             sourceUrl = sourceUrl,
+            importedRowId = importedRowId,
         )
         if (result != true && importedBook == null) {
             error("阅微导入未返回成功，且未找到书架记录：${target.result.name}")
@@ -1800,9 +1874,15 @@ internal fun WebDavDriveHook.syncOnlineCompletionImportedBookMetadata(
     bookshelf: Any,
     target: OnlineDownloadTarget,
     sourceUrl: String,
+    importedRowId: Long? = null,
 ): Any? =
     runCatching {
-        val imported = findOnlineCompletionImportedBook(bookshelf, target, sourceUrl) ?: return null
+        val imported = findOnlineCompletionImportedBook(
+            bookshelf,
+            target,
+            sourceUrl,
+            importedRowId,
+        ) ?: return null
         val bookDir = runCatching { bookDirectory(imported).canonicalFile }.getOrNull()
         val size = bookDir?.takeIf { it.isDirectory }?.let { bookDirectorySize(it) }
         val updated = copyBookWithBackupAndPublisher(
@@ -1831,9 +1911,29 @@ internal fun WebDavDriveHook.findOnlineCompletionImportedBook(
     bookshelf: Any,
     target: OnlineDownloadTarget,
     sourceUrl: String,
-): Any? =
-    findLocalBookByUrl(bookshelf, sourceUrl)
+    importedRowId: Long? = null,
+): Any? {
+    val located = importedRowId
+        ?.takeIf { it > 0L }
+        ?.let(::findLocalBookById)
+        ?: findLocalBookByUrl(bookshelf, sourceUrl)
         ?: findLocalBookByUrl(bookshelf, target.result.detailUrl)
+        ?: currentUserId(bookshelf)?.let { uid ->
+            findLocalBookByUuid(uid, onlineBookUuid(target))
+        }
+    if (located != null) return located
+
+    val targetTitle = target.result.name.normalizedOnlineCompletionTitle()
+    return listLocalBooks(bookshelf)
+        ?.asSequence()
+        ?.filterNotNull()
+        ?.firstOrNull { book ->
+            book.callString("getTitle").normalizedOnlineCompletionTitle() == targetTitle
+        }
+}
+
+private fun String.normalizedOnlineCompletionTitle(): String =
+    trim().replace(Regex("\\s+"), " ").lowercase()
 
 internal fun WebDavDriveHook.syncOnlineCompletionImportedBookSize(target: OnlineDownloadTarget) {
     runCatching {
@@ -1866,16 +1966,15 @@ internal fun WebDavDriveHook.syncOnlineCompletionImportedBookSize(target: Online
 internal fun WebDavDriveHook.importOnlineCompletionEpubDirectory(unzipDir: Any, booksDir: Any): Pair<Any, Any> {
     val managerClass = cls(EPUB_FILE_MANAGER_CLASS)
     val manager = runCatching {
-        managerClass.getDeclaredField("INSTANCE").apply { isAccessible = true }.get(null)
+        managerClass.hostField("INSTANCE").apply { isAccessible = true }.get(null)
     }.getOrNull() ?: error("阅微 EpubFileManager INSTANCE 未找到")
 
     val importMethod = (managerClass.methods.asSequence() + managerClass.declaredMethods.asSequence())
         .filter { candidate ->
-            candidate.name == EPUB_IMPORT_METHOD &&
-                candidate.returnType.name == KOTLIN_PAIR_CLASS &&
+            candidate.hostNameMatches(EPUB_IMPORT_METHOD) &&
                 candidate.parameterTypes.size >= 2 &&
-                candidate.parameterTypes[0].name == OKIO_PATH_CLASS &&
-                candidate.parameterTypes[1].name == OKIO_PATH_CLASS
+                typeMatches(candidate.parameterTypes[0], OKIO_PATH_CLASS) &&
+                typeMatches(candidate.parameterTypes[1], OKIO_PATH_CLASS)
         }
         .minByOrNull { it.parameterTypes.size }
         ?.apply { isAccessible = true }
@@ -1885,21 +1984,44 @@ internal fun WebDavDriveHook.importOnlineCompletionEpubDirectory(unzipDir: Any, 
     while (importArgs.size < importMethod.parameterTypes.size) importArgs.add(null)
     val pair = importMethod.invoke(manager, *importArgs.toTypedArray())
         ?: error("阅微 EpubFileManager.import 返回空")
-    val first = pair.javaClass.methods.first { it.name == "getFirst" && it.parameterTypes.isEmpty() }
-        .apply { isAccessible = true }
-        .invoke(pair)
+    // B4 将 Kotlin Pair 混淆成只有 a/b 字段的普通类，不能继续按 getFirst()/getSecond() 读取。
+    val first = onlineCompletionImportPart(pair, "getFirst", "a")
         ?: error("阅微 EpubFileManager.import 未返回 bookDir")
-    val second = pair.javaClass.methods.first { it.name == "getSecond" && it.parameterTypes.isEmpty() }
-        .apply { isAccessible = true }
-        .invoke(pair)
+    val second = onlineCompletionImportPart(pair, "getSecond", "b")
         ?: error("阅微 EpubFileManager.import 未返回 OPF")
+    logWebDav(
+        "online completion epub import returned type=${pair.javaClass.name} " +
+            "bookDir=${first.javaClass.simpleName} opf=${second.javaClass.simpleName}",
+    )
     return first to second
 }
 
+internal fun onlineCompletionImportPart(result: Any, getterName: String, fieldName: String): Any? =
+    runCatching {
+        result.javaClass.methods.firstOrNull {
+            it.hostNameMatches(getterName) && it.parameterTypes.isEmpty()
+        }?.apply { isAccessible = true }?.invoke(result)
+    }.getOrNull()
+        ?: runCatching {
+            result.javaClass.declaredFields.firstOrNull { it.name == fieldName }
+                ?.apply { isAccessible = true }
+                ?.get(result)
+        }.getOrNull()
+
+internal fun onlineCompletionImportRowId(result: Any?): Long? {
+    if (result == null) return null
+    val first = onlineCompletionImportPart(result, "getFirst", "a")
+    val second = onlineCompletionImportPart(result, "getSecond", "b")
+    // importBook 在 B4 返回 Pair(false, 新书架记录行 ID)，第二项不是错误码。
+    return (second as? Number)
+        ?.toLong()
+        ?.takeIf { first is Boolean && it > 0L }
+}
+
 internal fun WebDavDriveHook.okioPath(file: File): Any =
-    cls(OKIO_PATH_CLASS).getDeclaredMethod("get", File::class.java)
+    classLoader.hostStaticMethod(OKIO_PATHS_CLASS, "get", String::class.java, java.lang.Boolean.TYPE)
         .apply { isAccessible = true }
-        .invoke(null, file)
+        .invoke(null, file.absolutePath, false)
 
 internal fun WebDavDriveHook.obtainOnlineCompletionOpf(bookDir: Any): Any {
     val opfClass = cls(OPF_CLASS)
@@ -1922,19 +2044,45 @@ internal fun WebDavDriveHook.obtainOnlineCompletionOpf(bookDir: Any): Any {
                 }.getOrNull()
             }
             .firstOrNull()
-        ?: error(
-            "EPUB OPF Companion 未找到: fields=" +
-                opfClass.declaredFields.joinToString { "${it.name}:${it.type.name}" },
-        )
+        // B4 起 Opf 退化为数据类，Companion 被 R8 移除，改按签名反查解析器
+        ?: return obtainOnlineCompletionOpfBySignature(opfClass, bookDir)
     val obtain = (companion.javaClass.methods.asSequence() + companion.javaClass.declaredMethods.asSequence())
-        .firstOrNull { it.name == "obtain" && it.parameterTypes.size == 1 }
-        ?: error(
-            "EPUB OPF obtain 方法未找到: companion=${companion.javaClass.name}, methods=" +
-                companion.javaClass.declaredMethods.joinToString { "${it.name}/${it.parameterTypes.size}" },
-        )
+        .firstOrNull { it.hostNameMatches("obtain") && it.parameterTypes.size == 1 }
+        ?: return obtainOnlineCompletionOpfBySignature(opfClass, bookDir)
     obtain.isAccessible = true
     return obtain.invoke(companion, bookDir) ?: error("EPUB OPF 解析失败")
 }
+
+/**
+ * 新版宿主把 OPF 解析器从 Opf.Companion 挪走，并被 R8 合并进无关类。
+ * 这里按「(okio.Path) -> Opf」签名在 dex 中反查静态方法再调用。
+ */
+internal fun WebDavDriveHook.obtainOnlineCompletionOpfBySignature(opfClass: Class<*>, bookDir: Any): Any {
+    val pathClass = cls(OKIO_PATH_CLASS)
+    val owner = HostDexKit.findStaticMethodOwner(
+        returnDescriptor = hostTypeDescriptor(opfClass),
+        paramDescriptors = listOf(hostTypeDescriptor(pathClass)),
+        cacheKey = "online-completion-opf-obtain",
+    ) ?: error(
+        "EPUB OPF 解析器未找到: fields=" +
+            opfClass.declaredFields.joinToString { "${it.name}:${it.type.name}" },
+    )
+    val ownerClass = cls(owner)
+    val method = (ownerClass.declaredMethods.asSequence() + ownerClass.methods.asSequence())
+        .firstOrNull {
+            Modifier.isStatic(it.modifiers) &&
+                it.parameterTypes.size == 1 &&
+                it.parameterTypes[0] == pathClass &&
+                opfClass.isAssignableFrom(it.returnType)
+        }
+        ?: error("EPUB OPF 解析方法未找到: owner=$owner")
+    method.isAccessible = true
+    logWebDav("online completion opf resolver owner=$owner method=${method.name}")
+    return method.invoke(null, bookDir) ?: error("EPUB OPF 解析失败")
+}
+
+private fun hostTypeDescriptor(type: Class<*>): String =
+    "L" + type.name.replace('.', '/') + ";"
 
 internal fun WebDavDriveHook.updateOnlineCompletionNotification(
     context: Context,

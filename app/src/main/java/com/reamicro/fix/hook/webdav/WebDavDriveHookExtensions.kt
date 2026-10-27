@@ -29,24 +29,38 @@ internal fun String.isWanFengLiSourceName(): Boolean {
     return contains("晚风里") || normalized.contains("wanfengli") || normalized.contains("whispertale")
 }
 
-internal fun String.cleanOnlineText(): String =
-    replace(Regex("(?is)<script[\\s\\S]*?</script>"), " ")
-        .replace(Regex("(?is)<style[\\s\\S]*?</style>"), " ")
-        .replace(Regex("(?is)<[^>]+>"), " ")
-        .decodeOnlineHtmlEntities()
-        .replace(Regex("\\s+"), " ")
-        .trim()
+// 目录映射会对每章多次清洗文本，正则必须复用，否则每次调用都重新编译 Pattern。
+private val ONLINE_SCRIPT_TAG_REGEX = Regex("(?is)<script[\\s\\S]*?</script>")
+private val ONLINE_STYLE_TAG_REGEX = Regex("(?is)<style[\\s\\S]*?</style>")
+private val ONLINE_HTML_TAG_REGEX = Regex("(?is)<[^>]+>")
+private val ONLINE_WHITESPACE_REGEX = Regex("\\s+")
+private val ONLINE_BR_TAG_REGEX = Regex("(?is)<br\\s*/?>")
+private val ONLINE_INLINE_SPACE_REGEX = Regex("[\\t\\x0B\\f\\r ]+")
+private val ONLINE_LINE_PADDING_REGEX = Regex(" *\n *")
+private val ONLINE_BLANK_LINES_REGEX = Regex("\n{3,}")
 
-internal fun String.cleanOnlineMultilineText(): String =
-    replace(Regex("(?is)<script[\\s\\S]*?</script>"), " ")
-        .replace(Regex("(?is)<style[\\s\\S]*?</style>"), " ")
-        .replace(Regex("(?is)<br\\s*/?>"), "\n")
-        .replace(Regex("(?is)<[^>]+>"), " ")
+internal fun String.cleanOnlineText(): String {
+    if (isBlank()) return ""
+    return ONLINE_SCRIPT_TAG_REGEX.replace(this, " ")
+        .let { ONLINE_STYLE_TAG_REGEX.replace(it, " ") }
+        .let { ONLINE_HTML_TAG_REGEX.replace(it, " ") }
         .decodeOnlineHtmlEntities()
-        .replace(Regex("[\\t\\x0B\\f\\r ]+"), " ")
-        .replace(Regex(" *\n *"), "\n")
-        .replace(Regex("\n{3,}"), "\n\n")
+        .let { ONLINE_WHITESPACE_REGEX.replace(it, " ") }
         .trim()
+}
+
+internal fun String.cleanOnlineMultilineText(): String {
+    if (isBlank()) return ""
+    return ONLINE_SCRIPT_TAG_REGEX.replace(this, " ")
+        .let { ONLINE_STYLE_TAG_REGEX.replace(it, " ") }
+        .let { ONLINE_BR_TAG_REGEX.replace(it, "\n") }
+        .let { ONLINE_HTML_TAG_REGEX.replace(it, " ") }
+        .decodeOnlineHtmlEntities()
+        .let { ONLINE_INLINE_SPACE_REGEX.replace(it, " ") }
+        .let { ONLINE_LINE_PADDING_REGEX.replace(it, "\n") }
+        .let { ONLINE_BLANK_LINES_REGEX.replace(it, "\n\n") }
+        .trim()
+}
 
 internal fun ByteArray.toLowerHexString(): String =
     joinToString("") { "%02x".format(it.toInt() and 0xff) }
@@ -146,45 +160,31 @@ internal fun android.database.Cursor.longAt(index: Int): Long =
     if (index < 0 || isNull(index)) 0L else getLong(index)
 
 internal fun Any.method0(name: String): Any =
-    javaClass.methods.first {
-        it.parameterTypes.isEmpty() && (it.name == name || it.name.startsWith("$name-"))
-    }.apply { isAccessible = true }.invoke(this)
+    requireNotNull(com.reamicro.fix.xposed.XposedHelpers.callMethod(this, name))
 
 internal fun Any.longMethod(name: String): Long =
-    method0(name) as Long
+    (method0(name) as Number).toLong()
 
 internal fun Any.callString(methodName: String): String =
-    javaClass.methods.firstOrNull { it.name == methodName && it.parameterTypes.isEmpty() }
-        ?.apply { isAccessible = true }
-        ?.invoke(this)
-        ?.toString()
-        .orEmpty()
+    invokeNoArg(methodName)?.toString().orEmpty()
 
 internal fun Any.callLong(methodName: String): Long {
-    val value = javaClass.methods.firstOrNull { it.name == methodName && it.parameterTypes.isEmpty() }
-        ?.apply { isAccessible = true }
-        ?.invoke(this)
+    val value = invokeNoArg(methodName)
     return (value as? Number)?.toLong() ?: value?.toString()?.toLongOrNull() ?: 0L
 }
 
 internal fun Any.callInt(methodName: String): Int {
-    val value = javaClass.methods.firstOrNull { it.name == methodName && it.parameterTypes.isEmpty() }
-        ?.apply { isAccessible = true }
-        ?.invoke(this)
+    val value = invokeNoArg(methodName)
     return (value as? Number)?.toInt() ?: value?.toString()?.toIntOrNull() ?: 0
 }
 
 internal fun Any.callFloat(methodName: String): Float {
-    val value = javaClass.methods.firstOrNull { it.name == methodName && it.parameterTypes.isEmpty() }
-        ?.apply { isAccessible = true }
-        ?.invoke(this)
+    val value = invokeNoArg(methodName)
     return (value as? Number)?.toFloat() ?: value?.toString()?.toFloatOrNull() ?: 0f
 }
 
 internal fun Any.invokeNoArg(methodName: String): Any? =
-    javaClass.methods.firstOrNull { it.name == methodName && it.parameterTypes.isEmpty() }
-        ?.apply { isAccessible = true }
-        ?.invoke(this)
+    runCatching { com.reamicro.fix.xposed.XposedHelpers.callMethod(this, methodName) }.getOrNull()
 
 internal fun String.htmlAttrEscape(): String =
     replace("&", "&amp;")

@@ -805,22 +805,23 @@ internal fun WebDavDriveHook.onlineResultMetadata(
     rule: JSONObject?,
     baseUrl: String,
     chapterCountFallback: Int = 0,
+    loginInfo: Map<String, String>? = null,
 ): OnlineResultMetadata {
     val kind = rule?.optString("kind", "").orEmpty()
         .takeIf { it.isNotBlank() }
-        ?.let { onlineRuleValue(node, it, baseUrl, source = source) }
+        ?.let { onlineRuleValue(node, it, baseUrl, source = source, loginInfo = loginInfo) }
         .orEmpty()
     val wordCountRule = rule?.optString("wordCount", "").orEmpty()
         .takeUnless(::isOnlineChapterCountSelector)
         .orEmpty()
     val wordCount = wordCountRule
         .takeIf { it.isNotBlank() }
-        ?.let { onlineRuleValue(node, it, baseUrl, source = source) }
+        ?.let { onlineRuleValue(node, it, baseUrl, source = source, loginInfo = loginInfo) }
         .orEmpty()
         .ifBlank { onlineFirstJsonString(node, ONLINE_WORD_COUNT_FIELDS) }
     val updateTime = rule?.optString("updateTime", "").orEmpty()
         .takeIf { it.isNotBlank() }
-        ?.let { onlineRuleValue(node, it, baseUrl, source = source) }
+        ?.let { onlineRuleValue(node, it, baseUrl, source = source, loginInfo = loginInfo) }
         .orEmpty()
         .ifBlank { onlineFirstJsonString(node, ONLINE_UPDATE_TIME_FIELDS) }
     val chapterCount = onlineFirstJsonInt(node, ONLINE_CHAPTER_COUNT_FIELDS)
@@ -828,7 +829,7 @@ internal fun WebDavDriveHook.onlineResultMetadata(
         ?: chapterCountFallback.coerceAtLeast(0)
     val statusHint = rule?.optString("lastChapter", "").orEmpty()
         .takeIf { it.isNotBlank() }
-        ?.let { onlineRuleValue(node, it, baseUrl, source = source) }
+        ?.let { onlineRuleValue(node, it, baseUrl, source = source, loginInfo = loginInfo) }
         .orEmpty()
     val status = onlineCompletionStatusText(kind, node, statusHint)
     val platformName = if (source.isWanFengLiSource()) {
@@ -852,31 +853,55 @@ internal fun WebDavDriveHook.onlineRuleValue(
     baseUrl: String,
     query: String? = null,
     source: OnlineSourceEntry? = null,
+    loginInfo: Map<String, String>? = null,
 ): String {
     var rule = rawRule.trim()
     if (rule.isBlank() || node == null || node == JSONObject.NULL) return ""
     if (rule.startsWith("<js>", ignoreCase = true)) return ""
     if (rule.startsWith("@js:", ignoreCase = true)) {
         if (rule.contains("replaceCover", ignoreCase = true)) {
-            return replaceFanqieCover(onlineRuleValue(node, "thumb_url", baseUrl, source = source))
+            return replaceFanqieCover(
+                onlineRuleValue(node, "thumb_url", baseUrl, source = source, loginInfo = loginInfo),
+            )
         }
         return ""
     }
     val inlineTagIndex = rule.indexOf("<js>", ignoreCase = true)
     if (inlineTagIndex > 0) {
         val selectorRule = rule.substring(0, inlineTagIndex).trim()
-        val selectedValue = onlineRuleValue(node, selectorRule, baseUrl, query, source)
+        val selectedValue = onlineRuleValue(
+            node,
+            selectorRule,
+            baseUrl,
+            query,
+            source,
+            loginInfo,
+        )
         OnlineSourceScriptCompat.resolveInlineResultUrl(rule, selectedValue)?.let { return it }
     }
     val inlineJsIndex = rule.indexOf("\n@js:", ignoreCase = true)
     if (inlineJsIndex >= 0) {
         val selectorRule = rule.substring(0, inlineJsIndex).trim()
-        val selectedValue = onlineRuleValue(node, selectorRule, baseUrl, query, source)
+        val selectedValue = onlineRuleValue(
+            node,
+            selectorRule,
+            baseUrl,
+            query,
+            source,
+            loginInfo,
+        )
         evaluateQqReaderCoverRule(rule, selectedValue)?.let { return it }
     }
     rule = rule.substringBefore("\n<js>", rule).substringBefore("\n@js:", rule).trim()
     if (rule.contains("{{") && rule.contains("}}")) {
-        return applyOnlineTemplate(rule, node, baseUrl, query, source = source)
+        return applyOnlineTemplate(
+            rule,
+            node,
+            baseUrl,
+            query,
+            source = source,
+            loginInfo = loginInfo,
+        )
     }
     val parts = rule.split("##", limit = 3)
     val selector = parts.firstOrNull().orEmpty().trim()
@@ -902,8 +927,9 @@ internal fun WebDavDriveHook.applyOnlineTemplate(
     encodeQuery: Boolean = false,
     encodeCharset: String = "UTF-8",
     source: OnlineSourceEntry? = null,
+    loginInfo: Map<String, String>? = null,
 ): String {
-    val loginInfo = source?.let {
+    val effectiveLoginInfo = loginInfo ?: source?.let {
         OnlineSourceAuth.loginInfo(currentApplicationContext() ?: currentContext(), it)
     }.orEmpty()
     val sourceUrl = source?.sourceUrl.orEmpty().ifBlank { baseUrl }
@@ -919,7 +945,7 @@ internal fun WebDavDriveHook.applyOnlineTemplate(
     }
     return Regex("""\{\{([^{}]+)\}\}""").replace(text) { match ->
         val expr = match.groupValues[1].trim()
-        val sourceExpression = OnlineSourceLoginConfig.expressionValue(expr, sourceUrl, loginInfo)
+        val sourceExpression = OnlineSourceLoginConfig.expressionValue(expr, sourceUrl, effectiveLoginInfo)
         when {
             sourceExpression != null -> sourceExpression
             Regex("""^baseUrl\s*\+\s*['"]([^'"]*)['"]$""").matchEntire(expr) != null ->
@@ -1062,6 +1088,7 @@ internal fun WebDavDriveHook.enrichOnlineTargetFromDetail(
     detailUrl: String,
     chapterCount: Int,
 ) {
+    val startedAt = System.nanoTime()
     val root = parseOnlineJsonRoot(detailBody) ?: return
     val bookInfoRule = runCatching { JSONObject(target.source.ruleBookInfo) }.getOrNull()
     val node = bookInfoRule?.optString("init", "").orEmpty()
@@ -1069,19 +1096,29 @@ internal fun WebDavDriveHook.enrichOnlineTargetFromDetail(
         .takeIf { it.isNotBlank() }
         ?.let { onlineJsonRuleValues(root, it).firstOrNull() }
         ?: root
+    val loginInfo = OnlineSourceAuth.loginInfo(currentApplicationContext() ?: currentContext(), target.source)
     val meta = onlineResultMetadata(
         source = target.source,
         node = node,
         rule = bookInfoRule,
         baseUrl = detailUrl,
         chapterCountFallback = chapterCount,
+        loginInfo = loginInfo,
     )
     val current = target.result
     val enriched = current.copy(
         author = current.author.ifBlank {
             bookInfoRule?.optString("author", "").orEmpty()
                 .takeIf { it.isNotBlank() }
-                ?.let { onlineRuleValue(node, it, detailUrl, source = target.source).cleanOnlineText() }
+                ?.let {
+                    onlineRuleValue(
+                        node,
+                        it,
+                        detailUrl,
+                        source = target.source,
+                        loginInfo = loginInfo,
+                    ).cleanOnlineText()
+                }
                 .orEmpty()
                 .ifBlank { onlineFirstJsonString(node, listOf("author", "bookAuthor", "authorName", "writer")) }
         },
@@ -1092,7 +1129,13 @@ internal fun WebDavDriveHook.enrichOnlineTargetFromDetail(
                     normalizeOnlineCoverUrl(
                         target.source,
                         detailUrl,
-                        onlineRuleValue(node, it, detailUrl, source = target.source),
+                        onlineRuleValue(
+                            node,
+                            it,
+                            detailUrl,
+                            source = target.source,
+                            loginInfo = loginInfo,
+                        ),
                     )
                 }
                 .orEmpty()
@@ -1107,7 +1150,15 @@ internal fun WebDavDriveHook.enrichOnlineTargetFromDetail(
         intro = current.intro.ifBlank {
             bookInfoRule?.optString("intro", "").orEmpty()
                 .takeIf { it.isNotBlank() }
-                ?.let { onlineRuleValue(node, it, detailUrl, source = target.source).cleanOnlineText() }
+                ?.let {
+                    onlineRuleValue(
+                        node,
+                        it,
+                        detailUrl,
+                        source = target.source,
+                        loginInfo = loginInfo,
+                    ).cleanOnlineText()
+                }
                 .orEmpty()
                 .ifBlank { onlineFirstJsonString(node, listOf("intro", "abstract", "description", "bookDesc")) }
         },
@@ -1121,7 +1172,8 @@ internal fun WebDavDriveHook.enrichOnlineTargetFromDetail(
     logWebDav(
         "online metadata enriched source=${target.source.name} book=${enriched.name} " +
             "status=${enriched.status} words=${enriched.wordCount} " +
-            "chapters=${enriched.chapterCount} update=${enriched.updateTime}",
+            "chapters=${enriched.chapterCount} update=${enriched.updateTime} " +
+            "elapsedMs=${(System.nanoTime() - startedAt) / 1_000_000}",
     )
 }
 
@@ -1180,6 +1232,7 @@ internal fun WebDavDriveHook.parseOnlineJsonToc(
     baseUrl: String,
     root: Any,
 ): List<OnlineChapter> {
+    val startedAt = System.nanoTime()
     val rule = runCatching { JSONObject(source.ruleToc) }.getOrNull() ?: return emptyList()
     val chapterListRule = rule.optString("chapterList", "")
     val compat = resolveOnlineChapterListRuleCompat(chapterListRule)
@@ -1195,19 +1248,57 @@ internal fun WebDavDriveHook.parseOnlineJsonToc(
     val titleRule = rule.optString("chapterName", "")
     val urlRule = rule.optString("chapterUrl", "")
     val isVolumeRule = rule.optString("isVolume", "")
+    val loginStartedAt = System.nanoTime()
     val loginInfo = OnlineSourceAuth.loginInfo(currentApplicationContext() ?: currentContext(), source)
+    logWebDav(
+        "online completion toc login info fields=${loginInfo.size} " +
+            "elapsedMs=${(System.nanoTime() - loginStartedAt) / 1_000_000}",
+    )
     var currentVolumeTitle = ""
-    return nodes.mapIndexedNotNull { index, node ->
+    var titleNs = 0L
+    var urlNs = 0L
+    var volumeNs = 0L
+    var buildNs = 0L
+    var volumeTitleNs = 0L
+    val chapters = nodes.mapIndexedNotNull { index, node ->
+        val titleStartedAt = System.nanoTime()
         val rawTitle = cleanOnlineChapterTitleValue(
-            onlineRuleValue(node, titleRule, baseUrl, source = source).cleanOnlineText(),
+            onlineRuleValue(
+                node,
+                titleRule,
+                baseUrl,
+                source = source,
+                loginInfo = loginInfo,
+            ).cleanOnlineText(),
         )
-        val ruleRawUrl = onlineRuleValue(node, urlRule, baseUrl, source = source)
+        titleNs += System.nanoTime() - titleStartedAt
+        val urlStartedAt = System.nanoTime()
+        val ruleRawUrl = onlineRuleValue(
+            node,
+            urlRule,
+            baseUrl,
+            source = source,
+            loginInfo = loginInfo,
+        )
+        urlNs += System.nanoTime() - urlStartedAt
         val fallbackRawUrl = if (ruleRawUrl.isBlank()) fallbackOnlineChapterRawUrl(node) else ""
         val rawUrl = ruleRawUrl.ifBlank { fallbackRawUrl }
-        if (isOnlineTocVolumeNode(source, node, isVolumeRule, rawTitle, rawUrl.isNotBlank(), baseUrl)) {
+        val volumeStartedAt = System.nanoTime()
+        if (
+            isOnlineTocVolumeNode(
+                source,
+                node,
+                isVolumeRule,
+                rawTitle,
+                rawUrl.isNotBlank(),
+                baseUrl,
+                loginInfo,
+            )
+        ) {
             currentVolumeTitle = rawTitle
             return@mapIndexedNotNull null
         }
+        volumeNs += System.nanoTime() - volumeStartedAt
         val title = rawTitle.ifBlank { "第 ${index + 1} 章" }
         if (index == 0) {
             logWebDav(
@@ -1215,8 +1306,12 @@ internal fun WebDavDriveHook.parseOnlineJsonToc(
                     "ruleRaw=${ruleRawUrl.take(80)} fallbackRaw=${fallbackRawUrl.take(80)}",
             )
         }
+        val buildStartedAt = System.nanoTime()
         val url = buildOnlineChapterUrl(source, baseUrl, urlRule, rawUrl, loginInfo)
+        buildNs += System.nanoTime() - buildStartedAt
+        val volumeTitleStartedAt = System.nanoTime()
         val volumeTitle = onlineChapterVolumeTitle(node).ifBlank { currentVolumeTitle }
+        volumeTitleNs += System.nanoTime() - volumeTitleStartedAt
         if (url.isBlank()) null else OnlineChapter(
             title = title,
             url = url,
@@ -1224,6 +1319,14 @@ internal fun WebDavDriveHook.parseOnlineJsonToc(
             level = if (volumeTitle.isBlank()) 0 else 1,
         )
     }.distinctBy { it.url }
+    logWebDav(
+        "online completion toc mapped nodes=${nodes.size} chapters=${chapters.size} " +
+            "elapsedMs=${(System.nanoTime() - startedAt) / 1_000_000} " +
+            "phases titleMs=${titleNs / 1_000_000} urlMs=${urlNs / 1_000_000} " +
+            "volumeMs=${volumeNs / 1_000_000} buildMs=${buildNs / 1_000_000} " +
+            "volumeTitleMs=${volumeTitleNs / 1_000_000}",
+    )
+    return chapters
 }
 
 internal fun WebDavDriveHook.onlineCompletionSearchTextColors(composer: Any): IntArray =
