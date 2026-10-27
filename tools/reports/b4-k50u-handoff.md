@@ -148,3 +148,24 @@
 - MT 取证：`mt_apk_dex_read_class_outline` 的字段在 `data.fields[].sig`，
   类名/父类不在 outline 顶层返回；`mt_apk_workspace_list` 不接受 `limit` 参数。
 
+## 9. 2026-10-27 深夜点击失效修复（已构建待验收）
+
+- **根因**：B4 `nzd.b`（CloudBookRow）内部通过 `new vu2(function1, rd1Var, ...)` 包装
+  `onTap` 回调再用 `vj1(...)` 让整行可点击。模块 hook 在 `beforeHookedMethod` 里
+  直接 `param.result = Unit` 短路宿主方法，宿主 clickable 布局根本没组合出来。
+  之前 6911 进程能点击时走的是宿主原生行（模块替换行未被组合），
+  修复 `arg1` 后（`24521cd`）模块替换行恢复渲染、宿主行消失，
+  AndroidView 里的 `LinearLayout.setOnClickListener` 在 Compose 树中收不到事件。
+- **修复**：`WebDavDriveHook.HostHooks.kt` 的 `hookOnlineCompletionHomeCloudBookRow`
+  在 B4 profile 下不再短路宿主方法，而是注入 `OnlineCompletionSearchTapDelegate`
+  Function1 代理替换 `args[3]`。宿主原生行渲染并持有可点击语义，用户点击时
+  代理先调用宿主原始 onTap（保证宿主导航），再调用
+  `handleOnlineCompletionSearchTap(book)` 弹出模块下载对话框。
+- **验证状态**：`testDebugUnitTest` 与 `assembleRelease` 均通过，已安装到 K50U
+  （PID 31061，`profile=357/357 hooks=131/131`）。**ADB 中文输入链路不通**
+  （ADBKeyBoard B64 广播在 Compose EditText 不生效、keyevent 67 退格被
+  Compose 拦截），无法自动触发含中文的在线搜索，**需要用户在手机上
+  手动输入"诛仙"或任意中文书名，点击搜索结果卡片验证是否弹出下载对话框**。
+- **下一步**：用户验收通过后继续 B4 其余功能适配（文件编辑→图书结构→
+  关联补全→阅读高亮），然后推进 RC2+ 版本的 dexkit 动态识别。
+
