@@ -442,6 +442,7 @@ method=androidx.compose.foundation.text.BasicTextKt#BasicText-4YKlhWE=b
 method=androidx.compose.foundation.text.modifiers.MultiParagraphLayoutCache#intrinsicHeight=a
 method=androidx.compose.foundation.text.modifiers.MultiParagraphLayoutCache#layoutText-K40F9xA=b
 method=androidx.compose.ui.graphics.ColorKt#Color=b
+method=androidx.compose.ui.graphics.ColorKt#toArgb-8_81llA=s
 method=androidx.compose.foundation.text.modifiers.MultiParagraphLayoutCache#layoutWithConstraints-K40F9xA=c
 method=androidx.compose.foundation.text.modifiers.MultiParagraphLayoutCache#setDensity$foundation=d
 method=androidx.compose.foundation.text.modifiers.MultiParagraphLayoutCache#setLayoutDirection=e
@@ -2401,6 +2402,8 @@ method=app.zhendong.reamicro.arch.theme.ThemeKt#getBackgroundBright=c
 method=app.zhendong.reamicro.arch.theme.ThemeKt#getBackgroundDim=d
 method=app.zhendong.reamicro.arch.theme.ThemeKt#getBorderVariant=e
 method=app.zhendong.reamicro.arch.theme.ThemeKt#getOnBackgroundVariant=f
+field=app.zhendong.reamicro.arch.theme.ThemeKt#originalLightColorScheme=a
+field=app.zhendong.reamicro.arch.theme.ThemeKt#darkScheme=b
 typeAlias=app.zhendong.reamicro.Route$About=p39
 typeAlias=ReaMicroHost.SettingsAboutLabel=jo1
 typeAlias=androidx.compose.ui.graphics.Color=ch1

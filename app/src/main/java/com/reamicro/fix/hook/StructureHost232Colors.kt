@@ -1,5 +1,13 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostClassOrNull
+import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostMethodOrNull
+import com.reamicro.fix.xposed.XposedHelpers
+
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
@@ -164,20 +172,17 @@ internal object StructureHost232Colors {
     }
 
     private class Reader(loader: ClassLoader) {
-        private val theme = loader.loadClass(THEME)
-        val schemeType: Class<*> = loader.loadClass("androidx.compose.material3.ColorScheme")
-        val helpers = helperNames.associateWith { theme.getDeclaredMethod(it, schemeType).apply { isAccessible = true } }
-        private val getters = roleNames.associateWith { role ->
-            schemeType.methods.first { it.name.startsWith("get$role-") && it.parameterTypes.isEmpty() }
-        }
-        private val toArgb = loader.loadClass("androidx.compose.ui.graphics.ColorKt").declaredMethods.first {
-            it.name.startsWith("toArgb") && it.parameterTypes.contentEquals(arrayOf(java.lang.Long.TYPE))
-        }.apply { isAccessible = true }
-        private val isLight = loader.loadClass("app.zhendong.reamicro.arch.extensions.ColorExtKt").declaredMethods.first {
-            it.name.startsWith("isLight-") && it.parameterTypes.contentEquals(arrayOf(java.lang.Long.TYPE))
-        }.apply { isAccessible = true }
-        private val originalLight = theme.getDeclaredMethod("getOriginalLightColorScheme").apply { isAccessible = true }
-        private val originalDark = theme.getDeclaredField("darkScheme").apply { isAccessible = true }
+        private val theme = loader.hostClass(THEME)
+        val schemeType: Class<*> = loader.hostClass("androidx.compose.material3.ColorScheme")
+        val helpers = helperNames.filterNot {
+            HostSymbols.profileId in setOf("2.3.3-b2", "2.3.3-b4") && it == "getBorderDark"
+        }.associateWith { theme.hostMethod(it, schemeType) }
+        private val toArgb = loader.hostClass("androidx.compose.ui.graphics.ColorKt")
+            .hostMethod("toArgb-8_81llA", java.lang.Long.TYPE)
+        private val isLight = loader.hostClassOrNull("app.zhendong.reamicro.arch.extensions.ColorExtKt")
+            ?.hostMethodOrNull("isLight-8_81llA", java.lang.Long.TYPE)
+        private val originalLight = theme.hostField("originalLightColorScheme")
+        private val originalDark = theme.hostField("darkScheme")
         private var lightDefault: Snapshot? = null
         private var darkDefault: Snapshot? = null
         private var previousPacked: Map<String, Long>? = null
@@ -187,31 +192,47 @@ internal object StructureHost232Colors {
 
         fun defaultSnapshot(dark: Boolean): Snapshot {
             if (dark) darkDefault?.let { return it } else lightDefault?.let { return it }
-            val native = if (dark) originalDark.get(null) else originalLight.invoke(null)
+            val native = if (dark) originalDark.get(null) else originalLight.get(null)
             return read(requireNotNull(native), if (dark) "host232/default-dark" else "host232/default-light").also {
                 if (dark) darkDefault = it else lightDefault = it
             }
         }
 
         fun read(scheme: Any, source: String): Snapshot {
-            val packed = getters.mapValues { (_, method) -> method.invoke(scheme) as Long }
+            val packed = roleNames.associateWith { XposedHelpers.callMethod(scheme, "get$it-0d7_KjU") as Long }
             if (source == "host232/current-theme" && packed == previousPacked) {
                 previousCurrent?.let { return it }
             }
             fun helper(name: String) = argb(helpers.getValue(name).invoke(null, scheme) as Long)
+            val surfaceArgb = argb(packed.getValue("Surface"))
             val value = Snapshot(
                 roles = packed.mapValues { argb(it.value) },
                 pageArgb = helper("getBackgroundAuto"),
                 contentArgb = helper("getBackgroundDim"),
                 brightArgb = helper("getBackgroundBright"),
-                borderArgb = helper("getBorderDark"),
+                borderArgb = if (HostSymbols.profileId in setOf("2.3.3-b2", "2.3.3-b4"))
+                    argb(packed.getValue("SurfaceContainerHigh"))
+                    else helper("getBorderDark"),
                 borderVariantArgb = helper("getBorderVariant"),
                 captionArgb = helper("getOnBackgroundVariant"),
-                dark = !(isLight.invoke(null, packed.getValue("Surface")) as Boolean),
+                dark = !(isLight?.invoke(null, packed.getValue("Surface")) as? Boolean
+                    ?: isLightSurface(surfaceArgb)),
                 source = source,
             )
             if (source == "host232/current-theme") { previousPacked = packed; previousCurrent = value }
             return value
+        }
+
+        private fun isLightSurface(argb: Int): Boolean {
+            fun linear(channel: Int): Double {
+                val value = channel / 255.0
+                return if (value <= 0.04045) value / 12.92
+                else Math.pow((value + 0.055) / 1.055, 2.4)
+            }
+            val luminance = linear((argb ushr 16) and 0xff) * 0.2126 +
+                linear((argb ushr 8) and 0xff) * 0.7152 +
+                linear(argb and 0xff) * 0.0722
+            return luminance > 0.179
         }
     }
 
