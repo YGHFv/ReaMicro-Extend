@@ -1,6 +1,8 @@
 package com.reamicro.fix.hook
 
 import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.hostStaticMethod
+import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.core.hostField
 import com.reamicro.fix.core.typeMatches
 
@@ -416,6 +418,12 @@ internal fun ReaderHook.createNativeEditAction(icon: Any): Any? =
 
 internal fun ReaderHook.editImageVector(): Any? =
     runCatching {
+        if (HostSymbols.profileId == "2.3.3-b4") {
+            // B4 的 Outlined 接收者已被 R8 删除，图标保留在已核实的无参静态方法中。
+            val method = classLoader.hostStaticMethod(EDIT_ICON_CLASS, "getEdit")
+            check(typeMatches(method.returnType, HostClasses.Compose.IMAGE_VECTOR))
+            return@runCatching method.invoke(null)
+        }
         val outlined = classLoader.hostClass(ICONS_OUTLINED_CLASS)
             .let { it.hostFieldOrNull("INSTANCE") ?: it.hostField("INSTANCE") }
             .get(null)

@@ -63,10 +63,42 @@ internal fun ReaderHook.hookReaderViewModel() {
             resetFullTextSearchState("ReaderViewModel cleared", removeOverlays = true)
         }
         val readerUiIntentClass = classLoader.hostClass(READER_UI_INTENT_CLASS)
+        runCatching {
+            val highlightIntentClass = classLoader.hostClass("$READER_UI_INTENT_CLASS\$MarkUpsertHighlight")
+            XposedBridge.hookAllConstructors(highlightIntentClass, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val selection = param.thisObject.hostField("selection")?.get(param.thisObject)
+                    val start = selection.hostField("a")?.get(selection)?.toString().orEmpty()
+                    val end = selection.hostField("b")?.get(selection)?.toString().orEmpty()
+                    val quote = selection.hostField("c")?.get(selection)?.toString().orEmpty()
+                    val style = param.thisObject.hostField("style")?.get(param.thisObject)
+                    val color = param.thisObject.hostField("color")?.get(param.thisObject)
+                    XposedBridge.log(
+                        "$LOG_PREFIX highlight intent created start=$start end=$end " +
+                            "quote=${quote.take(160)} style=$style color=$color",
+                    )
+                }
+            })
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX highlight intent diagnostic failed: ${it.stackTraceToString()}")
+        }
         val onIntentCallback = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (currentViewModelRef?.get() !== param.thisObject) return
                     val intent = param.args?.getOrNull(0) ?: return
+                    if (HostSymbols.logicalClass(intent.javaClass.name) ==
+                        "$READER_UI_INTENT_CLASS\$MarkUpsertHighlight"
+                    ) {
+                        val selection = intent.hostField("selection")?.get(intent)
+                        XposedBridge.log(
+                            "$LOG_PREFIX highlight intent received " +
+                                "start=${selection.hostField("a")?.get(selection)} " +
+                                "end=${selection.hostField("b")?.get(selection)} " +
+                                "quote=${selection.hostField("c")?.get(selection)?.toString().orEmpty().take(160)} " +
+                                "style=${intent.hostField("style")?.get(intent)} " +
+                                "color=${intent.hostField("color")?.get(intent)}",
+                        )
+                    }
                     if (replayingOnDemandJump.get() != true) {
                         val intercepted = when (HostSymbols.logicalClass(intent.javaClass.name)) {
                             "$READER_UI_INTENT_CLASS\$JumpChapter" ->
@@ -130,6 +162,39 @@ internal fun ReaderHook.hookReaderViewModel() {
             error("ReaderViewModel onIntent(${readerUiIntentClass.name}) not found on ${cls.name}")
         }
         onIntentMethods.forEach { XposedBridge.hookMethod(it, onIntentCallback) }
+        runCatching {
+            val repositoryClass = classLoader.hostClass(READ_REPOSITORY_CLASS)
+            val saveMarkName = HostSymbols.resolveMethodName(READ_REPOSITORY_CLASS, "saveMark")
+            val saveMarkMethods = repositoryClass.declaredMethods.filter {
+                it.hostNameMatches(saveMarkName) && it.parameterTypes.size == 11
+            }
+            check(saveMarkMethods.isNotEmpty()) { "ReadRepository.saveMark not found" }
+            saveMarkMethods.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val args = param.args.orEmpty()
+                        XposedBridge.log(
+                            "$LOG_PREFIX saveMark invoke book=${args.getOrNull(0)} " +
+                                "chapter=${args.getOrNull(1)} start=${args.getOrNull(2)} " +
+                                "end=${args.getOrNull(3)} quote=${args.getOrNull(4)?.toString().orEmpty().take(160)} " +
+                                "kind=${args.getOrNull(5)} style=${args.getOrNull(6)} " +
+                                "color=${args.getOrNull(7)} extra=${args.getOrNull(8)} flag=${args.getOrNull(9)}",
+                        )
+                    }
+
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        XposedBridge.log(
+                            "$LOG_PREFIX saveMark result=${param.result?.javaClass?.name ?: "null"} " +
+                                "throwable=${param.throwable?.javaClass?.name}:${param.throwable?.message}",
+                        )
+                    }
+                })
+            }
+            XposedBridge.log("$LOG_PREFIX saveMark diagnostic installed count=${saveMarkMethods.size}")
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX saveMark diagnostic failed: ${it.stackTraceToString()}")
+        }
         XposedBridge.log(
             "$LOG_PREFIX ReaderViewModel onIntent(${onIntentMethods.joinToString { it.name }}) hook installed",
         )
@@ -490,23 +555,21 @@ internal fun ReaderHook.hookReaderHighlightScreenEntry() {
         })
 
         if (HostSymbols.profileId == "2.3.3-b4") {
-            // B4 的 HighlightPageContent 在内部 Column 里先调用分页标签（角色/高亮），
-            // 再组合 LazyColumn。把入口卡片放在标签方法之前，才能继承该 Column 的宽度约束；
-            // 若直接注入 HighlightPageContent，会和这个 Column 重叠并压成细条。
-            val tabsMethod = screenClass.declaredMethods.firstOrNull { method ->
-                method.hostNameMatches("HighlightPageContentTabs") &&
-                    method.parameterTypes.size == 5 &&
-                    method.parameterTypes[0] == Int::class.javaPrimitiveType &&
-                    method.parameterTypes[1] == Int::class.javaPrimitiveType &&
-                    method.parameterTypes[2] == composerClass &&
-                    typeMatches(method.parameterTypes[3], "java.util.List")
-            } ?: error("HighlightPageContentTabs main method not found")
-            tabsMethod.isAccessible = true
-            XposedBridge.hookMethod(tabsMethod, object : XC_MethodHook() {
+            // B4 只在高亮页签的滚动 Column 中调用预置对话行；入口作为它的前一个子项，
+            // 继承卡片宽度和滚动范围，不再占用角色/高亮切换栏外的空间。
+            val presetMethod = screenClass.declaredMethods.firstOrNull { method ->
+                method.hostNameMatches("PresetDialogueRow") &&
+                    method.parameterTypes.size == 7 &&
+                    method.parameterTypes[1] == String::class.java &&
+                    method.parameterTypes[2] == Boolean::class.javaPrimitiveType &&
+                    typeMatches(method.parameterTypes[3], "kotlin.jvm.functions.Function0") &&
+                    typeMatches(method.parameterTypes[4], "kotlin.jvm.functions.Function0") &&
+                    method.parameterTypes[5] == composerClass
+            } ?: error("PresetDialogueRow main method not found")
+            presetMethod.isAccessible = true
+            XposedBridge.hookMethod(presetMethod, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (highlightScreenEntryInjected.get() == true) return
-                    val composer = param.args?.getOrNull(2) ?: return
-                    highlightScreenEntryInjected.set(true)
+                    val composer = param.args?.getOrNull(5) ?: return
                     ReaMicroSettingsHook.renderReaderHighlightScreenEntryCard(
                         bookKey = ReaderHighlightBookContext.bookKey,
                         bookTitle = ReaderHighlightBookContext.bookTitle,
@@ -517,7 +580,11 @@ internal fun ReaderHook.hookReaderHighlightScreenEntry() {
                     }
                 }
             })
-            XposedBridge.log("$LOG_PREFIX reader highlight screen entry hook installed at B4 tabs")
+            // 仅反优化已取证的分页内容调用方，保证内联后的预置行仍命中入口 hook。
+            val pagerContent = classLoader.hostClass("ReaMicroHost.ReaderHighlightPagerContent")
+                .declaredMethods.single { it.hostNameMatches("invoke") && it.parameterCount == 4 }
+            XposedBridge.deoptimize(pagerContent)
+            XposedBridge.log("$LOG_PREFIX reader highlight screen entry hook installed before B4 preset dialogue")
             return@install
         }
 
@@ -676,9 +743,24 @@ internal fun ReaderHook.hookNativeSelectionMenu() {
                         val action = (editImageVector() ?: fallbackIcon)?.let(::createNativeEditAction)
                         if (action != null) next.add(action)
                     }
-                    if (canHighlightReaderSelection() && original.none { callString(it, "getTitle") == "\u9ad8\u4eae" }) {
-                        val action = (highlightImageVector() ?: fallbackIcon)?.let(::createNativeHighlightAction)
-                        if (action != null) next.add(action)
+                    if (canHighlightReaderSelection()) {
+                        val nativeHighlightIndex = next.indexOfFirst {
+                            callString(it, "getTitle") == "\u9ad8\u4eae"
+                        }
+                        val nativeHighlightIcon = nativeHighlightIndex
+                            .takeIf { it >= 0 }
+                            ?.let { callNoArg(next[it], "getIcon") }
+                        val action = (highlightImageVector() ?: nativeHighlightIcon ?: fallbackIcon)
+                            ?.let(::createNativeHighlightAction)
+                        if (action != null) {
+                            // B4 新增了宿主高亮动作，但模块选择高亮仍走自己的本书规则链路。
+                            // 仅替换同名动作，保留原有位置和划线等其它宿主动作。
+                            if (HostSymbols.profileId == "2.3.3-b4" && nativeHighlightIndex >= 0) {
+                                next[nativeHighlightIndex] = action
+                            } else if (nativeHighlightIndex < 0) {
+                                next.add(action)
+                            }
+                        }
                     }
                     val compact = if (settingsProvider().canUseCompactReaderSelectionMenu) {
                         compactSelectionMenuActions(next)
@@ -688,8 +770,10 @@ internal fun ReaderHook.hookNativeSelectionMenu() {
                     if (next.size != original.size || compact !== next) param.args[0] = compact
                     if (!HostSymbols.isIdentity && method.parameterTypes.size == 7 &&
                         method.parameterTypes[3] == Boolean::class.javaPrimitiveType &&
-                        settingsProvider().canUseCompactReaderSelectionMenu
+                        (settingsProvider().canUseCompactReaderSelectionMenu ||
+                            (HostSymbols.profileId == "2.3.3-b4" && selectionMenuMaxItemsPerRow(next.size) != null))
                     ) {
+                        // B4 的第四参控制 widthIn/固定全宽；换行内容也必须按实测宽度收缩气泡。
                         param.args[3] = true
                         param.args[6] = ((param.args[6] as? Int) ?: 0) and 0x1C00.inv()
                     }
@@ -702,6 +786,36 @@ internal fun ReaderHook.hookNativeSelectionMenu() {
 }
 
 internal fun ReaderHook.hookNativeSelectionMenuContent(bodyClass: Class<*>) {
+    if (HostSymbols.profileId == "2.3.3-b4") {
+        // 定位 Modifier、气泡背景和上下箭头仍由 SelectionBubbleMenu 处理，只替换内部动作布局。
+        listOf(
+            "ReaMicroHost.SelectionMenuFloatingContent" to true,
+            "ReaMicroHost.SelectionMenuInlineContent" to false,
+        ).forEach { (name, merged) ->
+            val content = classLoader.hostClass(name)
+            val target = content.hostMethod("invoke", Any::class.java, Any::class.java)
+            XposedBridge.hookMethod(target, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val closure = param.thisObject ?: return
+                    if (merged && content.getDeclaredField("a").getByte(closure) != 0.toByte()) return
+                    val actionsField = if (merged) "e" else "a"
+                    val tintField = if (merged) "d" else "b"
+                    val actions = (content.getDeclaredField(actionsField).get(closure) as? List<*>)
+                        ?.filterNotNull().orEmpty()
+                    val maxPerRow = selectionMenuMaxItemsPerRow(actions.size) ?: return
+                    val tint = content.getDeclaredField(tintField).getLong(closure)
+                    val composer = param.args?.getOrNull(0) ?: return
+                    val arrowOnTop = if (merged) content.getDeclaredField("b").getBoolean(closure) else null
+                    renderSelectionMenuReplacement(param, actions, tint, composer, maxPerRow, arrowOnTop)
+                }
+            })
+            XposedBridge.deoptimize(target)
+        }
+        bodyClass.declaredMethods.filter { it.hostNameMatches("SelectionBubbleMenu") }
+            .forEach(XposedBridge::deoptimize)
+        XposedBridge.logAlways("ReaMicro B4 selection menu content hooked; native position and bubble retained")
+        return
+    }
     val contentMethods = bodyClass.declaredMethods.filter { method ->
         method.name.contains("SelectionBubbleMenu") &&
             method.name.contains("lambda") &&
@@ -763,9 +877,10 @@ private fun ReaderHook.renderSelectionMenuReplacement(
     tint: Long,
     composer: Any,
     maxPerRow: Int,
+    bubbleArrowOnTop: Boolean? = null,
 ) {
     runCatching {
-        renderWrappedSelectionMenu(actions, tint, composer, maxPerRow)
+        renderWrappedSelectionMenu(actions, tint, composer, maxPerRow, bubbleArrowOnTop)
     }.onSuccess {
         param.result = targetUnit()
     }.onFailure {

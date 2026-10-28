@@ -48,9 +48,11 @@ internal fun ReaderHook.selectionMenuMaxItemsPerRow(actionCount: Int): Int? {
     }
 }
 
-internal fun ReaderHook.renderWrappedSelectionMenu(actions: List<Any>, tint: Long, composer: Any, maxPerRow: Int) {
+internal fun ReaderHook.renderWrappedSelectionMenu(
+    actions: List<Any>, tint: Long, composer: Any, maxPerRow: Int, bubbleArrowOnTop: Boolean? = null,
+) {
     if (HostSymbols.profileId == "2.3.3-b4") {
-        renderB4WrappedSelectionMenu(actions, tint, composer, maxPerRow)
+        renderB4WrappedSelectionMenu(actions, tint, composer, maxPerRow, bubbleArrowOnTop)
         return
     }
     if (settingsProvider().canUseCompactReaderSelectionMenu) {
@@ -118,14 +120,18 @@ private fun ReaderHook.renderB4WrappedSelectionMenu(
     tint: Long,
     composer: Any,
     maxPerRow: Int,
+    bubbleArrowOnTop: Boolean?,
 ) {
     val nativeUi = B2NativeUi(classLoader)
     val cellWidth = selectionMenuCellWidthDp(actions)
     val contentWidth = (maxPerRow.coerceAtLeast(1) * cellWidth + (maxPerRow - 1) * 2 + 16)
         .coerceAtMost(320)
-    val contentModifier = nativeUi.width(
-        nativeUi.padding(nativeUi.modifier(), 8f, 6f, 8f, 6f),
-        nativeUi.dp(contentWidth),
+    val contentModifier = nativeUi.padding(
+        // 总宽已经包含两侧 8dp，先限宽再内缩，避免 padding 把右侧再撑大 16dp。
+        nativeUi.width(nativeUi.modifier(), nativeUi.dp(contentWidth)),
+        // 宿主气泡形状的箭头占 10dp；保留原 ce0 内容的单侧避让，不能让第二行落进裁剪区。
+        8f, 6f + if (bubbleArrowOnTop == true) 10f else 0f,
+        8f, 6f + if (bubbleArrowOnTop == false) 10f else 0f,
     )
     val content = nativeUi.lambda(
         actions.fold(0x524d4234) { key, action -> key * 31 + callString(action, "getTitle").hashCode() },
@@ -247,6 +253,10 @@ private fun ReaderHook.selectionMenuCellWidthDp(actions: List<Any>): Int {
             if (character.code <= 0x7f) 8 else 14
         }
     } ?: 0
+    // 普通 B4 菜单收紧横向留白，长标题仍按内容扩宽，紧凑模式和旧版保持原样。
+    if (HostSymbols.profileId == "2.3.3-b4" && !settingsProvider().canUseCompactReaderSelectionMenu) {
+        return (maxTitleWidth + 32).coerceIn(60, 100)
+    }
     return (maxTitleWidth + 42).coerceIn(72, 112)
 }
 

@@ -2453,6 +2453,14 @@ typeAlias=ReaMicroHost.Spacer=qfd
 typeAlias=ReaMicroHost.NavigateNextIcon=mod
 typeAlias=ReaMicroHost.AspectRatio=pvb
 typeAlias=ReaMicroHost.ReaderMenuActions=d10
+methodOwner=org.epub.structure.opf.Opf#obtain=trd
+method=org.epub.structure.opf.Opf#obtain=k
+typeAlias=ReaMicroHost.SelectionMenuFloatingContent=ce0
+typeAlias=ReaMicroHost.SelectionMenuInlineContent=ae0
+typeAlias=ReaMicroHost.ProfileScreen=yyd
+typeAlias=ReaMicroHost.ProfileContent=lx7
+typeAlias=ReaMicroHost.ProfilePrivilegeCard=xbd
+typeAlias=ReaMicroHost.ShaderBrush=et0
 typeAlias=ReaMicroHost.ReaderMenuThemeClick=cv2
 typeAlias=ReaMicroHost.AliyunIcon=jj7
 typeAlias=androidx.compose.material.icons.outlined.SearchKt=xs4
@@ -2540,3 +2548,5 @@ typeAlias=androidx.compose.ui.graphics.AndroidCanvas_androidKt=df
 method=androidx.compose.ui.graphics.AndroidCanvas_androidKt#getNativeCanvas=c
 typeAlias=ReaMicroHost.ReaderHighlightPagerContent=je8
 method=ReaMicroHost.ReaderHighlightPagerContent#invoke=y
+methodOwner=androidx.compose.material.icons.outlined.EditKt#getEdit=yfd
+method=androidx.compose.material.icons.outlined.EditKt#getEdit=d
