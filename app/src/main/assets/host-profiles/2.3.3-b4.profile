@@ -2121,12 +2121,12 @@ field=okhttp3.Response#code=d
 field=okhttp3.Response#message=c
 field=okhttp3.Response#request=a
 field=okio.Path#DIRECTORY_SEPARATOR=b
-field=org.epub.FontProvider#buildInFonts=h
+field=org.epub.FontProvider#buildInFonts=i
 field=org.epub.FontProvider#builtInKaiFont=d
 field=org.epub.FontProvider#builtInSongFont=c
 field=org.epub.FontProvider#cmapCache=p
 field=org.epub.FontProvider#defaultFont=e
-field=org.epub.FontProvider#embeddedFonts=i
+field=org.epub.FontProvider#embeddedFonts=h
 field=org.epub.FontProvider#fonts=j
 field=org.epub.FontProvider#kaiFont=g
 field=org.epub.FontProvider#songFont=f
@@ -2550,3 +2550,11 @@ typeAlias=ReaMicroHost.ReaderHighlightPagerContent=je8
 method=ReaMicroHost.ReaderHighlightPagerContent#invoke=y
 methodOwner=androidx.compose.material.icons.outlined.EditKt#getEdit=yfd
 method=androidx.compose.material.icons.outlined.EditKt#getEdit=d
+typeAlias=org.epub.css.property.FontFamily$FamilyName=bk3
+field=org.epub.css.property.FontFamily$FamilyName#name=b
+typeAlias=ReaMicroHost.SentryOptionsConfig=uu
+methodOwner=io.sentry.android.core.SentryAndroid#init=io.sentry.android.core.h1
+method=io.sentry.android.core.SentryAndroid#init=b
+methodOwner=kotlinx.coroutines.JobKt#getJob=s2e
+method=kotlinx.coroutines.JobKt#getJob=i
+method=kotlinx.coroutines.Job#isActive=g

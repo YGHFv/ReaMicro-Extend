@@ -6,6 +6,9 @@ import android.content.SharedPreferences
 import com.reamicro.fix.settings.HostCrashUploadSettings
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.core.HookInstallReport
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostStaticMethod
 import com.reamicro.fix.xposed.XC_MethodHook
 import com.reamicro.fix.xposed.XposedBridge
 import java.lang.reflect.Method
@@ -35,6 +38,10 @@ internal object HostCrashReportBlocker {
 
     @Synchronized
     fun install(classLoader: ClassLoader, packageName: String) {
+        if (HostSymbols.profileId == "2.3.3-b4") {
+            installB4InitGuard(classLoader, packageName)
+            return
+        }
         val loadClass = { name: String -> Class.forName(name, false, classLoader) }
         try {
             loadClass("io.sentry.android.core.SentryAndroid")
@@ -54,6 +61,33 @@ internal object HostCrashReportBlocker {
         }, shouldBlock = ::isBlockingEnabled)
         val failed = HookInstallReport.snapshot().count { it.feature == FEATURE && !it.ok }
         XposedBridge.logAlways("ReaMicro privacy: Sentry guards registered=$count, failed=$failed; upload permission defaults OFF; registration alone is not proof of protection")
+    }
+
+    private fun installB4InitGuard(classLoader: ClassLoader, packageName: String) {
+        installSettingsBootstrap(packageName)
+        HookInstallReport.install(FEATURE, "b4-sdk-init") {
+            // R8 将 SentryAndroid.init 收窄为 App 与配置对象；只拦截已取证的 SDK 初始化入口。
+            val app = classLoader.hostClass("app.zhendong.reamicro.App")
+            val config = classLoader.hostClass("ReaMicroHost.SentryOptionsConfig")
+            val method = classLoader.hostStaticMethod("io.sentry.android.core.SentryAndroid", "init", app, config)
+            if (method !in installedMethods) {
+                val guard = replacement(method, ResultKind.VOID, ::isBlockingEnabled)
+                checkNotNull(XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        guard.callBeforeHookedMethod(param)
+                        if (param.isReturnEarly) {
+                            XposedBridge.logAlways("ReaMicro privacy: B4 Sentry init suppressed (upload disabled)")
+                        }
+                    }
+                })) { "Framework did not install $method" }
+                installedMethods += method
+            }
+            XposedBridge.deoptimize(app.getDeclaredMethod("onCreate"))
+            XposedBridge.logAlways(
+                "ReaMicro privacy: B4 Sentry init guard registered; upload switch retained; " +
+                    "registration alone is not proof of protection",
+            )
+        }
     }
 
     private fun installSettingsBootstrap(packageName: String) {

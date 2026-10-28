@@ -1,5 +1,9 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostStaticMethod
+
+import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.xposed.XposedHelpers
 import java.io.File
 import java.lang.reflect.Proxy
@@ -40,12 +44,13 @@ internal fun ReaderHook.invokeRefreshHostSuspend(
     session: ReaderRefreshSession, current: () -> Boolean, operation: (Any?) -> Any?,
 ): Any? {
     requireRefreshCurrent(current)
-    val vmType = classLoader.loadClass("androidx.lifecycle.ViewModel")
-    val scope = classLoader.loadClass("androidx.lifecycle.ViewModelKt")
-        .getMethod("getViewModelScope", vmType).invoke(null, session.viewModel)
+    val vmType = classLoader.hostClass("androidx.lifecycle.ViewModel")
+    val scope = classLoader.hostClass("androidx.lifecycle.ViewModelKt")
+        .hostMethod("getViewModelScope", vmType).invoke(null, session.viewModel)
     val context = XposedHelpers.callMethod(scope, "getCoroutineContext")
-    val job = requireNotNull(classLoader.loadClass("kotlinx.coroutines.JobKt").getMethod(
-        "getJob", classLoader.loadClass("kotlin.coroutines.CoroutineContext"),
+    val job = requireNotNull(classLoader.hostStaticMethod(
+        "kotlinx.coroutines.JobKt",
+        "getJob", classLoader.hostClass("kotlin.coroutines.CoroutineContext"),
     ).invoke(null, context)) { "Reader ViewModel job missing" }
     check(XposedHelpers.callMethod(job, "isActive") == true) { "Reader ViewModel job is inactive" }
     return invokeSelectionHostSuspend(parentContext = job) { cont ->
@@ -57,9 +62,9 @@ internal fun ReaderHook.invokeRefreshHostSuspend(
 internal fun ReaderHook.refreshOnMain(
     session: ReaderRefreshSession, current: () -> Boolean, action: () -> Any?,
 ): Any? {
-    val f2 = classLoader.loadClass("kotlin.jvm.functions.Function2")
+    val f2 = classLoader.hostClass("kotlin.jvm.functions.Function2")
     val block = Proxy.newProxyInstance(classLoader, arrayOf(f2)) { proxy, method, args ->
-        when (method.name) {
+        when (com.reamicro.fix.core.HostSymbols.logicalMethodName(method)) {
             "invoke" -> { requireRefreshCurrent(current); action() }
             "toString" -> "ReaMicroRefreshMain"
             "hashCode" -> System.identityHashCode(proxy)
@@ -67,10 +72,12 @@ internal fun ReaderHook.refreshOnMain(
             else -> null
         }
     }
-    val main = classLoader.loadClass("kotlinx.coroutines.Dispatchers").getMethod("getMain").invoke(null)
-    val withContext = classLoader.loadClass("kotlinx.coroutines.BuildersKt").getMethod(
-        "withContext", classLoader.loadClass("kotlin.coroutines.CoroutineContext"), f2,
-        classLoader.loadClass("kotlin.coroutines.Continuation"),
+    val main = com.reamicro.fix.core.HostCoroutines.mainDispatcher(classLoader)
+    // B4 合并门面的不同静态方法分属不同 owner，必须按已有成员映射分派。
+    val withContext = classLoader.hostStaticMethod(
+        "kotlinx.coroutines.BuildersKt",
+        "withContext", classLoader.hostClass("kotlin.coroutines.CoroutineContext"), f2,
+        classLoader.hostClass("kotlin.coroutines.Continuation"),
     )
     return invokeRefreshHostSuspend(session, current) { withContext.invoke(null, main, block, it) }
 }
