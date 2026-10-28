@@ -2614,3 +2614,6 @@ method=ReaMicroHost.BuiltInFontRow#render=a
 typeAlias=ReaMicroHost.LazyItemScope=tn5
 typeAlias=ReaMicroHost.BuiltInFontItems=ei6
 method=ReaMicroHost.BuiltInFontItems#invoke=y
+methodOwner=androidx.compose.ui.unit.TextUnitKt#TextUnit-anM5pPY=jtd
+method=androidx.compose.ui.unit.TextUnitKt#TextUnit-anM5pPY=k
+typeAlias=androidx.compose.ui.graphics.SolidColor=hea

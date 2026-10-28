@@ -1,6 +1,8 @@
 package com.reamicro.fix.hook
 
 import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostStaticMethod
 import com.reamicro.fix.core.hostNameMatches
 import com.reamicro.fix.core.typeMatches
 
@@ -76,7 +78,7 @@ class ReaderDialogueHighlightHook(
     private val spanStyleConstructor by lazy {
         val constructors = cls(SPAN_STYLE_CLASS).declaredConstructors
         (constructors.firstOrNull { it.parameterTypes.size == 18 }
-            ?: constructors.first {
+            ?: constructors.firstOrNull {
                 it.parameterTypes.size == 16 &&
                     it.parameterTypes.firstOrNull() == Long::class.javaPrimitiveType
             }
@@ -857,9 +859,10 @@ class ReaderDialogueHighlightHook(
         if (background != null) mask = mask and SPAN_STYLE_MASK_BACKGROUND.inv()
         val created = if (constructor.parameterTypes.size == 17) {
             constructor.newInstance(
-                null,
+                cls("androidx.compose.ui.graphics.SolidColor").getDeclaredConstructor(Long::class.javaPrimitiveType)
+                    .newInstance(color),
                 1f,
-                color,
+                fontSize ?: 0L,
                 null,
                 null,
                 null,
@@ -990,6 +993,14 @@ class ReaderDialogueHighlightHook(
 
     private fun packTextUnit(methodName: String, amount: Float): Long? =
         runCatching {
+            if (HostSymbols.profileId == "2.3.3-b4") {
+                // getSp/getEm 已被 R8 内联；通用 TextUnit 工厂仍在，类型位必须与旧实现一致。
+                val kind = if (methodName == "getEm") 0x200000000L else 0x100000000L
+                return@runCatching classLoader.hostStaticMethod(
+                    TEXT_UNIT_KT_CLASS, "TextUnit-anM5pPY", Float::class.javaPrimitiveType, Long::class.javaPrimitiveType,
+                )
+                    .invoke(null, amount, kind) as Long
+            }
             cls(TEXT_UNIT_KT_CLASS).declaredMethods.firstOrNull { method ->
                 method.hostNameMatches(methodName) &&
                     method.parameterTypes.size == 1 &&
@@ -1144,9 +1155,11 @@ class ReaderDialogueHighlightHook(
     }
 
     private fun compareJustifyTextForHighlight(param: XC_MethodHook.MethodHookParam) {
-        val flags = param.args?.getOrNull(JUSTIFY_TEXT_CHANGED_FLAGS_INDEX) as? Int ?: return
+        val index = if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") 5
+            else JUSTIFY_TEXT_CHANGED_FLAGS_INDEX
+        val flags = param.args?.getOrNull(index) as? Int ?: return
         // 参数可能被模块替换，交给宿主当前节点的 changed(text) 比较，不能每帧强制标脏。
-        param.args[JUSTIFY_TEXT_CHANGED_FLAGS_INDEX] = flags and JUSTIFY_TEXT_TEXT_DIRTY_MASK.inv()
+        param.args[index] = flags and JUSTIFY_TEXT_TEXT_DIRTY_MASK.inv()
     }
 
     private fun hookActivityConfigurationChanges() {
@@ -1242,7 +1255,10 @@ class ReaderDialogueHighlightHook(
                         if (ReaderHighlightBookContext.bookKey.isBlank()) return
                         if (!isTextNodeAttached(node)) return
                         checkHighlightRuntimeVersion()
-                        val layout = callNoArg(layoutCache.invoke(node, scope), "getTextLayoutResult") ?: return
+                        val cache = layoutCache.invoke(node, scope)
+                        val layout = callNoArg(cache, "getTextLayoutResult")
+                            ?: accessorOrField(cache, "layoutCache")
+                            ?: return
                         val token = currentHighlightRuntimeKey()
                         var state = synchronized(textNodeDrawStates) { textNodeDrawStates[node] }
                         if (state?.textLayoutResult !== layout || state.token != token) {
@@ -1255,11 +1271,21 @@ class ReaderDialogueHighlightHook(
                             val ranges = currentNinePatchRanges(text).ifEmpty { rememberedNinePatchRanges(text) }
                             state = NinePatchDrawState(ranges, token).apply { textLayoutResult = layout }
                             synchronized(textNodeDrawStates) { textNodeDrawStates[node] = state }
+                            logHighlightPerformance {
+                                "text-node layout ranges=${ranges.size} text=${annotatedStringLength(text)}"
+                            }
                         }
                         drawNinePatchBackgrounds(scope, state)
                     }.onFailure { logNinePatchDrawFailure("text-node", it) }
                 }
             })
+            if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+                // B4 在唯一的 drawDirect 调用点内联了节点 draw，必须反优化调用点才能命中 hook。
+                val caller = cls("androidx.compose.ui.node.LayoutNodeDrawScope").declaredMethods.single {
+                    it.hostNameMatches("drawDirect") && it.parameterCount == 5
+                }
+                XposedBridge.deoptimize(caller)
+            }
         }.onFailure {
             logNinePatchDrawFailure("text-node-install", it)
         }
@@ -1473,13 +1499,16 @@ class ReaderDialogueHighlightHook(
     }
 
     private fun lineRects(layout: Any, start: Int, end: Int, box: ReedenBoxStyle): List<Rect> {
-
-        val lineForOffset = instanceMethod(layout, "getLineForOffset", 1) ?: return emptyList()
-        val startLine = runCatching { lineForOffset.invoke(layout, start) as? Int }.getOrNull()
+        // B4 把 TextLayoutResult 的行查询内联到 MultiParagraph，坐标语义保持不变。
+        val paragraph = accessorOrField(layout, "multiParagraph")
+        val lineTarget = if (instanceMethod(layout, "getLineForOffset", 1) != null) layout else paragraph
             ?: return emptyList()
-        val endLine = runCatching { lineForOffset.invoke(layout, (end - 1).coerceAtLeast(start)) as? Int }.getOrNull()
+        val lineForOffset = instanceMethod(lineTarget, "getLineForOffset", 1) ?: return emptyList()
+        val startLine = runCatching { lineForOffset.invoke(lineTarget, start) as? Int }.getOrNull()
+            ?: return emptyList()
+        val endLine = runCatching { lineForOffset.invoke(lineTarget, (end - 1).coerceAtLeast(start)) as? Int }.getOrNull()
             ?: startLine
-        val lineCount = callNoArg(layout, "getLineCount") as? Int
+        val lineCount = (callNoArg(layout, "getLineCount") ?: callNoArg(paragraph, "getLineCount")) as? Int
         if (lineCount != null && lineCount <= 0) return emptyList()
         val firstLine = if (lineCount != null) startLine.coerceIn(0, lineCount - 1) else startLine
         val lastLine = if (lineCount != null) endLine.coerceIn(0, lineCount - 1) else endLine
@@ -1487,15 +1516,19 @@ class ReaderDialogueHighlightHook(
         return (firstLine..lastLine).mapNotNull { line ->
             val lineStart = callInt(layout, "getLineStart", line)
                 ?: return@mapNotNull null
-            val lineEnd = lineEnd(layout, line)
+            val lineEnd = lineEnd(layout, line) ?: paragraph?.let { lineEnd(it, line) }
                 ?: return@mapNotNull null
             val localStart = maxOf(start, lineStart)
             val localEnd = minOf(end, lineEnd)
             if (localEnd <= localStart) return@mapNotNull null
             val left = charRect(layout, localStart)?.left ?: return@mapNotNull null
             val right = charRect(layout, localEnd - 1)?.right ?: return@mapNotNull null
-            val top = callFloat(layout, "getLineTop", line) ?: charRect(layout, localStart)?.top ?: return@mapNotNull null
-            val bottom = callFloat(layout, "getLineBottom", line) ?: charRect(layout, localStart)?.bottom ?: return@mapNotNull null
+            val top = callFloat(layout, "getLineTop", line)
+                ?: paragraph?.let { callFloat(it, "getLineTop", line) }
+                ?: charRect(layout, localStart)?.top ?: return@mapNotNull null
+            val bottom = callFloat(layout, "getLineBottom", line)
+                ?: paragraph?.let { callFloat(it, "getLineBottom", line) }
+                ?: charRect(layout, localStart)?.bottom ?: return@mapNotNull null
             Rect(
                 (left - box.paddingLeftPx - box.marginLeftPx).toInt(),
                 (top - box.paddingTopPx - box.marginTopPx).toInt(),
@@ -1986,8 +2019,7 @@ class ReaderDialogueHighlightHook(
 
     private fun callNoArg(target: Any?, name: String): Any? {
         if (target == null) return null
-        val method = instanceMethod(target, name, 0) ?: return null
-        return runCatching { method.invoke(target) }.getOrNull()
+        return runCatching { hostCompat.accessor(target, name) }.getOrNull()
     }
 
     private fun annotatedStringText(annotatedString: Any): String =

@@ -1,5 +1,6 @@
 import android.graphics.Bitmap;
 import android.graphics.Typeface;
+import android.os.Looper;
 import dalvik.system.PathClassLoader;
 import java.io.File;
 import java.io.ByteArrayOutputStream;
@@ -7,6 +8,7 @@ import java.io.InputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.ArrayList;
@@ -122,6 +124,62 @@ public final class B4RemainingMigrationProbe {
         image.recycle();
     }
 
+    private static void highlightCss(ClassLoader host, ClassLoader module) throws Exception {
+        if (Looper.getMainLooper() == null) Looper.prepareMainLooper();
+        Class<?> callback = module.loadClass("kotlin.jvm.functions.Function0");
+        Object noContext = Proxy.newProxyInstance(module, new Class<?>[]{callback}, (proxy, method, args) -> {
+            if (method.getName().equals("invoke")) return null;
+            if (method.getName().equals("toString")) return "IsolatedNoActivity";
+            if (method.getName().equals("hashCode")) return System.identityHashCode(proxy);
+            if (method.getName().equals("equals")) return proxy == args[0];
+            return null;
+        });
+        Class<?> settings = module.loadClass("com.reamicro.fix.settings.XposedModuleSettings");
+        Object config = settings.getConstructor(callback).newInstance(noContext);
+        Class<?> hook = module.loadClass("com.reamicro.fix.hook.ReaderDialogueHighlightHook");
+        Object highlighter = hook.getConstructor(ClassLoader.class, callback, settings).newInstance(host, noContext, config);
+        Class<?> style = module.loadClass("com.reamicro.fix.settings.ReaderHighlightStyle");
+        Constructor<?> make = Arrays.stream(style.getDeclaredConstructors())
+                .filter(value -> value.getParameterCount() == 13).findFirst().get();
+        for (String size : new String[]{".3em", "2em", "24px", "18sp"}) {
+            // 生产 parser 不接受省略整数位的小数，使用实际设置保存格式 0.3em。
+            String cssSize = size.equals(".3em") ? "0.3em" : size;
+            Object definition = make.newInstance("probe-" + size, "CSS probe", "#ff9800", "system",
+                    "font-size: " + cssSize + "; color: #ff9800", "", "", true, "", "", "", "", "");
+            Object nativeStyle = invoke(hook, "createHighlightSpanStyle", highlighter,
+                    new Class<?>[]{style, boolean.class}, definition, false);
+            long packed = host.loadClass("cfa").getDeclaredField("b").getLong(nativeStyle);
+            float number = ((Number) invoke(host.loadClass("y5b"), "c", null,
+                    new Class<?>[]{long.class}, packed)).floatValue();
+            long kind = ((Number) invoke(host.loadClass("y5b"), "b", null,
+                    new Class<?>[]{long.class}, packed)).longValue();
+            float expected = size.equals(".3em") ? .3f : size.equals("2em") ? 2f : size.equals("24px") ? 24f : 18f;
+            check(Math.abs(number - expected) < .0001f, "Highlight CSS amount lost: " + size);
+            check(kind == (size.endsWith("em") ? 0x200000000L : 0x100000000L), "Highlight CSS kind lost");
+            System.out.println("HIGHLIGHT_CSS_PASS size=" + cssSize + " nativeValue=" + number
+                    + " kind=" + Long.toHexString(kind));
+        }
+        Constructor<?> brush = Arrays.stream(host.loadClass("cfa").getDeclaredConstructors())
+                .filter(value -> value.getParameterCount() == 17).findFirst().get();
+        Object initialized = module.loadClass("kotlin.InitializedLazyImpl").getConstructor(Object.class)
+                .newInstance(brush);
+        Field selected = hook.getDeclaredField("spanStyleConstructor$delegate");
+        selected.setAccessible(true);
+        selected.set(highlighter, initialized);
+        Object definition = make.newInstance("probe-brush", "CSS brush fallback", "#ff9800", "system",
+                "font-size: 0.3em; color: #ff9800", "", "", true, "", "", "", "", "");
+        Object nativeStyle = invoke(hook, "createHighlightSpanStyle", highlighter,
+                new Class<?>[]{style, boolean.class}, definition, false);
+        long packed = host.loadClass("cfa").getDeclaredField("b").getLong(nativeStyle);
+        check(Math.abs(((Number) invoke(host.loadClass("y5b"), "c", null,
+                new Class<?>[]{long.class}, packed)).floatValue() - .3f) < .0001f,
+                "Brush fallback lost font size");
+        Object foreground = host.loadClass("cfa").getDeclaredField("a").get(nativeStyle);
+        long color = ((Number) invoke(foreground.getClass(), "b", foreground, new Class<?>[0])).longValue();
+        check(color != 16L, "Brush fallback lost foreground color");
+        System.out.println("HIGHLIGHT_CSS_BRUSH_PASS size=0.3em foreground=" + Long.toHexString(color));
+    }
+
     private interface Test { void run() throws Exception; }
 
     private static void run(String name, List<String> failures, Test test) {
@@ -157,7 +215,9 @@ public final class B4RemainingMigrationProbe {
         run("METRICS", failures, () -> metrics(host, module));
         run("CSS", failures, () -> css(host, module, root));
         run("SVG", failures, () -> svg(host, module, root));
+        run("HIGHLIGHT_CSS", failures, () -> highlightCss(host, module));
         check(failures.isEmpty(), "Native fixture tests failed: " + failures);
         System.out.println("REMAINING_NATIVE_PROBE_PASS");
+        System.exit(0);
     }
 }
