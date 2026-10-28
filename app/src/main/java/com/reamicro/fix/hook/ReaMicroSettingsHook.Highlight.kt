@@ -1,5 +1,8 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostNameMatches
+
+
 import android.app.Activity
 import android.app.Dialog
 import android.content.Context
@@ -404,31 +407,30 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightScreenEntryCard(
             onClick = onClick,
         ),
     )
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        renderHostActionCard(rows, composer)
+        return
+    }
 
     val content = functionProxy("ReaderHighlightScreenEntryCard", FUNCTION3_CLASS) { args ->
         val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
         renderHostActionCard(rows, innerComposer)
         targetUnit()
     }
-    val bottomPaddedModifier = method(PADDING_KT_CLASS, PADDING_ABSOLUTE_DEFAULT_METHOD, 7).invoke(
-        null,
+    val bottomPaddedModifier = readerHighlightPaddingSides(
         modifierInstance(),
         0f,
         0f,
         0f,
         udp(12),
         7,
-        null,
     )
-    method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
-        null,
+    readerHighlightColumn(
         bottomPaddedModifier,
         arrangementTop(),
         alignmentStart(),
         content,
         composer,
-        0,
-        0,
     )
 }
 
@@ -480,15 +482,12 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightRulesSheetFromReader(
         }
         targetUnit()
     }
-    method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
-        null,
+    readerHighlightColumn(
         readerHighlightSheetModifier(composer),
         arrangementTop(),
         alignmentStart(),
         content,
         composer,
-        0,
-        0,
     )
 }
 
@@ -528,22 +527,7 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightSheetStyleList(composer: 
         }
         targetUnit()
     }
-    method(LAZY_DSL_KT_CLASS, LAZY_COLUMN_METHOD, 13).invoke(
-        null,
-        readerHighlightSheetListModifier(),
-        null,
-        null,
-        false,
-        spacedBy(12),
-        null,
-        null,
-        false,
-        null,
-        listContent,
-        composer,
-        0,
-        494,
-    )
+    readerHighlightLazyColumn(readerHighlightSheetListModifier(), spacedBy(12), listContent, composer)
 }
 
 internal fun ReaMicroSettingsHook.renderReaderHighlightScreenPlanPage(bookKey: String, bookTitle: String, composer: Any) {
@@ -566,23 +550,19 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightScreenPlanPage(bookKey: S
         }
         targetUnit()
     }
-    method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
-        null,
+    readerHighlightColumn(
         readerHighlightPlanColumnModifier(),
         spacedBy(12),
         alignmentStart(),
         content,
         composer,
-        0,
-        0,
     )
 }
 
 internal fun ReaMicroSettingsHook.readerHighlightPlanColumnModifier(): Any {
     val filled = method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, 4)
         .invoke(null, modifierInstance(), 0f, 1, null)
-    return method(PADDING_KT_CLASS, PADDING_HORIZONTAL_DEFAULT_METHOD, 5)
-        .invoke(null, filled, udp(16), udp(8), 2, null)
+    return readerHighlightHorizontalPadding(filled, udp(16), udp(8), 2)
 }
 
 internal fun ReaMicroSettingsHook.readerHighlightPlanStyleRows(): List<ActionRow> {
@@ -640,22 +620,7 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightRulesSheetList(
         }
         targetUnit()
     }
-    method(LAZY_DSL_KT_CLASS, LAZY_COLUMN_METHOD, 13).invoke(
-        null,
-        readerHighlightSheetListModifier(),
-        null,
-        null,
-        false,
-        spacedBy(12),
-        null,
-        null,
-        false,
-        null,
-        listContent,
-        composer,
-        0,
-        494,
-    )
+    readerHighlightLazyColumn(readerHighlightSheetListModifier(), spacedBy(12), listContent, composer)
 }
 
 internal fun ReaMicroSettingsHook.readerHighlightSheetStyleRows(): List<ActionRow> {
@@ -1754,14 +1719,19 @@ internal fun ReaMicroSettingsHook.readerHighlightSheetModifier(composer: Any): A
         modifierInstance(),
         udp(READER_RULE_SHEET_HEIGHT_DP),
     )
-    return method(BACKGROUND_KT_CLASS, BACKGROUND_DEFAULT_METHOD, 5).invoke(
-        null,
-        height,
-        colorScheme(composer).longMethod("getSurface"),
-        null,
-        2,
-        null,
-    )
+    val surface = colorScheme(composer).longMethod("getSurface")
+    return if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        b2Ui.background(requireNotNull(height), surface)
+    } else {
+        method(BACKGROUND_KT_CLASS, BACKGROUND_DEFAULT_METHOD, 5).invoke(
+            null,
+            height,
+            surface,
+            null,
+            2,
+            null,
+        )
+    }
 }
 
 internal fun ReaMicroSettingsHook.readerHighlightSheetListModifier(): Any {
@@ -1772,14 +1742,100 @@ internal fun ReaMicroSettingsHook.readerHighlightSheetListModifier(): Any {
         1,
         null,
     )
-    return method(PADDING_KT_CLASS, PADDING_HORIZONTAL_DEFAULT_METHOD, 5).invoke(
-        null,
-        filled,
-        udp(18),
-        0f,
-        2,
-        null,
-    )
+    return readerHighlightHorizontalPadding(filled, udp(18), 0f, 2)
+}
+
+private fun ReaMicroSettingsHook.readerHighlightPaddingSides(
+    baseModifier: Any,
+    start: Float,
+    top: Float,
+    end: Float,
+    bottom: Float,
+    mask: Int,
+): Any =
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        b2Ui.padding(baseModifier, start, top, end, bottom)
+    } else {
+        method(PADDING_KT_CLASS, PADDING_ABSOLUTE_DEFAULT_METHOD, 7).invoke(
+            null,
+            baseModifier,
+            start,
+            top,
+            end,
+            bottom,
+            mask,
+            null,
+        )
+    }
+
+private fun ReaMicroSettingsHook.readerHighlightHorizontalPadding(
+    baseModifier: Any,
+    horizontal: Float,
+    vertical: Float,
+    mask: Int,
+): Any =
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        b2Ui.padding(baseModifier, horizontal, vertical, horizontal, vertical)
+    } else {
+        method(PADDING_KT_CLASS, PADDING_HORIZONTAL_DEFAULT_METHOD, 5).invoke(
+            null,
+            baseModifier,
+            horizontal,
+            vertical,
+            mask,
+            null,
+        )
+    }
+
+private fun ReaMicroSettingsHook.readerHighlightColumn(
+    modifier: Any,
+    arrangement: Any,
+    alignment: Any,
+    content: Any,
+    composer: Any,
+) {
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        b2Ui.column(modifier, arrangement, alignment, content, composer)
+    } else {
+        method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
+            null,
+            modifier,
+            arrangement,
+            alignment,
+            content,
+            composer,
+            0,
+            0,
+        )
+    }
+}
+
+private fun ReaMicroSettingsHook.readerHighlightLazyColumn(
+    modifier: Any,
+    arrangement: Any,
+    content: Any,
+    composer: Any,
+) {
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        b2Ui.lazyColumn(modifier, arrangement, content, composer)
+    } else {
+        method(LAZY_DSL_KT_CLASS, LAZY_COLUMN_METHOD, 13).invoke(
+            null,
+            modifier,
+            null,
+            null,
+            false,
+            arrangement,
+            null,
+            null,
+            false,
+            null,
+            content,
+            composer,
+            0,
+            494,
+        )
+    }
 }
 
 internal fun ReaMicroSettingsHook.readerHighlightVersionState(): Any {
@@ -1794,7 +1850,7 @@ internal fun ReaMicroSettingsHook.bumpReaderHighlightVersion() {
     val state = readerHighlightVersionState()
     val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
     state.javaClass.methods
-        .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
         ?.invoke(state, value + 1)
 }
 
@@ -1809,7 +1865,7 @@ internal fun ReaMicroSettingsHook.readerHighlightSheetSubPageValue(): Int =
 internal fun ReaMicroSettingsHook.setReaderHighlightSheetSubPage(page: Int) {
     val state = readerHighlightSheetSubPageState()
     state.javaClass.methods
-        .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
         ?.invoke(state, page)
 }
 
@@ -1824,6 +1880,6 @@ internal fun ReaMicroSettingsHook.readerHighlightScreenPlanValue(): Int =
 internal fun ReaMicroSettingsHook.setReaderHighlightScreenPlan(page: Int) {
     val state = readerHighlightScreenPlanState()
     state.javaClass.methods
-        .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
         ?.invoke(state, page)
 }

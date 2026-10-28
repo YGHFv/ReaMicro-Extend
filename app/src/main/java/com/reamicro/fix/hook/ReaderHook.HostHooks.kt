@@ -489,6 +489,38 @@ internal fun ReaderHook.hookReaderHighlightScreenEntry() {
             }
         })
 
+        if (HostSymbols.profileId == "2.3.3-b4") {
+            // B4 的 HighlightPageContent 在内部 Column 里先调用分页标签（角色/高亮），
+            // 再组合 LazyColumn。把入口卡片放在标签方法之前，才能继承该 Column 的宽度约束；
+            // 若直接注入 HighlightPageContent，会和这个 Column 重叠并压成细条。
+            val tabsMethod = screenClass.declaredMethods.firstOrNull { method ->
+                method.hostNameMatches("HighlightPageContentTabs") &&
+                    method.parameterTypes.size == 5 &&
+                    method.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                    method.parameterTypes[1] == Int::class.javaPrimitiveType &&
+                    method.parameterTypes[2] == composerClass &&
+                    typeMatches(method.parameterTypes[3], "java.util.List")
+            } ?: error("HighlightPageContentTabs main method not found")
+            tabsMethod.isAccessible = true
+            XposedBridge.hookMethod(tabsMethod, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (highlightScreenEntryInjected.get() == true) return
+                    val composer = param.args?.getOrNull(2) ?: return
+                    highlightScreenEntryInjected.set(true)
+                    ReaMicroSettingsHook.renderReaderHighlightScreenEntryCard(
+                        bookKey = ReaderHighlightBookContext.bookKey,
+                        bookTitle = ReaderHighlightBookContext.bookTitle,
+                        composer = composer,
+                    ) {
+                        XposedBridge.log("$LOG_PREFIX highlight entry card clicked")
+                        openReaderCompletionPlanPage()
+                    }
+                }
+            })
+            XposedBridge.log("$LOG_PREFIX reader highlight screen entry hook installed at B4 tabs")
+            return@install
+        }
+
         // SectionTitleLikeMore 是旧 UI API，b2/b3 的 ReaderHighlightScreenKt 已没有同名成员。
         // 缺省回退到同一屏的 HighlightPageContent：它每次组屏都会执行，且以 Composer 为参数，
         // 卡片会落在分页标签栏上方，与旧版插入位置一致。

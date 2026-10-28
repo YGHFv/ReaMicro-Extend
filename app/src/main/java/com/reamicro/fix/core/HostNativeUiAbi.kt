@@ -10,6 +10,7 @@ object HostNativeUiAbi {
         "Background#e" to "g",
         "Border#a" to "a",
         "Clickable#h" to "g",
+        "Clickable#combined" to "h",
         "Clip#n" to "c",
         "ColumnPolicy#a" to "a",
         "Divider#c" to "c",

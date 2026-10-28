@@ -57,6 +57,8 @@ class B2NativeUi(private val loader: ClassLoader) {
     fun padding(base: Any, values: Any): Any = requireNotNull(static("Padding", "j", base, values))
     fun padding(base: Any, start: Float, top: Float, end: Float, bottom: Float): Any =
         requireNotNull(static("Padding", "n", base, start, top, end, bottom))
+    fun background(base: Any, color: Long): Any =
+        requireNotNull(static("Background", "e", base, color, field("RectangleShape", "a")))
 
     fun spacedBy(value: Float): Any {
         val aligner = type("SpacingAlignment").getDeclaredConstructor(Byte::class.javaPrimitiveType).newInstance(16.toByte())
@@ -66,6 +68,9 @@ class B2NativeUi(private val loader: ClassLoader) {
 
     fun clickable(base: Any, callback: Any): Any =
         requireNotNull(static("Clickable", "h", base, true, null, null, callback, 6))
+
+    fun combinedClickable(base: Any, onLongClick: Any, onClick: Any): Any =
+        requireNotNull(static("Clickable", "combined", base, null, null, onLongClick, onClick, 0))
 
     fun text(legacy: Array<out Any?>) {
         val translated = HostUiArguments.b2Text(legacy)

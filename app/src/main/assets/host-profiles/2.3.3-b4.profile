@@ -428,7 +428,9 @@ method=androidx.compose.foundation.layout.BoxKt#placeInBox=d
 method=androidx.compose.foundation.layout.FlowLayoutKt#FlowRow=a
 method=androidx.compose.foundation.layout.PaddingKt#padding-3ABfNKs=k
 method=androidx.compose.foundation.layout.PaddingKt#padding-VpY3zN4=l
+method=androidx.compose.foundation.layout.PaddingKt#padding-VpY3zN4$default=m
 method=androidx.compose.foundation.layout.PaddingKt#padding-qDBjuR0=n
+method=androidx.compose.foundation.layout.PaddingKt#padding-qDBjuR0$default=o
 method=androidx.compose.foundation.layout.RowScope#weight=b
 method=androidx.compose.foundation.ClickableKt#clickable-oSLSa3U$default=g
 method=androidx.compose.foundation.layout.SizeKt#height-3ABfNKs=f
@@ -992,6 +994,7 @@ method=app.zhendong.reamicro.ui.reader.compose.ReaderCatalogKt#ReaderCatalogSear
 method=app.zhendong.reamicro.ui.reader.compose.ReaderCatalogKt#markPreviewColor=s
 method=app.zhendong.reamicro.ui.reader.compose.ReaderHighlightScreenKt#HighlightItemRow=c
 method=app.zhendong.reamicro.ui.reader.compose.ReaderHighlightScreenKt#HighlightPageContent=d
+method=app.zhendong.reamicro.ui.reader.compose.ReaderHighlightScreenKt#HighlightPageContentTabs=b
 method=app.zhendong.reamicro.ui.reader.compose.ReaderHighlightScreenKt#IconAction-sW7UJKQ=e
 method=app.zhendong.reamicro.ui.reader.compose.ReaderHighlightScreenKt#PresetDialogueRow=i
 method=app.zhendong.reamicro.ui.reader.compose.ReaderHighlightScreenKt#ReaderHighlightContent=j
