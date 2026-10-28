@@ -26,6 +26,7 @@ class=androidx.compose.foundation.text.BasicTextKt=wnd
 class=androidx.compose.foundation.text.modifiers.MultiParagraphLayoutCache=tk6
 class=androidx.compose.foundation.text.modifiers.TextAnnotatedStringNode=yya
 class=androidx.compose.material3.ColorScheme=qh1
+class=androidx.compose.ui.graphics.ColorKt=f2e
 class=androidx.compose.material3.IconKt=nk4
 class=androidx.compose.material3.MaterialTheme$Values=n96
 class=androidx.compose.material3.TextKt=e4b
@@ -63,6 +64,7 @@ class=androidx.compose.ui.text.MultiParagraph=rk6
 class=androidx.compose.ui.text.MultiParagraphIntrinsics=eh1
 class=androidx.compose.ui.text.ParagraphStyle=ii7
 class=androidx.compose.ui.text.PlatformParagraphStyle=dq7
+class=androidx.compose.ui.text.StringAnnotation=nla
 class=androidx.compose.ui.text.PlatformTextStyle=zq7
 class=androidx.compose.ui.text.SpanStyle=cfa
 class=androidx.compose.ui.text.TextLayoutInput=j4b
@@ -439,6 +441,7 @@ method=androidx.compose.foundation.pager.PagerState#snapToItem$foundation=v
 method=androidx.compose.foundation.text.BasicTextKt#BasicText-4YKlhWE=b
 method=androidx.compose.foundation.text.modifiers.MultiParagraphLayoutCache#intrinsicHeight=a
 method=androidx.compose.foundation.text.modifiers.MultiParagraphLayoutCache#layoutText-K40F9xA=b
+method=androidx.compose.ui.graphics.ColorKt#Color=b
 method=androidx.compose.foundation.text.modifiers.MultiParagraphLayoutCache#layoutWithConstraints-K40F9xA=c
 method=androidx.compose.foundation.text.modifiers.MultiParagraphLayoutCache#setDensity$foundation=d
 method=androidx.compose.foundation.text.modifiers.MultiParagraphLayoutCache#setLayoutDirection=e
@@ -1515,9 +1518,15 @@ field=androidx.compose.ui.platform.ComposeViewContext#areValuesResolved=b
 field=androidx.compose.ui.platform.ComposeViewContext#currentConfiguration=i
 field=androidx.compose.ui.platform.ComposeViewContext#view=a
 field=androidx.compose.ui.platform.ComposeViewContext#viewCount=v
+field=androidx.compose.ui.text.AnnotatedString#annotations=a
+field=androidx.compose.ui.text.AnnotatedString#paragraphStyles=d
+field=androidx.compose.ui.text.AnnotatedString#spanStyles=c
 field=androidx.compose.ui.text.AnnotatedString#text=b
+field=androidx.compose.ui.text.AnnotatedString$Range#end=c
 field=androidx.compose.ui.text.AnnotatedString$Range#item=a
+field=androidx.compose.ui.text.AnnotatedString$Range#start=b
 field=androidx.compose.ui.text.AnnotatedString$Range#tag=d
+field=androidx.compose.ui.text.StringAnnotation#value=a
 field=androidx.compose.ui.text.MultiParagraph#didExceedMaxLines=c
 field=androidx.compose.ui.text.MultiParagraph#intrinsics=a
 field=androidx.compose.ui.text.ParagraphStyle#hyphens=h

@@ -1,5 +1,9 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.typeMatches
+
 import android.app.Activity
 import android.content.res.Configuration
 import android.graphics.Color
@@ -70,7 +74,16 @@ class ReaderDialogueHighlightHook(
     private var enabledRuleKey: Triple<ReaderHighlightSettingsSnapshot, String, String>? = null
     private var enabledRuleSnapshot: List<ReaderHighlightRule> = emptyList()
     private val spanStyleConstructor by lazy {
-        cls(SPAN_STYLE_CLASS).declaredConstructors.first { it.parameterTypes.size == 18 }.apply { isAccessible = true }
+        val constructors = cls(SPAN_STYLE_CLASS).declaredConstructors
+        (constructors.firstOrNull { it.parameterTypes.size == 18 }
+            ?: constructors.first {
+                it.parameterTypes.size == 16 &&
+                    it.parameterTypes.firstOrNull() == Long::class.javaPrimitiveType
+            }
+            ?: constructors.first {
+                it.parameterTypes.size == 17 &&
+                    typeMatches(it.parameterTypes.firstOrNull(), "androidx.compose.ui.graphics.Brush")
+            }).apply { isAccessible = true }
     }
     private val reedenBoxStyleCache = object : LinkedHashMap<String, ReedenBoxStyle>(32, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ReedenBoxStyle>?): Boolean =
@@ -102,7 +115,14 @@ class ReaderDialogueHighlightHook(
     @Volatile private var lastAppliedLogKey: String = ""
     @Volatile private var lastHighlightPerformanceLogAtMs: Long = 0L
     fun install() {
-        hostCompat.contentDomClassCandidates().forEach(::hookContentDom)
+        val candidates = hostCompat.contentDomClassCandidates()
+            .mapNotNull { candidate -> runCatching { cls(candidate).name }.getOrNull() }
+            .distinct()
+        XposedBridge.log(
+            "$LOG_PREFIX dialogue highlight install candidates=$candidates " +
+                "profile=${com.reamicro.fix.core.HostSymbols.profileId}",
+        )
+        candidates.forEach(::hookContentDom)
         hookJustifyTextNinePatchDraw()
         hookBasicTextNinePatchDraw()
         hookTextNodeNinePatchDraw()
@@ -132,7 +152,10 @@ class ReaderDialogueHighlightHook(
                     }
                 })
             }
-            logHighlightInfo("dialogue highlight hook installed: $className count=${methods.size}")
+            XposedBridge.log(
+                "$LOG_PREFIX dialogue highlight hook installed: $className count=${methods.size} " +
+                    "method=${methods.joinToString { it.name }}",
+            )
         }.onFailure {
             if (it is ClassNotFoundException) return@onFailure
             XposedBridge.log("$LOG_PREFIX dialogue highlight hook failed: $className ${it.stackTraceToString()}")
@@ -143,8 +166,8 @@ class ReaderDialogueHighlightHook(
         checkHighlightRuntimeVersion()
         runCatching {
             contentDom ?: return
-            val content = callNoArg(contentDom, "getContent") ?: return
-            val text = callNoArg(content, "getText")?.toString().orEmpty()
+            val content = accessorOrField(contentDom, "content") ?: return
+            val text = annotatedStringText(content)
             val nextContent = highlightedAnnotatedString(content, contentDom) ?: return
             field(contentDom.javaClass.name, "content").set(contentDom, nextContent)
             logApplied(text, highlightMarkerRanges(nextContent).size)
@@ -198,12 +221,12 @@ class ReaderDialogueHighlightHook(
                 )
             }
 
-            val originalContent = callNoArg(contentDom, "getContent")
+            val originalContent = accessorOrField(contentDom, "content")
                 ?: return logOnlineParagraphCommentDebug("skip:no-content:$spineIndex")
-            val originalText = callNoArg(originalContent, "getText")?.toString().orEmpty()
-            val originalPlaceholderMap = callNoArg(contentDom, "getPlaceholderMap") as? Map<*, *>
+            val originalText = annotatedStringText(originalContent)
+            val originalPlaceholderMap = accessorOrField(contentDom, "placeholderMap") as? Map<*, *>
                 ?: return logOnlineParagraphCommentDebug("skip:no-placeholder-map:$spineIndex")
-            val originalPlaceholders = callNoArg(contentDom, "getPlaceholders") as? Map<*, *>
+            val originalPlaceholders = accessorOrField(contentDom, "placeholders") as? Map<*, *>
                 ?: return logOnlineParagraphCommentDebug("skip:no-placeholders:$spineIndex")
             val existingIds = onlineCommentRuntimeIds(originalContent, originalPlaceholderMap)
             val plan = OnlineParagraphCommentInjectionPlanner.plan(
@@ -238,15 +261,9 @@ class ReaderDialogueHighlightHook(
         val result = placeholderMap.keys
             .mapNotNull { it?.toString() }
             .filterTo(linkedSetOf()) { it.startsWith(OnlineParagraphCommentInjectionPlanner.RUNTIME_ID_PREFIX) }
-        val length = (callNoArg(content, "getLength") as? Number)?.toInt()
-            ?: callNoArg(content, "getText")?.toString()?.length
-            ?: 0
-        val annotations = content.javaClass.methods.firstOrNull {
-            it.name == "getStringAnnotations" && it.parameterTypes.size == 2
-        }?.invoke(content, 0, length) as? List<*> ?: emptyList<Any>()
-        annotations.filterNotNull().forEach { range ->
-            val tag = callNoArg(range, "getTag")?.toString().orEmpty()
-            val item = callNoArg(range, "getItem")?.toString().orEmpty()
+        stringAnnotations(content, INLINE_CONTENT_ANNOTATION_TAG).filterNotNull().forEach { range ->
+            val tag = annotatedRangeTag(range)
+            val item = annotatedRangeString(range)
             if (
                 tag == INLINE_CONTENT_ANNOTATION_TAG &&
                 item.startsWith(OnlineParagraphCommentInjectionPlanner.RUNTIME_ID_PREFIX)
@@ -322,22 +339,18 @@ class ReaderDialogueHighlightHook(
     }.getOrNull()
 
     private fun allAnnotatedRanges(content: Any): List<Any> {
-        val method = content.javaClass.methods.firstOrNull {
-            it.name == "getAnnotations\$ui_text" && it.parameterTypes.isEmpty()
-        } ?: content.javaClass.declaredMethods.firstOrNull {
-            it.name == "getAnnotations\$ui_text" && it.parameterTypes.isEmpty()
-        } ?: error("宿主 AnnotatedString 缺少统一 annotations getter")
-        method.isAccessible = true
-        val ranges = method.invoke(content) as? List<*>
-            ?: error("宿主 AnnotatedString annotations 类型异常")
+        val ranges = (
+            callNoArg(content, "getAnnotations\$ui_text") as? List<*>
+                ?: accessorOrField(content, "annotations") as? List<*>
+            ) ?: error("宿主 AnnotatedString 缺少统一 annotations getter")
         return ranges.map { it ?: error("宿主 AnnotatedString annotations 含 null range") }
     }
 
     private fun shiftedAnnotatedRange(range: Any, plan: OnlineParagraphCommentInjectionPlan): Any? {
-        val item = callNoArg(range, "getItem") ?: return null
-        val start = (callNoArg(range, "getStart") as? Number)?.toInt() ?: return null
-        val end = (callNoArg(range, "getEnd") as? Number)?.toInt() ?: return null
-        val tag = callNoArg(range, "getTag")?.toString().orEmpty()
+        val item = annotatedRangeItem(range) ?: return null
+        val start = annotatedRangeStart(range) ?: return null
+        val end = annotatedRangeEnd(range) ?: return null
+        val tag = annotatedRangeTag(range)
         return createTaggedAnnotatedRange(
             item = item,
             start = plan.shiftedOffset(start, includeInsertionAtOffset = true),
@@ -346,23 +359,69 @@ class ReaderDialogueHighlightHook(
         )
     }
 
-    private fun createTaggedAnnotatedRange(item: Any, start: Int, endExclusive: Int, tag: String): Any? =
-        runCatching {
-            val annotationItem = if (item is String) {
-                cls(STRING_ANNOTATION_CLASS).getDeclaredMethod("box-impl", String::class.java)
+    private fun createTaggedAnnotatedRange(item: Any, start: Int, endExclusive: Int, tag: String): Any? {
+        val rangeClass = cls(ANNOTATED_RANGE_CLASS)
+        val boxedItem = if (item is String) {
+            runCatching {
+                cls(STRING_ANNOTATION_CLASS).hostMethod("box-impl", String::class.java)
                     .apply { isAccessible = true }
                     .invoke(null, item)
-            } else {
-                item
-            }
-            cls(ANNOTATED_RANGE_CLASS).getDeclaredConstructor(
-                Any::class.java,
-                Int::class.javaPrimitiveType,
-                Int::class.javaPrimitiveType,
-                String::class.java,
-            ).apply { isAccessible = true }
-                .newInstance(annotationItem, start, endExclusive, tag)
-        }.getOrNull()
+            }.recoverCatching {
+                cls(STRING_ANNOTATION_CLASS).getDeclaredConstructor(String::class.java)
+                    .apply { isAccessible = true }
+                    .newInstance(item)
+            }.getOrNull()
+        } else {
+            null
+        }
+        // B4 的 annotations 必须是 vs 实现，不能把 String 直接塞进 Range.item。
+        val candidates = if (boxedItem == null) listOf(item) else listOf(boxedItem, item)
+
+        // B4 的 Range 构造参数已调整为 (start, end, item, tag)，旧版仍是 (item, start, end, tag)。
+        candidates.forEach { candidate ->
+            runCatching {
+                rangeClass.getDeclaredConstructor(
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                    Any::class.java,
+                    String::class.java,
+                ).apply { isAccessible = true }
+                    .newInstance(start, endExclusive, candidate, tag)
+            }.getOrNull()?.let { return it }
+        }
+        candidates.forEach { candidate ->
+            runCatching {
+                rangeClass.getDeclaredConstructor(
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                    Any::class.java,
+                ).apply { isAccessible = true }
+                    .newInstance(start, endExclusive, candidate)
+            }.getOrNull()?.let { return it }
+        }
+        candidates.forEach { candidate ->
+            runCatching {
+                rangeClass.getDeclaredConstructor(
+                    Any::class.java,
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                    String::class.java,
+                ).apply { isAccessible = true }
+                    .newInstance(candidate, start, endExclusive, tag)
+            }.getOrNull()?.let { return it }
+        }
+        candidates.forEach { candidate ->
+            runCatching {
+                rangeClass.getDeclaredConstructor(
+                    Any::class.java,
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                ).apply { isAccessible = true }
+                    .newInstance(candidate, start, endExclusive)
+            }.getOrNull()?.let { return it }
+        }
+        return null
+    }
 
     private fun encodeOnlineCommentAnnotation(
         runtimeId: String,
@@ -401,7 +460,7 @@ class ReaderDialogueHighlightHook(
     }.getOrNull()
 
     private fun onlineCommentFontSize(contentDom: Any): Float {
-        val style = callNoArg(contentDom, "getStyle")
+        val style = accessorOrField(contentDom, "style")
         val fontSize = callNoArg(callNoArg(style, "getFontSize"), "getNumber") as? Number
         return fontSize?.toFloat()?.takeIf { it.isFinite() && it > 0f } ?: 1f
     }
@@ -483,7 +542,7 @@ class ReaderDialogueHighlightHook(
         }
         val snapshot = settings.snapshot()
         if (!snapshot.canHighlightReaderDialogue) return cleaned
-        val text = callNoArg(original, "getText")?.toString().orEmpty()
+        val text = annotatedStringText(original)
         if (text.isBlank()) return null
         val highlight = settings.highlightSettings()
         val currentBookKey = ReaderHighlightBookContext.bookKey
@@ -561,15 +620,15 @@ class ReaderDialogueHighlightHook(
         "$OWNED_SPAN_TAG|${ReaderHighlightBookContext.bookKey.length}:${ReaderHighlightBookContext.bookKey}|${rule.id.length}:${rule.id}|${rule.type}|${rule.pattern.length}:${rule.pattern}|${rule.allowCrossParagraph}"
 
     private fun hasOwnedHighlightStyle(text: Any): Boolean =
-        (callNoArg(text, "getSpanStyles") as? List<*>).orEmpty().any {
-            HighlightOwnedRanges.isOwned(callNoArg(it, "getTag")?.toString().orEmpty())
+        annotatedStringRanges(text, "spanStyles").any {
+            HighlightOwnedRanges.isOwned(annotatedRangeTag(it))
         }
 
     private fun ownedRuleRanges(text: Any, tag: String): List<IntRange> =
-        (callNoArg(text, "getSpanStyles") as? List<*>).orEmpty().mapNotNull { range ->
-            if (callNoArg(range, "getTag") != tag) return@mapNotNull null
-            val start = callNoArg(range, "getStart") as? Int ?: return@mapNotNull null
-            val end = callNoArg(range, "getEnd") as? Int ?: return@mapNotNull null
+        annotatedStringRanges(text, "spanStyles").mapNotNull { range ->
+            if (annotatedRangeTag(range) != tag) return@mapNotNull null
+            val start = annotatedRangeStart(range) ?: return@mapNotNull null
+            val end = annotatedRangeEnd(range) ?: return@mapNotNull null
             if (end > start) start..end else null
         }
 
@@ -657,7 +716,7 @@ class ReaderDialogueHighlightHook(
     }
 
     private fun dialogueParagraphContext(contentDom: Any, renderedText: String): DialogueParagraphContext? {
-        val containerDom = callNoArg(contentDom, "getParent") ?: return null
+        val containerDom = accessorOrField(contentDom, "parent") ?: return null
         val element = callNoArg(containerDom, "getElement") ?: return null
         val parentElement = callNoArg(element, "parent") ?: return null
         val radius = MAX_DOUBLE_QUOTE_DIALOGUE_PARAGRAPHS - 1
@@ -680,13 +739,13 @@ class ReaderDialogueHighlightHook(
         val endExclusive = minOf(siblings.size, elementIndex + radius + 1)
         val segments = siblings.subList(start, endExclusive).mapIndexed { index, sibling ->
             if (start + index == elementIndex) renderedText
-            else callNoArg(sibling, "text")?.toString().orEmpty()
+            else sibling?.let { accessorOrField(it, "text")?.toString().orEmpty() }.orEmpty()
         }
         return DialogueParagraphContext(segments, elementIndex - start)
     }
 
     private fun protectedStyledElementRanges(contentDom: Any, renderedText: String): List<IntRange> {
-        val children = callNoArg(contentDom, "getChildren") as? List<*> ?: return emptyList()
+        val children = accessorOrField(contentDom, "children") as? List<*> ?: return emptyList()
         val ranges = ArrayList<IntRange>()
         val text = StringBuilder(renderedText.length)
         children.filterNotNull().forEach { child ->
@@ -700,10 +759,10 @@ class ReaderDialogueHighlightHook(
     }
 
     private fun appendNodeTextRanges(node: Any, text: StringBuilder, ranges: MutableList<IntRange>) {
-        val tag = callNoArg(node, "getTag")?.toString().orEmpty()
-        val children = callNoArg(node, "getChildren") as? List<*>
+        val tag = accessorOrField(node, "tag")?.toString().orEmpty()
+        val children = accessorOrField(node, "children") as? List<*>
         if (children.isNullOrEmpty()) {
-            text.append(callNoArg(node, "getText")?.toString().orEmpty())
+            text.append(accessorOrField(node, "text")?.toString().orEmpty())
             return
         }
         val start = text.length
@@ -796,26 +855,71 @@ class ReaderDialogueHighlightHook(
         if (fontSize != null) mask = mask and SPAN_STYLE_MASK_FONT_SIZE.inv()
         if (fontFamily != null) mask = mask and SPAN_STYLE_MASK_FONT_FAMILY.inv()
         if (background != null) mask = mask and SPAN_STYLE_MASK_BACKGROUND.inv()
-        return constructor.newInstance(
-            color,
-            fontSize ?: 0L,
-            null,
-            null,
-            null,
-            fontFamily,
-            null,
-            0L,
-            null,
-            null,
-            null,
-            background ?: 0L,
-            null,
-            null,
-            null,
-            null,
-            mask,
-            null,
-        ).also {
+        val created = if (constructor.parameterTypes.size == 17) {
+            constructor.newInstance(
+                null,
+                1f,
+                color,
+                null,
+                null,
+                null,
+                fontFamily,
+                null,
+                0L,
+                null,
+                null,
+                null,
+                background ?: 16L,
+                null,
+                null,
+                null,
+                null,
+            )
+        } else if (
+            constructor.parameterTypes.size == 16 &&
+            constructor.parameterTypes.firstOrNull() == Long::class.javaPrimitiveType
+        ) {
+            constructor.newInstance(
+                color,
+                fontSize ?: 0L,
+                null,
+                null,
+                null,
+                fontFamily,
+                null,
+                0L,
+                null,
+                null,
+                null,
+                background ?: 16L,
+                null,
+                null,
+                null,
+                null,
+            )
+        } else {
+            constructor.newInstance(
+                color,
+                fontSize ?: 0L,
+                null,
+                null,
+                null,
+                fontFamily,
+                null,
+                0L,
+                null,
+                null,
+                null,
+                background ?: 0L,
+                null,
+                null,
+                null,
+                null,
+                mask,
+                null,
+            )
+        }
+        return created.also {
             rememberInjectedHighlightSpanStyle(it)
             synchronized(highlightStyleCache) { highlightStyleCache[key] = it }
         }
@@ -828,20 +932,18 @@ class ReaderDialogueHighlightHook(
     }
 
     private fun spanStylesWithoutInjectedHighlights(annotatedString: Any): List<Any> {
-        val spanStyles = (callNoArg(annotatedString, "getSpanStyles") as? List<*>)
-            ?.filterNotNull()
-            .orEmpty()
+        val spanStyles = annotatedStringRanges(annotatedString, "spanStyles")
         val markedRanges = highlightMarkerRanges(annotatedString)
             .mapTo(HashSet()) { it.first to it.last }
         if (spanStyles.isEmpty()) return spanStyles
         val injectedStyles = synchronized(injectedHighlightSpanStyles) {
             injectedHighlightSpanStyles.keys.toList()
         }
-        return HighlightOwnedRanges.keepHostRanges(spanStyles, { callNoArg(it, "getTag")?.toString().orEmpty() }) { range ->
-            val start = callNoArg(range, "getStart") as? Int ?: return@keepHostRanges false
-            val end = callNoArg(range, "getEnd") as? Int ?: return@keepHostRanges false
+        return HighlightOwnedRanges.keepHostRanges(spanStyles, ::annotatedRangeTag) { range ->
+            val start = annotatedRangeStart(range) ?: return@keepHostRanges false
+            val end = annotatedRangeEnd(range) ?: return@keepHostRanges false
             if ((start to end) !in markedRanges) return@keepHostRanges false
-            val item = callNoArg(range, "getItem") ?: return@keepHostRanges false
+            val item = annotatedRangeItem(range) ?: return@keepHostRanges false
             injectedStyles.any { it == item }
         }
     }
@@ -889,7 +991,7 @@ class ReaderDialogueHighlightHook(
     private fun packTextUnit(methodName: String, amount: Float): Long? =
         runCatching {
             cls(TEXT_UNIT_KT_CLASS).declaredMethods.firstOrNull { method ->
-                method.name == methodName &&
+                method.hostNameMatches(methodName) &&
                     method.parameterTypes.size == 1 &&
                     method.parameterTypes[0] == Float::class.javaPrimitiveType
             }?.apply { isAccessible = true }?.invoke(null, amount) as? Long
@@ -898,11 +1000,17 @@ class ReaderDialogueHighlightHook(
     private fun composeColor(value: String): Long {
         val argb = parseAndroidColor(value) ?: Color.parseColor(DEFAULT_DIALOGUE_COLOR)
         val packedArgb = argb.toLong() and 0xFFFFFFFFL
-        return cls(COLOR_KT_CLASS).declaredMethods.firstOrNull { method ->
-            method.name == "Color" &&
-                method.parameterTypes.size == 1 &&
-                method.parameterTypes[0] == Long::class.javaPrimitiveType
-        }?.apply { isAccessible = true }?.invoke(null, packedArgb) as? Long ?: 0L
+        return runCatching {
+            val factory = cls(COLOR_KT_CLASS).declaredMethods.firstOrNull { method ->
+                method.hostNameMatches("Color") && method.parameterTypes.size == 1
+            } ?: return@runCatching packedArgb
+            factory.isAccessible = true
+            when (factory.parameterTypes[0]) {
+                Int::class.javaPrimitiveType -> factory.invoke(null, argb) as? Long
+                Long::class.javaPrimitiveType -> factory.invoke(null, packedArgb) as? Long
+                else -> null
+            }
+        }.getOrNull() ?: packedArgb
     }
 
     private fun parseAndroidColor(value: String): Int? {
@@ -928,24 +1036,49 @@ class ReaderDialogueHighlightHook(
 
     private fun createAnnotatedRange(item: Any, start: Int, endExclusive: Int): Any? {
         val rangeClass = cls(ANNOTATED_RANGE_CLASS)
-        return runCatching {
-            rangeClass.getDeclaredConstructor(Any::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
-                .apply { isAccessible = true }
-                .newInstance(item, start, endExclusive)
-        }.recoverCatching {
-            rangeClass.getDeclaredConstructor(
-                Any::class.java,
-                Int::class.javaPrimitiveType,
-                Int::class.javaPrimitiveType,
-                String::class.java,
-            ).apply { isAccessible = true }
-                .newInstance(item, start, endExclusive, "")
-        }.getOrNull()
+        val candidates = if (item is String) {
+            listOf(
+                item,
+                runCatching {
+                    cls(STRING_ANNOTATION_CLASS).hostMethod("box-impl", String::class.java)
+                        .apply { isAccessible = true }
+                        .invoke(null, item)
+                }.getOrNull(),
+            ).filterNotNull()
+        } else {
+            listOf(item)
+        }
+        candidates.forEach { candidate ->
+            runCatching {
+                rangeClass.getDeclaredConstructor(
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                    Any::class.java,
+                ).apply { isAccessible = true }
+                    .newInstance(start, endExclusive, candidate)
+            }.getOrNull()?.let { return it }
+        }
+        candidates.forEach { candidate ->
+            runCatching {
+                rangeClass.getDeclaredConstructor(
+                    Any::class.java,
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                ).apply { isAccessible = true }
+                    .newInstance(candidate, start, endExclusive)
+            }.getOrNull()?.let { return it }
+        }
+        return null
     }
 
-    private fun newAnnotatedString(original: Any, spanStyles: List<Any>): Any? =
-        method(ANNOTATED_STRING_EXT_CLASS, "newInstance\$default", 5)
-            .invoke(null, original, spanStyles, null, 2, null)
+    private fun newAnnotatedString(original: Any, spanStyles: List<Any>): Any? {
+        val spanStyleClass = cls(SPAN_STYLE_CLASS)
+        val ranges = allAnnotatedRanges(original)
+            .filter { range -> !spanStyleClass.isInstance(annotatedRangeItem(range)) }
+            .toMutableList()
+        ranges.addAll(spanStyles)
+        return newAnnotatedStringFromRanges(original, ranges)
+    }
 
     private fun newAnnotatedStringWithNinePatchAnnotations(
         original: Any,
@@ -957,9 +1090,9 @@ class ReaderDialogueHighlightHook(
             val spanStyleClass = cls(SPAN_STYLE_CLASS)
             val ranges = allAnnotatedRanges(original)
                 .filter { range ->
-                    val item = callNoArg(range, "getItem")
+                    val item = annotatedRangeItem(range)
                         ?: error("AnnotatedString range 缺少 item")
-                    val tag = callNoArg(range, "getTag")?.toString().orEmpty()
+                    val tag = annotatedRangeTag(range)
                     !spanStyleClass.isInstance(item) &&
                         tag != NINE_PATCH_ANNOTATION_TAG &&
                         tag != HIGHLIGHT_ANNOTATION_TAG
@@ -984,15 +1117,7 @@ class ReaderDialogueHighlightHook(
                     tag = HIGHLIGHT_ANNOTATION_TAG,
                 ) ?: error("无法创建高亮 annotation range")
             }
-            cls(ANNOTATED_STRING_CLASS).declaredConstructors
-                .firstOrNull { constructor ->
-                    constructor.parameterTypes.contentEquals(arrayOf(List::class.java, String::class.java))
-                }
-                ?.apply { isAccessible = true }
-                ?.newInstance(
-                    ranges,
-                    callNoArg(original, "getText")?.toString().orEmpty(),
-                )
+            newAnnotatedStringFromRanges(original, ranges)
                 ?: error("无法重建 AnnotatedString")
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX nine-patch annotation failed: ${it.stackTraceToString()}")
@@ -1081,7 +1206,7 @@ class ReaderDialogueHighlightHook(
         runCatching {
             val methods = hostCompat.basicTextMethods()
             methods.forEach { method ->
-                val composerIndex = method.parameterTypes.indexOfFirst { it.name == "androidx.compose.runtime.Composer" }
+                val composerIndex = method.parameterTypes.indexOfFirst { typeMatches(it, "androidx.compose.runtime.Composer") }
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         refreshAnnotatedStringForCurrentTheme(param.args?.getOrNull(0))?.let {
@@ -1104,9 +1229,9 @@ class ReaderDialogueHighlightHook(
     private fun hookTextNodeNinePatchDraw() {
         runCatching {
             val nodeClass = cls("androidx.compose.foundation.text.modifiers.TextAnnotatedStringNode")
-            val draw = nodeClass.declaredMethods.first { it.name == "draw" && it.parameterTypes.size == 1 }
+            val draw = nodeClass.declaredMethods.first { it.hostNameMatches("draw") && it.parameterTypes.size == 1 }
             val layoutCache = nodeClass.declaredMethods.first {
-                it.name == "getLayoutCache" && it.parameterTypes.size == 1
+                it.hostNameMatches("getLayoutCache") && it.parameterTypes.size == 1
             }.apply { isAccessible = true }
             // 直接复用真实文本节点及其布局，不改 onTextLayout；回调变化会让宿主重新测量。
             XposedBridge.hookMethod(draw, object : XC_MethodHook() {
@@ -1121,7 +1246,12 @@ class ReaderDialogueHighlightHook(
                         val token = currentHighlightRuntimeKey()
                         var state = synchronized(textNodeDrawStates) { textNodeDrawStates[node] }
                         if (state?.textLayoutResult !== layout || state.token != token) {
-                            val text = callNoArg(callNoArg(layout, "getLayoutInput"), "getText") ?: return
+                            val layoutInput = callNoArg(layout, "getLayoutInput")
+                                ?: accessorOrField(layout, "layoutInput")
+                                ?: return
+                            val text = callNoArg(layoutInput, "getText")
+                                ?: accessorOrField(layoutInput, "text")
+                                ?: return
                             val ranges = currentNinePatchRanges(text).ifEmpty { rememberedNinePatchRanges(text) }
                             state = NinePatchDrawState(ranges, token).apply { textLayoutResult = layout }
                             synchronized(textNodeDrawStates) { textNodeDrawStates[node] = state }
@@ -1170,7 +1300,7 @@ class ReaderDialogueHighlightHook(
     }
 
     private fun annotatedStringTextKey(annotatedString: Any): String =
-        callNoArg(annotatedString, "getText")?.toString().orEmpty()
+        annotatedStringText(annotatedString)
 
     private fun currentNinePatchRanges(annotatedString: Any): List<NinePatchRange> =
         if (hasCurrentReaderHighlightMarker(annotatedString)) ninePatchRanges(annotatedString) else emptyList()
@@ -1178,13 +1308,13 @@ class ReaderDialogueHighlightHook(
     private fun hasCurrentReaderHighlightMarker(annotatedString: Any): Boolean {
         val token = highlightMarkerToken()
         return stringAnnotations(annotatedString, HIGHLIGHT_ANNOTATION_TAG)
-            .any { callNoArg(it, "getItem")?.toString().orEmpty() == token }
+            .any { annotatedRangeString(it) == token }
     }
 
     private fun highlightMarkerRanges(annotatedString: Any): List<IntRange> =
         stringAnnotations(annotatedString, HIGHLIGHT_ANNOTATION_TAG).mapNotNull { range ->
-            val start = callNoArg(range, "getStart") as? Int ?: return@mapNotNull null
-            val end = callNoArg(range, "getEnd") as? Int ?: return@mapNotNull null
+            val start = annotatedRangeStart(range) ?: return@mapNotNull null
+            val end = annotatedRangeEnd(range) ?: return@mapNotNull null
             if (end > start) exclusiveRange(start, end) else null
         }
 
@@ -1194,14 +1324,13 @@ class ReaderDialogueHighlightHook(
     private fun currentHighlightRuntimeKey(): String =
         lastHighlightRuntimeKey.ifBlank { highlightMarkerToken() }
 
-    private fun stringAnnotations(annotatedString: Any, tag: String): List<*> {
-        val length = (callNoArg(annotatedString, "length") as? Int)
-            ?: callNoArg(annotatedString, "getLength") as? Int
-            ?: callNoArg(annotatedString, "getText")?.toString()?.length
-            ?: 0
-
-        return instanceMethod(annotatedString, "getStringAnnotations", 3)
-            ?.invoke(annotatedString, tag, 0, length) as? List<*> ?: emptyList<Any>()
+    private fun stringAnnotations(annotatedString: Any, tag: String): List<Any> {
+        val length = annotatedStringLength(annotatedString)
+        val fromHost = instanceMethod(annotatedString, "getStringAnnotations", 3)
+            ?.let { runCatching { it.invoke(annotatedString, tag, 0, length) }.getOrNull() as? List<*> }
+        return (fromHost ?: allAnnotatedRanges(annotatedString))
+            .filterNotNull()
+            .filter { annotatedRangeTag(it) == tag }
     }
 
     private fun deriveRememberedNinePatchRanges(currentText: String): List<NinePatchRange> {
@@ -1263,22 +1392,17 @@ class ReaderDialogueHighlightHook(
     }
 
     private fun ninePatchRanges(annotatedString: Any): List<NinePatchRange> {
-        val length = (callNoArg(annotatedString, "length") as? Int)
-            ?: callNoArg(annotatedString, "getLength") as? Int
-            ?: callNoArg(annotatedString, "getText")?.toString()?.length
-            ?: 0
-        val annotations = instanceMethod(annotatedString, "getStringAnnotations", 3)
-            ?.invoke(annotatedString, NINE_PATCH_ANNOTATION_TAG, 0, length) as? List<*>
-            ?: return emptyList()
+        val length = annotatedStringLength(annotatedString)
+        val annotations = stringAnnotations(annotatedString, NINE_PATCH_ANNOTATION_TAG)
         return annotations.mapNotNull { range ->
             range ?: return@mapNotNull null
-            val value = callNoArg(range, "getItem")?.toString().orEmpty()
+            val value = annotatedRangeString(range)
             val parts = value.split(NINE_PATCH_ANNOTATION_SEPARATOR, limit = 3)
             val path = parts.getOrNull(0).orEmpty().trim()
             val slice = parts.getOrNull(1).orEmpty().trim()
             val css = parts.getOrNull(2).orEmpty()
-            val start = (callNoArg(range, "getStart") as? Int ?: return@mapNotNull null).coerceIn(0, length)
-            val end = (callNoArg(range, "getEnd") as? Int ?: return@mapNotNull null).coerceIn(0, length)
+            val start = (annotatedRangeStart(range) ?: return@mapNotNull null).coerceIn(0, length)
+            val end = (annotatedRangeEnd(range) ?: return@mapNotNull null).coerceIn(0, length)
             if (path.isBlank() || end <= start) null else NinePatchRange(start, end, path, slice, css)
         }
     }
@@ -1730,34 +1854,17 @@ class ReaderDialogueHighlightHook(
         runCatching {
             when (selection) {
                 FAMILY_SYSTEM -> resolveDefaultFontFamily()
-                FAMILY_SOURCE_HAN_SERIF -> callNoArg(staticObject(FONT_PROVIDER_CLASS, "INSTANCE"), "builtInSong")
+                FAMILY_SOURCE_HAN_SERIF -> com.reamicro.fix.core.HostFontFamilies.song(classLoader)
                 else -> null
             }
         }.onFailure { logResolveFontFamilyFailure(selection, it) }.getOrNull()
 
-    private fun resolveDefaultFontFamily(): Any? {
-        fieldObjectOrNull(FONT_FAMILY_CLASS, "Default")?.let { return it }
-        for (fieldName in listOf("Companion", "INSTANCE")) {
-            val companion = fieldObjectOrNull(FONT_FAMILY_CLASS, fieldName) ?: continue
-            callNoArg(companion, "getDefault")?.let { return it }
-        }
-        return cls(FONT_FAMILY_CLASS).methods.firstOrNull {
-            it.name == "getDefault" && it.parameterTypes.isEmpty()
-        }?.apply { isAccessible = true }?.invoke(null)
-    }
+    private fun resolveDefaultFontFamily(): Any? =
+        com.reamicro.fix.core.HostFontFamilies.system(classLoader)
 
     private fun resolveFontFamilyFromFile(file: File): Any? =
         runCatching {
-            val provider = staticObject(FONT_PROVIDER_CLASS, "INSTANCE")
-            val fromPath = method(FONT_PROVIDER_CLASS, "fromPath", 2)
-            val fonts = listOfNotNull(
-                fromPath.invoke(provider, file.absolutePath, fontWeight("getNormal")),
-                fromPath.invoke(provider, file.absolutePath, fontWeight("getBold")),
-            )
-            if (fonts.isEmpty()) return null
-            cls(FONT_FAMILY_KT_CLASS).declaredMethods.firstOrNull {
-                it.name == "FontFamily" && it.parameterTypes.size == 1 && List::class.java.isAssignableFrom(it.parameterTypes[0])
-            }?.apply { isAccessible = true }?.invoke(null, fonts)
+            com.reamicro.fix.core.HostFontFamilies.fromFile(classLoader, file)
         }.onFailure { logResolveFontFamilyFailure(file.absolutePath, it) }.getOrNull()
 
     private fun resolveFontFile(selection: String): File? {
@@ -1788,7 +1895,7 @@ class ReaderDialogueHighlightHook(
         for (fieldName in listOf("INSTANCE", "Companion")) {
             val companion = fieldObjectOrNull(FONT_WEIGHT_CLASS, fieldName) ?: continue
             companion.javaClass.methods.firstOrNull {
-                it.name == methodName && it.parameterTypes.isEmpty()
+                it.hostNameMatches(methodName) && it.parameterTypes.isEmpty()
             }?.apply { isAccessible = true }?.invoke(companion)?.let { return it }
         }
         val (fieldName, weight) = when (methodName) {
@@ -1870,11 +1977,68 @@ class ReaderDialogueHighlightHook(
     private fun fieldObjectOrNull(className: String, fieldName: String): Any? =
         hostCompat.fieldObjectOrNull(className, fieldName)
 
+    private fun accessorOrField(target: Any, propertyName: String): Any? {
+        val accessor = "get" + propertyName.replaceFirstChar { it.uppercaseChar() }
+        return callNoArg(target, accessor) ?: runCatching {
+            field(target.javaClass.name, propertyName).get(target)
+        }.getOrNull()
+    }
+
     private fun callNoArg(target: Any?, name: String): Any? {
         if (target == null) return null
         val method = instanceMethod(target, name, 0) ?: return null
         return runCatching { method.invoke(target) }.getOrNull()
     }
+
+    private fun annotatedStringText(annotatedString: Any): String =
+        callNoArg(annotatedString, "getText")?.toString()
+            ?: accessorOrField(annotatedString, "text")?.toString().orEmpty()
+
+    private fun annotatedStringLength(annotatedString: Any): Int =
+        (callNoArg(annotatedString, "getLength") as? Number)?.toInt()
+            ?: (callNoArg(annotatedString, "length") as? Number)?.toInt()
+            ?: annotatedStringText(annotatedString).length
+
+    private fun annotatedStringRanges(annotatedString: Any, propertyName: String): List<Any> {
+        val accessor = "get" + propertyName.replaceFirstChar { it.uppercaseChar() }
+        val ranges = (
+            callNoArg(annotatedString, accessor)
+                ?: accessorOrField(annotatedString, propertyName)
+            ) as? List<*>
+        return ranges?.filterNotNull().orEmpty()
+    }
+
+    private fun annotatedRangeItem(range: Any): Any? =
+        callNoArg(range, "getItem") ?: accessorOrField(range, "item")
+
+    private fun annotatedRangeStart(range: Any): Int? =
+        (callNoArg(range, "getStart") as? Number)?.toInt()
+            ?: (accessorOrField(range, "start") as? Number)?.toInt()
+
+    private fun annotatedRangeEnd(range: Any): Int? =
+        (callNoArg(range, "getEnd") as? Number)?.toInt()
+            ?: (accessorOrField(range, "end") as? Number)?.toInt()
+
+    private fun annotatedRangeTag(range: Any): String =
+        callNoArg(range, "getTag")?.toString()
+            ?: accessorOrField(range, "tag")?.toString().orEmpty()
+
+    private fun annotatedRangeString(range: Any): String =
+        annotatedRangeValue(range)?.toString().orEmpty()
+
+    private fun annotatedRangeValue(range: Any): Any? {
+        val item = annotatedRangeItem(range) ?: return null
+        if (!cls(STRING_ANNOTATION_CLASS).isInstance(item)) return item
+        return accessorOrField(item, "value") ?: item
+    }
+
+    private fun newAnnotatedStringFromRanges(original: Any, ranges: List<Any>): Any? =
+        cls(ANNOTATED_STRING_CLASS).declaredConstructors
+            .firstOrNull { constructor ->
+                constructor.parameterTypes.contentEquals(arrayOf(List::class.java, String::class.java))
+            }
+            ?.apply { isAccessible = true }
+            ?.newInstance(ranges, annotatedStringText(original))
 
     private companion object {
         const val LOG_PREFIX = "ReaMicro LSP"
