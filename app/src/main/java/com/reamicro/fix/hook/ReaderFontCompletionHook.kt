@@ -1,5 +1,11 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostStaticMethod
+
 import android.app.Activity
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.core.HostClasses
@@ -31,8 +37,7 @@ class ReaderFontCompletionHook(
     private fun hookFontProvider() {
         HookInstallReport.install("ReaderFontCompletionHook", "hookFontProvider") {
             val fontProviderClass = cls(FONT_PROVIDER_CLASS)
-            check(fontProviderClass.declaredMethods.any { it.name == "withName" }) { "FontProvider.withName not found" }
-            check(fontProviderClass.declaredMethods.any { it.name == "getBuildInFonts" }) { "FontProvider.getBuildInFonts not found" }
+            check(fontProviderClass.declaredMethods.any { it.hostNameMatches("withName") }) { "FontProvider.withName not found" }
             XposedBridge.hookAllMethods(fontProviderClass, "withName", object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val names = fontFamilyArgumentNames(param.args)
@@ -54,7 +59,9 @@ class ReaderFontCompletionHook(
                     }
                 }
             })
-            XposedBridge.hookAllMethods(fontProviderClass, "getBuildInFonts", object : XC_MethodHook() {
+            if (HostSymbols.profileId == "2.3.3-b4") {
+                hookB4BuiltInFontRow()
+            } else XposedBridge.hookAllMethods(fontProviderClass, "getBuildInFonts", object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     if (!settings.snapshot().canUseFontSettings) return
                     val list = param.result as? List<*> ?: return
@@ -76,6 +83,37 @@ class ReaderFontCompletionHook(
             })
             XposedBridge.log("$LOG_PREFIX font completion FontProvider hook installed")
         }
+    }
+
+    private fun hookB4BuiltInFontRow() {
+        val row = classLoader.hostStaticMethod(
+            "ReaMicroHost.BuiltInFontRow", "render", classLoader.hostClass("ReaMicroHost.LazyItemScope"),
+            cls(KOTLIN_PAIR_CLASS), cls("androidx.compose.runtime.Composer"), Int::class.javaPrimitiveType,
+        )
+        XposedBridge.hookMethod(row, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if (!settings.snapshot().canUseFontSettings) return
+                val pair = param.args.getOrNull(1) ?: return
+                val label = callMethod(pair, "getFirst") as? String ?: return
+                // 该入口仅渲染宿主宋楷预览行；保留其行布局和所有点击/设置回调。
+                val config = settings.fontSettings()
+                val mapped = when {
+                    isSongFamilyName(label) -> config.songMapping
+                    isKaiFamilyName(label) -> config.kaiMapping
+                    else -> return
+                }
+                if (mapped.isBlank()) return
+                val family = resolveFontFamily(mapped) ?: return
+                param.args[1] = kotlinPair(mappedLabel(label, mapped), family)
+                param.args[3] = (param.args[3] as Int) and 0x70.inv()
+            }
+        })
+        val content = classLoader.hostClass("ReaMicroHost.BuiltInFontItems").hostMethod(
+            "invoke", Any::class.java, Any::class.java, Any::class.java, Any::class.java,
+        )
+        XposedBridge.deoptimize(content)
+        XposedBridge.deoptimize(row)
+        XposedBridge.logAlways("$LOG_PREFIX B4 built-in font preview row hook installed")
     }
 
     private fun fontFamilyArgumentNames(args: Array<Any?>?): List<String> {
@@ -153,18 +191,7 @@ class ReaderFontCompletionHook(
         }
         val file = resolvedFile ?: return null
         return runCatching {
-            val provider = staticObject(FONT_PROVIDER_CLASS, "INSTANCE")
-            val normal = fontWeight("getNormal")
-            val bold = fontWeight("getBold")
-            val fromPath = method(FONT_PROVIDER_CLASS, "fromPath", 2)
-            val fonts = listOfNotNull(
-                fromPath.invoke(provider, file.absolutePath, normal),
-                fromPath.invoke(provider, file.absolutePath, bold),
-            )
-            if (fonts.isEmpty()) return null
-            val family = cls(FONT_FAMILY_KT_CLASS).declaredMethods.first {
-                it.name == "FontFamily" && it.parameterTypes.size == 1 && List::class.java.isAssignableFrom(it.parameterTypes[0])
-            }.invoke(null, fonts) ?: return null
+            val family = com.reamicro.fix.core.HostFontFamilies.fromFile(classLoader, file) ?: return null
             synchronized(fontFamilyCache) {
                 fontFamilyCache[cacheKey] = family
             }
@@ -176,19 +203,13 @@ class ReaderFontCompletionHook(
         runCatching {
             when (selection) {
                 FAMILY_SYSTEM -> resolveDefaultFontFamily()
-                FAMILY_SOURCE_HAN_SERIF -> callMethod(staticObject(FONT_PROVIDER_CLASS, "INSTANCE"), "builtInSong")
+                FAMILY_SOURCE_HAN_SERIF -> com.reamicro.fix.core.HostFontFamilies.song(classLoader)
                 else -> null
             }
         }.onFailure { logResolveFontFamilyFailure(selection, it) }.getOrNull()
 
-    private fun resolveDefaultFontFamily(): Any? {
-        fieldObjectOrNull(FONT_FAMILY_CLASS, "Default")?.let { return it }
-        for (fieldName in listOf("Companion", "INSTANCE")) {
-            val companion = fieldObjectOrNull(FONT_FAMILY_CLASS, fieldName) ?: continue
-            callMethod(companion, "getDefault")?.let { return it }
-        }
-        return staticMethod(FONT_FAMILY_CLASS, "getDefault")?.invoke(null)
-    }
+    private fun resolveDefaultFontFamily(): Any? =
+        com.reamicro.fix.core.HostFontFamilies.system(classLoader)
 
     private fun fontWeight(methodName: String): Any {
         val clazz = cls(FONT_WEIGHT_CLASS)
@@ -211,7 +232,7 @@ class ReaderFontCompletionHook(
                 clazz.getField(fieldName).apply { isAccessible = true }.get(null)
             }.getOrNull() ?: continue
             val method = companion.javaClass.methods.firstOrNull {
-                it.name == methodName && it.parameterTypes.isEmpty()
+                it.hostNameMatches(methodName) && it.parameterTypes.isEmpty()
             } ?: continue
             return method.invoke(companion)
         }
@@ -272,14 +293,12 @@ class ReaderFontCompletionHook(
 
     private fun callMethod(target: Any?, name: String): Any? {
         if (target == null) return null
-        return target.javaClass.methods.firstOrNull {
-            it.name == name && it.parameterTypes.isEmpty()
-        }?.invoke(target)
+        return runCatching { XposedHelpers.callMethod(target, name) }.getOrNull()
     }
 
     private fun staticMethod(className: String, name: String): Method? =
         cls(className).methods.firstOrNull {
-            it.name == name && it.parameterTypes.isEmpty()
+            it.hostNameMatches(name) && it.parameterTypes.isEmpty()
         }?.apply { isAccessible = true }
 
     private fun fieldObjectOrNull(className: String, fieldName: String): Any? =
@@ -301,10 +320,10 @@ class ReaderFontCompletionHook(
         return synchronized(methodCache) {
             methodCache.getOrPut(cacheKey) {
                 cls(className).declaredMethods.firstOrNull {
-                    it.name == methodName && it.parameterTypes.size == parameterCount
+                    it.hostNameMatches(methodName) && it.parameterTypes.size == parameterCount
                 }?.apply { isAccessible = true }
                     ?: cls(className).methods.firstOrNull {
-                        it.name == methodName && it.parameterTypes.size == parameterCount
+                        it.hostNameMatches(methodName) && it.parameterTypes.size == parameterCount
                     }?.apply { isAccessible = true }
                     ?: error("$className.$methodName/$parameterCount not found")
             }
@@ -315,12 +334,7 @@ class ReaderFontCompletionHook(
         val cacheKey = "$className#$fieldName"
         return synchronized(fieldCache) {
             fieldCache.getOrPut(cacheKey) {
-                cls(className).run {
-                    runCatching { getDeclaredField(fieldName) }
-                        .recoverCatching { getField(fieldName) }
-                        .getOrThrow()
-                        .apply { isAccessible = true }
-                }
+                XposedHelpers.findField(cls(className), fieldName).apply { isAccessible = true }
             }
         }
     }

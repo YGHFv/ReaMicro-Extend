@@ -1,5 +1,9 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.HostTypographyMetrics
+
 import android.content.Context
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.PlatformTextStyle
@@ -21,11 +25,20 @@ internal object BookImageDialogStyle {
     fun capture(loader: ClassLoader, composer: Any?) {
         if (composer == null) return
         runCatching {
+            if (HostSymbols.profileId == "2.3.3-b4") {
+                val metrics = HostTypographyMetrics(loader, composer)
+                fun unit(value: HostTypographyMetrics.UnitValue?) = value?.let { UnitValue(it.value, it.em) }
+                types = roles.associateWith { role ->
+                    val style = metrics.style(role)
+                    Type(unit(style.fontSize), unit(style.lineHeight), unit(style.letterSpacing), style.fontWeight ?: 400)
+                }
+                return
+            }
             val composerClass = loader.loadClass("androidx.compose.runtime.Composer")
             if (!composerClass.isInstance(composer)) return
             val material = loader.loadClass("androidx.compose.material3.MaterialTheme")
             val typography = material.getMethod("getTypography", composerClass, Int::class.javaPrimitiveType)
-                .invoke(material.getField("INSTANCE").get(null), composer, 6)
+                .invoke(material.hostField("INSTANCE").get(null), composer, 6)
             val unitClass = loader.loadClass("androidx.compose.ui.unit.TextUnit")
             val value = unitClass.getDeclaredMethod("getValue-impl", Long::class.javaPrimitiveType)
             val isEm = unitClass.getDeclaredMethod("isEm-impl", Long::class.javaPrimitiveType)

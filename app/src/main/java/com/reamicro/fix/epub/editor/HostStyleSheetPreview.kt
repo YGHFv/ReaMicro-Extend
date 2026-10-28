@@ -1,23 +1,28 @@
 package com.reamicro.fix.epub.editor
 
+import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.HostSymbols
+
+import com.reamicro.fix.core.hostClass
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
 internal fun hostStyleSheetPreview(loader: ClassLoader, file: File): JSONArray {
-    val providerType = loader.loadClass("org.epub.css.StyleSheetsProvider")
-    val provider = providerType.getField("INSTANCE").get(null)
+    if (HostSymbols.profileId == "2.3.3-b4") return B4HostCssPreview(loader).preview(file)
+    val providerType = loader.hostClass("org.epub.css.StyleSheetsProvider")
+    val provider = providerType.hostField("INSTANCE").get(null)
 
     val cacheGetter = providerType.getDeclaredMethod("getMRuleSetCache").apply { isAccessible = true }
     val cache = cacheGetter.invoke(provider)
-    loader.loadClass("io.github.reactivecircus.cache4k.Cache")
+    loader.hostClass("io.github.reactivecircus.cache4k.Cache")
         .getMethod("invalidate", Any::class.java).invoke(cache, file.absolutePath)
     val sheets = providerType.getMethod("attach", Array<String>::class.java)
         .invoke(provider, arrayOf(file.absolutePath) as Any)
     fun call(target: Any, name: String): Any? =
         target.javaClass.getMethod(name).invoke(target)
     val rules = call(sheets, "getRuleSets") as? Iterable<*> ?: error("宿主 CSS 规则为空")
-    val ruleType = loader.loadClass("org.epub.css.RuleSet")
+    val ruleType = loader.hostClass("org.epub.css.RuleSet")
     val companion = ruleType.getField("Companion").get(null)
 
     val merge = companion.javaClass.getMethod("merge", List::class.java, Map::class.java)
@@ -47,10 +52,14 @@ internal fun hostStyleSheetPreview(loader: ClassLoader, file: File): JSONArray {
 }
 
 internal fun invalidateHostCssPreview(loader: ClassLoader, file: File) {
-    val providerType = loader.loadClass("org.epub.css.StyleSheetsProvider")
-    val provider = providerType.getField("INSTANCE").get(null)
+    if (HostSymbols.profileId == "2.3.3-b4") {
+        B4HostCssPreview(loader).invalidate(file)
+        return
+    }
+    val providerType = loader.hostClass("org.epub.css.StyleSheetsProvider")
+    val provider = providerType.hostField("INSTANCE").get(null)
     val getter = providerType.getDeclaredMethod("getMRuleSetCache").apply { isAccessible = true }
     val cache = getter.invoke(provider)
-    loader.loadClass("io.github.reactivecircus.cache4k.Cache")
+    loader.hostClass("io.github.reactivecircus.cache4k.Cache")
         .getMethod("invalidate", Any::class.java).invoke(cache, file.absolutePath)
 }

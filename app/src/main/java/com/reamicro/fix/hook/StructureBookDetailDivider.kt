@@ -1,5 +1,9 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostStaticMethod
+
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.Composable
@@ -15,11 +19,17 @@ internal object StructureBookDetailDividerStyle {
     private data class Reader(val instance: Any, val getter: java.lang.reflect.Method)
     private val readers = WeakHashMap<ClassLoader, Reader?>()
     fun scale(loader: ClassLoader): Float = runCatching {
+        if (HostSymbols.profileId == "2.3.3-b4") {
+            // getUdp(1f) 复用宿主懒初始化的真实缩放因子，不读取未初始化字段或重复计算。
+            return@runCatching normalizeScale((loader.hostStaticMethod(
+                "app.zhendong.reamicro.arch.extensions.UnitExtKt", "getUdp", Float::class.javaPrimitiveType,
+            ).invoke(null, 1f) as Number).toFloat())
+        }
         val reader = synchronized(readers) {
             if (readers.containsKey(loader)) readers[loader] else {
                 val found = runCatching {
                     val type = loader.loadClass("app.zhendong.reamicro.arch.AppScaleManager")
-                    Reader(type.getField("INSTANCE").get(null), type.getMethod("getScaleFactor"))
+                    Reader(type.hostField("INSTANCE").get(null), type.getMethod("getScaleFactor"))
                 }.getOrNull()
                 readers[loader] = found
                 found

@@ -1,5 +1,9 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.HostTypographyMetrics
+
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
@@ -57,11 +61,27 @@ internal object EmbeddedHostUi {
     fun captureTypography(loader: ClassLoader, composer: Any?) {
         if(composer==null)return
         runCatching {
+            if (HostSymbols.profileId == "2.3.3-b4") {
+                val metrics = HostTypographyMetrics(loader, composer)
+                if (metrics.typography === lastTypography && metrics.densityKey == lastDensity) return
+                val body = metrics.style("BodyLarge")
+                val small = metrics.style("BodySmall")
+                val label = metrics.style("LabelLarge")
+                val title = metrics.style("TitleSmall")
+                fun size(value: HostTypographyMetrics.UnitValue?, fallback: Float) =
+                    value?.value?.takeIf { !value.em && it in 8f..64f } ?: fallback
+                textMetrics = TextMetrics(size(body.fontSize, 16f), size(small.fontSize, 12f),
+                    size(label.fontSize, 14f), size(title.fontSize, 16f),
+                    body.fontSizePx, label.fontSizePx, body.lineHeightPx, label.lineHeightPx, label.fontWeight ?: 500)
+                lastTypography = metrics.typography
+                lastDensity = metrics.densityKey
+                return
+            }
             val composerType=loader.loadClass("androidx.compose.runtime.Composer")
             if(!composerType.isInstance(composer))return
             val material=loader.loadClass("androidx.compose.material3.MaterialTheme")
             val typography=material.getMethod("getTypography",composerType,Int::class.javaPrimitiveType)
-                .invoke(material.getField("INSTANCE").get(null),composer,6)
+                .invoke(material.hostField("INSTANCE").get(null),composer,6)
             val local=loader.loadClass("androidx.compose.ui.platform.CompositionLocalsKt").getMethod("getLocalDensity").invoke(null)
             val density=composerType.getMethod("consume",loader.loadClass("androidx.compose.runtime.CompositionLocal")).invoke(composer,local)
             fun densityValue(name:String)=(density.javaClass.getMethod(name).apply {isAccessible=true}.invoke(density) as Number).toFloat()
