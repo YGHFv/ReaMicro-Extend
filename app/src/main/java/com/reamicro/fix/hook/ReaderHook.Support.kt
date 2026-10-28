@@ -432,10 +432,24 @@ internal fun ReaderHook.currentReadingTarget(): ReadingTarget? {
 
 internal fun ReaderHook.forceRefreshReaderWindow(source: String): Boolean {
     val viewModel = currentViewModelRef?.get() ?: return false
-    return runCatching {
-        val windowKey = XposedHelpers.getObjectField(viewModel, "windowKey")
-        XposedHelpers.callMethod(windowKey, "setValue", "reamicro_${source}_${System.currentTimeMillis()}")
+    val windowKey = "reamicro_${source}_${System.currentTimeMillis()}"
+    val dispatched = runCatching {
+        val intentClass = classLoader.hostClass("$READER_UI_INTENT_CLASS\$UpdateWindowKey")
+        val intent = intentClass.getDeclaredConstructor(String::class.java).newInstance(windowKey)
+        dispatchReaderIntent(null, viewModel, intent, "UpdateWindowKey")
+    }.onFailure {
+        XposedBridge.log("$LOG_PREFIX reader window intent failed: ${it.stackTraceToString()}")
+    }.getOrDefault(false)
+    if (dispatched) {
         XposedBridge.log("$LOG_PREFIX reader window refresh requested: $source")
+        return true
+    }
+
+    // 旧宿主把 windowKey 直接暴露为 ReaderViewModel 字段；保留该路径作为兼容回退。
+    return runCatching {
+        val state = XposedHelpers.getObjectField(viewModel, "windowKey")
+        XposedHelpers.callMethod(state, "setValue", windowKey)
+        XposedBridge.log("$LOG_PREFIX reader window refresh requested legacy: $source")
         true
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX reader window refresh failed: ${it.stackTraceToString()}")
