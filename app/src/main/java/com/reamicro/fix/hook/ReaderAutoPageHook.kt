@@ -9,6 +9,13 @@ import android.widget.Toast
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.core.ComposeInterop
 import com.reamicro.fix.core.HostClasses
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.B2NativeUi
+import com.reamicro.fix.core.HostAndroidViews
+import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostClassOrNull
+import com.reamicro.fix.core.hostNameMatches
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.xposed.XC_MethodHook
 import com.reamicro.fix.xposed.XposedBridge
@@ -41,6 +48,7 @@ class ReaderAutoPageHook(
 
     private var currentIntentReceiverRef: WeakReference<Any>? = null
     private var currentViewModelRef: WeakReference<Any>? = null
+    private var currentSettingsCloseRef: WeakReference<Any>? = null
     private var runningState: Any? = null
     private var timerHoursState: Any? = null
     private var intervalSecondsState: Any? = null
@@ -78,8 +86,10 @@ class ReaderAutoPageHook(
 
     private fun hookTapGesturesBox() {
         runCatching {
-            cls(TAP_GESTURES_BOX_CLASS).declaredMethods
-                .filter { it.name == TAP_GESTURES_BOX_METHOD && it.parameterTypes.size == 4 }
+            // B4 将手势容器内联到 Reader 层，旧 facade 不存在；找不到时保留 VM 兜底。
+            val gestureClass = classLoader.hostClassOrNull(TAP_GESTURES_BOX_CLASS) ?: return@runCatching
+            gestureClass.declaredMethods
+                .filter { it.hostNameMatches(TAP_GESTURES_BOX_METHOD) && it.parameterTypes.size == 4 }
                 .forEach { method ->
                     method.isAccessible = true
                     XposedBridge.hookMethod(method, object : XC_MethodHook() {
@@ -96,12 +106,19 @@ class ReaderAutoPageHook(
     }
 
     private fun hookReaderSettings() {
+        if (HostSymbols.profileId == "2.3.3-b4") {
+            hookB4ReaderSettings()
+            return
+        }
         runCatching {
             val settingsClass = cls(READER_SETTINGS_CLASS)
 
             val screenMethod = settingsClass.declaredMethods.firstOrNull {
-                it.name == READER_SETTINGS_SCREEN_METHOD
-            } ?: error("$READER_SETTINGS_CLASS.$READER_SETTINGS_SCREEN_METHOD not found")
+                it.hostNameMatches(READER_SETTINGS_SCREEN_METHOD)
+            } ?: error(
+                "$READER_SETTINGS_CLASS.$READER_SETTINGS_SCREEN_METHOD not found; " +
+                    "methods=" + settingsClass.declaredMethods.joinToString { "${it.name}/${it.parameterTypes.size}" },
+            )
             screenMethod.isAccessible = true
 
             val composerClass = cls(COMPOSER_CLASS)
@@ -113,6 +130,7 @@ class ReaderAutoPageHook(
 
                     readerSettingsBuildDepth.set(1)
                     autoPageItemInjected.set(false)
+                    captureSettingsCloseCallback(param.args.getOrNull(0))
                     val autoPageVisible = canRunAutoPage()
                     readerSettingsComposer.set(param.args.getOrNull(composerIndex).takeIf { autoPageVisible })
                     log(
@@ -131,9 +149,15 @@ class ReaderAutoPageHook(
             })
 
             val lazyListScopeClass = cls(LAZY_LIST_SCOPE_CLASS)
-            val itemDefaultMethod = lazyListScopeClass.declaredMethods.firstOrNull {
-                it.name == LAZY_ITEM_DEFAULT_METHOD && it.parameterTypes.size == 6
-            } ?: error("LazyListScope.$LAZY_ITEM_DEFAULT_METHOD not found")
+            val itemDefaultMethod = if (HostSymbols.profileId == "2.3.3-b4") {
+                lazyListScopeClass.declaredMethods.firstOrNull {
+                    it.name == "n" && it.parameterTypes.size == 3
+                }
+            } else {
+                lazyListScopeClass.declaredMethods.firstOrNull {
+                    it.hostNameMatches(LAZY_ITEM_DEFAULT_METHOD) && it.parameterTypes.size == 6
+                }
+            } ?: error("LazyListScope item method not found")
             itemDefaultMethod.isAccessible = true
 
             XposedBridge.hookMethod(itemDefaultMethod, object : XC_MethodHook() {
@@ -143,7 +167,7 @@ class ReaderAutoPageHook(
                     val composer = readerSettingsComposer.get() ?: return
                     if (autoPageItemInjected.get()) return
                     autoPageItemInjected.set(true)
-                    val lazyListScope = param.args[0] ?: return
+                    val lazyListScope = param.thisObject ?: return
                     insertAutoPageItem(lazyListScope, composer)
                 }
             })
@@ -152,6 +176,110 @@ class ReaderAutoPageHook(
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX Reader auto page settings UI hook failed: ${it.stackTraceToString()}")
         }
+    }
+
+    private fun hookB4ReaderSettings() {
+        HookInstallReport.install("ReaderAutoPageHook", "b4ReaderSettings") {
+            val moreSettingsMethod = cls(READER_SETTINGS_CLASS).declaredMethods.firstOrNull {
+                it.hostNameMatches(READER_SETTINGS_SCREEN_METHOD) && it.parameterTypes.size == 3
+            } ?: error("$READER_SETTINGS_CLASS.$READER_SETTINGS_SCREEN_METHOD/3 not found")
+            require(cls(FUNCTION0_CLASS).isAssignableFrom(moreSettingsMethod.parameterTypes[0])) {
+                "B4 ReaderMoreSettingScreen first parameter must be Function0"
+            }
+            moreSettingsMethod.isAccessible = true
+            XposedBridge.hookMethod(moreSettingsMethod, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    captureSettingsCloseCallback(param.args.getOrNull(0))
+                    log("B4 ReaderMoreSettingScreen entered autoPageVisible=${canRunAutoPage()}")
+                }
+            })
+
+            // nf8 是更多设置的唯一 LazyList 回调，不能依赖外层组合结束后的 ThreadLocal。
+            val callback = classLoader.loadClass("nf8").getDeclaredMethod("invoke", Any::class.java)
+            XposedBridge.hookMethod(callback, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!canRunAutoPage()) return
+                    val scope = param.args[0] ?: return
+                    val content = B2NativeUi(classLoader).lambda(
+                        AUTO_PAGE_ITEM_KEY,
+                        functionProxy("B4AutoPageItem", FUNCTION3_CLASS) { args ->
+                            val composer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
+                            ensureUiStates()
+                            runningState?.method0("getValue")
+                            val factory = functionProxy("B4AutoPageFactory", FUNCTION1_CLASS) { values ->
+                                val context = values?.firstOrNull() as? Context ?: error("自动阅读上下文不可用")
+                                b4AutoPageView(context)
+                            }
+                            HostAndroidViews(classLoader).render(factory, B2NativeUi(classLoader).modifier(), composer)
+                            targetUnit()
+                        },
+                    )
+                    runCatching {
+                        B2NativeUi(classLoader).addItem(scope, AUTO_PAGE_ITEM_KEY, content)
+                    }.onFailure {
+                        XposedBridge.log("$LOG_PREFIX B4 ReaderMoreSetting auto-page item failed: ${it.stackTraceToString()}")
+                    }
+                }
+            })
+            XposedBridge.deoptimize(callback)
+        }
+    }
+
+    private fun b4AutoPageView(context: Context): android.widget.LinearLayout {
+        val palette = requireNotNull(EmbeddedHostUi.snapshot(context))
+        val root = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val inset = EmbeddedHostUi.dp(context, 16f).toInt()
+            setPadding(inset, inset, inset, inset)
+        }
+        fun text(value: String) = android.widget.TextView(context).apply {
+            text = value
+            textSize = 14f
+            setTextColor(palette.roles.getValue("OnBackground"))
+            EmbeddedHostUi.uiTypeface(context)?.let { typeface = it }
+        }
+        val title = text("自动阅读")
+        root.addView(title)
+        val timer = text("定时：" + formatHours(timerHours()) + " 小时（0 为不限时）")
+        root.addView(timer)
+        root.addView(android.widget.SeekBar(context).apply {
+            max = 50
+            progress = (timerHours() * 10).roundToInt()
+            contentDescription = "自动阅读定时"
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: android.widget.SeekBar?, value: Int, fromUser: Boolean) {
+                    if (fromUser) setTimerHours(value / 10f)
+                    timer.text = "定时：" + formatHours(value / 10f) + " 小时（0 为不限时）"
+                }
+                override fun onStartTrackingTouch(bar: android.widget.SeekBar?) = Unit
+                override fun onStopTrackingTouch(bar: android.widget.SeekBar?) = Unit
+            })
+        })
+        val interval = text("间隔：" + intervalSeconds() + " 秒")
+        root.addView(interval)
+        root.addView(android.widget.SeekBar(context).apply {
+            max = MAX_INTERVAL_SECONDS - MIN_INTERVAL_SECONDS
+            progress = intervalSeconds() - MIN_INTERVAL_SECONDS
+            contentDescription = "自动阅读间隔"
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: android.widget.SeekBar?, value: Int, fromUser: Boolean) {
+                    if (fromUser) setIntervalSeconds(value + MIN_INTERVAL_SECONDS)
+                    interval.text = "间隔：" + (value + MIN_INTERVAL_SECONDS) + " 秒"
+                }
+                override fun onStartTrackingTouch(bar: android.widget.SeekBar?) = Unit
+                override fun onStopTrackingTouch(bar: android.widget.SeekBar?) = Unit
+            })
+        })
+        root.addView(text(if (isRunning()) "停止自动阅读" else "开始自动阅读").apply {
+            setTextColor(palette.roles.getValue("Primary"))
+            minHeight = EmbeddedHostUi.dp(context, 48f).toInt()
+            gravity = android.view.Gravity.CENTER
+            setOnClickListener {
+                toggleAutoPage()
+                text = if (isRunning()) "停止自动阅读" else "开始自动阅读"
+            }
+        })
+        return root
     }
 
     private fun insertAutoPageItem(lazyListScope: Any, composer: Any) {
@@ -163,9 +291,15 @@ class ReaderAutoPageHook(
                 targetUnit()
             }
 
-            method(LAZY_LIST_SCOPE_CLASS, LAZY_ITEM_DEFAULT_METHOD, 6).invoke(
-                null, lazyListScope, AUTO_PAGE_ITEM_KEY, null, itemContent, 2, null
-            )
+            if (HostSymbols.profileId == "2.3.3-b4") {
+                lazyListScope.javaClass.getDeclaredMethod(
+                    "n", Any::class.java, Any::class.java, cls(FUNCTION3_CLASS),
+                ).apply { isAccessible = true }.invoke(lazyListScope, AUTO_PAGE_ITEM_KEY, null, itemContent)
+            } else {
+                method(LAZY_LIST_SCOPE_CLASS, LAZY_ITEM_DEFAULT_METHOD, 6).invoke(
+                    null, lazyListScope, AUTO_PAGE_ITEM_KEY, null, itemContent, 2, null
+                )
+            }
         }.onFailure {
             log("insertAutoPageItem failed: ${it.message}")
         }
@@ -491,24 +625,35 @@ class ReaderAutoPageHook(
     }
 
     private fun closeReaderSettings() {
+        val callback = currentSettingsCloseRef?.get()
+        if (callback == null) {
+            XposedBridge.log("$LOG_PREFIX auto page settings close skipped: navigation callback unavailable")
+            return
+        }
         runCatching {
-            val status = staticObject(UI_STATUS_READER_CLASS, "INSTANCE")
-            val intent = cls(UPDATE_UI_STATUS_CLASS)
-                .getConstructor(cls(UI_STATUS_CLASS))
-                .newInstance(status)
-            dispatchReaderIntent(intent, "settings close")
+            val invoke = callback.javaClass.methods.firstOrNull {
+                it.hostNameMatches("invoke") && it.parameterTypes.isEmpty()
+            } ?: error("Function0.invoke not found on ${callback.javaClass.name}")
+            invoke.invoke(callback)
+            currentSettingsCloseRef = null
+            log("auto page settings closed via ReaderMoreSettingScreen navigation callback")
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX auto page close settings failed: ${it.stackTraceToString()}")
         }
+    }
+
+    private fun captureSettingsCloseCallback(callback: Any?) {
+        if (callback == null || !cls(FUNCTION0_CLASS).isInstance(callback)) return
+        currentSettingsCloseRef = WeakReference(callback)
     }
 
     private fun dispatchReaderIntent(intent: Any, action: String): Boolean {
         val target = currentIntentReceiverRef?.get() ?: currentViewModelRef?.get() ?: return false
         return runCatching {
             val method = target.javaClass.methods.firstOrNull {
-                it.name == "intent" && it.parameterTypes.size == 1 && it.parameterTypes[0].isAssignableFrom(intent.javaClass)
+                it.hostNameMatches("intent") && it.parameterTypes.size == 1 && it.parameterTypes[0].isAssignableFrom(intent.javaClass)
             } ?: target.javaClass.methods.firstOrNull {
-                it.name == "onIntent" && it.parameterTypes.size == 1 && it.parameterTypes[0].isAssignableFrom(intent.javaClass)
+                it.hostNameMatches("onIntent") && it.parameterTypes.size == 1 && it.parameterTypes[0].isAssignableFrom(intent.javaClass)
             } ?: error("intent/onIntent not found on ${target.javaClass.name}")
             method.invoke(target, intent)
             log("auto page $action dispatched via ${target.javaClass.name}.${method.name}")
@@ -550,7 +695,7 @@ class ReaderAutoPageHook(
     }
 
     private fun setState(state: Any?, value: Any) {
-        state?.javaClass?.methods?.firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+        state?.javaClass?.methods?.firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
             ?.invoke(state, value)
     }
 
@@ -558,7 +703,8 @@ class ReaderAutoPageHook(
         settingsProvider().canRunReaderAutoPage
 
     private fun mutableState(value: Any): Any =
-        method(SNAPSHOT_STATE_KT_CLASS, MUTABLE_STATE_OF_DEFAULT_METHOD, 4).invoke(null, value, null, 2, null)
+        if (HostSymbols.profileId == "2.3.3-b4") B2NativeUi(classLoader).mutableState(value)
+        else method(SNAPSHOT_STATE_KT_CLASS, MUTABLE_STATE_OF_DEFAULT_METHOD, 4).invoke(null, value, null, 2, null)
 
     private fun circleShape(): Any =
         method(FOUNDATION_SHAPE_KT_CLASS, CIRCLE_SHAPE_METHOD, 0).invoke(null)
@@ -731,14 +877,14 @@ class ReaderAutoPageHook(
         composeInterop.functionProxy(name, functionClassName, block)
 
     private fun targetUnit(): Any =
-        staticObject(UNIT_CLASS, "INSTANCE")
+        requireNotNull(cls(UNIT_CLASS).hostField("INSTANCE").get(null))
 
     private fun log(message: String) {
         XposedBridge.log("$LOG_PREFIX $message")
     }
 
     private fun cls(className: String): Class<*> =
-        XposedHelpers.findClass(className, classLoader)
+        classLoader.hostClass(className)
 
     private fun method(className: String, methodName: String, parameterCount: Int): Method {
         val cacheKey = "$className#$methodName/$parameterCount"
