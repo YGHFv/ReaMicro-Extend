@@ -289,6 +289,7 @@ class ReaMicroHookEntry {
                             profileBackgroundHook.refreshRandomImageFor(activity)
                             CloudTaskNotificationPoller.poll(activity.applicationContext)
                             startForegroundHeartbeat()
+                            DexKitUpdateScan.onResume(activity)
                         }
                     },
                 )
@@ -331,6 +332,7 @@ class ReaMicroHookEntry {
                 override fun onActivityStarted(activity: Activity) = Unit
                 override fun onActivityResumed(activity: Activity) = Unit
                 override fun onActivityPaused(activity: Activity) {
+                    DexKitUpdateScan.onPause(activity)
                     if (currentActivityRef?.get() !== activity) return
                     currentActivityResumed = false
                     heartbeatHandler.removeCallbacks(heartbeatRunnable)
@@ -339,6 +341,7 @@ class ReaMicroHookEntry {
                 override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
 
                 override fun onActivityDestroyed(activity: Activity) {
+                    DexKitUpdateScan.onDestroyed(activity)
                     if (activity.javaClass.name != "app.zhendong.reamicro.MainActivity") return
                     if (activity.isChangingConfigurations) return
                     readerHook.onHostActivityDestroyed("MainActivity lifecycle destroyed")
