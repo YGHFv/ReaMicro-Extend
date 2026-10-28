@@ -1,5 +1,11 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.typeMatches
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostClassOrNull
+
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.hook.settings.CLICKABLE_KT_CLASS
 import com.reamicro.fix.hook.settings.COMPOSER_CLASS
@@ -104,21 +110,32 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                 }
             },
         )
+        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+            XposedBridge.deoptimize(target)
+        }
     }
 
     private fun findCommunityMethod(): Method? {
-        val clazz = XposedHelpers.findClass(HOST_COMMUNITY, classLoader)
+        val clazz = classLoader.hostClass(HOST_COMMUNITY)
 
         return clazz.declaredMethods
-            .filter { it.name == COMMUNITY_METHOD }
+            .filter { it.hostNameMatches(COMMUNITY_METHOD) }
             .maxByOrNull { it.parameterTypes.size }
     }
 
     private fun hookCommunityText() {
-        val clazz = XposedHelpers.findClass(STRING0_CLASS, classLoader)
+        val clazz = classLoader.hostClassOrNull(STRING0_CLASS)
+        if (clazz == null) {
+            // B4 已把社区标题内联为常量，不再存在资源门面；社区生命周期仍可独立工作。
+            XposedBridge.log("$LOG_PREFIX B4 community text resource hook skipped: class absent")
+            return
+        }
         val target = clazz.declaredMethods.firstOrNull {
-            it.name == GET_COMMUNITY_METHOD && it.parameterTypes.size == 1
-        } ?: error("$STRING0_CLASS.$GET_COMMUNITY_METHOD not found")
+            it.hostNameMatches(GET_COMMUNITY_METHOD) && it.parameterTypes.size == 1
+        } ?: run {
+            XposedBridge.log("$LOG_PREFIX community text resource hook skipped: method absent")
+            return
+        }
         XposedBridge.hookMethod(
             target,
             object : XC_MethodHook() {
@@ -132,10 +149,19 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
     }
 
     private fun hookRowScopeWeight() {
-        val clazz = XposedHelpers.findClass(ROW_SCOPE_CLASS, classLoader)
+        // B4 RowScope 只剩抽象声明，实际调用位于已核实的 RowScopeInstance。
+        val clazz = classLoader.hostClass(
+            if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") "ReaMicroHost.RowScopeInstance"
+            else ROW_SCOPE_CLASS,
+        )
         val target = clazz.declaredMethods.firstOrNull {
-            it.name == WEIGHT_DEFAULT_METHOD && it.parameterTypes.size == WEIGHT_PARAMETER_COUNT
-        } ?: error("$ROW_SCOPE_CLASS.$WEIGHT_DEFAULT_METHOD not found")
+            !java.lang.reflect.Modifier.isAbstract(it.modifiers) &&
+                (it.hostNameMatches(WEIGHT_DEFAULT_METHOD) || it.hostNameMatches(WEIGHT_METHOD) ||
+                    (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4" && it.name == "b")) &&
+                (it.parameterTypes.size == WEIGHT_PARAMETER_COUNT ||
+                    it.parameterTypes.size == B4_WEIGHT_PARAMETER_COUNT)
+        } ?: error("$ROW_SCOPE_CLASS weight method not found")
+        val b4InstanceMethod = !java.lang.reflect.Modifier.isStatic(target.modifiers)
         XposedBridge.hookMethod(
             target,
             object : XC_MethodHook() {
@@ -143,7 +169,8 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                     if (!inCommunity()) return
                     if (communityTextSeen.get() != true) return
                     if (communityInjected.get() == true) return
-                    val scope = param.args?.getOrNull(0) ?: return
+                    val scope = if (b4InstanceMethod) param.thisObject else param.args?.getOrNull(0)
+                    if (scope == null) return
                     if (communityRowScope.get() == null) {
                         communityRowScope.set(scope)
                     }
@@ -166,9 +193,9 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
     private fun hookRowTrailingIcon() {
         val clazz = XposedHelpers.findClass(ICON_KT_CLASS, classLoader)
         val target = clazz.declaredMethods.firstOrNull {
-            it.name == ICON_METHOD &&
+            it.hostNameMatches(ICON_METHOD) &&
                 it.parameterTypes.size == ICON_PARAMETER_COUNT &&
-                it.parameterTypes.firstOrNull()?.name == IMAGE_VECTOR_CLASS
+                typeMatches(it.parameterTypes.firstOrNull(), IMAGE_VECTOR_CLASS)
         } ?: error("$ICON_KT_CLASS.$ICON_METHOD ImageVector overload not found")
         XposedBridge.hookMethod(
             target,
@@ -196,11 +223,13 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
     }
 
     private fun hookRowClickable() {
-        val clazz = XposedHelpers.findClass(CLICKABLE_KT_CLASS, classLoader)
+        val clazz = classLoader.hostClass(CLICKABLE_KT_CLASS)
         val target = clazz.declaredMethods.firstOrNull {
-            it.name == HOST_CLICKABLE_DEFAULT_METHOD &&
-                it.parameterTypes.size == HOST_CLICKABLE_PARAMETER_COUNT
-        } ?: error("$CLICKABLE_KT_CLASS.$HOST_CLICKABLE_DEFAULT_METHOD not found")
+            it.hostNameMatches(HOST_CLICKABLE_DEFAULT_METHOD) &&
+                (it.parameterTypes.size == HOST_CLICKABLE_PARAMETER_COUNT ||
+                    it.parameterTypes.size == B4_CLICKABLE_PARAMETER_COUNT)
+        } ?: error("$CLICKABLE_KT_CLASS clickable method not found")
+        val b4Clickable = target.parameterTypes.size == B4_CLICKABLE_PARAMETER_COUNT
         XposedBridge.hookMethod(
             target,
             object : XC_MethodHook() {
@@ -209,8 +238,16 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                     if (communityRowStripped.get() == true) return
                     runCatching {
                         val args = param.args ?: return@runCatching
-                        val onClick = args.getOrNull(HOST_CLICKABLE_ARG_ON_CLICK) ?: return@runCatching
-                        if (onClick.javaClass.name != HOST_COMMUNITY_ROW_CLICK) return@runCatching
+                        val onClickIndex = if (b4Clickable) B4_CLICKABLE_ARG_ON_CLICK else HOST_CLICKABLE_ARG_ON_CLICK
+                        val onClick = args.getOrNull(onClickIndex) ?: return@runCatching
+                        if (b4Clickable) {
+                            if (!typeMatches(onClick.javaClass, FUNCTION0_CLASS)) return@runCatching
+                            // 社区有多个同形回调，只拆分真实书院行的 byte=12 分支。
+                            if (onClick.javaClass.name != "mb" ||
+                                onClick.javaClass.getDeclaredField("a").getByte(onClick) != 12.toByte()) return@runCatching
+                        } else if (onClick.javaClass.name != HOST_COMMUNITY_ROW_CLICK) {
+                            return@runCatching
+                        }
                         communityRowClick.set(onClick)
                         communityRowBase.set(args.getOrNull(0))
                         communityRowStripped.set(true)
@@ -225,7 +262,7 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
     private fun hookRowPadding() {
         val clazz = XposedHelpers.findClass(PADDING_KT_CLASS, classLoader)
         val target = clazz.declaredMethods.firstOrNull {
-            it.name == PADDING_ALL_METHOD && it.parameterTypes.size == PADDING_ALL_PARAMETER_COUNT
+            it.hostNameMatches(PADDING_ALL_METHOD) && it.parameterTypes.size == PADDING_ALL_PARAMETER_COUNT
         } ?: error("$PADDING_KT_CLASS.$PADDING_ALL_METHOD not found")
         XposedBridge.hookMethod(
             target,
@@ -250,9 +287,13 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
     }
 
     private fun hookRowBookIcon() {
-        val clazz = XposedHelpers.findClass(BOOK_KT_CLASS, classLoader)
+        val clazz = classLoader.hostClassOrNull(BOOK_KT_CLASS) ?: run {
+            // B4 内联了 Colored.Book 图标，旧 BookKt 门面不再可 hook。
+            XposedBridge.log("$LOG_PREFIX B4 discover book icon hook skipped: class absent")
+            return
+        }
         val target = clazz.declaredMethods.firstOrNull {
-            it.name == BOOK_METHOD && it.parameterTypes.size == 1
+            it.hostNameMatches(BOOK_METHOD) && it.parameterTypes.size == 1
         } ?: error("$BOOK_KT_CLASS.$BOOK_METHOD not found")
         XposedBridge.hookMethod(
             target,
@@ -267,17 +308,22 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
 
     private fun hookRowIconImage() {
         val clazz = XposedHelpers.findClass(IMAGE_KT_CLASS, classLoader)
-        val target = clazz.declaredMethods.firstOrNull {
-            it.name == IMAGE_METHOD &&
-                it.parameterTypes.size == IMAGE_PARAMETER_COUNT &&
-                it.parameterTypes.firstOrNull()?.name == IMAGE_VECTOR_CLASS
+        // Image 的 ImageVector 重载参数个数随宿主 Compose 版本变化（b1 为 10，b2/b3 收窄到 6），
+        // 必须按「首参 ImageVector + 带 Composer」定位，默认掩码下标按实际参数个数推导。
+        val target = clazz.declaredMethods.firstOrNull { method ->
+            method.hostNameMatches(IMAGE_METHOD) &&
+                typeMatches(method.parameterTypes.firstOrNull(), IMAGE_VECTOR_CLASS) &&
+                method.parameterTypes.any { parameter -> parameter == composerClass }
         } ?: error("$IMAGE_KT_CLASS.$IMAGE_METHOD ImageVector overload not found")
+        val defaultMaskIndex = target.parameterTypes.size - 1
         XposedBridge.hookMethod(
             target,
             object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!inCommunity()) return
-                    if (communityBookSeen.get() != true) return
+                    if (communityBookSeen.get() != true &&
+                        !(com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4" &&
+                            communityLabelPending.get() == true)) return
                     if (communityInjected.get() == true) return
                     val hook = ReaMicroSettingsHook.activeInstanceOrNull() ?: return
                     val args = param.args ?: return
@@ -286,7 +332,7 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                     runCatching {
                         args[IMAGE_ARG_MODIFIER] = hook.leftCellIconModifier(composer, hostRowClickInvoker())
 
-                        clearDefaultBit(args, IMAGE_ARG_DEFAULT_MASK, IMAGE_MODIFIER_DEFAULT_BIT)
+                        clearDefaultBit(args, defaultMaskIndex, IMAGE_MODIFIER_DEFAULT_BIT)
                     }.onFailure { probeFailed("rowIconImage", it) }
                 }
             },
@@ -295,9 +341,13 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
 
     private fun hookRowLabelText() {
         val clazz = XposedHelpers.findClass(TEXT_KT_CLASS, classLoader)
+        // Text(String, ...) 重载同样随 Compose 版本变参数（b1 22 / b2 21 / b3 20），按首参 String 定位。
         val target = clazz.declaredMethods.firstOrNull {
-            it.name == TEXT_METHOD && it.parameterTypes.size == TEXT_PARAMETER_COUNT
+            it.hostNameMatches(TEXT_METHOD) &&
+                it.parameterTypes.firstOrNull() == String::class.java &&
+                it.parameterTypes.any { parameter -> parameter == composerClass }
         } ?: error("$TEXT_KT_CLASS.$TEXT_METHOD not found")
+        val defaultMaskIndex = target.parameterTypes.size - 1
         XposedBridge.hookMethod(
             target,
             object : XC_MethodHook() {
@@ -315,7 +365,10 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                         args[TEXT_ARG_MODIFIER] =
                             hook.leftCellLabelModifier(composer, hostRowClickInvoker())
 
-                        clearDefaultBit(args, TEXT_ARG_DEFAULT_MASK, TEXT_MODIFIER_DEFAULT_BIT)
+                        clearDefaultBit(args, defaultMaskIndex, TEXT_MODIFIER_DEFAULT_BIT)
+                        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+                            communityTextSeen.set(true)
+                        }
                     }.onFailure { probeFailed("rowLabelText", it) }
                 }
             },
@@ -323,9 +376,31 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
     }
 
     private fun hookRowSpacer() {
-        val clazz = XposedHelpers.findClass(SPACER_KT_CLASS, classLoader)
+        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+            val target = classLoader.hostClass("ReaMicroHost.Spacer").getDeclaredMethod(
+                "b", classLoader.hostClass(COMPOSER_CLASS),
+                classLoader.hostClass("androidx.compose.ui.Modifier"),
+            )
+            XposedBridge.hookMethod(target, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!inCommunity() || communityInjected.get() == true) return
+                    val weighted = communitySpacerWeight.get() ?: return
+                    if (param.args[1] !== weighted) return
+                    val scope = communityRowScope.get() ?: return
+                    val hook = ReaMicroSettingsHook.activeInstanceOrNull() ?: return
+                    communitySpacerWeight.set(null)
+                    param.args[1] = hook.leftCellSpacerModifier(scope, param.args[0], hostRowClickInvoker())
+                }
+            })
+            return
+        }
+        val clazz = classLoader.hostClassOrNull(SPACER_KT_CLASS) ?: run {
+            // B4 直接用 RowScope 权重布局，不再调用 SpacerKt。
+            XposedBridge.log("$LOG_PREFIX B4 discover spacer hook skipped: class absent")
+            return
+        }
         val target = clazz.declaredMethods.firstOrNull {
-            it.name == SPACER_METHOD && it.parameterTypes.size == SPACER_PARAMETER_COUNT
+            it.hostNameMatches(SPACER_METHOD) && it.parameterTypes.size == SPACER_PARAMETER_COUNT
         } ?: error("$SPACER_KT_CLASS.$SPACER_METHOD not found")
         XposedBridge.hookMethod(
             target,
@@ -353,7 +428,7 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
         val click: Any? = communityRowClick.get()
         return {
             if (click != null) {
-                runCatching { click.javaClass.getMethod(INVOKE_METHOD).invoke(click) }
+                runCatching { click.javaClass.hostMethod(INVOKE_METHOD).invoke(click) }
                     .onFailure { probeFailed("hostRowClick", it) }
             } else {
                 probeFailed("hostRowClick", IllegalStateException("host row onClick lambda not captured"))
@@ -367,7 +442,7 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
     }
 
     private val composerClass: Class<*>? by lazy {
-        runCatching { XposedHelpers.findClass(COMPOSER_CLASS, classLoader) }.getOrNull()
+        classLoader.hostClassOrNull(COMPOSER_CLASS)
     }
 
     private fun probeFailed(where: String, error: Throwable) {
@@ -396,7 +471,9 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
         const val GET_COMMUNITY_METHOD = "getCommunity"
         const val ROW_SCOPE_CLASS = "androidx.compose.foundation.layout.RowScope"
         const val WEIGHT_DEFAULT_METHOD = "weight\$default"
+        const val WEIGHT_METHOD = "weight"
         const val WEIGHT_PARAMETER_COUNT = 6
+        const val B4_WEIGHT_PARAMETER_COUNT = 2
         const val ICON_KT_CLASS = "androidx.compose.material3.IconKt"
         const val ICON_METHOD = "Icon-ww6aTOc"
         const val ICON_PARAMETER_COUNT = 7
@@ -417,8 +494,11 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
 
         const val HOST_CLICKABLE_DEFAULT_METHOD = "clickable-oSLSa3U\$default"
         const val HOST_CLICKABLE_PARAMETER_COUNT = 8
+        const val B4_CLICKABLE_PARAMETER_COUNT = 6
 
         const val HOST_CLICKABLE_ARG_ON_CLICK = 5
+        const val B4_CLICKABLE_ARG_ON_CLICK = 4
+        const val FUNCTION0_CLASS = "kotlin.jvm.functions.Function0"
 
         const val HOST_COMMUNITY_ROW_CLICK =
             "app.zhendong.reamicro.ui.profile.components.CommunityKt\$\$ExternalSyntheticLambda3"

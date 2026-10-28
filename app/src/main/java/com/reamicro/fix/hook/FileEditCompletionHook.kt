@@ -224,7 +224,15 @@ class FileEditCompletionHook(
         formatFileSize(callLong(book, "getSize")).replace(" ", "")
 
     private fun backupTypeName(book: Any): String =
-        runCatching {
+        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+            // 与 B4 BookSyncSizeItem 的存储类型参数保持一致，旧 BackupType 门面已被内联。
+            when (callInt(book, "getBackupType")) {
+                1 -> "百度网盘"
+                2 -> "115网盘"
+                4 -> "阿里云盘"
+                else -> "本地存储"
+            }
+        } else runCatching {
             method(BACKUP_TYPE_CLASS, "getName", 1).invoke(
                 staticObject(BACKUP_TYPE_CLASS, "INSTANCE"),
                 Integer.valueOf(callInt(book, "getBackupType")),
@@ -431,6 +439,46 @@ class FileEditCompletionHook(
         )
     }
 
+    /** 编辑与同步使用同一右侧箭头；同步的存储信息仍与取值并排，不降成左侧副标题。 */
+    private fun renderB4SyncActionRow(
+        label: String, value: String, storage: String?, storageIcon: Any?,
+        composer: Any, name: String, onClick: () -> Unit,
+    ) {
+        val callback = functionProxy(name, FUNCTION0_CLASS) { onClick(); targetUnit() }
+        val modifier = nativeUi.padding(
+            nativeUi.clickable(nativeUi.fillWidth(nativeUi.modifier()), callback),
+            nativeUi.dp(16), nativeUi.dp(15), nativeUi.dp(16), nativeUi.dp(15),
+        )
+        val content = functionProxy("${name}RowContent", FUNCTION3_CLASS) { args ->
+            val scope = requireNotNull(args?.getOrNull(0))
+            val inner = requireNotNull(args?.getOrNull(1))
+            val scheme = nativeUi.theme(inner, "getColorScheme")
+            nativeText(label, inner, nativeThemeOnBackgroundVariant(scheme), NATIVE_VALUE_STYLE)
+            nativeUi.spacer(nativeUi.weight(scope, nativeUi.modifier()), inner)
+            nativeText(value, inner, 0L, NATIVE_VALUE_STYLE)
+            storageIcon?.let { image ->
+                nativeUi.spacer(nativeUi.width(nativeUi.modifier(), nativeUi.dp(8)), inner)
+                val sized = nativeUi.height(nativeUi.width(nativeUi.modifier(), nativeUi.dp(18)), nativeUi.dp(18))
+                method("androidx.compose.foundation.ImageKt", "Image", 6)
+                    .invoke(null, image, null, sized, inner, 48, 120)
+            }
+            storage?.takeIf { it.isNotBlank() }?.let {
+                nativeUi.spacer(nativeUi.width(nativeUi.modifier(), nativeUi.dp(4)), inner)
+                nativeText(it, inner, 0L, NATIVE_VALUE_STYLE)
+            }
+            renderB4DetailsArrow(scheme, inner)
+            targetUnit()
+        }
+        nativeUi.row(modifier, content, composer)
+    }
+
+    private fun renderB4DetailsArrow(scheme: Any, composer: Any) {
+        val arrow = navigateNextImageVector() ?: return
+        // 与 B4 出版行完全一致：默认 24dp Icon、SurfaceContainerHighest、modifier 默认位 4。
+        method(ICON_KT_CLASS, ICON_METHOD, 7).invoke(null, arrow, null, null,
+            nativeLong(scheme, "getSurfaceContainerHighest"), composer, 48, 4)
+    }
+
     /** 详情卡片走已核实的原生 ABI：混淆宿主不存在明文 Compose 门面，反射路径只适用于未混淆构建。 */
     private fun renderNativeDetailsCard(composer: Any, name: String, renderRows: (Any) -> Unit) {
         val scheme = nativeUi.theme(composer, "getColorScheme")
@@ -539,6 +587,11 @@ class FileEditCompletionHook(
         middleEllipsis: Boolean = false,
         nativeTrailingGlyph: String? = null,
     ) {
+        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4" &&
+            (secondaryValue != null || nativeTrailingGlyph == "\u276F")) {
+            renderB4SyncActionRow(label, value, secondaryValue, afterValueIcon, composer, onClickName, onClick)
+            return
+        }
         if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
             renderNativeActionRow(
                 label = label,
@@ -734,6 +787,9 @@ class FileEditCompletionHook(
 
     private fun navigateNextImageVector(): Any? =
         runCatching {
+            if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+                return@runCatching cls("ReaMicroHost.NavigateNextIcon").getDeclaredMethod("i").invoke(null)
+            }
             method(NAVIGATE_NEXT_ICON_CLASS, "getNavigateNext", 1).invoke(
                 null,
                 staticObject(ICONS_AUTO_MIRRORED_FILLED_CLASS, "INSTANCE"),
@@ -752,7 +808,9 @@ class FileEditCompletionHook(
         when (callInt(book, "getBackupType")) {
             1 -> coloredAppIcon(BAIDU_ICON_CLASS, "getBaiduNetdisk")
             2 -> coloredAppIcon(YUN115_ICON_CLASS, "getYun115")
-            4 -> coloredAppIcon(ALIYUN_ICON_CLASS, "getAliyun")
+            4 -> if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+                cls("ReaMicroHost.AliyunIcon").getDeclaredMethod("d").invoke(null)
+            } else coloredAppIcon(ALIYUN_ICON_CLASS, "getAliyun")
             else -> coloredAppIcon(ANDROID_OS_ICON_CLASS, "getAndroidOs")
         }
 

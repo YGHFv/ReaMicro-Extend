@@ -3,6 +3,7 @@ package com.reamicro.fix.hook
 import com.reamicro.fix.core.hostField
 
 import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.hostNameStartsWith
 
 
 import android.app.Activity
@@ -1456,7 +1457,7 @@ private var pageInsetsLogged = false
 private fun paddingValuesSideDp(paddings: Any, prefix: String): Double? =
     runCatching {
         paddings.javaClass.methods
-            .firstOrNull { it.parameterCount == 0 && it.name.startsWith(prefix) }
+            .firstOrNull { it.parameterCount == 0 && it.hostNameStartsWith(prefix) }
             ?.apply { isAccessible = true }
             ?.invoke(paddings)
             ?.let { it as? Float }

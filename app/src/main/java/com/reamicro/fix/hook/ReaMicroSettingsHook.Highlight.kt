@@ -407,26 +407,22 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightScreenEntryCard(
             onClick = onClick,
         ),
     )
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
-        renderHostActionCard(rows, composer)
-        return
-    }
-
     val content = functionProxy("ReaderHighlightScreenEntryCard", FUNCTION3_CLASS) { args ->
         val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
         renderHostActionCard(rows, innerComposer)
         targetUnit()
     }
-    val bottomPaddedModifier = readerHighlightPaddingSides(
+    val b4 = com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4"
+    val paddedModifier = readerHighlightPaddingSides(
         modifierInstance(),
         0f,
-        0f,
+        if (b4) udp(12) else 0f,
         0f,
         udp(12),
-        7,
+        if (b4) 5 else 7,
     )
     readerHighlightColumn(
-        bottomPaddedModifier,
+        paddedModifier,
         arrangementTop(),
         alignmentStart(),
         content,

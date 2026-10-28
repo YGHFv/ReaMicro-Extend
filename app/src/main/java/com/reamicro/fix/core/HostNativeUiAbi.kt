@@ -16,6 +16,7 @@ object HostNativeUiAbi {
         "Divider#c" to "c",
         "HomeSearchFooter#a" to "a",
         "LazyDsl#a" to "a",
+        "LazyDsl#b" to "b",
         "ListItem#a" to "a",
         "ListItemColors#a" to "a",
         "Materialize#h" to "h",

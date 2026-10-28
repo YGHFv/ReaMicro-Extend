@@ -8,6 +8,9 @@ import android.provider.DocumentsContract
 import android.widget.Toast
 import com.reamicro.fix.core.ComposeInterop
 import com.reamicro.fix.core.HostClasses
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.B2NativeUi
 import com.reamicro.fix.xposed.XC_MethodHook
 import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.xposed.XposedHelpers
@@ -34,7 +37,6 @@ class LocalExportHook(
 
     private val methodCache = mutableMapOf<String, Method>()
     private val currentBackupContext = ThreadLocal<BackupContext?>()
-    private val renderingLocalExport = ThreadLocal<Boolean>()
     @Volatile private var pendingPickContext: BackupContext? = null
 
     fun install() {
@@ -46,17 +48,12 @@ class LocalExportHook(
     private fun hookBookBackupContent() {
         runCatching {
             val method = cls(BOOK_BACKUP_SCREEN_CLASS).declaredMethods.first {
-                it.name == BOOK_BACKUP_CONTENT_METHOD && it.parameterTypes.size == 9
+                it.hostNameMatches(BOOK_BACKUP_CONTENT_METHOD) && it.parameterTypes.size == 9
             }.apply { isAccessible = true }
             XposedBridge.hookMethod(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val book = param.args?.getOrNull(0) ?: return
-                    val context = BackupContext(book)
-                    if (renderScrollableBackupContent(param, context)) {
-                        param.result = targetUnit()
-                        return
-                    }
-                    currentBackupContext.set(context)
+                    currentBackupContext.set(BackupContext(book))
                 }
 
                 override fun afterHookedMethod(param: MethodHookParam) {
@@ -71,9 +68,7 @@ class LocalExportHook(
 
     private fun hookLocalStorageCard() {
         runCatching {
-            val method = cls(LOCAL_STORAGE_CARD_CLASS).declaredMethods.first {
-                it.name == LOCAL_STORAGE_CARD_METHOD && it.parameterTypes.size == 3
-            }.apply { isAccessible = true }
+            val method = staticMethod(LOCAL_STORAGE_CARD_CLASS, LOCAL_STORAGE_CARD_METHOD, 3)
             XposedBridge.hookMethod(method, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val context = currentBackupContext.get() ?: return
@@ -122,114 +117,6 @@ class LocalExportHook(
         }
     }
 
-    private fun renderScrollableBackupContent(param: XC_MethodHook.MethodHookParam, context: BackupContext): Boolean {
-        val args = param.args ?: return false
-        val cloudBook = args.getOrNull(1)
-        val deleting = args.getOrNull(2) as? Boolean ?: false
-        val onIntent = args.getOrNull(3) ?: return false
-        val onSelectFolder = args.getOrNull(4) ?: return false
-        val onAuthorize = args.getOrNull(5) ?: return false
-        val onSetupDefaultDir = args.getOrNull(6) ?: return false
-        val composer = args.getOrNull(7) ?: return false
-        return runCatching {
-            renderScrollableColumn(composer) { innerComposer ->
-                renderLocalStorageCard(context.book, innerComposer)
-                renderLocalExportCard(context, innerComposer)
-                renderBackupTargetCards(
-                    book = context.book,
-                    cloudBook = cloudBook,
-                    deleting = deleting,
-                    onIntent = onIntent,
-                    onSelectFolder = onSelectFolder,
-                    onAuthorize = onAuthorize,
-                    onSetupDefaultDir = onSetupDefaultDir,
-                    composer = innerComposer,
-                )
-            }
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to render scrollable backup content: ${it.stackTraceToString()}")
-        }.isSuccess
-    }
-
-    private fun renderScrollableColumn(composer: Any, content: (Any) -> Unit) {
-        val contentProxy = functionProxy("ScrollableBackupContent", FUNCTION3_CLASS) { args ->
-            content(args?.getOrNull(1) ?: composer)
-            targetUnit()
-        }
-        method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
-            null,
-            scrollableBackupContentModifier(composer),
-            arrangementTop(),
-            alignmentStart(),
-            contentProxy,
-            composer,
-            0,
-            0,
-        )
-    }
-
-    private fun renderLocalStorageCard(book: Any, composer: Any) {
-        method(LOCAL_STORAGE_CARD_CLASS, LOCAL_STORAGE_CARD_METHOD, 3).invoke(
-            null,
-            book,
-            composer,
-            0,
-        )
-    }
-
-    private fun renderBackupTargetCards(
-        book: Any,
-        cloudBook: Any?,
-        deleting: Boolean,
-        onIntent: Any,
-        onSelectFolder: Any,
-        onAuthorize: Any,
-        onSetupDefaultDir: Any,
-        composer: Any,
-    ) {
-        val type = cloudBook?.callInt("getType") ?: 0
-        if (cloudBook != null && type in setOf(BACKUP_TYPE_BAIDU, BACKUP_TYPE_YUN115, BACKUP_TYPE_ALIYUN, BACKUP_TYPE_WEBDAV)) {
-            val onDelete = functionProxy("BackupDelete", FUNCTION1_CLASS) {
-                invokeFunction1(onIntent, backupDeleteEvent())
-                targetUnit()
-            }
-            val methodName = when (type) {
-                BACKUP_TYPE_BAIDU -> BAIDU_NET_DISK_CARD_METHOD
-                BACKUP_TYPE_YUN115, BACKUP_TYPE_WEBDAV -> YUN115_NET_DISK_CARD_METHOD
-                else -> ALIYUN_DRIVE_CARD_METHOD
-            }
-            method(DRIVE_CARD_CLASS, methodName, 5).invoke(
-                null,
-                cloudBook,
-                deleting,
-                onDelete,
-                composer,
-                0,
-            )
-            return
-        }
-
-        val uploadBlock = functionProxy("BackupUploadBlock", FUNCTION2_CLASS) { callbackArgs ->
-            val uploadType = (callbackArgs?.getOrNull(0) as? Number)?.toInt() ?: return@functionProxy targetUnit()
-            val dir = callbackArgs.getOrNull(1)?.toString()
-            if (dir.isNullOrBlank()) {
-                invokeFunction1(onSelectFolder, uploadType)
-            } else {
-                invokeFunction1(onIntent, backupUploadEvent(uploadType, dir))
-            }
-            targetUnit()
-        }
-        method(AUTH_CARD_CLASS, AUTH_CARD_METHOD, 6).invoke(
-            null,
-            book.callLong("getId"),
-            onAuthorize,
-            onSetupDefaultDir,
-            uploadBlock,
-            composer,
-            0,
-        )
-    }
-
     private fun renderLocalExportCard(context: BackupContext, composer: Any) {
         runCatching {
             val onDefault = functionProxy("LocalExportDefault", FUNCTION0_CLASS) {
@@ -240,9 +127,16 @@ class LocalExportHook(
                 openDirectoryPicker(context)
                 targetUnit()
             }
-            renderAuthCardColumn(composer) { innerComposer ->
-                renderLocalExportDriveCard(context, innerComposer, onDefault, onPick)
-            }
+            if (HostSymbols.profileId == "2.3.3-b4") {
+                // 恢复旧 authCardColumnModifier 的外层缩进，不能直接插入全宽的备份页 Column。
+                val ui = B2NativeUi(classLoader)
+                val content = functionProxy("LocalExportColumnContent", HostClasses.Kotlin.FUNCTION3) { args ->
+                    renderLocalExportDriveCard(context, requireNotNull(args?.getOrNull(1)), onDefault, onPick)
+                    targetUnit()
+                }
+                ui.column(ui.padding(ui.fillWidth(ui.modifier()), ui.dp(16), 0f, ui.dp(16), ui.dp(16)),
+                    ui.top(), ui.start(), content, composer)
+            } else renderLocalExportDriveCard(context, composer, onDefault, onPick)
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to render local export card: ${it.stackTraceToString()}")
         }
@@ -260,7 +154,6 @@ class LocalExportHook(
             targetUnit()
         },
     ) {
-        renderingLocalExport.set(true)
         runCatching {
             method(AUTH_CARD_CLASS, DRIVE_AUTH_CARD_METHOD, 8).invoke(
                 null,
@@ -275,29 +168,6 @@ class LocalExportHook(
             )
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to render local export drive card: ${it.stackTraceToString()}")
-        }
-        renderingLocalExport.remove()
-    }
-
-    private fun renderAuthCardColumn(composer: Any, content: (Any) -> Unit) {
-        runCatching {
-            val contentProxy = functionProxy("LocalExportColumnContent", FUNCTION3_CLASS) { args ->
-                content(args?.getOrNull(1) ?: composer)
-                targetUnit()
-            }
-            method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
-                null,
-                authCardColumnModifier(),
-                spacedByUdp(16),
-                alignmentStart(),
-                contentProxy,
-                composer,
-                0,
-                0,
-            )
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to render local export card with native column: ${it.stackTraceToString()}")
-            content(composer)
         }
     }
 
@@ -446,13 +316,13 @@ class LocalExportHook(
 
     private fun bookDirectory(book: Any): File {
         val activity = activityProvider() ?: error("无法获取阅微上下文")
-        val uid = book.callLong("getUid")
-        val uuid = book.callString("getUuid")
+        val uid = book.hostFieldLong(BOOK_CLASS, "uid")
+        val uuid = book.hostFieldString(BOOK_CLASS, "uuid")
         return File(activity.filesDir, "$uid/books/$uuid")
     }
 
     private fun exportFileName(book: Any): String =
-        "${book.callString("getTitle").sanitizeFileName().ifBlank { "book" }}.epub"
+        "${book.hostFieldString(BOOK_CLASS, "title").sanitizeFileName().ifBlank { "book" }}.epub"
 
     private fun uniqueFile(dir: File, name: String): File {
         val base = name.substringBeforeLast('.', name)
@@ -470,166 +340,64 @@ class LocalExportHook(
     private fun String.sanitizeFileName(): String =
         replace(Regex("""[\\/:*?"<>|]"""), "_").trim().take(120)
 
-    private fun Any.callString(methodName: String): String =
-        javaClass.methods.first { it.name == methodName && it.parameterTypes.isEmpty() }
-            .invoke(this)
-            ?.toString()
-            .orEmpty()
+    private fun Any.hostFieldString(className: String, fieldName: String): String =
+        hostField(className, fieldName)?.toString().orEmpty()
 
-    private fun Any.callLong(methodName: String): Long {
-        val value = javaClass.methods.first { it.name == methodName && it.parameterTypes.isEmpty() }
-            .invoke(this)
+    private fun Any.hostFieldLong(className: String, fieldName: String): Long {
+        val value = hostField(className, fieldName)
         return (value as? Number)?.toLong() ?: value?.toString()?.toLong() ?: 0L
     }
 
-    private fun Any.callInt(methodName: String): Int {
-        val value = javaClass.methods.first { it.name == methodName && it.parameterTypes.isEmpty() }
-            .invoke(this)
-        return (value as? Number)?.toInt() ?: value?.toString()?.toInt() ?: 0
+    private fun Any.hostField(className: String, fieldName: String): Any? {
+        val actualName = HostSymbols.resolveFieldName(className, fieldName)
+        var type: Class<*>? = javaClass
+        while (type != null) {
+            val field = runCatching { type!!.getDeclaredField(actualName) }.getOrNull()
+            if (field != null) {
+                field.isAccessible = true
+                return field.get(this)
+            }
+            type = type.superclass
+        }
+        error("$className.$fieldName not found")
     }
 
     private fun downloadsDir(): String =
         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).absolutePath
 
     private fun localExportIcon(): Any {
+        runCatching {
+            return method(ANDROID_OS_KT_CLASS, ANDROID_OS_METHOD, 0).invoke(null)
+        }
         val colored = staticObject(APP_ICONS_COLORED_CLASS, "INSTANCE")
         return method(ANDROID_OS_KT_CLASS, ANDROID_OS_METHOD, 1).invoke(null, colored)
     }
 
-    private fun authCardColumnModifier(): Any {
-        val modifier = staticObject(MODIFIER_CLASS, "INSTANCE")
-        val horizontalPadded = method(PADDING_KT_CLASS, PADDING_HORIZONTAL_DEFAULT_METHOD, 5).invoke(
-            null,
-            modifier,
-            udp(16),
-            0f,
-            2,
-            null,
-        )
-        val padded = method(PADDING_KT_CLASS, PADDING_INDIVIDUAL_DEFAULT_METHOD, 7).invoke(
-            null,
-            horizontalPadded,
-            0f,
-            0f,
-            0f,
-            udp(16),
-            7,
-            null,
-        )
-        return method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, 4).invoke(
-            null,
-            padded,
-            0f,
-            1,
-            null,
-        )
-    }
-
-    private fun scrollableBackupContentModifier(composer: Any): Any {
-        val modifier = staticObject(MODIFIER_CLASS, "INSTANCE")
-        val fillMaxSize = method(SIZE_KT_CLASS, FILL_MAX_SIZE_DEFAULT_METHOD, 4).invoke(
-            null,
-            modifier,
-            0f,
-            1,
-            null,
-        )
-        return scrollableModifier(fillMaxSize, composer)
-    }
-
-    private fun scrollableModifier(modifier: Any, composer: Any): Any {
-        val scrollState = method(SCROLL_KT_CLASS, REMEMBER_SCROLL_STATE_METHOD, 4).invoke(
-            null,
-            0,
-            composer,
-            0,
-            1,
-        )
-        return method(SCROLL_KT_CLASS, VERTICAL_SCROLL_DEFAULT_METHOD, 7).invoke(
-            null,
-            modifier,
-            scrollState,
-            false,
-            null,
-            false,
-            14,
-            null,
-        )
-    }
-
-    private fun arrangementTop(): Any {
-        val arrangement = staticObject(ARRANGEMENT_CLASS, "INSTANCE")
-        return instanceMethod(arrangement, ARRANGEMENT_TOP_METHOD, 0).invoke(arrangement)
-    }
-
-    private fun spacedByUdp(value: Int): Any {
-        val arrangement = staticObject(ARRANGEMENT_CLASS, "INSTANCE")
-        return instanceMethod(arrangement, SPACED_BY_METHOD, 1).invoke(arrangement, udp(value))
-    }
-
-    private fun alignmentStart(): Any {
-        val alignment = staticObject(ALIGNMENT_CLASS, "INSTANCE")
-        return instanceMethod(alignment, ALIGNMENT_START_METHOD, 0).invoke(alignment)
-    }
-
-    private fun udp(value: Int): Float =
-        (typedMethod(UNIT_EXT_KT_CLASS, UDP_METHOD, Int::class.javaPrimitiveType).invoke(null, value) as Number).toFloat()
-
     private fun method(className: String, methodName: String, parameterCount: Int): Method =
-        method(className, methodName, parameterCount, null)
+        staticMethod(className, methodName, parameterCount)
 
-    private fun method(className: String, methodName: String, parameterCount: Int, receiver: Any?): Method {
-        val receiverClass = receiver?.javaClass?.name.orEmpty()
-        val cacheKey = "$className#$methodName/$parameterCount@$receiverClass"
+    private fun staticMethod(className: String, methodName: String, parameterCount: Int): Method {
+        val cacheKey = "$className#$methodName/$parameterCount"
         return synchronized(methodCache) {
             methodCache.getOrPut(cacheKey) {
-                val candidates = cls(className).methods.asSequence() + cls(className).declaredMethods.asSequence()
+                val owner = Class.forName(
+                    HostSymbols.resolveMethodOwner(className, methodName),
+                    false,
+                    classLoader,
+                )
+                val resolvedName = HostSymbols.resolveMethodName(className, methodName)
+                val candidates = owner.methods.asSequence() + owner.declaredMethods.asSequence()
                 candidates.firstOrNull {
-                    it.name == methodName && it.parameterTypes.size == parameterCount
+                    (it.name == resolvedName || it.name == methodName) &&
+                        it.parameterTypes.size == parameterCount
                 }?.apply { isAccessible = true }
                     ?: error("$className.$methodName/$parameterCount not found")
             }
         }
     }
 
-    private fun typedMethod(className: String, methodName: String, vararg parameterTypes: Class<*>?): Method {
-        val cacheKey = "$className#$methodName(${parameterTypes.joinToString { it?.name.orEmpty() }})"
-        return synchronized(methodCache) {
-            methodCache.getOrPut(cacheKey) {
-                cls(className).getDeclaredMethod(methodName, *parameterTypes).apply {
-                    isAccessible = true
-                }
-            }
-        }
-    }
-
-    private fun instanceMethod(receiver: Any, methodName: String, parameterCount: Int): Method {
-        val cacheKey = "${receiver.javaClass.name}#$methodName/$parameterCount"
-        return synchronized(methodCache) {
-            methodCache.getOrPut(cacheKey) {
-                val candidates = receiver.javaClass.methods.asSequence() + receiver.javaClass.declaredMethods.asSequence()
-                candidates.firstOrNull {
-                    it.name == methodName && it.parameterTypes.size == parameterCount
-                }?.apply { isAccessible = true }
-                    ?: error("${receiver.javaClass.name}.$methodName/$parameterCount not found")
-            }
-        }
-    }
-
     private fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any =
         composeInterop.functionProxy(name, functionClassName, block)
-
-    private fun invokeFunction1(function: Any, arg: Any?) {
-        instanceMethod(function, "invoke", 1).invoke(function, arg)
-    }
-
-    private fun backupDeleteEvent(): Any =
-        staticObject(BOOK_BACKUP_DELETE_EVENT_CLASS, "INSTANCE")
-
-    private fun backupUploadEvent(type: Int, dir: String): Any =
-        cls(BOOK_BACKUP_UPLOAD_EVENT_CLASS)
-            .getConstructor(Int::class.javaPrimitiveType, String::class.java)
-            .newInstance(type, dir)
 
     private fun staticObject(className: String, fieldName: String): Any {
         val clazz = cls(className)
@@ -662,49 +430,17 @@ class LocalExportHook(
         const val LOG_PREFIX = "ReaMicro LSP"
         const val MAIN_ACTIVITY_CLASS = HostClasses.Host.MAIN_ACTIVITY
         const val BOOK_BACKUP_SCREEN_CLASS = HostClasses.Host.BOOK_BACKUP_SCREEN
+        const val BOOK_CLASS = HostClasses.Host.BOOK
         const val BOOK_BACKUP_CONTENT_METHOD = "BookBackupContent"
-        const val BOOK_BACKUP_DELETE_EVENT_CLASS = "app.zhendong.reamicro.ui.backup.BookBackupUIEvent\$Delete"
-        const val BOOK_BACKUP_UPLOAD_EVENT_CLASS = "app.zhendong.reamicro.ui.backup.BookBackupUIEvent\$Upload"
         const val LOCAL_STORAGE_CARD_CLASS = HostClasses.Host.LOCAL_STORAGE_CARD
         const val LOCAL_STORAGE_CARD_METHOD = "LocalStorageCard"
         const val AUTH_CARD_CLASS = HostClasses.Host.AUTH_CARD
-        const val AUTH_CARD_METHOD = "AuthCard"
         const val DRIVE_AUTH_CARD_METHOD = "DriveAuthCard"
-        const val DRIVE_CARD_CLASS = HostClasses.Host.DRIVE_CARD
-        const val ALIYUN_DRIVE_CARD_METHOD = "AliyunDriveCard"
-        const val BAIDU_NET_DISK_CARD_METHOD = "BaiduNetDiskCard"
-        const val YUN115_NET_DISK_CARD_METHOD = "Yun115NetDiskCard"
-        const val BACKUP_TYPE_BAIDU = 1
-        const val BACKUP_TYPE_YUN115 = 2
-        const val BACKUP_TYPE_ALIYUN = 4
-        const val BACKUP_TYPE_WEBDAV = 8
         const val APP_ICONS_COLORED_CLASS = "app.zhendong.reamicro.arch.icons.AppIcons\$Colored"
         const val ANDROID_OS_KT_CLASS = HostClasses.Host.ANDROID_OS_ICON
         const val ANDROID_OS_METHOD = "getAndroidOs"
-        const val COLUMN_KT_CLASS = HostClasses.Compose.COLUMN_KT
-        const val COLUMN_METHOD = "Column"
-        const val MODIFIER_CLASS = HostClasses.Compose.MODIFIER
-        const val SIZE_KT_CLASS = HostClasses.Compose.SIZE_KT
-        const val FILL_MAX_SIZE_DEFAULT_METHOD = "fillMaxSize\$default"
-        const val FILL_MAX_WIDTH_DEFAULT_METHOD = "fillMaxWidth\$default"
-        const val PADDING_KT_CLASS = HostClasses.Compose.PADDING_KT
-        const val PADDING_HORIZONTAL_DEFAULT_METHOD = "padding-VpY3zN4\$default"
-        const val PADDING_INDIVIDUAL_DEFAULT_METHOD = "padding-qDBjuR0\$default"
-        const val ARRANGEMENT_CLASS = HostClasses.Compose.ARRANGEMENT
-        const val ARRANGEMENT_TOP_METHOD = "getTop"
-        const val SPACED_BY_METHOD = "spacedBy-0680j_4"
-        const val ALIGNMENT_CLASS = HostClasses.Compose.ALIGNMENT
-        const val ALIGNMENT_START_METHOD = "getStart"
-        const val SCROLL_KT_CLASS = HostClasses.Compose.SCROLL_KT
-        const val REMEMBER_SCROLL_STATE_METHOD = "rememberScrollState"
-        const val VERTICAL_SCROLL_DEFAULT_METHOD = "verticalScroll\$default"
-        const val UNIT_EXT_KT_CLASS = HostClasses.Host.UNIT_EXT_KT
-        const val UDP_METHOD = "getUdp"
         const val FUNCTION0_CLASS = HostClasses.Kotlin.FUNCTION0
-        const val FUNCTION1_CLASS = HostClasses.Kotlin.FUNCTION1
-        const val FUNCTION2_CLASS = HostClasses.Kotlin.FUNCTION2
-        const val FUNCTION3_CLASS = HostClasses.Kotlin.FUNCTION3
-        const val REQUEST_PICK_EXPORT_DIR = 0x524D47
+        const val REQUEST_PICK_EXPORT_DIR = 0x524D50
         const val EPUB_MIME_TYPE = "application/epub+zip"
         const val EXPORT_TITLE = "导出到本地存储"
         const val DOWNLOADS_LABEL = "下载"

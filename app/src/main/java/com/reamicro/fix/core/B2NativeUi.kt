@@ -120,6 +120,33 @@ class B2NativeUi(private val loader: ClassLoader) {
         static("LazyDsl", "a", modifier, null, null, arrangement, null, null, false, null, content, composer, 0, 494)
     }
 
+    fun lazyRow(modifier: Any, content: Any, composer: Any) {
+        check(HostSymbols.profileId == "2.3.3-b4") { "Unverified native lazy row host" }
+        static("LazyDsl", "b", modifier, null, null, null, null, null, false, null, content, composer, 0, 254)
+    }
+
+    fun weight(scope: Any, base: Any, value: Float = 1f): Any {
+        check(HostSymbols.profileId == "2.3.3-b4") { "Unverified native row weight host" }
+        return requireNotNull(type("RowScopeInstance")
+            .getDeclaredMethod("b", loader.hostClass("androidx.compose.ui.Modifier"), Float::class.javaPrimitiveType)
+            .invoke(scope, base, value))
+    }
+
+    fun spacer(modifier: Any, composer: Any) {
+        check(HostSymbols.profileId == "2.3.3-b4") { "Unverified native spacer host" }
+        loader.hostClass("ReaMicroHost.Spacer")
+            .getDeclaredMethod("b", loader.hostClass("androidx.compose.runtime.Composer"),
+                loader.hostClass("androidx.compose.ui.Modifier"))
+            .invoke(null, composer, modifier)
+    }
+
+    fun emptyBox(modifier: Any, composer: Any) {
+        loader.hostClass("androidx.compose.foundation.layout.BoxKt")
+            .hostMethod("Box", loader.hostClass("androidx.compose.ui.Modifier"),
+                loader.hostClass("androidx.compose.runtime.Composer"),
+                Int::class.javaPrimitiveType).invoke(null, modifier, composer, 0)
+    }
+
     fun addItem(scope: Any, key: Any?, content: Any) {
         val name = if (HostSymbols.profileId == "2.3.3-b4") "n" else "m"
         val method = type("LazyListScope").declaredMethods.single { it.name == name && it.parameterCount == 3 }
@@ -166,8 +193,44 @@ class B2NativeUi(private val loader: ClassLoader) {
         static("Updater", "d", field("NodeSetters", "h"), composer, hash)
         static("Updater", "c", composer)
         static("Updater", "d", field("NodeSetters", "e"), composer, materialized)
-        XposedHelpers.callMethod(content, "invoke", field("ColumnScope", "a"), composer, 0)
+        invokeLayoutContent(content, field("ColumnScope", "a"), composer)
         XposedHelpers.callMethod(composer, "p", true)
         XposedHelpers.callMethod(composer, "p", false)
+    }
+
+    fun row(modifier: Any, content: Any, composer: Any, arrangement: Any? = null, alignment: Any? = null) {
+        check(HostSymbols.profileId == "2.3.3-b4") { "Unverified native row host" }
+        val policy = loader.hostClass("androidx.compose.foundation.layout.RowKt")
+            .hostMethod("rowMeasurePolicy", type("ArrangementHorizontal"), type("AlignmentVertical"),
+                loader.hostClass("androidx.compose.runtime.Composer"), Int::class.javaPrimitiveType)
+            .invoke(null, arrangement ?: field("Arrangement", "a"), alignment ?: centerVertically(), composer, 48)
+        // 复用宿主 Row 的节点协议；两列使用真实 weight modifier，不借用置顶/想法回调。
+        XposedHelpers.callMethod(composer, "b0", 0x524d7032)
+        val hash = java.lang.Long.hashCode(composer.javaClass.getDeclaredField("T").getLong(composer))
+        val locals = XposedHelpers.callMethod(composer, "l")
+        val materialized = requireNotNull(static("Materialize", "h", composer, modifier))
+        XposedHelpers.callMethod(composer, "f0")
+        if (composer.javaClass.getDeclaredField("S").getBoolean(composer)) {
+            XposedHelpers.callMethod(composer, "k", field("LayoutNode", "c0"))
+        } else {
+            XposedHelpers.callMethod(composer, "o0")
+        }
+        static("Updater", "d", field("NodeSetters", "g"), composer, policy)
+        static("Updater", "d", field("NodeSetters", "f"), composer, locals)
+        static("Updater", "d", field("NodeSetters", "h"), composer, hash)
+        static("Updater", "c", composer)
+        static("Updater", "d", field("NodeSetters", "e"), composer, materialized)
+        invokeLayoutContent(content, field("RowScopeInstance", "a"), composer)
+        XposedHelpers.callMethod(composer, "p", true)
+        XposedHelpers.callMethod(composer, "p", false)
+    }
+
+    private fun invokeLayoutContent(content: Any, scope: Any, composer: Any) {
+        if (HostSymbols.profileId == "2.3.3-b4") {
+            // 原生 ComposableLambda 同时实现多个 Function 接口，invoke 必须按 Function3 的 r 分派。
+            loader.hostClass("kotlin.jvm.functions.Function3").hostMethod(
+                "invoke", Any::class.java, Any::class.java, Any::class.java,
+            ).invoke(content, scope, composer, 0)
+        } else XposedHelpers.callMethod(content, "invoke", scope, composer, 0)
     }
 }

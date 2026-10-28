@@ -36,16 +36,6 @@ internal fun ReaMicroSettingsHook.renderCommunityRow(
     onHostRowClick: () -> Unit,
     onDiscoverClick: () -> Unit,
 ) {
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
-        // 复用宿主行与主题；B4 已内联 Spacer/背景门面，右半行不走旧 Compose ABI。
-        val callback = functionProxy("B4DiscoverCell", FUNCTION0_CLASS) { onDiscoverClick(); targetUnit() }
-        val clickable = b2Ui.clickable(modifierInstance(), callback)
-        val labelModifier = b2Ui.padding(clickable, udp(16), udp(16), udp(4), udp(16))
-        renderDiscoverLabel(DISCOVER_LABEL, labelModifier, composer)
-        val arrowModifier = b2Ui.padding(clickable, udp(0), udp(16), udp(16), udp(16))
-        renderDiscoverArrow(arrowModifier, composer)
-        return
-    }
     val icon: Any? = runCatching { (cachedDiscoverIcon ?: DiscoverIcon(classLoader).also { cachedDiscoverIcon = it }).imageVectorOrNull() }.getOrNull()
 
     val leftSource = sharedInteractionSource(CELL_LEFT)
@@ -103,6 +93,9 @@ private fun ReaMicroSettingsHook.renderCellArrow(
 
 private fun ReaMicroSettingsHook.navigateNextImageVector(): Any? =
     runCatching {
+        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+            return@runCatching cls("ReaMicroHost.NavigateNextIcon").getDeclaredMethod("i").invoke(null)
+        }
         method(NAVIGATE_NEXT_ICON_CLASS, NAVIGATE_NEXT_METHOD, NAVIGATE_NEXT_PARAMETER_COUNT).invoke(
             null,
             staticObject(ICONS_AUTO_MIRRORED_FILLED_OBJECT, "INSTANCE"),
@@ -123,6 +116,11 @@ private fun ReaMicroSettingsHook.iconVectorMethod(): Method =
     }
 
 private fun ReaMicroSettingsHook.renderVerticalDivider(composer: Any) {
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        val sized = b2Ui.height(b2Ui.width(modifierInstance(), udp(DIVIDER_WIDTH_DP)), udp(DIVIDER_HEIGHT_DP))
+        b2Ui.emptyBox(b2Ui.background(sized, borderVariant(composer)), composer)
+        return
+    }
     val width = method(SIZE_KT_CLASS, WIDTH_METHOD, SIZE_PARAMETER_COUNT)
         .invoke(null, modifierInstance(), udp(DIVIDER_WIDTH_DP))
     val height = method(SIZE_KT_CLASS, HEIGHT_METHOD, SIZE_PARAMETER_COUNT)
@@ -188,10 +186,11 @@ internal fun ReaMicroSettingsHook.leftCellSpacerModifier(
     onClick: () -> Unit,
 ): Any {
     if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
-        val scope = cls("ReaMicroHost.RowScopeInstance")
-        val weighted = scope.getDeclaredMethod("b", cls("androidx.compose.ui.Modifier"), Float::class.javaPrimitiveType)
-            .invoke(rowScope, modifierInstance(), 1f)
-        return b2Ui.clickable(weighted, functionProxy("B4CommunitySpace", FUNCTION0_CLASS) { onClick(); targetUnit() })
+        val weighted = b2Ui.weight(rowScope, modifierInstance())
+        return b2Ui.height(b2Ui.padding(
+            b2Ui.clickable(weighted, functionProxy("B4CommunitySpace", FUNCTION0_CLASS) { onClick(); targetUnit() }),
+            0f, udp(CELL_VERTICAL_PADDING_DP), 0f, udp(CELL_VERTICAL_PADDING_DP),
+        ), udp(DISCOVER_ICON_SIZE_DP))
     }
     val weighted = method(ROW_SCOPE_INSTANCE_CLASS, ROW_WEIGHT_METHOD, ROW_WEIGHT_PARAMETER_COUNT)
         .invoke(rowScope, modifierInstance(), 1f, true)
@@ -216,11 +215,15 @@ internal fun ReaMicroSettingsHook.leftCellSpacerModifier(
 }
 
 private fun ReaMicroSettingsHook.sizedSquare(base: Any, dp: Int): Any =
-    method(SIZE_KT_CLASS, SIZE_METHOD, SIZE_PARAMETER_COUNT).invoke(null, base, udp(dp))
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        cls(SIZE_KT_CLASS).getDeclaredMethod("o", cls("androidx.compose.ui.Modifier"), Float::class.javaPrimitiveType)
+            .invoke(null, base, udp(dp))
+    } else method(SIZE_KT_CLASS, SIZE_METHOD, SIZE_PARAMETER_COUNT).invoke(null, base, udp(dp))
 
 private fun ReaMicroSettingsHook.textNodeCellHeight(base: Any): Any {
     if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
-        return b2Ui.height(base, udp(DISCOVER_ICON_SIZE_DP))
+        // 行高仍由图标和上下 16dp 内边距决定，文字保留自身行高交给 Row 居中。
+        return base
     }
     val fixed = method(SIZE_KT_CLASS, HEIGHT_METHOD, SIZE_PARAMETER_COUNT)
         .invoke(null, base, udp(DISCOVER_ICON_SIZE_DP))
@@ -249,7 +252,7 @@ private fun ReaMicroSettingsHook.renderDiscoverIcon(
         end = ICON_LABEL_GAP_PADDING_DP,
         bottom = CELL_VERTICAL_PADDING_DP,
     )
-    val sized = method(SIZE_KT_CLASS, SIZE_METHOD, SIZE_PARAMETER_COUNT).invoke(null, padded, udp(DISCOVER_ICON_SIZE_DP))
+    val sized = sizedSquare(padded, DISCOVER_ICON_SIZE_DP)
 
     // ImageVector 重载的形参个数随宿主 Compose 版本变化：b1 为 10 参（含 Alignment/ContentScale/alpha/ColorFilter），
     // b2/b3 收窄到 6 参（ImageVector, String, Modifier, Composer, int, int）。按实际形参个数组装调用参数。
@@ -280,7 +283,7 @@ private fun ReaMicroSettingsHook.imageVectorMethod(): Method =
     cachedImageVectorMethod ?: synchronized(DiscoverImageMethodLock) {
         cachedImageVectorMethod ?: cls(IMAGE_KT_CLASS).declaredMethods.firstOrNull {
             it.hostNameMatches(IMAGE_METHOD) &&
-                it.parameterTypes.size == IMAGE_PARAMETER_COUNT &&
+                it.parameterTypes.any { parameter -> typeMatches(parameter, COMPOSER_CLASS) } &&
                 typeMatches(it.parameterTypes.firstOrNull(), IMAGE_VECTOR_CLASS)
         }?.apply { isAccessible = true }
             ?.also { cachedImageVectorMethod = it }
@@ -349,6 +352,13 @@ private fun ReaMicroSettingsHook.renderDiscoverFiller(
     interactionSource: Any?,
     onDiscoverClick: () -> Unit,
 ) {
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        val weighted = b2Ui.weight(rowScope, modifierInstance())
+        val clickable = discoverClickable(weighted, "ReaMicroDiscoverFiller", composer, interactionSource, onDiscoverClick)
+        val padded = paddingSides(clickable, 0, CELL_VERTICAL_PADDING_DP, 0, CELL_VERTICAL_PADDING_DP)
+        b2Ui.spacer(b2Ui.height(padded, udp(DISCOVER_ICON_SIZE_DP)), composer)
+        return
+    }
     val weighted = method(ROW_SCOPE_INSTANCE_CLASS, ROW_WEIGHT_METHOD, ROW_WEIGHT_PARAMETER_COUNT)
         .invoke(rowScope, modifierInstance(), 1f, true)
     val clickable = discoverClickable(weighted, "ReaMicroDiscoverFiller", composer, interactionSource, onDiscoverClick)
@@ -406,6 +416,7 @@ private fun ReaMicroSettingsHook.localIndication(composer: Any): Any? {
 private var localIndicationUnavailable = false
 
 private fun ReaMicroSettingsHook.sharedInteractionSource(cell: Int): Any? {
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") return null
     cachedDiscoverInteractionSources.getOrNull(cell)?.let { return it }
     if (discoverInteractionSourceUnavailable) return null
     return synchronized(DiscoverImageMethodLock) {

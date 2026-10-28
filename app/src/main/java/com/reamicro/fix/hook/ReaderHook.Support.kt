@@ -1,5 +1,9 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.typeMatches
+
 import android.app.Activity
 import android.content.Context
 import android.graphics.Bitmap
@@ -17,6 +21,9 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.reamicro.fix.online.OnlineReaderContextBridge
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostFieldOrNull
 import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.xposed.XposedHelpers
 import java.io.ByteArrayOutputStream
@@ -28,6 +35,14 @@ import java.nio.charset.StandardCharsets
 import java.util.Locale
 import org.xmlpull.v1.XmlPullParser
 import com.reamicro.fix.hook.reader.*
+
+internal fun readerUiStatusName(status: Any?): String {
+    if (status == null) return ""
+    // 状态单例属于 typeAlias，不能依赖仅反查 class 条目的通用逻辑名。
+    return listOf("Reader", "Menu", "Catalog", "Font", "Highlight", "MarginEditor", "Theme", "TypeSetting")
+        .firstOrNull { typeMatches(status.javaClass, "app.zhendong.reamicro.ui.reader.UiStatus\$$it") }
+        ?: HostSymbols.logicalSimpleName(status.javaClass.name)
+}
 
 internal fun ReaderHook.releaseReaderStrongReferences(reason: String, releaseEpub: Boolean) {
     currentPageStrong = null
@@ -66,25 +81,17 @@ internal fun ReaderHook.fallbackRenderTextWidthDp(contentDom: Any?): Float? =
         val size = callNoArg(textLayout, "getSize") as? Number ?: return@runCatching null
         val widthPx = (size.toLong() shr 32).toInt()
         if (widthPx <= 0) return@runCatching 0f
-        val epubWindowClass = classLoader.loadClass(UI_EPUB_WINDOW_CLASS)
-        val instance = epubWindowClass.getDeclaredField("INSTANCE")
-            .apply { isAccessible = true }
-            .get(null)
-        val dpFloat = epubWindowClass.methods.firstOrNull {
-            it.name == "dpFloat" && it.parameterTypes.size == 1
-        } ?: return@runCatching widthPx.toFloat()
-        val dp = (dpFloat.invoke(instance, Integer.valueOf(widthPx)) as? Number)?.toFloat()
+        // 混淆版宿主可能把 UIEpubWindow 归约成纯静态类（无 INSTANCE），统一走 HostObject。
+        val dp = (epubWindow.callOrNull("dpFloat", Integer.valueOf(widthPx)) as? Number)?.toFloat()
             ?: widthPx.toFloat()
         kotlin.math.ceil(dp.toDouble()).toFloat()
     }.getOrNull()
 
 internal fun ReaderHook.handleHomeBookshelfRendered(source: String) {
     val hadReaderSearchState = hasFullTextSearchState()
-    stopReadAloudIfPausedOnLeaveReader("home rendered: $source")
     if (activeSearchNavigation != null) {
         returnToSearchOrigin(clearNavigation = true, removeBar = false)
     }
-    removeReadAloudMenuButton()
 
     val readerGone = currentViewModelRef?.get() == null
     if (readerGone) {
@@ -95,8 +102,6 @@ internal fun ReaderHook.handleHomeBookshelfRendered(source: String) {
         OnlineReaderContextBridge.clear()
         lastHandledReaderStatisticsKey = ""
         lastOnDemandPrefetchSpineKey = ""
-        bottomReadAloudReceiverRef = null
-        bottomReadAloudBookRef = null
         readerBottomMenuVisible = false
         updateReaderHighlightBookContext("", "", "home rendered: $source", requestRefresh = false)
         if (hadReaderSearchState) {
@@ -121,7 +126,26 @@ internal fun ReaderHook.postRemoveTaggedViews(activity: Activity?, tagValue: Int
 internal fun ReaderHook.isReaderBottomBarDarkLightToggleClick(onClick: Any): Boolean =
     runCatching {
         val cls = onClick.javaClass
-        val className = cls.name
+        if (HostSymbols.profileId == "2.3.3-b4") {
+            // B4 原生深浅色按钮改为 cv2 的 byte=2 分支，不能按所有同形状态回调猜测。
+            val expected = classLoader.hostClass("ReaMicroHost.ReaderMenuThemeClick")
+            val session = expected.takeIf { cls == it }?.getDeclaredField("e")?.get(onClick)
+            return@runCatching cls == expected &&
+                expected.getDeclaredField("a").getByte(onClick) == 2.toByte() &&
+                session != null && classLoader.hostClass(SESSION_CLASS).isInstance(session) &&
+                (currentSessionRef?.get()?.let { it === session } != false)
+        }
+        if (!HostSymbols.isIdentity) {
+            if (!readerBottomBarComposeScope.active) return@runCatching false
+            val captures = cls.declaredFields.filterNot {
+                java.lang.reflect.Modifier.isStatic(it.modifiers)
+            }.mapNotNull { field -> runCatching { field.isAccessible = true; field.get(onClick) }.getOrNull() }
+            return@runCatching captures.any { it === currentSessionRef?.get() } &&
+                captures.any { typeMatches(it.javaClass, "kotlinx.coroutines.CoroutineScope") } &&
+                captures.any { typeMatches(it.javaClass, "androidx.compose.runtime.State") } &&
+                captures.none { typeMatches(it.javaClass, NAV_GRAPH_SCOPE_CLASS) }
+        }
+        val className = HostSymbols.logicalClass(cls.name)
         if (!className.contains("ReaderBottomBarKt") ||
             !className.contains("ExternalSyntheticLambda")
         ) {
@@ -139,31 +163,35 @@ internal fun ReaderHook.isReaderBottomBarDarkLightToggleClick(onClick: Any): Boo
 internal fun ReaderHook.isReaderBottomBarBackClick(onClick: Any): Boolean =
     runCatching {
         val cls = onClick.javaClass
-        val className = cls.name
+        val className = HostSymbols.logicalClass(cls.name)
         if (!className.contains("ReaderBottomBarKt") ||
             !className.contains("ExternalSyntheticLambda")
         ) {
             return@runCatching false
         }
-        cls.declaredFields.any { it.type.name == NAV_GRAPH_SCOPE_CLASS }
+        cls.declaredFields.any { typeMatches(it.type, NAV_GRAPH_SCOPE_CLASS) }
     }.getOrDefault(false)
 
 internal fun ReaderHook.isInReaderFamilySheetCompose(): Boolean =
     Thread.currentThread().stackTrace.any { frame ->
-        frame.className == READER_FAMILY_EPUB_CLASS ||
-            frame.className == READER_FAMILY_USER_CLASS ||
-            frame.className == READER_FAMILY_BUILD_IN_CLASS
+        val className = HostSymbols.logicalClass(frame.className)
+        className == READER_FAMILY_EPUB_CLASS ||
+            className == READER_FAMILY_USER_CLASS ||
+            className == READER_FAMILY_BUILD_IN_CLASS
     }
 
 internal fun ReaderHook.sendReaderUiSheetStatus(receiver: Any, statusName: String): Boolean =
     runCatching {
         val status = readerSheetStatus(statusName)
-        val intentClass = classLoader.loadClass("$READER_UI_INTENT_CLASS\$UpdateUISheetStatus")
+        val intentClass = classLoader.hostClass("$READER_UI_INTENT_CLASS\$UpdateUISheetStatus")
         val intent = intentClass.declaredConstructors.first { it.parameterTypes.size == 1 }
             .apply { isAccessible = true }
             .newInstance(status)
         receiver.javaClass.methods.first {
-            it.name == "intent" && it.parameterTypes.size == 1
+            it.name == HostSymbols.resolveMethodName(
+                HostSymbols.logicalClass(receiver.javaClass.name),
+                "intent",
+            ) && it.parameterTypes.size == 1
         }.apply { isAccessible = true }.invoke(receiver, intent)
         true
     }.onFailure {
@@ -171,8 +199,8 @@ internal fun ReaderHook.sendReaderUiSheetStatus(receiver: Any, statusName: Strin
     }.getOrDefault(false)
 
 internal fun ReaderHook.readerSheetStatus(statusName: String): Any =
-    classLoader.loadClass("$UI_SHEET_STATUS_CLASS\$$statusName")
-        .getDeclaredField("INSTANCE")
+    classLoader.hostClass("$UI_SHEET_STATUS_CLASS\$$statusName")
+        .let { it.hostFieldOrNull("INSTANCE") ?: it.hostField("INSTANCE") }
         .apply { isAccessible = true }
         .get(null)
         ?: error("UiSheetStatus.$statusName unavailable")
@@ -189,15 +217,15 @@ internal fun ReaderHook.extractNavGraphScopeFromLambda(onClick: Any): Any? =
     }
 
 internal fun ReaderHook.hostApplicationContext(): Context? =
-    activityProvider()?.applicationContext ?: readAloudHighlightReceiverContextRef?.get()
+    activityProvider()?.applicationContext
 
 internal fun ReaderHook.createReaderStatisticsIntent(page: Any): Any? =
     runCatching {
-        val pageClass = classLoader.loadClass(EPUB_PAGE_CLASS)
-        val intentClass = classLoader.loadClass("$READER_UI_INTENT_CLASS\$Statistics")
+        val pageClass = classLoader.hostClass(EPUB_PAGE_CLASS)
+        val intentClass = classLoader.hostClass("$READER_UI_INTENT_CLASS\$Statistics")
         intentClass.getDeclaredConstructor(pageClass).newInstance(page)
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX read aloud statistics intent failed: ${it.stackTraceToString()}")
+        XposedBridge.log("$LOG_PREFIX reader statistics intent failed: ${it.stackTraceToString()}")
     }.getOrNull()
 
 internal fun ReaderHook.setReaderStatisticsTimer(viewModel: Any, durationDeltaMs: Long) {
@@ -212,19 +240,19 @@ internal fun ReaderHook.setReaderStatisticsTimer(viewModel: Any, durationDeltaMs
     if (fieldSet) return
     runCatching {
         val accessor = viewModel.javaClass.declaredMethods.firstOrNull { method ->
-            method.name == "access\$set_timer\$p" && method.parameterTypes.size == 2
+            method.hostNameMatches("access\$set_timer\$p") && method.parameterTypes.size == 2
         } ?: return
         accessor.isAccessible = true
         accessor.invoke(null, viewModel, timer)
     }.onFailure { error ->
-        XposedBridge.log("$LOG_PREFIX read aloud statistics timer failed: ${error.stackTraceToString()}")
+        XposedBridge.log("$LOG_PREFIX reader statistics timer failed: ${error.stackTraceToString()}")
     }
 }
 
 internal fun ReaderHook.findDeclaredField(type: Class<*>, name: String): java.lang.reflect.Field? {
     var current: Class<*>? = type
     while (current != null) {
-        val field = current.declaredFields.firstOrNull { it.name == name }
+        val field = current.declaredFields.firstOrNull { it.hostNameMatches(name) }
         if (field != null) return field
         current = current.superclass
     }
@@ -235,7 +263,7 @@ internal fun ReaderHook.arrangementSpacedBy(dp: Int): Any =
     ARRANGEMENT_SPACED_BY_METHOD_CANDIDATES.firstNotNullOfOrNull { name ->
         runCatching {
             staticObject(ARRANGEMENT_CLASS, "INSTANCE").javaClass.methods.firstOrNull { method ->
-                method.name == name && method.parameterTypes.size == 1
+                method.hostNameMatches(name) && method.parameterTypes.size == 1
             }?.invoke(staticObject(ARRANGEMENT_CLASS, "INSTANCE"), udp(dp))
         }.getOrNull()
     } ?: error("Arrangement.spacedBy method not found")
@@ -268,7 +296,7 @@ private fun ReaderHook.udpMethod(): Method =
     synchronized(composeMethodCache) {
         composeMethodCache.getOrPut("$UNIT_EXT_KT_CLASS#$UDP_METHOD/int") {
             classLoader.loadClass(UNIT_EXT_KT_CLASS).declaredMethods.first {
-                it.name == UDP_METHOD && it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
+                it.hostNameMatches(UDP_METHOD) && it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
             }.apply { isAccessible = true }
         }
     }
@@ -291,9 +319,16 @@ internal fun ReaderHook.composeMethod(className: String, methodName: String, par
     val cacheKey = "$className#$methodName/$parameterCount"
     return synchronized(composeMethodCache) {
         composeMethodCache.getOrPut(cacheKey) {
-            classLoader.loadClass(className).declaredMethods.firstOrNull { method ->
-                method.name == methodName && method.parameterTypes.size == parameterCount
-            }?.apply { isAccessible = true }
+            val clazz = classLoader.hostClass(className)
+            val resolvedName = HostSymbols.resolveMethodName(
+                HostSymbols.logicalClass(clazz.name),
+                methodName,
+            )
+            sequenceOf(resolvedName, methodName)
+                .distinct()
+                .flatMap { name -> clazz.declaredMethods.asSequence().filter { it.hostNameMatches(name) } }
+                .firstOrNull { it.parameterTypes.size == parameterCount }
+                ?.apply { isAccessible = true }
                 ?: error("$className.$methodName/$parameterCount not found")
         }
     }
@@ -325,6 +360,12 @@ internal fun ReaderHook.cacheThemeColors(composer: Any, captureSearchTheme: Bool
 }
 
 internal fun ReaderHook.hostColorScheme(composer: Any): Any {
+    if (!HostSymbols.isIdentity) {
+        val local = classLoader.hostClass("androidx.compose.material3.MaterialThemeKt")
+            .hostField("_localMaterialTheme").get(null)
+        val values = XposedHelpers.callMethod(composer, "consume", local)
+        return requireNotNull(XposedHelpers.callMethod(values, "getColorScheme"))
+    }
     val materialTheme = staticObject(MATERIAL_THEME_CLASS, "INSTANCE")
     val stable = staticInt(MATERIAL_THEME_CLASS, "\$stable")
     return composeMethod(MATERIAL_THEME_CLASS, "getColorScheme", 2).invoke(materialTheme, composer, stable)
@@ -338,21 +379,22 @@ internal fun ReaderHook.hostThemeColor(methodName: String, colorScheme: Any): In
 
 internal fun ReaderHook.hostColorSchemeColor(colorScheme: Any, methodName: String): Int =
     composeColorToArgb(
-        colorScheme.javaClass.methods.first {
-            it.name == methodName && it.parameterTypes.isEmpty()
-        }.apply { isAccessible = true }.invoke(colorScheme) as Long,
+        XposedHelpers.callMethod(colorScheme, methodName) as Long,
     )
 
 internal fun ReaderHook.composeColorToArgb(color: Long): Int =
     composeInterop.colorToArgb(color)
 
 internal fun ReaderHook.staticInt(className: String, fieldName: String): Int =
-    classLoader.loadClass(className).getDeclaredField(fieldName).apply { isAccessible = true }.getInt(null)
+    classLoader.hostClass(className).let { clazz ->
+        (clazz.hostFieldOrNull(fieldName) ?: throw NoSuchFieldException("$className#$fieldName"))
+            .apply { isAccessible = true }
+            .getInt(null)
+    }
 
 internal fun ReaderHook.staticObject(className: String, fieldName: String): Any {
-    val clazz = classLoader.loadClass(className)
-    val field = runCatching { clazz.getDeclaredField(fieldName) }
-        .recoverCatching { clazz.getField(fieldName) }
+    val clazz = classLoader.hostClass(className)
+    val field = runCatching { clazz.hostFieldOrNull(fieldName) ?: throw NoSuchFieldException() }
         .recoverCatching { clazz.getDeclaredField("Companion") }
         .getOrElse {
             val fields = clazz.declaredFields.joinToString { field -> "${field.name}:${field.type.name}" }
@@ -374,16 +416,19 @@ internal fun ReaderHook.createNativeEditAction(icon: Any): Any? =
 
 internal fun ReaderHook.editImageVector(): Any? =
     runCatching {
-        val outlined = classLoader.loadClass(ICONS_OUTLINED_CLASS).getField("INSTANCE").get(null)
-        classLoader.loadClass(EDIT_ICON_CLASS).declaredMethods.firstOrNull {
-            it.name == "getEdit" && it.parameterTypes.size == 1
+        val outlined = classLoader.hostClass(ICONS_OUTLINED_CLASS)
+            .let { it.hostFieldOrNull("INSTANCE") ?: it.hostField("INSTANCE") }
+            .get(null)
+        classLoader.hostClass(EDIT_ICON_CLASS).declaredMethods.firstOrNull {
+            it.name == HostSymbols.resolveMethodName(EDIT_ICON_CLASS, "getEdit") &&
+                it.parameterTypes.size == 1
         }?.apply { isAccessible = true }?.invoke(null, outlined)
     }.getOrNull()
 
 internal fun ReaderHook.nativeFunction0(block: () -> Unit): Any {
-    val function0Class = classLoader.loadClass("kotlin.jvm.functions.Function0")
+    val function0Class = classLoader.hostClass("kotlin.jvm.functions.Function0")
     return Proxy.newProxyInstance(classLoader, arrayOf(function0Class)) { _, method, _ ->
-        when (method.name) {
+        when (com.reamicro.fix.core.HostSymbols.logicalMethodName(method)) {
             "invoke" -> {
                 com.reamicro.fix.core.InjectedModuleContext.runUiAction(activityProvider(), block)
                 targetKotlinUnit()
@@ -397,7 +442,7 @@ internal fun ReaderHook.nativeFunction0(block: () -> Unit): Any {
 }
 
 internal fun ReaderHook.targetKotlinUnit(): Any? =
-    runCatching { classLoader.loadClass("kotlin.Unit").getField("INSTANCE").get(null) }.getOrNull()
+    runCatching { classLoader.hostClass("kotlin.Unit").hostField("INSTANCE").get(null) }.getOrNull()
 
 internal fun ReaderHook.resultCardLayoutParams(activity: Activity): LinearLayout.LayoutParams =
     LinearLayout.LayoutParams(
@@ -410,6 +455,9 @@ internal fun ReaderHook.resultCardLayoutParams(activity: Activity): LinearLayout
     }
 
 internal fun ReaderHook.currentReadingTarget(): ReadingTarget? {
+    currentViewModelRef?.get()?.let { vm ->
+        searchScrollBridge?.readingTarget(vm)?.let { return it }
+    }
     currentScrollElement?.let { element ->
         val id = callNoArg(element, "getId")?.toString().orEmpty()
         if (id.isNotBlank()) return ReadingTarget(id,
@@ -417,7 +465,17 @@ internal fun ReaderHook.currentReadingTarget(): ReadingTarget? {
     }
     val nativePage = if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
         currentViewModelRef?.get()?.let { searchPageBridge?.page(it) } else null
-    val page = nativePage ?: currentPageRef?.get() ?: return null
+    val page = nativePage ?: currentPageRef?.get()
+    if (page == null) {
+        val lastCfi = runCatching {
+            currentViewModelRef?.get()?.let { XposedHelpers.getObjectField(it, "lastVisibleCfi") } as? String
+        }.getOrNull()?.takeIf { it.isNotBlank() }
+            ?: currentViewModelRef?.get()?.let { searchPageBridge?.progressCfi(it) }
+        if (lastCfi != null) {
+            return ReadingTarget(lastCfi, 0, "原来进度", "")
+        }
+    }
+    if (page == null) return null
     val cfi = callString(page, "getAnchor")
         .ifBlank { callNoArg(page, "getStart")?.toString().orEmpty() }
         .takeIf { it.isNotBlank() }
@@ -459,23 +517,17 @@ internal fun ReaderHook.forceRefreshReaderWindow(source: String): Boolean {
 internal fun ReaderHook.idOrNull(mark: Any?): Long? =
     mark?.let(::searchResultHighlightMarkId)
 
-internal fun ReaderHook.textRange(start: Int, end: Int): Long? =
-    runCatching {
-        val cls = classLoader.loadClass("androidx.compose.ui.text.TextRangeKt")
-        val method = cls.methods.firstOrNull {
-            it.name == "TextRange" &&
-                it.parameterTypes.size == 2 &&
-                it.parameterTypes[0] == Int::class.javaPrimitiveType &&
-                it.parameterTypes[1] == Int::class.javaPrimitiveType
-        } ?: return@runCatching null
-        (method.invoke(null, start, end) as? Number)?.toLong()
-    }.getOrNull()
+internal fun ReaderHook.textRange(start: Int, end: Int): Long? {
+    if (start < 0 || end < start) return null
+    // Compose TextRange 的值类存储格式：高 32 位为起点，低 32 位为终点。
+    return (start.toLong() shl 32) or (end.toLong() and 0xffffffffL)
+}
 
 internal fun ReaderHook.markColorTokenToColor(token: String): Long? =
     runCatching {
-        val cls = classLoader.loadClass("org.epub.ui.BodyKt")
+        val cls = classLoader.hostClass("org.epub.ui.BodyKt")
         val method = cls.methods.firstOrNull {
-            it.name == "markColorTokenToColor" &&
+            it.hostNameMatches("markColorTokenToColor") &&
                 it.parameterTypes.size == 1 &&
                 it.parameterTypes[0] == String::class.java
         } ?: return@runCatching null
@@ -515,12 +567,12 @@ internal fun ReaderHook.dispatchReaderIntent(receiver: Any?, viewModel: Any?, in
     if (targetViewModel != null) {
         val viewModelIntent = targetViewModel.javaClass.methods
             .filter { method ->
-                method.name == "onIntent" &&
+                method.hostNameMatches("onIntent") &&
                     method.parameterTypes.size == 1 &&
                     method.parameterTypes[0].isAssignableFrom(intent.javaClass)
             }
             .sortedByDescending { method ->
-                if (method.parameterTypes[0].name == READER_UI_INTENT_CLASS) 1 else 0
+                if (typeMatches(method.parameterTypes[0], READER_UI_INTENT_CLASS)) 1 else 0
             }
             .firstOrNull()
         if (viewModelIntent != null) {
@@ -531,7 +583,7 @@ internal fun ReaderHook.dispatchReaderIntent(receiver: Any?, viewModel: Any?, in
     }
     if (receiver != null) {
         val receiverIntent = receiver.javaClass.methods.firstOrNull {
-            it.name == "intent" &&
+            it.hostNameMatches("intent") &&
                 it.parameterTypes.size == 1 &&
                 it.parameterTypes[0].isAssignableFrom(intent.javaClass)
         }
@@ -672,65 +724,6 @@ internal fun ReaderHook.normalizeHref(value: String): String =
         .substringBefore('?')
         .replace('\uFEFF', ' ')
         .trim()
-
-internal fun ReaderHook.currentBookCoverUri(context: CatalogContext): String {
-    val root = currentEpubRoot()
-    listOf(
-        currentUiStateBook(),
-        context.book,
-        bottomReadAloudBookRef?.get(),
-        bottomSearchBookRef?.get(),
-        lastCatalogContext?.book,
-    ).filterNotNull().forEach { book ->
-        coverUriFromBook(book, root)?.let { return prepareCoverUriForService(it) }
-    }
-    return root?.let(::coverUriFromEpubRoot)?.let(::prepareCoverUriForService).orEmpty()
-}
-
-internal fun ReaderHook.prepareCoverUriForService(value: String): String {
-    val raw = value.trim()
-    if (raw.isBlank() || raw.startsWith("data:", ignoreCase = true)) return raw
-    if (raw.startsWith("http://", ignoreCase = true) || raw.startsWith("https://", ignoreCase = true)) return raw
-    val bytes = when {
-        raw.startsWith("content://", ignoreCase = true) -> runCatching {
-            activityProvider()?.contentResolver?.openInputStream(android.net.Uri.parse(raw))?.use { it.readBytes() }
-        }.getOrNull()
-        raw.startsWith("file://", ignoreCase = true) -> runCatching {
-            File(android.net.Uri.parse(raw).path.orEmpty()).takeIf { it.isFile }?.readBytes()
-        }.getOrNull()
-        else -> runCatching {
-            File(raw).takeIf { it.isFile }?.readBytes()
-        }.getOrNull()
-    } ?: return raw
-    return coverDataUriForService(bytes) ?: raw
-}
-
-internal fun ReaderHook.coverDataUriForService(bytes: ByteArray): String? =
-    runCatching {
-        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
-        if (options.outWidth <= 0 || options.outHeight <= 0) return@runCatching null
-        val sample = coverSampleSizeForService(options.outWidth, options.outHeight)
-        val bitmap = BitmapFactory.Options().run {
-            inSampleSize = sample
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, this)
-        } ?: return@runCatching null
-        val output = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 82, output)
-        bitmap.recycle()
-        "data:image/jpeg;base64," + Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX read aloud cover encode failed: ${it.stackTraceToString()}")
-    }.getOrNull()
-
-internal fun ReaderHook.coverSampleSizeForService(width: Int, height: Int): Int {
-    var sample = 1
-    var maxEdge = maxOf(width, height)
-    while (maxEdge / sample > READ_ALOUD_COVER_MAX_EDGE_PX) {
-        sample *= 2
-    }
-    return sample.coerceAtLeast(1)
-}
 
 internal fun ReaderHook.coverUriFromBook(book: Any, root: File?): String? {
     val methodCandidates = listOf(
@@ -1028,9 +1021,9 @@ internal fun ReaderHook.candidateCurrentTextFiles(): List<File> {
 
 internal fun ReaderHook.currentTextContentFile(root: File, itemRefs: Iterable<*>): File? {
     val page = currentPageRef?.get() ?: return null
-    readAloudPageHrefCandidates(page).forEach { href ->
+    pageHrefCandidates(page).forEach { href ->
         searchFileForHref(root, href)?.let { file ->
-            XposedBridge.log("$LOG_PREFIX read aloud current file by href href=$href file=${relativePath(root, file)}")
+            XposedBridge.log("$LOG_PREFIX reader current file by href href=$href file=${relativePath(root, file)}")
             return file
         }
     }
@@ -1051,14 +1044,14 @@ internal fun ReaderHook.currentTextContentFile(root: File, itemRefs: Iterable<*>
         }
         if (byCfi != null) {
             XposedBridge.log(
-                "$LOG_PREFIX read aloud current file by cfi itemRef=$cfiItemRefIndex file=${relativePath(root, byCfi)}",
+                "$LOG_PREFIX reader current file by cfi itemRef=$cfiItemRefIndex file=${relativePath(root, byCfi)}",
             )
             return byCfi
         }
     }
     val spineIndex = (callNoArg(page, "getSpineIndex") as? Number)?.toInt() ?: -1
     if (spineIndex < 0) {
-        logReadAloudCurrentPageProbe(root, itemRefs, "missing-spine-index")
+        logCurrentPageProbe(root, itemRefs, "missing-spine-index")
         return null
     }
     val currentHref = itemRefs.firstOrNull {
@@ -1068,12 +1061,73 @@ internal fun ReaderHook.currentTextContentFile(root: File, itemRefs: Iterable<*>
         ?.let { callString(it, "getHref") }
         ?.takeIf { it.isNotBlank() }
         ?: run {
-            logReadAloudCurrentPageProbe(root, itemRefs, "spine-index-not-in-itemRefs")
+            logCurrentPageProbe(root, itemRefs, "spine-index-not-in-itemRefs")
             return null
         }
     return searchFileForHref(root, currentHref).also { file ->
-        if (file == null) logReadAloudCurrentPageProbe(root, itemRefs, "href-not-found:$currentHref")
+        if (file == null) logCurrentPageProbe(root, itemRefs, "href-not-found:$currentHref")
     }
+}
+
+// 以下两个辅助函数由原先的听书子系统迁移而来，仍被选中文本编辑与全文搜索的当前页定位使用。
+internal fun ReaderHook.pageHrefCandidates(page: Any): List<String> =
+    buildList {
+        listOf(
+            "getHref",
+            "getPath",
+            "getFile",
+            "getFileName",
+            "getSource",
+            "getSrc",
+        ).forEach { method ->
+            callString(page, method).takeIf { it.isNotBlank() }?.let(::add)
+        }
+        val chapter = callNoArg(page, "getChapter")
+        listOf("getHref", "getPath", "getFile", "getSource", "getSrc").forEach { method ->
+            callString(chapter, method).takeIf { it.isNotBlank() }?.let(::add)
+        }
+    }.distinct()
+
+internal fun ReaderHook.logCurrentPageProbe(root: File, itemRefs: Iterable<*>, reason: String) {
+    val page = currentPageRef?.get()
+    val key = listOf(
+        reason,
+        root.absolutePath,
+        page?.javaClass?.name.orEmpty(),
+        callString(page, "getAnchor"),
+        callString(page, "getSummary").take(48),
+    ).joinToString("|")
+    if (key == currentPageProbeLogKey) return
+    currentPageProbeLogKey = key
+    val methodDump = listOf(
+        "getAnchor",
+        "getStart",
+        "getSpineIndex",
+        "getChapterIndex",
+        "getPageIndex",
+        "getSummary",
+        "getHref",
+        "getPath",
+        "getFile",
+    ).joinToString(";") { method ->
+        "$method=${callNoArg(page, method)?.toString()?.take(120).orEmpty()}"
+    }
+    val fieldDump = page?.javaClass?.declaredFields
+        ?.take(16)
+        ?.joinToString(";") { field ->
+            runCatching {
+                field.isAccessible = true
+                "${field.name}=${field.get(page)?.toString()?.take(120).orEmpty()}"
+            }.getOrDefault("${field.name}=?")
+        }
+        .orEmpty()
+    val itemRefDump = itemRefs.take(8).joinToString(";") { item ->
+        "href=${callString(item, "getHref")},index=${callNoArg(item, "getIndex")},spine=${callNoArg(item, "getSpineIndex")}"
+    }
+    XposedBridge.log(
+        "$LOG_PREFIX reader current file probe reason=$reason page=${page?.javaClass?.name} " +
+            "methods=[$methodDump] fields=[$fieldDump] itemRefs=[$itemRefDump]",
+    )
 }
 
 internal fun ReaderHook.replaceUniqueTextInFile(file: File, oldText: String, newText: String): Boolean {
@@ -1091,32 +1145,39 @@ internal fun ReaderHook.escapeXmlText(value: String): String =
 
 internal fun ReaderHook.emptyCoroutineContext(): Any =
     XposedHelpers.findClass(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS, classLoader)
-        .getDeclaredField("INSTANCE")
+        .hostField("INSTANCE")
         .apply { isAccessible = true }
         .get(null)
 
 internal fun ReaderHook.targetUnit(): Any? = runCatching {
     XposedHelpers.findClass(KOTLIN_UNIT_CLASS, classLoader)
-        .getDeclaredField("INSTANCE")
+        .hostField("INSTANCE")
         .apply { isAccessible = true }
         .get(null)
 }.getOrNull()
 
 internal fun ReaderHook.callNoArg(target: Any?, name: String): Any? {
     target ?: return null
-    val method = noArgMethod(target, name) ?: return null
+    val method = noArgMethod(target, name)
+        ?: return runCatching { XposedHelpers.callMethod(target, name) }.getOrNull()
     return runCatching { method.invoke(target) }.getOrNull()
 }
 
 private fun ReaderHook.noArgMethod(target: Any, name: String): Method? {
-    val cacheKey = "${target.javaClass.name}#$name"
+    val logicalClass = HostSymbols.logicalClass(target.javaClass.name)
+    val resolvedName = HostSymbols.resolveMethodName(target.javaClass, name)
+    val cacheKey = "$logicalClass#$name"
     synchronized(noArgMethodCache) {
         if (noArgMethodCache.containsKey(cacheKey)) return noArgMethodCache[cacheKey]
     }
     val found = runCatching {
-        target.javaClass.methods.firstOrNull {
-            it.parameterTypes.isEmpty() && it.name == name
-        }?.apply { isAccessible = true }
+        sequenceOf(resolvedName, name)
+            .distinct()
+            .flatMap { candidate ->
+                target.javaClass.methods.asSequence().filter { it.name == candidate }
+            }
+            .firstOrNull { it.parameterTypes.isEmpty() }
+            ?.apply { isAccessible = true }
     }.getOrNull()
     synchronized(noArgMethodCache) {
         noArgMethodCache[cacheKey] = found
@@ -1128,19 +1189,31 @@ internal fun ReaderHook.callString(target: Any?, name: String): String =
     callNoArg(target, name)?.toString().orEmpty()
 
 internal fun ReaderHook.setString(target: Any, name: String, value: String) {
+    val resolved = HostSymbols.resolveMethodName(
+        HostSymbols.logicalClass(target.javaClass.name),
+        name,
+    )
     target.javaClass.methods.firstOrNull {
-        it.name == name && it.parameterTypes.size == 1 && it.parameterTypes[0] == String::class.java
+        it.name == resolved && it.parameterTypes.size == 1 && it.parameterTypes[0] == String::class.java
     }?.invoke(target, value)
 }
 
 internal fun ReaderHook.setInt(target: Any, name: String, value: Int) {
+    val resolved = HostSymbols.resolveMethodName(
+        HostSymbols.logicalClass(target.javaClass.name),
+        name,
+    )
     target.javaClass.methods.firstOrNull {
-        it.name == name && it.parameterTypes.size == 1 && it.parameterTypes[0] == Int::class.javaPrimitiveType
+        it.name == resolved && it.parameterTypes.size == 1 && it.parameterTypes[0] == Int::class.javaPrimitiveType
     }?.invoke(target, value)
 }
 
 internal fun ReaderHook.setFloat(target: Any, name: String, value: Float) {
+    val resolved = HostSymbols.resolveMethodName(
+        HostSymbols.logicalClass(target.javaClass.name),
+        name,
+    )
     target.javaClass.methods.firstOrNull {
-        it.name == name && it.parameterTypes.size == 1 && it.parameterTypes[0] == Float::class.javaPrimitiveType
+        it.name == resolved && it.parameterTypes.size == 1 && it.parameterTypes[0] == Float::class.javaPrimitiveType
     }?.invoke(target, value)
 }

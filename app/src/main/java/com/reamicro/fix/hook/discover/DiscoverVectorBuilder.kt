@@ -2,6 +2,8 @@ package com.reamicro.fix.hook.discover
 
 import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.xposed.XposedHelpers
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.B2NativeUi
 import java.lang.reflect.Constructor
 import java.lang.reflect.Method
 
@@ -39,6 +41,11 @@ internal object DiscoverVectorBuilder {
         evenOddFill: Boolean = false,
         viewport: Float = VIEWPORT,
     ): Any? = runCatching {
+        if (HostSymbols.profileId == "2.3.3-b4") {
+            return@runCatching B4DiscoverVector.build(
+                classLoader, name, layers, B2NativeUi(classLoader).dp(sizeDp), viewport, evenOddFill,
+            )
+        }
         val members = resolve(classLoader)
         val size = udp(classLoader, sizeDp)
 
