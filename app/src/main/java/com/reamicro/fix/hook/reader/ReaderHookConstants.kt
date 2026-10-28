@@ -4,6 +4,7 @@ import com.reamicro.fix.core.HostClasses
 
 internal const val FEATURE_ID = "ReaderHook"
 internal const val READER_VIEW_MODEL_CLASS = HostClasses.Host.READER_VIEW_MODEL
+internal const val READ_REPOSITORY_CLASS = "app.zhendong.reamicro.repository.ReadRepository"
 internal const val ON_DEMAND_PREFETCH_429_RETRIES = 2
 internal const val ON_DEMAND_PREFETCH_429_RETRY_MS = 10_000L
 internal const val READER_UI_INTENT_CLASS = HostClasses.Host.READER_UI_INTENT
@@ -39,8 +40,6 @@ internal const val DICTIONARY_ICON_BOOK_CLASS = HostClasses.Compose.DICTIONARY_I
 internal const val HIGHLIGHT_ICON_BORDER_COLOR_CLASS = HostClasses.Compose.HIGHLIGHT_ICON_BORDER_COLOR
 internal const val HIGHLIGHT_ICON_FORMAT_COLOR_FILL_CLASS = HostClasses.Compose.HIGHLIGHT_ICON_FORMAT_COLOR_FILL
 internal const val HIGHLIGHT_ICON_MODE_EDIT_CLASS = HostClasses.Compose.HIGHLIGHT_ICON_MODE_EDIT
-internal const val READ_ALOUD_ICON_VOLUME_UP_CLASS = HostClasses.Compose.READ_ALOUD_ICON_VOLUME_UP
-internal const val READ_ALOUD_ICON_RECORD_VOICE_OVER_CLASS = HostClasses.Compose.READ_ALOUD_ICON_RECORD_VOICE_OVER
 internal const val ICONS_OUTLINED_CLASS = "androidx.compose.material.icons.Icons\$Outlined"
 internal const val LOG_PREFIX = "ReaMicro LSP"
 internal const val FLIP_STYLE_TRANSLATE = 0
@@ -104,25 +103,6 @@ internal const val SEARCH_CJK_SNIPPET_RADIUS = 16
 internal const val SEARCH_SNIPPET_EXTRA_RADIUS = 3
 internal const val SEARCH_EMIT_INTERVAL_MS = 120L
 internal const val SEARCH_NAV_BAR_TAG = 0x524d5331
-internal const val READ_ALOUD_MENU_BUTTON_TAG = 0x524d5334
-internal const val READ_ALOUD_MENU_BUTTON_SIZE_DP = 44
-internal const val READ_ALOUD_MENU_BUTTON_RIGHT_MARGIN_DP = 84
-internal const val READ_ALOUD_MENU_BUTTON_BOTTOM_MARGIN_DP = 166
-internal const val READ_ALOUD_SEGMENT_TARGET_CHARS = 160
-internal const val READ_ALOUD_SEGMENT_MAX_CHARS = 260
-internal const val READ_ALOUD_INITIAL_SEGMENTS = 24
-internal const val READ_ALOUD_SEGMENTS_PER_CHUNK = 48
-internal const val READ_ALOUD_CHUNK_MAX_CHARS = 18_000
-internal const val READ_ALOUD_BACKGROUND_APPEND_DELAY_MS = 8_000L
-internal const val READ_ALOUD_REMAINDER_CHUNK_DELAY_MS = 80L
-internal const val MAX_READ_ALOUD_SEGMENTS = 5000
-internal const val READ_ALOUD_PAGE_RESTART_DELAY_MS = 450L
-internal const val READ_ALOUD_RESTART_SUPPRESS_MS = 1_500L
-internal const val READ_ALOUD_FOLLOW_MIN_INTERVAL_MS = 650L
-internal const val READ_ALOUD_COVER_MAX_EDGE_PX = 512
-internal const val READ_ALOUD_PROGRESS_RESTORE_DELAY_MS = 420L
-internal const val READ_ALOUD_PROGRESS_SYNC_MIN_INTERVAL_MS = 1_500L
-internal const val READ_ALOUD_PROGRESS_MAX_AGE_MS = 7L * 24L * 60L * 60L * 1000L
 internal const val EPUB_PAGE_CONTENT = 0
 internal const val SEARCH_NAVIGATION_READER_BOTTOM_MARGIN_DP = 8
 internal const val SEARCH_NAVIGATION_MENU_BOTTOM_MARGIN_DP = 190
@@ -135,24 +115,9 @@ internal const val SEARCH_ORIGIN_KEY_CFI = "cfi"
 internal const val SEARCH_ORIGIN_KEY_CHAPTER_INDEX = "chapter_index"
 internal const val SEARCH_ORIGIN_KEY_TITLE = "title"
 internal const val SEARCH_ORIGIN_KEY_SUMMARY = "summary"
+internal const val SEARCH_ORIGIN_KEY_SCROLL_OFFSET = "scroll_offset_px"
 internal const val SEARCH_ORIGIN_RESTORE_DELAY_MS = 360L
 internal const val SEARCH_ORIGIN_MAX_AGE_MS = 24L * 60L * 60L * 1000L
-internal const val READ_ALOUD_PROGRESS_PREFS = "reamicro_read_aloud_progress"
-internal const val READ_ALOUD_PROGRESS_KEY_TIMESTAMP = "timestamp"
-internal const val READ_ALOUD_PROGRESS_KEY_SESSION = "session"
-internal const val READ_ALOUD_PROGRESS_KEY_BOOK = "book"
-internal const val READ_ALOUD_PROGRESS_KEY_BOOK_IDENTITY = "book_identity"
-internal const val READ_ALOUD_PROGRESS_KEY_EPUB_ROOT = "epub_root"
-internal const val READ_ALOUD_PROGRESS_KEY_BOOK_TITLE = "book_title"
-internal const val READ_ALOUD_PROGRESS_KEY_CFI = "cfi"
-internal const val READ_ALOUD_PROGRESS_KEY_END_CFI = "end_cfi"
-internal const val READ_ALOUD_PROGRESS_KEY_PARAGRAPH_INDEX = "paragraph_index"
-internal const val READ_ALOUD_PROGRESS_KEY_CHAPTER_INDEX = "chapter_index"
-internal const val READ_ALOUD_PROGRESS_KEY_TITLE = "title"
-internal const val READ_ALOUD_PROGRESS_KEY_SUMMARY = "summary"
-internal const val READ_ALOUD_PROGRESS_KEY_ELAPSED_MS = "elapsed_ms"
-internal const val READ_ALOUD_PROGRESS_KEY_RECORDED_ELAPSED_MS = "recorded_elapsed_ms"
-internal const val READ_ALOUD_PROGRESS_KEY_PLAYBACK_STARTED = "playback_started"
 internal const val MARK_KIND_HIGHLIGHT = 0
 internal const val MARK_STYLE_FILL = 0
 internal const val MARK_STYLE_LINE = 1
@@ -163,8 +128,6 @@ internal const val SEARCH_HIGHLIGHT_MARK_ID_BASE = -9_223_372_036_854_000_000L
 internal const val SEARCH_HIGHLIGHT_MARK_ID_RANGE = 100_000L
 internal const val SELECTION_HIGHLIGHT_MARK_ID_BASE = -9_223_372_036_853_800_000L
 internal const val SELECTION_HIGHLIGHT_MARK_ID_RANGE = 100_000L
-internal const val READ_ALOUD_HIGHLIGHT_MARK_ID_BASE = -9_223_372_036_853_700_000L
-internal const val READ_ALOUD_HIGHLIGHT_MARK_ID_RANGE = 100_000L
 internal val BLOCK_SEARCH_TAGS = setOf(
     "p", "div", "section", "article", "li", "blockquote", "pre",
     "h1", "h2", "h3", "h4", "h5", "h6",
@@ -172,29 +135,5 @@ internal val BLOCK_SEARCH_TAGS = setOf(
 internal val SKIPPED_SEARCH_TAGS = setOf("head", "script", "style", "title", "svg", "math")
 internal val SEARCH_VOID_TAGS = setOf(
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr",
-)
-internal val READ_ALOUD_CHUNK_SOFT_BREAK_CHARS = setOf(
-    '\u3002', '\uff01', '\uff1f', '\uff1b', '\uff0c', '\u3001', '\uff1a',
-    '.', '!', '?', ';', ',', ':',
-)
-internal val READ_ALOUD_CHUNK_TRAILING_CHARS = setOf(
-    '\u3002', '\uff01', '\uff1f', '\uff1b', '\uff0c', '\u3001', '\uff1a',
-    '.', '!', '?', ';', ',', ':',
-    '\u2019', '\u201d', '\u3011', '\uff09', '\u300b', '\u3009',
-    '\'', '"', ')', ']', '}', '>',
-)
-internal val READ_ALOUD_OPEN_WRAPPER_CHARS = setOf(
-    '\u2018', '\u201c', '\u3010', '\uff08', '(', '[', '{', '<', '\u300a', '\u3008', '\'', '"',
-)
-internal val READ_ALOUD_CLOSE_WRAPPER_CHARS = setOf(
-    '\u2019', '\u201d', '\u3011', '\uff09', ')', ']', '}', '>', '\u300b', '\u3009', '\'', '"',
-)
-internal val READ_ALOUD_WRAPPER_CHARS = charArrayOf(
-    '\u2018', '\u2019', '\u201c', '\u201d', '\u3010', '\u3011', '\uff08', '\uff09',
-    '(', ')', '[', ']', '{', '}', '<', '>', '\u300a', '\u300b', '\u3008', '\u3009', '\'', '"',
-)
-internal val READ_ALOUD_INNER_PUNCTUATION_CHARS = setOf(
-    '\u3002', '\uff01', '\uff1f', '\uff1b', '\uff0c', '\u3001', '\uff1a',
-    '.', '!', '?', ';', ',', ':',
 )
 internal val COVER_IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp")

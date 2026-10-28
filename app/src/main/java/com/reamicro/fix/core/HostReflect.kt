@@ -11,6 +11,18 @@ class HostReflect(
     private val methodCache = HashMap<String, Method>()
     private val fieldCache = HashMap<String, Field>()
     private val instanceMethodCache = HashMap<String, Method?>()
+    private val accessorCache = HashMap<Pair<Class<*>, String>, HostAccessor?>()
+
+    fun accessor(target: Any, getter: String): Any? {
+        val key = target.javaClass to getter
+        val bound = synchronized(accessorCache) {
+            if (!accessorCache.containsKey(key)) {
+                accessorCache[key] = HostAccessor.bind(target.javaClass, getter)
+            }
+            accessorCache[key]
+        }
+        return bound?.get(target)
+    }
 
     fun cls(className: String): Class<*> =
         synchronized(classCache) {
@@ -51,10 +63,7 @@ class HostReflect(
     }
 
     fun instanceMethod(target: Any, methodName: String, parameterCount: Int): Method? {
-        val resolvedName = HostSymbols.resolveMethodName(
-            HostSymbols.logicalClass(target.javaClass.name),
-            methodName,
-        )
+        val resolvedName = HostSymbols.resolveMethodName(target.javaClass, methodName)
         val cacheKey = "${target.javaClass.name}#$methodName/$parameterCount"
         synchronized(instanceMethodCache) {
             if (instanceMethodCache.containsKey(cacheKey)) return instanceMethodCache[cacheKey]
@@ -127,7 +136,9 @@ class HostReflect(
                     ReaderHighlight.JUSTIFY_TEXT_CLASS,
                     ReaderHighlight.JUSTIFY_TEXT_METHOD,
                 ) &&
-                    method.parameterTypes.size == ReaderHighlight.JUSTIFY_TEXT_PARAMETER_COUNT &&
+                    method.parameterTypes.size == (
+                        if (HostSymbols.abiProfileId == "2.3.3-b4") 7 else ReaderHighlight.JUSTIFY_TEXT_PARAMETER_COUNT
+                    ) &&
                     method.parameterTypes[0] == annotatedStringClass
             }
             .onEach { it.isAccessible = true }

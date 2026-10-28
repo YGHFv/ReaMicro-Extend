@@ -1,5 +1,8 @@
 package com.reamicro.fix.core
 
+import com.reamicro.fix.core.hostAbiMethod
+import com.reamicro.fix.core.hostAbiField
+
 import com.reamicro.fix.xposed.XposedHelpers
 import java.lang.reflect.Method
 
@@ -15,15 +18,16 @@ class B2NativeUi(private val loader: ClassLoader) {
     private fun static(role: String, name: String, vararg args: Any?): Any? {
         val key = "$role#$name/${args.size}"
         val method = methods.getOrPut(key) {
-            val actual = HostNativeUiAbi.method(HostSymbols.profileId, role, name)
-            type(role).declaredMethods.single { it.name == actual && it.parameterCount == args.size }
+            val actual = HostNativeUiAbi.method(HostSymbols.abiProfileId, role, name)
+            val (owner, name) = HostRawAbi.methodName(type(role), actual, args.size)
+            owner.declaredMethods.single { it.name == name && it.parameterCount == args.size }
                 .apply { isAccessible = true }
         }
         return method.invoke(null, *args)
     }
 
     private fun field(role: String, name: String): Any =
-        requireNotNull(type(role).getDeclaredField(name).apply { isAccessible = true }.get(null))
+        requireNotNull(type(role).hostAbiField(name).apply { isAccessible = true }.get(null))
 
     fun dp(value: Int): Float = (static("Unit", "g", value) as Number).toFloat()
     fun dp(value: Double): Float = (static("Unit", "e", value) as Number).toFloat()
@@ -46,7 +50,7 @@ class B2NativeUi(private val loader: ClassLoader) {
     fun center(): Any = field("Alignment", HostNativeUiAbi.alignment(HostSymbols.profileId, "center"))
     fun centerHorizontally(): Any = field(
         "Alignment",
-        if (HostSymbols.profileId == "2.3.3-b4") "o" else HostNativeUiAbi.alignment(HostSymbols.profileId, "center"),
+        if (HostSymbols.abiProfileId == "2.3.3-b4") "o" else HostNativeUiAbi.alignment(HostSymbols.abiProfileId, "center"),
     )
     fun centerVertically(): Any = field("Alignment", HostNativeUiAbi.alignment(HostSymbols.profileId, "centerVertically"))
     fun emptySlot(): Any = field("EmptySlot", "a")
@@ -84,7 +88,7 @@ class B2NativeUi(private val loader: ClassLoader) {
     }
 
     fun listColors(composer: Any): Any = requireNotNull(static("ListItemColors", "a",
-        if (HostSymbols.profileId == "2.3.3-b4") loader.hostClass("androidx.compose.ui.graphics.Color")
+        if (HostSymbols.abiProfileId == "2.3.3-b4") loader.hostClass("androidx.compose.ui.graphics.Color")
             .hostField("Transparent").getLong(null) else 0L, composer))
 
     private val settingsSwitchClass by lazy { type("SettingsSwitch") }
@@ -94,10 +98,10 @@ class B2NativeUi(private val loader: ClassLoader) {
         ).apply { isAccessible = true }
     }
     private val settingsSwitchBranch by lazy {
-        settingsSwitchClass.getDeclaredField("a").apply { isAccessible = true }
+        settingsSwitchClass.hostAbiField("a").apply { isAccessible = true }
     }
     private val settingsSwitchContent by lazy {
-        settingsSwitchClass.getDeclaredMethod("C", Any::class.java, Any::class.java)
+        settingsSwitchClass.hostAbiMethod("C", Any::class.java, Any::class.java)
             .apply { isAccessible = true }
     }
 
@@ -121,21 +125,21 @@ class B2NativeUi(private val loader: ClassLoader) {
     }
 
     fun lazyRow(modifier: Any, content: Any, composer: Any) {
-        check(HostSymbols.profileId == "2.3.3-b4") { "Unverified native lazy row host" }
+        check(HostSymbols.abiProfileId == "2.3.3-b4") { "Unverified native lazy row host" }
         static("LazyDsl", "b", modifier, null, null, null, null, null, false, null, content, composer, 0, 254)
     }
 
     fun weight(scope: Any, base: Any, value: Float = 1f): Any {
-        check(HostSymbols.profileId == "2.3.3-b4") { "Unverified native row weight host" }
+        check(HostSymbols.abiProfileId == "2.3.3-b4") { "Unverified native row weight host" }
         return requireNotNull(type("RowScopeInstance")
-            .getDeclaredMethod("b", loader.hostClass("androidx.compose.ui.Modifier"), Float::class.javaPrimitiveType)
+            .hostAbiMethod("b", loader.hostClass("androidx.compose.ui.Modifier"), Float::class.javaPrimitiveType)
             .invoke(scope, base, value))
     }
 
     fun spacer(modifier: Any, composer: Any) {
-        check(HostSymbols.profileId == "2.3.3-b4") { "Unverified native spacer host" }
+        check(HostSymbols.abiProfileId == "2.3.3-b4") { "Unverified native spacer host" }
         loader.hostClass("ReaMicroHost.Spacer")
-            .getDeclaredMethod("b", loader.hostClass("androidx.compose.runtime.Composer"),
+            .hostAbiMethod("b", loader.hostClass("androidx.compose.runtime.Composer"),
                 loader.hostClass("androidx.compose.ui.Modifier"))
             .invoke(null, composer, modifier)
     }
@@ -148,8 +152,9 @@ class B2NativeUi(private val loader: ClassLoader) {
     }
 
     fun addItem(scope: Any, key: Any?, content: Any) {
-        val name = if (HostSymbols.profileId == "2.3.3-b4") "n" else "m"
-        val method = type("LazyListScope").declaredMethods.single { it.name == name && it.parameterCount == 3 }
+        val name = if (HostSymbols.abiProfileId == "2.3.3-b4") "n" else "m"
+        val (owner, actual) = HostRawAbi.methodName(type("LazyListScope"), name, 3)
+        val method = owner.declaredMethods.single { it.name == actual && it.parameterCount == 3 }
         method.invoke(scope, key, null, content)
     }
 
@@ -179,11 +184,11 @@ class B2NativeUi(private val loader: ClassLoader) {
     fun column(modifier: Any, arrangement: Any, alignment: Any, content: Any, composer: Any) {
         val policy = requireNotNull(static("ColumnPolicy", "a", arrangement, alignment, composer, 0))
         XposedHelpers.callMethod(composer, "b0", 0x524d7031)
-        val hash = java.lang.Long.hashCode(composer.javaClass.getDeclaredField("T").getLong(composer))
+        val hash = java.lang.Long.hashCode(composer.javaClass.hostAbiField("T").getLong(composer))
         val locals = XposedHelpers.callMethod(composer, "l")
         val materialized = requireNotNull(static("Materialize", "h", composer, modifier))
         XposedHelpers.callMethod(composer, "f0")
-        if (composer.javaClass.getDeclaredField("S").getBoolean(composer)) {
+        if (composer.javaClass.hostAbiField("S").getBoolean(composer)) {
             XposedHelpers.callMethod(composer, "k", field("LayoutNode", "c0"))
         } else {
             XposedHelpers.callMethod(composer, "o0")
@@ -199,18 +204,18 @@ class B2NativeUi(private val loader: ClassLoader) {
     }
 
     fun row(modifier: Any, content: Any, composer: Any, arrangement: Any? = null, alignment: Any? = null) {
-        check(HostSymbols.profileId == "2.3.3-b4") { "Unverified native row host" }
+        check(HostSymbols.abiProfileId == "2.3.3-b4") { "Unverified native row host" }
         val policy = loader.hostClass("androidx.compose.foundation.layout.RowKt")
             .hostMethod("rowMeasurePolicy", type("ArrangementHorizontal"), type("AlignmentVertical"),
                 loader.hostClass("androidx.compose.runtime.Composer"), Int::class.javaPrimitiveType)
             .invoke(null, arrangement ?: field("Arrangement", "a"), alignment ?: centerVertically(), composer, 48)
         // 复用宿主 Row 的节点协议；两列使用真实 weight modifier，不借用置顶/想法回调。
         XposedHelpers.callMethod(composer, "b0", 0x524d7032)
-        val hash = java.lang.Long.hashCode(composer.javaClass.getDeclaredField("T").getLong(composer))
+        val hash = java.lang.Long.hashCode(composer.javaClass.hostAbiField("T").getLong(composer))
         val locals = XposedHelpers.callMethod(composer, "l")
         val materialized = requireNotNull(static("Materialize", "h", composer, modifier))
         XposedHelpers.callMethod(composer, "f0")
-        if (composer.javaClass.getDeclaredField("S").getBoolean(composer)) {
+        if (composer.javaClass.hostAbiField("S").getBoolean(composer)) {
             XposedHelpers.callMethod(composer, "k", field("LayoutNode", "c0"))
         } else {
             XposedHelpers.callMethod(composer, "o0")
@@ -226,7 +231,7 @@ class B2NativeUi(private val loader: ClassLoader) {
     }
 
     private fun invokeLayoutContent(content: Any, scope: Any, composer: Any) {
-        if (HostSymbols.profileId == "2.3.3-b4") {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
             // 原生 ComposableLambda 同时实现多个 Function 接口，invoke 必须按 Function3 的 r 分派。
             loader.hostClass("kotlin.jvm.functions.Function3").hostMethod(
                 "invoke", Any::class.java, Any::class.java, Any::class.java,

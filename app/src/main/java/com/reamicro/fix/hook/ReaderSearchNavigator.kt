@@ -36,10 +36,15 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
         reader.searchScrollBridge?.clearCache()
     }
     fun submit(result: FullTextSearchResult, index: Int): Boolean {
-        val vm = reader.currentViewModelRef?.get() ?: return false
-        val epub = reader.currentEpubStrong ?: reader.currentEpubRef?.get() ?: return false
-        val book = reader.searchNavigationState?.bookKey ?: return false
-        val mode = reader.currentSearchPagerMode ?: return false
+        val vm = reader.currentViewModelRef?.get()
+            ?: return false.also { XposedBridge.log("ReaMicro search jump rejected: viewModel") }
+        val epub = reader.currentEpubStrong ?: reader.currentEpubRef?.get()
+            ?: return false.also { XposedBridge.log("ReaMicro search jump rejected: epub") }
+        val book = reader.searchNavigationState?.bookKey
+            ?: return false.also { XposedBridge.log("ReaMicro search jump rejected: book") }
+        val mode = if (reader.currentScrollElement != null) 3 else reader.currentSearchPagerMode
+            ?: return false.also { XposedBridge.log("ReaMicro search jump rejected: pagerMode") }
+        reader.currentSearchPagerMode = mode
         deadline?.let(main::removeCallbacks)
         requestedIndex = index
         cursorIndex = index
@@ -112,7 +117,7 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
         if (visible(r.vm, resolved)) return@onMain true
         if (resolved.flipStyle == 3 && reader.searchScrollBridge?.command(r.vm, resolved) != null) return@onMain true
         val mark = reader.createSearchResultHighlightMark(resolved.result, r.index)
-        val anchor = resolved.scrollElementId ?: resolved.start
+        val anchor = if (resolved.flipStyle == 3) resolved.start else resolved.scrollElementId ?: resolved.start
         check(reader.jumpToSearchCfi(r.result.intentReceiver, r.vm, anchor.toString(), mark,
             r.result.chapterIndex.coerceAtLeast(0), r.result.chapterTitle, r.result.snippet)) { "宿主未接受搜索跳转" }
         XposedBridge.log("ReaMicro search navigation dispatched seq=${work.sequence} index=${r.index}")
@@ -139,7 +144,10 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
     private fun fail(work: Work, error: Throwable) {
         val r = work.value
         if (!valid(r) || !work.ticket.isCurrent()) return
-        XposedBridge.log("ReaMicro search navigation failed seq=${work.sequence} type=${(error.cause ?: error).javaClass.simpleName}")
+        XposedBridge.logError(
+            "ReaMicro search navigation failed seq=${work.sequence} index=${r.index}",
+            error.cause ?: error,
+        )
         main.post {
             if (!valid(r) || !work.ticket.isCurrent()) return@post
             requestedIndex = null
@@ -166,8 +174,12 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
             reader.activityProvider()?.let { reader.ensureSearchNavigationBar(it) }
         }
     }
-    private fun visible(vm: Any, target: ResolvedSearchTarget): Boolean = if (target.flipStyle == 3)
-        reader.searchScrollBridge?.visible(vm, target) == true else contains(reader.searchPageBridge?.page(vm), target.start)
+    private fun visible(vm: Any, target: ResolvedSearchTarget): Boolean = if (target.flipStyle == 3) {
+        reader.searchScrollBridge?.visible(vm, target) == true ||
+            (target.scrollElementId != null && reader.currentScrollElement?.let {
+                reader.callNoArg(it, "getId")?.toString() == target.scrollElementId.toString()
+            } == true)
+    } else contains(reader.searchPageBridge?.page(vm), target.start)
     private fun contains(page: Any?, cfi: Any): Boolean {
         val range = page?.let { reader.callNoArg(it, "getRange") } ?: return false
         return XposedHelpers.callMethod(range, "contains", cfi) == true
@@ -177,7 +189,8 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
         val started = SystemClock.elapsedRealtime()
         var absoluteSent = false
         var scrollSent = false
-        while (valid(r) && work.ticket.isCurrent() && SystemClock.elapsedRealtime() - started < 6_000) {
+        var diagnosticLogged = false
+        while (valid(r) && work.ticket.isCurrent() && SystemClock.elapsedRealtime() - started < 8_000) {
             if (target.flipStyle == 3 && !scrollSent && work.ticket.isCurrent()) {
                 val command = onMain { if (valid(r) && work.ticket.isCurrent()) reader.searchScrollBridge?.command(r.vm, target) else null }
                 if (command != null) {
@@ -188,8 +201,19 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
             val state = onMain {
                 if (!valid(r) || !work.ticket.isCurrent()) return@onMain 2
                 if (visible(r.vm, target)) return@onMain 1
-                val seed = XposedHelpers.getObjectField(r.vm, "jumpSeed")?.let { reader.callNoArg(it, "getValue") }?.toString()
-                if (!absoluteSent && work.ticket.isCurrent() && seed == target.start.toString() &&
+                val seed = runCatching {
+                    XposedHelpers.getObjectField(r.vm, "jumpSeed")?.let { reader.callNoArg(it, "getValue") }?.toString()
+                }.getOrNull()
+                if (!diagnosticLogged) {
+                    diagnosticLogged = true
+                    val page = reader.searchPageBridge?.page(r.vm)
+                    XposedBridge.log(
+                        "ReaMicro search awaiting target=$target.start pageStart=${page?.let { reader.callNoArg(it, "getStart") }}" +
+                            " pageEnd=${page?.let { reader.callNoArg(it, "getEnd") }} seed=$seed",
+                    )
+                }
+                if (!absoluteSent && work.ticket.isCurrent() &&
+                    (seed == target.start.toString() || SystemClock.elapsedRealtime() - started >= 500) &&
                     target.flipStyle != null && target.flipStyle != 3 && SystemClock.elapsedRealtime() - started >= 200) {
                     val pages = XposedHelpers.getObjectField(r.vm, "virtualPages") as? Map<*, *>
                     val key = pages?.entries?.firstOrNull { contains(it.value, target.start) }?.key as? Number

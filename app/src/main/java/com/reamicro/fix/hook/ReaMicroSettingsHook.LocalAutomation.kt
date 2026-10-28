@@ -1,5 +1,8 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostNameMatches
+
+
 import android.app.Dialog
 import android.text.InputType
 import android.widget.TextView
@@ -311,7 +314,7 @@ private fun ReaMicroSettingsHook.renderLocalAutomationTaskSwitch(
     val targetChecked = task?.enabled == true
     val state = rememberBooleanState(composer, targetChecked)
     fun updateChecked(value: Boolean) {
-        state.javaClass.methods.firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+        state.javaClass.methods.firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
             ?.invoke(state, value)
     }
     val rememberedChecked = state.method0("getValue") as? Boolean ?: targetChecked
@@ -332,19 +335,7 @@ private fun ReaMicroSettingsHook.renderLocalAutomationTaskSwitch(
         updateChecked(applied)
         targetUnit()
     }
-    method(SWITCH_KT_CLASS, SWITCH_METHOD, 10).invoke(
-        null,
-        checked,
-        onCheckedChange,
-        switchModifier(),
-        null,
-        false,
-        switchColors(composer),
-        null,
-        composer,
-        0,
-        88,
-    )
+    renderAbiSwitch(checked, onCheckedChange, composer)
 }
 
 private fun ReaMicroSettingsHook.setLocalAutomationTaskEnabled(
@@ -675,6 +666,6 @@ private fun ReaMicroSettingsHook.bumpLocalAutomationVersion() {
     val state = localAutomationVersionState()
     val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
     state.javaClass.methods
-        .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
         ?.invoke(state, value + 1)
 }

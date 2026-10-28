@@ -59,7 +59,7 @@ class ReaderFontCompletionHook(
                     }
                 }
             })
-            if (HostSymbols.profileId == "2.3.3-b4") {
+            if (HostSymbols.abiProfileId == "2.3.3-b4") {
                 hookB4BuiltInFontRow()
             } else XposedBridge.hookAllMethods(fontProviderClass, "getBuildInFonts", object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {

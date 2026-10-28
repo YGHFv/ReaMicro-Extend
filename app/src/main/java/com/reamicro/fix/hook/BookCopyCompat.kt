@@ -2,6 +2,9 @@ package com.reamicro.fix.hook
 
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
+import com.reamicro.fix.core.HostExactRecordCopy
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.B2BookAssociation
 
 internal data class BookCopyPatch(
     val title: String? = null,
@@ -20,6 +23,23 @@ internal data class BookCopyPatch(
 
 internal object BookCopyCompat {
     fun copy(book: Any, patch: BookCopyPatch): Any {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
+            val changes = buildMap<String, Any?> {
+                patch.title?.let { put("title", it) }
+                patch.subtitle?.let { put("subtitle", it) }
+                patch.author?.let { put("author", it) }
+                patch.cover?.takeIf(String::isNotBlank)?.let { put("cover", it) }
+                patch.size?.takeIf { it > 0 }?.let { put("size", it) }
+                patch.updated?.takeIf { it > 0 }?.let { put("updated", it) }
+                patch.pinnedAt?.let { put("pinnedAt", it) }
+                patch.cloudId?.let { put("cloudId", it) }
+                patch.backupType?.let { put("backupType", it) }
+                patch.backupId?.let { put("backupId", it) }
+                patch.backupCode?.let { put("backupCode", it) }
+                patch.publisher?.let { put("publisher", it) }
+            }
+            return HostExactRecordCopy(book.javaClass, B2BookAssociation.properties).copy(book, changes)
+        }
         val copyMethod = findCopyMethod(book)
         val parameterTypes = copyMethod.parameterTypes
         val args = Array<Any?>(parameterTypes.size) { index ->
@@ -71,6 +91,13 @@ internal object BookCopyCompat {
     }
 
     internal fun requireSameStorageIdentity(before: Any, after: Any) {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
+            val schema = HostExactRecordCopy(before.javaClass, B2BookAssociation.properties)
+            val left = schema.snapshot(before)
+            val right = schema.snapshot(after)
+            check(listOf("id", "uuid", "uid").all { left[it] == right[it] })
+            return
+        }
         for (number in 1..3) {
             check(componentMethod(before, number).invoke(before) == componentMethod(after, number).invoke(after)) {
                 "拒绝改变书籍身份字段 component$number，已阻止书架回写"

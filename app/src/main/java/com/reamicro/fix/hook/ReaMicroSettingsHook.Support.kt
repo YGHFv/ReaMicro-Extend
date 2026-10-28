@@ -1465,7 +1465,7 @@ private fun paddingValuesSideDp(paddings: Any, prefix: String): Double? =
     }.getOrNull()
 
 internal fun ReaMicroSettingsHook.pageModifier(innerPaddings: Any, extendBottom: Boolean = false): Any {
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         val base = b2Ui.fillSize(modifierInstance())
         val padded = if (extendBottom) {
             b2Ui.padding(base, 0f, (paddingValuesSideDp(innerPaddings, "calculateTopPadding") ?: 0.0).toFloat(), 0f, 0f)

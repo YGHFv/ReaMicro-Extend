@@ -1,5 +1,8 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostNameMatches
+
+
 import android.app.Dialog
 import android.graphics.Typeface
 import android.text.Editable
@@ -25,7 +28,7 @@ internal fun ReaMicroSettingsHook.renderAiApiSwitch(config: AiApiConfig, compose
     val targetChecked = latest.enabled
     val state = rememberBooleanState(composer, targetChecked)
     fun updateChecked(value: Boolean) {
-        state.javaClass.methods.firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+        state.javaClass.methods.firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
             ?.invoke(state, value)
     }
     val rememberedChecked = state.method0("getValue") as? Boolean ?: targetChecked
@@ -45,19 +48,7 @@ internal fun ReaMicroSettingsHook.renderAiApiSwitch(config: AiApiConfig, compose
         }
         targetUnit()
     }
-    method(SWITCH_KT_CLASS, SWITCH_METHOD, 10).invoke(
-        null,
-        checked,
-        onCheckedChange,
-        switchModifier(),
-        null,
-        false,
-        switchColors(composer),
-        null,
-        composer,
-        0,
-        88,
-    )
+    renderAbiSwitch(checked, onCheckedChange, composer)
 }
 
 internal fun ReaMicroSettingsHook.openAiApiConfigDialog() {
@@ -314,6 +305,6 @@ internal fun ReaMicroSettingsHook.bumpAiApiVersion() {
     val state = aiApiVersionState()
     val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
     state.javaClass.methods
-        .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
         ?.invoke(state, value + 1)
 }

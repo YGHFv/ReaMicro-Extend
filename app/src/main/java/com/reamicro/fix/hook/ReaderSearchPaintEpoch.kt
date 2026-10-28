@@ -1,12 +1,23 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.B2NativeUi
+import com.reamicro.fix.core.HostNativeUiAbi
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostStaticMethod
+import com.reamicro.fix.xposed.XposedBridge
+
 internal class ReaderSearchPaintEpoch(loader: ClassLoader) {
-    private val facade = loader.loadClass("androidx.compose.runtime.SnapshotStateKt")
-    private val policyType = loader.loadClass("androidx.compose.runtime.SnapshotMutationPolicy")
-    private val state = facade.getMethod("mutableStateOf", Any::class.java, policyType).invoke(null, 0L,
-        facade.getMethod("structuralEqualityPolicy").invoke(null))
-    private val get = loader.loadClass("androidx.compose.runtime.State").getMethod("getValue")
-    private val set = loader.loadClass("androidx.compose.runtime.MutableState").getMethod("setValue", Any::class.java)
+    // B4 将状态工厂合并到原生门面，不能再从已删除的 Compose 文件类查找。
+    private val state = if (HostNativeUiAbi.supports(HostSymbols.profileId)) {
+        B2NativeUi(loader).mutableState(0L)
+    } else loader.hostStaticMethod(
+        "androidx.compose.runtime.SnapshotStateKt__SnapshotStateKt",
+        "mutableStateOf", Any::class.java,
+    ).invoke(null, 0L)
+    private val get = loader.hostClass("androidx.compose.runtime.State").hostMethod("getValue")
+    private val set = loader.hostClass("androidx.compose.runtime.MutableState").hostMethod("setValue", Any::class.java)
     private var epoch = 0L
     private data class Seen(val owner: java.lang.ref.WeakReference<Any>, var epoch: Long)
     private val seen = arrayListOf<Seen>()
@@ -30,7 +41,11 @@ internal fun ReaderHook.observeSearchPaint(owner: Any): Boolean {
     return runCatching {
         val epoch = searchPaintEpoch ?: ReaderSearchPaintEpoch(classLoader).also { searchPaintEpoch = it }
         epoch.observe(owner)
-    }.getOrElse { searchPaintUnavailable = true; com.reamicro.fix.xposed.XposedBridge.log("ReaMicro search paint observer unavailable: ${it.javaClass.simpleName}"); false }
+    }.getOrElse {
+        searchPaintUnavailable = true
+        XposedBridge.logError("ReaMicro search paint observer unavailable", it)
+        false
+    }
 }
 internal fun ReaderHook.invalidateSearchPaint(): Boolean {
     if (searchPaintUnavailable) return false
@@ -38,5 +53,9 @@ internal fun ReaderHook.invalidateSearchPaint(): Boolean {
         val epoch = searchPaintEpoch ?: ReaderSearchPaintEpoch(classLoader).also { searchPaintEpoch = it }
         epoch.invalidate()
         true
-    }.getOrElse { searchPaintUnavailable = true; com.reamicro.fix.xposed.XposedBridge.log("ReaMicro search paint invalidation unavailable: ${it.javaClass.simpleName}"); false }
+    }.getOrElse {
+        searchPaintUnavailable = true
+        XposedBridge.logError("ReaMicro search paint invalidation unavailable", it)
+        false
+    }
 }

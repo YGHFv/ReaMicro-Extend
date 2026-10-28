@@ -1,4 +1,8 @@
 package com.reamicro.fix.hook
+import com.reamicro.fix.core.hostAbiMethodByArity
+
+import com.reamicro.fix.core.hostAbiMethod
+import com.reamicro.fix.core.hostAbiField
 
 import com.reamicro.fix.core.HostNativeUiAbi
 import com.reamicro.fix.core.HostHomeSearchList
@@ -14,13 +18,13 @@ internal class B4HomeSearchUiBridge(private val drive: WebDavDriveHook) {
     private val title = ThreadLocal<String?>()
 
     fun install() {
-        check(HostSymbols.profileId == "2.3.3-b4")
+        check(HostSymbols.abiProfileId == "2.3.3-b4")
         val callbackCopy = HostHomeSearchList(drive.cls("ReaMicroHost.HomeSearchList"))
         val function = drive.cls(FUNCTION1_CLASS)
-        val invoke = function.getDeclaredMethod("invoke", Any::class.java)
+        val invoke = function.hostAbiMethod("invoke", Any::class.java)
         val name = HostNativeUiAbi.method(HostSymbols.profileId, "LazyDsl", "a")
-        val lazyColumn = drive.cls("ReaMicroHost.LazyDsl").declaredMethods.single {
-            it.name == name && it.parameterCount == 12 && it.parameterTypes[8] == function
+        val lazyColumn = drive.cls("ReaMicroHost.LazyDsl").hostAbiMethodByArity(name, 12).also {
+            check(it.parameterTypes[8] == function)
         }
         XposedBridge.hookMethod(lazyColumn, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
@@ -55,9 +59,7 @@ internal class B4HomeSearchUiBridge(private val drive: WebDavDriveHook) {
 
     private fun installFooterInjection() {
         val name = HostNativeUiAbi.method(HostSymbols.profileId, "HomeSearchFooter", "a")
-        val footer = drive.cls("ReaMicroHost.HomeSearchFooter").declaredMethods.single {
-            it.name == name && it.parameterCount == 2
-        }.apply { isAccessible = true }
+        val footer = drive.cls("ReaMicroHost.HomeSearchFooter").hostAbiMethodByArity(name, 2).apply { isAccessible = true }
         XposedBridge.hookMethod(footer, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 val context = drive.homeWebDavSearchRender.get() ?: return

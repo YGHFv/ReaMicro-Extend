@@ -25,7 +25,7 @@ internal object AppTopBarArguments {
         var insetsUsed = false
 
         val actionsIndex = if (actions != null) {
-            (0 until composerIndex).lastOrNull { parameterTypes[it].name == function3ClassName } ?: -1
+            (0 until composerIndex).lastOrNull { typeMatches(parameterTypes[it], function3ClassName) } ?: -1
         } else {
             -1
         }
@@ -33,15 +33,15 @@ internal object AppTopBarArguments {
             val type = parameterTypes[i]
             when {
                 i == 0 && type == String::class.java -> args[i] = title
-                !backUsed && onBack != null && type.name == function0ClassName -> {
+                !backUsed && onBack != null && typeMatches(type, function0ClassName) -> {
                     args[i] = onBack
                     backUsed = true
                 }
-                !navUsed && navIcon != null && type.name == imageVectorClassName -> {
+                !navUsed && navIcon != null && typeMatches(type, imageVectorClassName) -> {
                     args[i] = navIcon
                     navUsed = true
                 }
-                !insetsUsed && windowInsets != null && type.name == windowInsetsClassName -> {
+                !insetsUsed && windowInsets != null && typeMatches(type, windowInsetsClassName) -> {
                     args[i] = windowInsets
                     insetsUsed = true
                 }

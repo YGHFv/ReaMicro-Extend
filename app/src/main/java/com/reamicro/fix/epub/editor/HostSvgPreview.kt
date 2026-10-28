@@ -28,7 +28,7 @@ internal fun hostSvgPreview(loader: ClassLoader, file: File, maxEdge: Int): Bitm
     require(urls.all { it.groupValues[1].trim().trim('"', '\'').trim().startsWith("#") }) {
         "SVG 安全预览不支持外部资源引用"
     }
-    val bridge = if (HostSymbols.profileId == "2.3.3-b4") B4HostSvgPreview(loader) else null
+    val bridge = if (HostSymbols.abiProfileId == "2.3.3-b4") B4HostSvgPreview(loader) else null
     val document = bridge?.parse(text)
     val type = if (bridge == null) loader.hostClass("com.caverock.androidsvg.SVG") else null
     val svg = document?.native ?: type!!.getMethod("getFromString", String::class.java).invoke(null, text)

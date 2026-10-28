@@ -1,5 +1,8 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostNameMatches
+
+
 import android.app.Activity
 import android.app.Dialog
 import android.content.Context
@@ -562,7 +565,7 @@ internal fun ReaMicroSettingsHook.bumpFontLibraryVersion() {
     val state = fontLibraryVersionState()
     val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
     state.javaClass.methods
-        .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
         ?.invoke(state, value + 1)
     synchronized(fontFilesCacheLock) {
         cachedFontFilesVersion = Int.MIN_VALUE
@@ -582,14 +585,14 @@ internal fun ReaMicroSettingsHook.pendingDeleteFontSelection(): String =
 internal fun ReaMicroSettingsHook.setPendingDeleteFontSelection(selection: String) {
     val state = pendingDeleteFontState()
     state.javaClass.methods
-        .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
         ?.invoke(state, selection)
 }
 
 internal fun ReaMicroSettingsHook.clearPendingDeleteFontSelection() {
     val state = pendingDeleteFontUiState ?: return
     state.javaClass.methods
-        .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
         ?.invoke(state, "")
 }
 
@@ -607,20 +610,7 @@ internal fun ReaMicroSettingsHook.resolvePreviewFontFamily(selection: String): A
     val file = File(selection)
     if (!file.isFile || !isFontFileName(file.name)) return null
     return runCatching {
-        val provider = staticObject(FONT_PROVIDER_CLASS, "INSTANCE")
-        val normal = fontWeight("getNormal")
-        val bold = fontWeight("getBold")
-        val fromPath = method(FONT_PROVIDER_CLASS, "fromPath", 2)
-        val fonts = listOfNotNull(
-            fromPath.invoke(provider, file.absolutePath, normal),
-            fromPath.invoke(provider, file.absolutePath, bold),
-        )
-        if (fonts.isEmpty()) return null
-        val family = cls(FONT_FAMILY_KT_CLASS).declaredMethods.first {
-            it.name == "FontFamily" &&
-                it.parameterTypes.size == 1 &&
-                List::class.java.isAssignableFrom(it.parameterTypes[0])
-        }.invoke(null, fonts)
+        val family = com.reamicro.fix.core.HostFontFamilies.fromFile(classLoader, file) ?: return null
         synchronized(previewFontFamilyCache) {
             previewFontFamilyCache[selection] = family
         }
@@ -632,19 +622,13 @@ internal fun ReaMicroSettingsHook.resolveBuiltinFontFamily(selection: String): A
     runCatching {
         when (selection) {
             FAMILY_SYSTEM -> resolveDefaultFontFamily()
-            FAMILY_SOURCE_HAN_SERIF -> staticObject(FONT_PROVIDER_CLASS, "INSTANCE").method0("builtInSong")
+            FAMILY_SOURCE_HAN_SERIF -> com.reamicro.fix.core.HostFontFamilies.song(classLoader)
             else -> null
         }
     }.onFailure { logResolvePreviewFontFailure(selection, it) }.getOrNull()
 
-internal fun ReaMicroSettingsHook.resolveDefaultFontFamily(): Any? {
-    fieldObjectOrNull(FONT_FAMILY_CLASS, "Default")?.let { return it }
-    for (fieldName in listOf("Companion", "INSTANCE")) {
-        val companion = fieldObjectOrNull(FONT_FAMILY_CLASS, fieldName) ?: continue
-        callMethod(companion, "getDefault")?.let { return it }
-    }
-    return staticMethod(FONT_FAMILY_CLASS, "getDefault")?.invoke(null)
-}
+internal fun ReaMicroSettingsHook.resolveDefaultFontFamily(): Any? =
+    com.reamicro.fix.core.HostFontFamilies.system(classLoader)
 
 internal fun ReaMicroSettingsHook.fontWeight(methodName: String): Any {
     val clazz = cls(FONT_WEIGHT_CLASS)
@@ -667,7 +651,7 @@ internal fun ReaMicroSettingsHook.companionFontWeight(clazz: Class<*>, methodNam
             clazz.getField(fieldName).apply { isAccessible = true }.get(null)
         }.getOrNull() ?: continue
         val method = companion.javaClass.methods.firstOrNull {
-            it.name == methodName && it.parameterTypes.isEmpty()
+            it.hostNameMatches(methodName) && it.parameterTypes.isEmpty()
         } ?: continue
         return method.invoke(companion)
     }

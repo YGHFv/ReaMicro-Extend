@@ -128,7 +128,7 @@ internal fun ReaderHook.postRemoveTaggedViews(activity: Activity?, tagValue: Int
 internal fun ReaderHook.isReaderBottomBarDarkLightToggleClick(onClick: Any): Boolean =
     runCatching {
         val cls = onClick.javaClass
-        if (HostSymbols.profileId == "2.3.3-b4") {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
             // B4 原生深浅色按钮改为 cv2 的 byte=2 分支，不能按所有同形状态回调猜测。
             val expected = classLoader.hostClass("ReaMicroHost.ReaderMenuThemeClick")
             val session = expected.takeIf { cls == it }?.getDeclaredField("e")?.get(onClick)
@@ -418,7 +418,7 @@ internal fun ReaderHook.createNativeEditAction(icon: Any): Any? =
 
 internal fun ReaderHook.editImageVector(): Any? =
     runCatching {
-        if (HostSymbols.profileId == "2.3.3-b4") {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
             // B4 的 Outlined 接收者已被 R8 删除，图标保留在已核实的无参静态方法中。
             val method = classLoader.hostStaticMethod(EDIT_ICON_CLASS, "getEdit")
             check(typeMatches(method.returnType, HostClasses.Compose.IMAGE_VECTOR))

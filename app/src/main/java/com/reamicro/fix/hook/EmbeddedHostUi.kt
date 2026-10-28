@@ -61,7 +61,7 @@ internal object EmbeddedHostUi {
     fun captureTypography(loader: ClassLoader, composer: Any?) {
         if(composer==null)return
         runCatching {
-            if (HostSymbols.profileId == "2.3.3-b4") {
+            if (HostSymbols.abiProfileId == "2.3.3-b4") {
                 val metrics = HostTypographyMetrics(loader, composer)
                 if (metrics.typography === lastTypography && metrics.densityKey == lastDensity) return
                 val body = metrics.style("BodyLarge")

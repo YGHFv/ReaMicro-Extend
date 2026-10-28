@@ -87,7 +87,7 @@ internal fun WebDavDriveHook.renderOnlineCompletionCloudBookSearchRow(book: Any,
     }
     runCatching {
         val baseModifier = fillMaxWidthModifier()
-        val rowModifier = if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        val rowModifier = if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
             // AndroidView 内部的 Android 点击在 B4 Compose 树中会被拦截，
             // 在 Compose 层补点击语义，同时继续渲染模块自定义卡片。
             val click = functionProxy("OnlineCompletionSearchRowClick", FUNCTION0_CLASS) {

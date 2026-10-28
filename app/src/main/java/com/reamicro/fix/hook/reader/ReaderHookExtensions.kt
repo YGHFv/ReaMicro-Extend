@@ -1,7 +1,5 @@
 package com.reamicro.fix.hook.reader
 
-import android.content.Intent
-import com.reamicro.fix.tts.ReadAloudIntents
 import com.reamicro.fix.online.search.decodeOnlineHtmlEntities
 import java.io.File
 import java.util.Locale
@@ -13,31 +11,6 @@ internal fun List<String>.indexOfFirstIndexed(predicate: (Int, String) -> Boolea
     }
     return -1
 }
-
-internal fun ReadAloudTextPart.mergeWith(next: ReadAloudTextPart): ReadAloudTextPart =
-    ReadAloudTextPart(
-        text = listOf(text, next.text).joinToString("").trim(),
-        highlightText = listOf(highlightText, next.highlightText).joinToString("").trim(),
-        startOffset = minOf(startOffset, next.startOffset),
-        endOffset = maxOf(endOffset, next.endOffset),
-    )
-
-internal fun Char.isReadAloudWhitespace(): Boolean =
-    this == ' ' || this == '\t' || this == '\u000B' || this == '\u000C' || this == '\n' || this == '\r'
-
-internal fun Intent.putReadAloudChunkExtras(chunk: List<ReadAloudSegment>): Intent =
-    putStringArrayListExtra(ReadAloudIntents.EXTRA_TEXTS, ArrayList(chunk.map { it.text }))
-        .putStringArrayListExtra(ReadAloudIntents.EXTRA_HIGHLIGHT_TEXTS, ArrayList(chunk.map { it.highlightText }))
-        .putStringArrayListExtra(ReadAloudIntents.EXTRA_TITLES, ArrayList(chunk.map { it.chapterTitle }))
-        .putIntegerArrayListExtra(ReadAloudIntents.EXTRA_CHAPTER_INDICES, ArrayList(chunk.map { it.chapterIndex }))
-        .putStringArrayListExtra(ReadAloudIntents.EXTRA_START_CFIS, ArrayList(chunk.map { it.startCfi }))
-        .putStringArrayListExtra(ReadAloudIntents.EXTRA_END_CFIS, ArrayList(chunk.map { it.endCfi }))
-
-internal fun Intent.setReadAloudService(): Intent =
-    setClassName(ReadAloudIntents.MODULE_PACKAGE_NAME, ReadAloudIntents.SERVICE_CLASS_NAME)
-
-internal fun Intent.setReadAloudCommandActivity(): Intent =
-    setClassName(ReadAloudIntents.MODULE_PACKAGE_NAME, ReadAloudIntents.COMMAND_ACTIVITY_CLASS_NAME)
 
 internal fun Map<String, List<String>>.titlePathForHref(href: String): List<String> {
     if (href.isBlank()) return emptyList()

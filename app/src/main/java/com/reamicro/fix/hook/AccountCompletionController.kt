@@ -1,5 +1,12 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+
+import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostClass
+
+
 import android.app.Activity
 import android.content.ContentValues
 import android.content.Context
@@ -8,6 +15,8 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteStatement
 import android.util.Base64
+import android.util.JsonReader
+import android.util.JsonToken
 import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.xposed.XposedBridge
 import java.io.BufferedInputStream
@@ -15,6 +24,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStreamReader
 import java.io.OutputStream
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
@@ -25,8 +35,8 @@ import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.zip.CRC32
-import java.util.zip.ZipInputStream
 import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 import org.json.JSONArray
 import org.json.JSONObject
@@ -452,28 +462,6 @@ class AccountCompletionController(
         )
     }
 
-    fun importAccountDataBundle(bytes: ByteArray): ImportedAccountDataBundle {
-        val activity = activityProvider() ?: error("褰撳墠娌℃湁鍙敤椤甸潰")
-        persistCurrentAccountSnapshot()
-        val bundle = decodeAccountDataBundle(bytes)
-        restoreAccountDataBundle(activity, bundle)
-        val normalized = bundle.account.copy(lastUsedAt = System.currentTimeMillis())
-        restoreAccount(activity, normalized)
-        val stored = loadStoredAccounts(activity)
-            .associateByTo(linkedMapOf()) { it.accountId }
-        val existing = stored[normalized.accountId]
-        stored[normalized.accountId] = existing?.mergeWith(normalized) ?: normalized
-        saveStoredAccounts(activity, stored.values.toList())
-        return ImportedAccountDataBundle(
-            account = AccountDisplayItem(
-                accountId = normalized.accountId,
-                nickname = normalized.nickname,
-                identity = displayIdentity(normalized.email, normalized.thirdBinds),
-                isCurrent = true,
-            ),
-        )
-    }
-
     private fun captureCurrentAccount(activity: Activity): StoredAccount? {
         val current = currentAccountPreview(activity) ?: return null
         val session = currentSession(activity) ?: return null
@@ -512,9 +500,13 @@ class AccountCompletionController(
     }
 
     private fun restoreAccount(activity: Activity, account: StoredAccount) {
-        upsertUserRow(activity, account)
+        // 写回前先以宿主当前行为准做字段合并，避免旧快照覆盖掉实时资料（如第三方绑定）。
+        val guarded = guardUserDataAgainstHost(activity, account)
+        upsertUserRow(activity, guarded)
+        // 会话与令牌仍取原始快照，资料写入一律走合并后的 guarded。
+        val restoreToken = account.token
         val session = currentSession(activity) ?: error("无法获取阅微会话")
-        method1(session, "setToken", account.token)
+        method1(session, "setToken", restoreToken)
         updatePreference(session, key(PREF_KEYS_CLASS, "getTOKEN"), account.session.token)
         updatePreference(session, key(THIRD_PARTY_KEYS_CLASS, "getBAIDU_AUTH"), account.session.baiduAuth)
         updatePreference(session, key(THIRD_PARTY_KEYS_CLASS, "getALIYUN_AUTH"), account.session.aliyunAuth)
@@ -527,8 +519,8 @@ class AccountCompletionController(
             restoreSharedPrefs(activity, WEBDAV_PREFS, account.webDavPrefs)
             restoreSharedPrefs(activity, LOCAL_LIBRARY_PREFS, SharedPrefsSnapshot.EMPTY)
         }
-        updateCachedUser(account)
-        method1(session, "setToken", account.token)
+        updateCachedUser(guarded)
+        method1(session, "setToken", restoreToken)
     }
 
     private fun restoreFullSessionPreferences(session: Any, snapshot: SessionSnapshot) {
@@ -595,21 +587,40 @@ class AccountCompletionController(
     }
 
     private fun captureReaderMargins(preferences: Any): ReaderMarginsSnapshot? {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
+            val padding = (readPreference(preferences, key(PREF_KEYS_CLASS, "getPADDING")) as? Number)?.toInt() ?: 0
+            fun edge(name: String, fallback: Int): Int =
+                (readPreference(preferences, key(PREF_KEYS_CLASS, name)) as? Number)?.toInt() ?: fallback
+            return ReaderMarginsSnapshot(
+                edge("getPADDING_TOP", padding), edge("getPADDING_BOTTOM", padding),
+                edge("getPADDING_LEFT", padding), edge("getPADDING_RIGHT", padding),
+                edge("getPADDING_TOP_OUTER", 0), edge("getPADDING_BOTTOM_OUTER", 0),
+            )
+        }
         val sessionKt = try {
             Class.forName("${SESSION_CLASS}Kt", false, classLoader)
         } catch (_: ClassNotFoundException) {
             return null
         }
         val getter = sessionKt.declaredMethods.firstOrNull {
-            it.name == "getReaderMargins" && it.parameterTypes.size == 1
+            it.hostNameMatches("getReaderMargins") && it.parameterTypes.size == 1
         } ?: return null
         val margins = getter.apply { isAccessible = true }.invoke(null, preferences) ?: return null
         return ReaderMarginsSnapshot.fromHost(margins)
     }
 
     private fun restoreReaderMargins(session: Any, snapshot: ReaderMarginsSnapshot) {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
+            val value = classLoader.hostClass("ReaMicroHost.ReaderMargins")
+                .getDeclaredConstructor(*Array(6) { Integer.TYPE }).newInstance(*snapshot.arguments())
+            val update = session.javaClass.getDeclaredMethod(
+                "k", value.javaClass, classLoader.hostClass("ReaMicroHost.SuspendContinuation"),
+            )
+            invokeSuspendMethod(update, session, value)
+            return
+        }
         val update = allMethods(session.javaClass).firstOrNull {
-            it.name == "updateReaderMargins" && it.parameterTypes.size == 2
+            it.hostNameMatches("updateReaderMargins") && it.parameterTypes.size == 2
         } ?: return
         val marginsClass = update.parameterTypes[0]
         val constructor = marginsClass.getDeclaredConstructor(*Array(6) { Integer.TYPE })
@@ -631,12 +642,16 @@ class AccountCompletionController(
     }
 
     private fun currentSession(activity: Activity): Any? =
+        b4Session() ?:
         runCatching {
             sessionFromActivity(activity)
                 ?: sessionFromKoin(activity)
         }.getOrNull()
 
     private fun currentCachedUser(activity: Activity): Any? =
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
+            classLoader.hostClass(CACHED_CLASS).getDeclaredField("a").get(null)
+        } else
         runCatching {
             val cached = staticObject(CACHED_CLASS, "INSTANCE")
             val cachedUser = cached?.let { method0(it, "getCurrentUser") }
@@ -667,17 +682,17 @@ class AccountCompletionController(
         runCatching {
             val scopeProvider = Class.forName(ANDROID_KOIN_SCOPE_EXT_CLASS, false, classLoader)
             val getScope = scopeProvider.methods.firstOrNull {
-                it.name == "getKoinScope" && it.parameterTypes.size == 1
+                it.hostNameMatches("getKoinScope") && it.parameterTypes.size == 1
             } ?: return@runCatching null
             val scope = getScope.invoke(null, activity) ?: return@runCatching null
             val reflection = Class.forName(KOTLIN_REFLECTION_CLASS, false, classLoader)
             val getKClass = reflection.methods.firstOrNull {
-                it.name == "getOrCreateKotlinClass" && it.parameterTypes.size == 1
+                it.hostNameMatches("getOrCreateKotlinClass") && it.parameterTypes.size == 1
             } ?: return@runCatching null
             val targetClass = Class.forName(className, false, classLoader)
             val kClass = getKClass.invoke(null, targetClass)
             scope.javaClass.methods.firstOrNull {
-                it.name == "get" && it.parameterTypes.size == 3
+                it.hostNameMatches("get") && it.parameterTypes.size == 3
             }?.invoke(scope, kClass, null, null)
         }.getOrNull()
 
@@ -725,101 +740,93 @@ class AccountCompletionController(
             })
         }
 
-    private fun decodeAccountDataBundle(bytes: ByteArray): DecodedAccountDataBundle {
-        val entries = linkedMapOf<String, ByteArray>()
-        ZipInputStream(bytes.inputStream().buffered()).use { zip ->
-            while (true) {
-                val entry = zip.nextEntry ?: break
-                if (!entry.isDirectory) {
-                    entries[entry.name] = zip.readBytes()
-                }
-                zip.closeEntry()
-            }
-        }
-        val manifestBytes = entries["manifest.json"] ?: error("缂烘皯瀵艰緭娓呭崟")
-        val manifest = JSONObject(String(manifestBytes, Charsets.UTF_8))
+    private fun readBundleManifest(zip: ZipFile): JSONObject {
+        val bytes = readBundleEntryBytes(zip, "manifest.json") ?: error("\u7f3a\u5c11\u6570\u636e\u5305\u6e05\u5355")
+        val manifest = JSONObject(String(bytes, Charsets.UTF_8))
         if (manifest.optString("type") != "account_data_export") {
-            error("涓嶆敮鎸佺殑鏁版嵁鍖呮牸寮?")
+            error("\u4e0d\u652f\u6301\u7684\u6570\u636e\u5305\u683c\u5f0f")
         }
-        val storedBytes = entries["account/stored_account.json"] ?: error("缂哄皯璐﹀彿鏁版嵁")
-        val account = StoredAccount.fromJson(JSONObject(String(storedBytes, Charsets.UTF_8)))
-        if (account.accountId <= 0L) error("璐﹀彿鏁版嵁鏃犳晥")
-        val dbEntries = DatabaseEntries(
-            users = decodeJsonArray(entries["database/users.json"]),
-            books = decodeJsonArray(entries["database/books.json"]),
-            bookItemRefs = decodeJsonArray(entries["database/book_item_ref.json"]),
-            bookChapters = decodeJsonArray(entries["database/book_chapter.json"]),
-            bookReading = decodeJsonArray(entries["database/book_reading.json"]),
-        )
-        val filePrefix = "files/${account.accountId}/"
-        val files = entries.entries
-            .asSequence()
-            .filter { it.key.startsWith(filePrefix) }
-            .associate { (path, content) -> path.removePrefix(filePrefix) to content }
-        val moduleEntries = decodeModuleGlobalEntries(entries)
-        return DecodedAccountDataBundle(
-            manifest = manifest,
-            account = account,
-            database = dbEntries,
-            files = files,
-            module = moduleEntries,
-        )
+        return manifest
     }
 
-    private fun decodeModuleGlobalEntries(entries: Map<String, ByteArray>): ModuleGlobalEntries {
-        val prefs = entries["module/shared_prefs.json"]?.let { bytes ->
-            val json = JSONObject(String(bytes, Charsets.UTF_8))
-            buildMap {
-                val iterator = json.keys()
-                while (iterator.hasNext()) {
-                    val prefsName = iterator.next()
-                    if (prefsName in MODULE_BACKUP_PREFS) {
-                        put(prefsName, SharedPrefsSnapshot.fromJson(json.optJSONObject(prefsName)))
-                    }
-                }
-            }
-        }.orEmpty()
-        val filePrefix = "module/files/"
-        val files = entries.entries
-            .asSequence()
-            .filter { (path, _) -> path.startsWith(filePrefix) }
-            .mapNotNull { (path, bytes) ->
-                val relativePath = normalizeModuleBackupPath(path.removePrefix(filePrefix)) ?: return@mapNotNull null
-                relativePath to bytes
-            }
-            .filter { (relativePath, _) -> isAllowedModuleBackupFile(relativePath) }
-            .toMap()
-        return ModuleGlobalEntries(prefs = prefs, files = files)
+    private fun readBundleAccount(zip: ZipFile): StoredAccount {
+        val bytes = readBundleEntryBytes(zip, "account/stored_account.json")
+            ?: error("\u7f3a\u5c11\u8d26\u53f7\u6570\u636e")
+        val account = StoredAccount.fromJson(JSONObject(String(bytes, Charsets.UTF_8)))
+        if (account.accountId <= 0L) error("\u8d26\u53f7\u6570\u636e\u65e0\u6548")
+        return account
     }
 
-    private fun decodeJsonArray(bytes: ByteArray?): List<JSONObject> {
-        if (bytes == null) return emptyList()
-        val array = JSONArray(String(bytes, Charsets.UTF_8))
-        return buildList {
-            for (index in 0 until array.length()) {
-                val item = array.optJSONObject(index) ?: continue
-                add(item)
+    private fun readBundleEntryBytes(zip: ZipFile, name: String): ByteArray? =
+        zip.getEntry(name)?.let { entry -> zip.getInputStream(entry).use { it.readBytes() } }
+
+    // 只做清单校验与文件统计，不把整包解压到内存，供导入确认弹窗使用。
+    fun previewAccountDataBundleFile(file: File, displayName: String = ""): AccountDataBundlePreview {
+        ZipFile(file).use { zip ->
+            val manifest = readBundleManifest(zip)
+            val account = readBundleAccount(zip)
+            val filePrefix = "files/${account.accountId}/"
+            var fileCount = 0
+            var uncompressedBytes = 0L
+            var compressedBytes = 0L
+            for (entry in zip.entries()) {
+                if (entry.isDirectory || !entry.name.startsWith(filePrefix)) continue
+                fileCount++
+                if (entry.size > 0L) uncompressedBytes += entry.size
+                if (entry.compressedSize > 0L) compressedBytes += entry.compressedSize
             }
+            return AccountDataBundlePreview(
+                accountId = account.accountId,
+                nickname = account.nickname,
+                identity = displayIdentity(account.email, account.thirdBinds),
+                fileName = displayName.trim().ifBlank { file.name },
+                exportedAt = manifest.optLong("exportedAt", 0L),
+                fileCount = fileCount,
+                uncompressedBytes = uncompressedBytes,
+                compressedBytes = compressedBytes,
+                archiveBytes = file.length(),
+            )
         }
     }
 
-    private fun restoreAccountDataBundle(activity: Activity, bundle: DecodedAccountDataBundle) {
-        restoreHostDatabaseEntries(activity, bundle)
-        restoreUserFiles(activity, bundle)
-        restoreModuleGlobalEntries(activity, bundle.module)
+    // 流式导入：数据库逐行写入，图书与模块文件逐条复制，避免整包常驻内存。
+    fun importAccountDataBundle(file: File, onProgress: (String) -> Unit = {}): ImportedAccountDataBundle {
+        val activity = activityProvider() ?: error("\u5f53\u524d\u6ca1\u6709\u53ef\u7528\u9875\u9762")
+        ZipFile(file).use { zip ->
+            readBundleManifest(zip)
+            val account = readBundleAccount(zip)
+            persistCurrentAccountSnapshot()
+            onProgress("\u6b63\u5728\u6062\u590d\u4e66\u5e93\u6570\u636e")
+            restoreHostDatabaseEntriesStreaming(zip, account.accountId)
+            onProgress("\u6b63\u5728\u6062\u590d\u56fe\u4e66\u6587\u4ef6")
+            restoreUserFilesStreaming(zip, account.accountId, onProgress)
+            onProgress("\u6b63\u5728\u6062\u590d\u6a21\u5757\u8bbe\u7f6e")
+            restoreModuleGlobalEntriesStreaming(zip)
+            val normalized = account.copy(lastUsedAt = System.currentTimeMillis())
+            restoreAccount(activity, normalized)
+            val stored = loadStoredAccounts(activity)
+                .associateByTo(linkedMapOf()) { it.accountId }
+            val existing = stored[normalized.accountId]
+            stored[normalized.accountId] = existing?.mergeWith(normalized) ?: normalized
+            saveStoredAccounts(activity, stored.values.toList())
+            return ImportedAccountDataBundle(
+                account = AccountDisplayItem(
+                    accountId = normalized.accountId,
+                    nickname = normalized.nickname,
+                    identity = displayIdentity(normalized.email, normalized.thirdBinds),
+                    isCurrent = true,
+                ),
+            )
+        }
     }
 
-    private fun restoreHostDatabaseEntries(activity: Activity, bundle: DecodedAccountDataBundle) {
+    private fun restoreHostDatabaseEntriesStreaming(zip: ZipFile, accountId: Long) {
+        val activity = activityProvider() ?: error("\u5f53\u524d\u6ca1\u6709\u53ef\u7528\u9875\u9762")
         val databasePath = activity.applicationContext.getDatabasePath(HOST_DB_NAME)
-        if (!databasePath.exists()) error("鏈壘鍒伴槄寰暟鎹簱")
-        val database = SQLiteDatabase.openDatabase(
-            databasePath.absolutePath,
-            null,
-            SQLiteDatabase.OPEN_READWRITE,
-        )
+        if (!databasePath.exists()) error("\u672a\u627e\u5230\u9605\u5fae\u6570\u636e\u5e93")
+        val database = openHostDatabaseReadWrite(databasePath.absolutePath)
         try {
             database.beginTransaction()
-            val accountId = bundle.account.accountId
             val oldBookIds = queryRows(
                 database = database,
                 sql = "SELECT id FROM books WHERE uid = ?",
@@ -830,11 +837,24 @@ class AccountCompletionController(
             deleteRowsForIds(database, "book_chapter", "book_id", oldBookIds)
             database.delete("books", "uid = ?", arrayOf(accountId.toString()))
             database.delete("users", "id = ?", arrayOf(accountId.toString()))
-            insertRows(database, "users", bundle.database.users)
-            val bookIdMap = insertImportedBooks(database, accountId, bundle.database.books)
-            insertImportedChildRows(database, "book_item_ref", bundle.database.bookItemRefs, bookIdMap)
-            insertImportedChildRows(database, "book_chapter", bundle.database.bookChapters, bookIdMap)
-            insertImportedReadingRows(database, accountId, bundle.database.bookReading, bookIdMap)
+            forEachBundleRow(zip, "database/users.json") { row ->
+                insertOrReplace(database, "users", jsonToContentValues(row))
+            }
+            val bookIdMap = linkedMapOf<Long, Long>()
+            forEachBundleRow(zip, "database/books.json") { row ->
+                val oldId = (row.opt("id") as? Number)?.toLong() ?: 0L
+                val newId = insertImportedBooks(database, accountId, row)
+                if (oldId > 0L && newId != null) bookIdMap[oldId] = newId
+            }
+            forEachBundleRow(zip, "database/book_item_ref.json") { row ->
+                insertImportedChildRow(database, "book_item_ref", row, bookIdMap)
+            }
+            forEachBundleRow(zip, "database/book_chapter.json") { row ->
+                insertImportedChildRow(database, "book_chapter", row, bookIdMap)
+            }
+            forEachBundleRow(zip, "database/book_reading.json") { row ->
+                insertImportedReadingRow(database, accountId, row, bookIdMap)
+            }
             database.setTransactionSuccessful()
         } finally {
             database.endTransaction()
@@ -842,29 +862,116 @@ class AccountCompletionController(
         }
     }
 
-    private fun restoreUserFiles(activity: Activity, bundle: DecodedAccountDataBundle) {
-        val root = File(activity.filesDir, bundle.account.accountId.toString())
-        if (root.exists()) {
-            root.deleteRecursively()
-        }
-        if (bundle.files.isEmpty()) return
-        root.mkdirs()
-        bundle.files.forEach { (relativePath, bytes) ->
-            val target = File(root, relativePath)
-            target.parentFile?.mkdirs()
-            FileOutputStream(target).use { output ->
-                output.write(bytes)
+    // 逐行读取数据包内的 JSON 数组，避免一次性构造整棵 JSON 树。
+    private fun forEachBundleRow(zip: ZipFile, entryName: String, action: (JSONObject) -> Unit) {
+        val entry = zip.getEntry(entryName) ?: return
+        zip.getInputStream(entry).buffered().use { input ->
+            val reader = JsonReader(InputStreamReader(input, Charsets.UTF_8))
+            reader.beginArray()
+            while (reader.hasNext()) {
+                action(readJsonRecord(reader))
             }
+            reader.endArray()
         }
     }
 
-    private fun restoreModuleGlobalEntries(activity: Activity, module: ModuleGlobalEntries) {
-        module.prefs.forEach { (prefsName, snapshot) ->
-            if (prefsName in MODULE_BACKUP_PREFS) {
-                restoreSharedPrefs(activity, prefsName, snapshot)
+    private fun readJsonRecord(reader: JsonReader): JSONObject {
+        val record = JSONObject()
+        reader.beginObject()
+        while (reader.hasNext()) {
+            val name = reader.nextName()
+            when (val value = readJsonValue(reader)) {
+                null -> record.put(name, JSONObject.NULL)
+                else -> record.put(name, value)
             }
         }
-        if (module.files.isEmpty()) return
+        reader.endObject()
+        return record
+    }
+
+    private fun readJsonValue(reader: JsonReader): Any? =
+        when (reader.peek()) {
+            JsonToken.BEGIN_OBJECT -> readJsonRecord(reader)
+            JsonToken.BEGIN_ARRAY -> readJsonArrayValue(reader)
+            JsonToken.STRING -> reader.nextString()
+            JsonToken.NUMBER -> {
+                val text = reader.nextString()
+                text.toLongOrNull() ?: text.toDoubleOrNull() ?: text
+            }
+            JsonToken.BOOLEAN -> reader.nextBoolean()
+            JsonToken.NULL -> {
+                reader.nextNull()
+                JSONObject.NULL
+            }
+            else -> null
+        }
+
+    private fun readJsonArrayValue(reader: JsonReader): JSONArray {
+        val array = JSONArray()
+        reader.beginArray()
+        while (reader.hasNext()) {
+            array.put(readJsonValue(reader))
+        }
+        reader.endArray()
+        return array
+    }
+
+    private fun restoreUserFilesStreaming(zip: ZipFile, accountId: Long, onProgress: (String) -> Unit) {
+        val activity = activityProvider() ?: error("\u5f53\u524d\u6ca1\u6709\u53ef\u7528\u9875\u9762")
+        val root = File(activity.filesDir, accountId.toString())
+        if (root.exists()) {
+            root.deleteRecursively()
+        }
+        val prefix = "files/$accountId/"
+        val entries = zip.entries().asSequence()
+            .filter { !it.isDirectory && it.name.startsWith(prefix) }
+            .toList()
+        if (entries.isEmpty()) return
+        root.mkdirs()
+        val rootPath = root.canonicalFile
+        var written = 0
+        entries.forEach { entry ->
+            val relativePath = entry.name.removePrefix(prefix)
+            if (!isSafeArchivePath(relativePath)) return@forEach
+            val target = File(root, relativePath).canonicalFile
+            if (!target.path.startsWith(rootPath.path + File.separator)) return@forEach
+            target.parentFile?.mkdirs()
+            zip.getInputStream(entry).use { input ->
+                FileOutputStream(target).buffered().use { output -> input.copyTo(output) }
+            }
+            written++
+            if (written % 500 == 0) {
+                onProgress("\u6b63\u5728\u6062\u590d\u56fe\u4e66\u6587\u4ef6 $written/${entries.size}")
+            }
+        }
+        if (written == 0) error("\u6570\u636e\u5305\u4e2d\u6ca1\u6709\u53ef\u6062\u590d\u7684\u56fe\u4e66\u6587\u4ef6")
+    }
+
+    private fun restoreModuleGlobalEntriesStreaming(zip: ZipFile) {
+        val activity = activityProvider() ?: error("\u5f53\u524d\u6ca1\u6709\u53ef\u7528\u9875\u9762")
+        readBundleEntryBytes(zip, "module/shared_prefs.json")?.let { bytes ->
+            val json = JSONObject(String(bytes, Charsets.UTF_8))
+            val iterator = json.keys()
+            while (iterator.hasNext()) {
+                val prefsName = iterator.next()
+                if (prefsName !in MODULE_BACKUP_PREFS) continue
+                val snapshotJson = json.optJSONObject(prefsName) ?: continue
+                restoreSharedPrefs(activity, prefsName, SharedPrefsSnapshot.fromJson(snapshotJson))
+            }
+        }
+        val prefix = "module/files/"
+        val entries = zip.entries().asSequence()
+            .filter { !it.isDirectory && it.name.startsWith(prefix) }
+            .mapNotNull { entry ->
+                val relativePath = entry.name.removePrefix(prefix)
+                if (!isSafeArchivePath(relativePath) || !isAllowedModuleBackupFile(relativePath)) {
+                    null
+                } else {
+                    relativePath to entry
+                }
+            }
+            .toList()
+        if (entries.isEmpty()) return
         val root = activity.filesDir.canonicalFile
         MODULE_BACKUP_FILES.forEach { fileName ->
             runCatching { File(root, fileName).delete() }
@@ -872,14 +979,20 @@ class AccountCompletionController(
         MODULE_BACKUP_DIRS.forEach { dirName ->
             runCatching { File(root, dirName).deleteRecursively() }
         }
-        module.files.forEach { (relativePath, bytes) ->
+        entries.forEach { (relativePath, entry) ->
             val target = File(root, relativePath).canonicalFile
             if (!target.path.startsWith(root.path + File.separator)) return@forEach
             target.parentFile?.mkdirs()
-            FileOutputStream(target).use { output ->
-                output.write(bytes)
+            zip.getInputStream(entry).use { input ->
+                FileOutputStream(target).buffered().use { output -> input.copyTo(output) }
             }
         }
+    }
+
+    private fun isSafeArchivePath(path: String): Boolean {
+        val normalized = path.replace('\\', '/').trim('/')
+        if (normalized.isBlank()) return false
+        return normalized.split('/').none { it.isBlank() || it == "." || it == ".." }
     }
 
     private fun insertRows(database: SQLiteDatabase, table: String, rows: List<JSONObject>) {
@@ -888,64 +1001,66 @@ class AccountCompletionController(
         }
     }
 
+    // 宿主用 androidx.sqlite 捆绑驱动以 WAL 打开 app.db。
+    // 框架 SQLiteDatabase 默认会把日志模式改成 delete 并截断 -wal，
+    // 宿主仍打开的连接会立刻 SQLITE_CORRUPT 崩溃，因此这里强制保持 WAL。
+    private fun openHostDatabaseReadWrite(path: String): SQLiteDatabase =
+        SQLiteDatabase.openDatabase(
+            path,
+            null,
+            SQLiteDatabase.OPEN_READWRITE
+                or SQLiteDatabase.ENABLE_WRITE_AHEAD_LOGGING
+                or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
+        )
+
     private fun insertImportedBooks(
         database: SQLiteDatabase,
         accountId: Long,
-        rows: List<JSONObject>,
-    ): Map<Long, Long> {
-        val idMap = linkedMapOf<Long, Long>()
-        rows.forEach { row ->
-            val oldId = (row.opt("id") as? Number)?.toLong() ?: 0L
-            val restoredRow = copyJsonRow(
-                row = row,
-                overrides = mapOf("uid" to accountId),
-                nullColumns = setOf("id"),
-            )
-            val newId = insertOrReplace(database, "books", jsonToContentValues(restoredRow))
-            if (newId > 0L && oldId > 0L) {
-                idMap[oldId] = newId
-            }
-        }
-        return idMap
+        row: JSONObject,
+    ): Long? {
+        val oldId = (row.opt("id") as? Number)?.toLong() ?: 0L
+        val restoredRow = copyJsonRow(
+            row = row,
+            overrides = mapOf("uid" to accountId),
+            nullColumns = setOf("id"),
+        )
+        val newId = insertOrReplace(database, "books", jsonToContentValues(restoredRow))
+        return newId.takeIf { it > 0L && oldId > 0L }
     }
 
-    private fun insertImportedChildRows(
+    private fun insertImportedChildRow(
         database: SQLiteDatabase,
         table: String,
-        rows: List<JSONObject>,
+        row: JSONObject,
         bookIdMap: Map<Long, Long>,
     ) {
-        rows.forEach { row ->
-            val oldBookId = (row.opt("book_id") as? Number)?.toLong() ?: return@forEach
-            val newBookId = bookIdMap[oldBookId] ?: return@forEach
-            val restoredRow = copyJsonRow(
-                row = row,
-                overrides = mapOf("book_id" to newBookId),
-                nullColumns = setOf("id"),
-            )
-            insertOrReplace(database, table, jsonToContentValues(restoredRow))
-        }
+        val oldBookId = (row.opt("book_id") as? Number)?.toLong() ?: return
+        val newBookId = bookIdMap[oldBookId] ?: return
+        val restoredRow = copyJsonRow(
+            row = row,
+            overrides = mapOf("book_id" to newBookId),
+            nullColumns = setOf("id"),
+        )
+        insertOrReplace(database, table, jsonToContentValues(restoredRow))
     }
 
-    private fun insertImportedReadingRows(
+    private fun insertImportedReadingRow(
         database: SQLiteDatabase,
         accountId: Long,
-        rows: List<JSONObject>,
+        row: JSONObject,
         bookIdMap: Map<Long, Long>,
     ) {
-        rows.forEach { row ->
-            val oldBookId = (row.opt("book_id") as? Number)?.toLong() ?: return@forEach
-            val newBookId = bookIdMap[oldBookId] ?: return@forEach
-            val restoredRow = copyJsonRow(
-                row = row,
-                overrides = mapOf(
-                    "uid" to accountId,
-                    "book_id" to newBookId,
-                ),
-                nullColumns = setOf("id"),
-            )
-            insertOrReplace(database, "book_reading", jsonToContentValues(restoredRow))
-        }
+        val oldBookId = (row.opt("book_id") as? Number)?.toLong() ?: return
+        val newBookId = bookIdMap[oldBookId] ?: return
+        val restoredRow = copyJsonRow(
+            row = row,
+            overrides = mapOf(
+                "uid" to accountId,
+                "book_id" to newBookId,
+            ),
+            nullColumns = setOf("id"),
+        )
+        insertOrReplace(database, "book_reading", jsonToContentValues(restoredRow))
     }
 
     private fun deleteRowsForIds(
@@ -1514,62 +1629,37 @@ class AccountCompletionController(
     }
 
     private fun updatePreference(session: Any, prefKey: Any, value: Any) {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
+            val update = session.javaClass.getDeclaredMethod(
+                "h", classLoader.hostClass("ReaMicroHost.PreferenceKey"), Any::class.java,
+                classLoader.hostClass(KOTLIN_CONTINUATION_CLASS),
+            )
+            invokeSuspendMethod(update, session, prefKey, value)
+            return
+        }
         val method = allMethods(session.javaClass).firstOrNull {
-            it.name == "update" && it.parameterTypes.size == 3
+            it.hostNameMatches("update") && it.parameterTypes.size == 3
         } ?: error("Session.update not found")
         invokeSuspendMethod(method, session, prefKey, value)
     }
 
     private fun firstFlowValue(flow: Any): Any? {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
+            val first = classLoader.hostClass("ReaMicroHost.FlowFirst").getDeclaredMethod(
+                "e", classLoader.hostClass("kotlinx.coroutines.flow.Flow"),
+                classLoader.hostClass(KOTLIN_CONTINUATION_CLASS),
+            )
+            return invokeSuspendMethod(first, null, flow)
+        }
         val flowKt = Class.forName(FLOW_KT_CLASS, false, flow.javaClass.classLoader ?: classLoader)
         val method = flowKt.methods.firstOrNull {
-            (it.name == "firstOrNull" || it.name == "first") && it.parameterTypes.size == 2
+            (it.hostNameMatches("firstOrNull") || it.hostNameMatches("first")) && it.parameterTypes.size == 2
         } ?: error("FlowKt.first not found")
         return invokeSuspendMethod(method, null, flow)
     }
 
-    private fun invokeSuspendMethod(method: Method, target: Any?, vararg args: Any?): Any? {
-        val latch = CountDownLatch(1)
-        var value: Any? = null
-        var error: Throwable? = null
-        val continuationClass = Class.forName(KOTLIN_CONTINUATION_CLASS, false, classLoader)
-        val throwOnFailure = Class.forName(KOTLIN_RESULT_KT_CLASS, false, classLoader)
-            .declaredMethods.first {
-                it.name == "throwOnFailure" && it.parameterTypes.size == 1
-            }.apply { isAccessible = true }
-        val continuation = Proxy.newProxyInstance(classLoader, arrayOf(continuationClass)) { proxy, proxyMethod, proxyArgs ->
-            when (proxyMethod.name) {
-                "getContext" -> emptyCoroutineContext()
-                "resumeWith" -> {
-                    val result = proxyArgs?.getOrNull(0)
-                    runCatching {
-                        throwOnFailure.invoke(null, result)
-                        value = result
-                    }.onFailure {
-                        error = if (it is InvocationTargetException) it.targetException ?: it else it
-                    }
-                    latch.countDown()
-                    targetUnit()
-                }
-                "toString" -> "ReaMicroAccountContinuation"
-                "hashCode" -> System.identityHashCode(proxy)
-                "equals" -> proxy === proxyArgs?.getOrNull(0)
-                else -> null
-            }
-        }
-        val invocationArgs = args.toMutableList().apply { add(continuation) }.toTypedArray()
-        val returned = try {
-            method.invoke(target, *invocationArgs)
-        } catch (invokeError: InvocationTargetException) {
-            throw invokeError.targetException ?: invokeError
-        }
-        if (returned !== coroutineSuspendedMarker()) return returned
-        if (!latch.await(SUSPEND_WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-            error("等待阅微协程结果超时")
-        }
-        error?.let { throw it }
-        return value
-    }
+    private fun invokeSuspendMethod(method: Method, target: Any?, vararg args: Any?): Any? =
+        com.reamicro.fix.core.HostCoroutines.invokeTimed(classLoader, method, target, SUSPEND_WAIT_TIMEOUT_MS, *args)
 
     private fun upsertUserRow(activity: Activity, account: StoredAccount) {
         runCatching {
@@ -1580,11 +1670,7 @@ class AccountCompletionController(
         }
         val databasePath = activity.applicationContext.getDatabasePath(HOST_DB_NAME)
         if (!databasePath.exists()) error("未找到阅微数据库")
-        val database = SQLiteDatabase.openDatabase(
-            databasePath.absolutePath,
-            null,
-            SQLiteDatabase.OPEN_READWRITE,
-        )
+        val database = openHostDatabaseReadWrite(databasePath.absolutePath)
         try {
             val values = ContentValues().apply {
                 put("id", account.accountId)
@@ -1599,6 +1685,16 @@ class AccountCompletionController(
     }
 
     private fun upsertUserRowViaHostDao(activity: Activity, account: StoredAccount) {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
+            val repository = b4UserRepository() ?: error("B4 user repository unavailable")
+            val dao = repository.javaClass.getDeclaredField("g").get(repository)
+            val upsert = dao.javaClass.getDeclaredMethod(
+                "b", classLoader.hostClass(HOST_USER_CLASS),
+                classLoader.hostClass("ReaMicroHost.SuspendContinuation"),
+            )
+            invokeSuspendMethod(upsert, dao, createHostUser(account))
+            return
+        }
         val repository = userRepository(activity) ?: error("UserRepository not found")
         val userDaoClass = Class.forName(HOST_USER_DAO_CLASS, false, classLoader)
         val userDao = repository.javaClass.declaredFields
@@ -1607,7 +1703,7 @@ class AccountCompletionController(
             ?.get(repository)
             ?: error("UserDao not found")
         val upsertMethod = allMethods(userDao.javaClass).firstOrNull {
-            it.name == "upsert" && it.parameterTypes.size == 2
+            it.hostNameMatches("upsert") && it.parameterTypes.size == 2
         } ?: error("UserDao.upsert not found")
         invokeSuspendMethod(upsertMethod, userDao, createHostUser(account))
     }
@@ -1615,19 +1711,95 @@ class AccountCompletionController(
     private fun updateCachedUser(account: StoredAccount) {
         runCatching {
             val user = createHostUser(account)
+            if (HostSymbols.abiProfileId == "2.3.3-b4") {
+                val value = classLoader.hostClass("ReaMicroHost.CachedUserData")
+                    .getDeclaredConstructor(classLoader.hostClass(HOST_USER_CLASS)).newInstance(user)
+                classLoader.hostClass(CACHED_CLASS).getDeclaredMethod(
+                    "b", value.javaClass.superclass,
+                ).invoke(null, value)
+                return@runCatching
+            }
             val cached = staticObject(CACHED_CLASS, "INSTANCE") ?: return@runCatching
             val userDataClass = Class.forName("$CACHED_CLASS\$DataType\$UserData", false, classLoader)
             val userData = userDataClass.constructors.first { it.parameterTypes.size == 1 }.newInstance(user)
             cached.javaClass.methods.firstOrNull {
-                it.name == "save" && it.parameterTypes.size == 1
+                it.hostNameMatches("save") && it.parameterTypes.size == 1
             }?.invoke(cached, userData)
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to update cached user: ${it.stackTraceToString()}")
         }
     }
 
+    // 宿主 users.data 是服务端账号资料的本地镜像，阅微冷启动会自行重新同步。
+    // 因此已存在的账号行一律以宿主实时值为准，快照只补齐宿主缺失的字段，
+    // 避免用陈旧快照把绑定关系、阅读时长等资料写回旧值。
+    private fun guardUserDataAgainstHost(activity: Activity, account: StoredAccount): StoredAccount {
+        val hostRow = runCatching { readHostUserRow(activity, account.accountId) }.getOrNull()
+        val hostData = hostRow?.optString("data").orEmpty()
+        if (hostData.isBlank() || hostData == account.userData) return account
+        val merged = mergeUserDataJson(hostData, account.userData) ?: return account
+        XposedBridge.log("$LOG_PREFIX host user data kept live for account ${account.accountId}")
+        val liveBinds = userDataThirdBinds(merged)
+        return account.copy(
+            userData = merged,
+            thirdBinds = liveBinds.ifEmpty { account.thirdBinds },
+        )
+    }
+
+    private fun readHostUserRow(activity: Activity, accountId: Long): JSONObject? {
+        val databasePath = activity.applicationContext.getDatabasePath(HOST_DB_NAME)
+        if (!databasePath.exists()) return null
+        val database = SQLiteDatabase.openDatabase(
+            databasePath.absolutePath,
+            null,
+            SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
+        )
+        try {
+            return queryRows(
+                database = database,
+                sql = "SELECT data, token FROM users WHERE id = ?",
+                selectionArgs = arrayOf(accountId.toString()),
+            ).firstOrNull()
+        } finally {
+            database.close()
+        }
+    }
+
+    // 以宿主实时值为底，只补快照里存在而宿主缺失的字段；宿主已有的值（含 thirdBinds）保持不动。
+    private fun mergeUserDataJson(hostData: String, snapshotData: String): String? {
+        val host = runCatching { JSONObject(hostData) }.getOrNull() ?: return null
+        val snapshot = runCatching { JSONObject(snapshotData) }.getOrNull() ?: return null
+        host.put("id", accountAccountId(host, snapshot))
+        val iterator = snapshot.keys()
+        while (iterator.hasNext()) {
+            val name = iterator.next()
+            val hostValue = host.opt(name)
+            if (hostValue != null && hostValue != JSONObject.NULL) continue
+            val snapshotValue = snapshot.opt(name)
+            if (snapshotValue == null || snapshotValue == JSONObject.NULL) continue
+            host.put(name, snapshotValue)
+        }
+        return host.toString()
+    }
+
+    // 行主键永远跟随目标账号，防止导入包内的 id 把资料写到别人的行上。
+    private fun accountAccountId(host: JSONObject, snapshot: JSONObject): Long {
+        val hostId = host.optLong("id", 0L)
+        return if (hostId > 0L) hostId else snapshot.optLong("id", 0L)
+    }
+
+    private fun userDataThirdBinds(userData: String): List<String> = runCatching {
+        jsonArrayToStringList(JSONObject(userData).optJSONArray("thirdBinds"))
+    }.getOrDefault(emptyList())
+
     private fun createHostUser(account: StoredAccount): Any {
-        val userClass = Class.forName(HOST_USER_CLASS, false, classLoader)
+        val userClass = classLoader.hostClass(HOST_USER_CLASS)
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
+            return userClass.getDeclaredConstructor(
+                Long::class.javaPrimitiveType, Long::class.javaPrimitiveType,
+                String::class.java, String::class.java,
+            ).newInstance(account.accountId, System.currentTimeMillis(), account.token, account.userData)
+        }
         return userClass.getConstructor(
             Long::class.javaPrimitiveType,
             String::class.java,
@@ -1646,11 +1818,25 @@ class AccountCompletionController(
             ?: koinGet(activity, USER_REPOSITORY_CLASS)
 
     private fun readPreference(preferences: Any, key: Any): Any? =
+        if (HostSymbols.abiProfileId == "2.3.3-b4") preferences.javaClass
+            .getDeclaredMethod("c", classLoader.hostClass("ReaMicroHost.PreferenceKey")).invoke(preferences, key)
+        else
         allMethods(preferences.javaClass).firstOrNull {
-            it.name == "get" && it.parameterTypes.size == 1
+            it.hostNameMatches("get") && it.parameterTypes.size == 1
         }?.invoke(preferences, key)
 
     private fun key(className: String, getterName: String): Any {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
+            val name = when (getterName) {
+                "getBUILD_IN_FONTS" -> "built_in_fonts"
+                "getBAIDU_AUTH" -> "baidu_auth"
+                "getALIYUN_AUTH" -> "aliyun_auth"
+                "getYUN115_AUTH" -> "yun115_auth"
+                else -> getterName.removePrefix("get").lowercase(Locale.ROOT)
+            }
+            return classLoader.hostClass("ReaMicroHost.PreferenceKey").getDeclaredConstructor(String::class.java)
+                .newInstance(name)
+        }
         val companion = staticObject(className, "INSTANCE")
             ?: error("Missing key companion $className")
         return method0(companion, getterName)
@@ -1664,13 +1850,19 @@ class AccountCompletionController(
         }.getOrNull()
 
     private fun method0(target: Any, name: String): Any =
-        allMethods(target.javaClass).first {
-            it.parameterTypes.isEmpty() && (it.name == name || it.name.startsWith("$name-"))
+        b4Property(target, name) ?: allMethods(target.javaClass).first {
+            it.parameterTypes.isEmpty() && (it.hostNameMatches(name) || it.name.startsWith("$name-"))
         }.apply { isAccessible = true }.invoke(target)
 
     private fun method1(target: Any, name: String, value: Any?) {
+        if (HostSymbols.abiProfileId == "2.3.3-b4" && name == "setToken") {
+            val session = classLoader.hostClass(SESSION_CLASS)
+            check(session.isInstance(target))
+            session.getDeclaredField("b").set(target, value)
+            return
+        }
         allMethods(target.javaClass).firstOrNull {
-            it.name == name && it.parameterTypes.size == 1
+            it.hostNameMatches(name) && it.parameterTypes.size == 1
         }?.apply { isAccessible = true }?.invoke(target, value)
     }
 
@@ -1679,6 +1871,37 @@ class AccountCompletionController(
 
     private fun Any.stringValue(name: String): String =
         method0(this, name)?.toString().orEmpty()
+
+    private fun b4UserRepository(): Any? {
+        if (HostSymbols.abiProfileId != "2.3.3-b4") return null
+        val bookshelf = ReaMicroBookMetadataSync.currentBookshelfRepository() ?: return null
+        val userStorage = bookshelf.javaClass.getDeclaredField("l").get(bookshelf) ?: return null
+        return userStorage.javaClass.getDeclaredField("a").get(userStorage)
+    }
+
+    private fun b4Session(): Any? =
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
+            ReaMicroBookMetadataSync.currentBookshelfRepository()?.let {
+                it.javaClass.getDeclaredField("k").get(it)
+            }
+        } else null
+
+    private fun b4Property(target: Any, name: String): Any? {
+        if (HostSymbols.abiProfileId != "2.3.3-b4") return null
+        val field = when (target.javaClass) {
+            classLoader.hostClass(HOST_USER_CLASS) -> when (name) {
+                "getId" -> "a"; "getToken" -> "b"; "getData" -> "c"; "getUpdated" -> "d"; else -> null
+            }
+            classLoader.hostClass(SESSION_CLASS) -> when (name) {
+                "getToken" -> "b"; "getDataStore" -> "a"; else -> null
+            }
+            classLoader.hostClass("ReaMicroHost.AccountSecurityUser") -> when (name) {
+                "getNickName" -> "c"; "getEmail" -> "j"; "getThirdBinds" -> "k"; else -> null
+            }
+            else -> null
+        } ?: return null
+        return target.javaClass.getDeclaredField(field).get(target)
+    }
 
     private fun displayIdentity(email: String, thirdBinds: List<String>): String {
         if (email.isNotBlank()) return email
@@ -1753,6 +1976,18 @@ class AccountCompletionController(
         val account: AccountDisplayItem,
     )
 
+    data class AccountDataBundlePreview(
+        val accountId: Long,
+        val nickname: String,
+        val identity: String,
+        val fileName: String,
+        val exportedAt: Long,
+        val fileCount: Int,
+        val uncompressedBytes: Long,
+        val compressedBytes: Long,
+        val archiveBytes: Long,
+    )
+
     private data class CurrentAccountPreview(
         val accountId: Long,
         val token: String,
@@ -1794,27 +2029,6 @@ class AccountCompletionController(
                 hasFullState = false,
             )
     }
-
-    private data class DatabaseEntries(
-        val users: List<JSONObject>,
-        val books: List<JSONObject>,
-        val bookItemRefs: List<JSONObject>,
-        val bookChapters: List<JSONObject>,
-        val bookReading: List<JSONObject>,
-    )
-
-    private data class ModuleGlobalEntries(
-        val prefs: Map<String, SharedPrefsSnapshot> = emptyMap(),
-        val files: Map<String, ByteArray> = emptyMap(),
-    )
-
-    private data class DecodedAccountDataBundle(
-        val manifest: JSONObject,
-        val account: StoredAccount,
-        val database: DatabaseEntries,
-        val files: Map<String, ByteArray>,
-        val module: ModuleGlobalEntries,
-    )
 
     private data class StoredAccount(
         val accountId: Long,
@@ -2238,13 +2452,13 @@ class AccountCompletionController(
 
     private fun emptyCoroutineContext(): Any =
         Class.forName(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS, false, classLoader)
-            .getDeclaredField("INSTANCE")
+            .hostField("INSTANCE")
             .apply { isAccessible = true }
             .get(null)
 
     private fun targetUnit(): Any =
         Class.forName(KOTLIN_UNIT_CLASS, false, classLoader)
-            .getDeclaredField("INSTANCE")
+            .hostField("INSTANCE")
             .apply { isAccessible = true }
             .get(null)
 
@@ -2252,7 +2466,7 @@ class AccountCompletionController(
         runCatching {
             Class.forName(KOTLIN_INTRINSICS_CLASS, false, classLoader)
                 .methods.first {
-                    it.name == "getCOROUTINE_SUSPENDED" && it.parameterTypes.isEmpty()
+                    it.hostNameMatches("getCOROUTINE_SUSPENDED") && it.parameterTypes.isEmpty()
                 }.apply { isAccessible = true }
                 .invoke(null)
         }.getOrElse {

@@ -93,7 +93,7 @@ private fun ReaMicroSettingsHook.renderCellArrow(
 
 private fun ReaMicroSettingsHook.navigateNextImageVector(): Any? =
     runCatching {
-        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
             return@runCatching cls("ReaMicroHost.NavigateNextIcon").getDeclaredMethod("i").invoke(null)
         }
         method(NAVIGATE_NEXT_ICON_CLASS, NAVIGATE_NEXT_METHOD, NAVIGATE_NEXT_PARAMETER_COUNT).invoke(
@@ -116,7 +116,7 @@ private fun ReaMicroSettingsHook.iconVectorMethod(): Method =
     }
 
 private fun ReaMicroSettingsHook.renderVerticalDivider(composer: Any) {
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         val sized = b2Ui.height(b2Ui.width(modifierInstance(), udp(DIVIDER_WIDTH_DP)), udp(DIVIDER_HEIGHT_DP))
         b2Ui.emptyBox(b2Ui.background(sized, borderVariant(composer)), composer)
         return
@@ -185,7 +185,7 @@ internal fun ReaMicroSettingsHook.leftCellSpacerModifier(
     composer: Any,
     onClick: () -> Unit,
 ): Any {
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         val weighted = b2Ui.weight(rowScope, modifierInstance())
         return b2Ui.height(b2Ui.padding(
             b2Ui.clickable(weighted, functionProxy("B4CommunitySpace", FUNCTION0_CLASS) { onClick(); targetUnit() }),
@@ -215,13 +215,13 @@ internal fun ReaMicroSettingsHook.leftCellSpacerModifier(
 }
 
 private fun ReaMicroSettingsHook.sizedSquare(base: Any, dp: Int): Any =
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         cls(SIZE_KT_CLASS).getDeclaredMethod("o", cls("androidx.compose.ui.Modifier"), Float::class.javaPrimitiveType)
             .invoke(null, base, udp(dp))
     } else method(SIZE_KT_CLASS, SIZE_METHOD, SIZE_PARAMETER_COUNT).invoke(null, base, udp(dp))
 
 private fun ReaMicroSettingsHook.textNodeCellHeight(base: Any): Any {
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         // 行高仍由图标和上下 16dp 内边距决定，文字保留自身行高交给 Row 居中。
         return base
     }
@@ -232,7 +232,7 @@ private fun ReaMicroSettingsHook.textNodeCellHeight(base: Any): Any {
 }
 
 internal fun ReaMicroSettingsHook.fillMaxWidthModifier(base: Any): Any =
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") b2Ui.fillWidth(base)
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.fillWidth(base)
     else
     method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, FILL_MAX_WIDTH_DEFAULT_PARAMETER_COUNT)
         .invoke(null, base, 0f, FILL_MAX_WIDTH_DEFAULT_MASK, null)
@@ -352,7 +352,7 @@ private fun ReaMicroSettingsHook.renderDiscoverFiller(
     interactionSource: Any?,
     onDiscoverClick: () -> Unit,
 ) {
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         val weighted = b2Ui.weight(rowScope, modifierInstance())
         val clickable = discoverClickable(weighted, "ReaMicroDiscoverFiller", composer, interactionSource, onDiscoverClick)
         val padded = paddingSides(clickable, 0, CELL_VERTICAL_PADDING_DP, 0, CELL_VERTICAL_PADDING_DP)
@@ -381,7 +381,7 @@ private fun ReaMicroSettingsHook.discoverClickable(
     interactionSource: Any?,
     onClick: () -> Unit,
 ): Any =
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         b2Ui.clickable(base, functionProxy(name, FUNCTION0_CLASS) { onClick(); targetUnit() })
     } else
     method(CLICKABLE_KT_CLASS, CLICKABLE_DEFAULT_METHOD, CLICKABLE_DEFAULT_PARAMETER_COUNT).invoke(
@@ -416,7 +416,7 @@ private fun ReaMicroSettingsHook.localIndication(composer: Any): Any? {
 private var localIndicationUnavailable = false
 
 private fun ReaMicroSettingsHook.sharedInteractionSource(cell: Int): Any? {
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") return null
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") return null
     cachedDiscoverInteractionSources.getOrNull(cell)?.let { return it }
     if (discoverInteractionSourceUnavailable) return null
     return synchronized(DiscoverImageMethodLock) {
@@ -445,7 +445,7 @@ private fun ReaMicroSettingsHook.clickableBase(): Any =
     paddingSides(modifierInstance(), start = 0, top = 0, end = 0, bottom = 0)
 
 private fun ReaMicroSettingsHook.paddingSides(base: Any, start: Int, top: Int, end: Int, bottom: Int): Any =
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         b2Ui.padding(base, udp(start), udp(top), udp(end), udp(bottom))
     } else
     method(PADDING_KT_CLASS, PADDING_SIDES_METHOD, PADDING_SIDES_PARAMETER_COUNT).invoke(

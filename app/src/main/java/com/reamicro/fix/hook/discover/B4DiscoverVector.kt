@@ -1,5 +1,8 @@
 package com.reamicro.fix.hook.discover
 
+import com.reamicro.fix.core.hostAbiMethod
+import com.reamicro.fix.core.hostAbiField
+
 import androidx.core.graphics.PathParser
 import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.core.hostClass
@@ -14,7 +17,7 @@ internal object B4DiscoverVector {
         viewport: Float,
         evenOddFill: Boolean,
     ): Any {
-        check(HostSymbols.profileId == "2.3.3-b4")
+        check(HostSymbols.abiProfileId == "2.3.3-b4")
         val float = Float::class.javaPrimitiveType!!
         val int = Int::class.javaPrimitiveType!!
         val builderType = loader.hostClass("ReaMicroHost.VectorBuilder")
@@ -24,11 +27,11 @@ internal object B4DiscoverVector {
             String::class.java, float, float, float, float, Long::class.javaPrimitiveType,
             int, Boolean::class.javaPrimitiveType, int,
         ).newInstance(name, size, size, viewport, viewport, 0L, 0, false, 224)
-        val add = builderType.getDeclaredMethod(
+        val add = builderType.hostAbiMethod(
             "d", builderType, ArrayList::class.java, int, brushType, float, float, float, int, float,
         )
         val color = loader.hostClass("ReaMicroHost.VectorColor")
-            .getDeclaredMethod("d", Long::class.javaPrimitiveType)
+            .hostAbiMethod("d", Long::class.javaPrimitiveType)
         val brush = brushType.getDeclaredConstructor(Long::class.javaPrimitiveType)
         val commands = mapOf(
             'M' to ("k" to 2), 'm' to ("l" to 2), 'L' to ("i" to 2), 'l' to ("j" to 2),
@@ -41,14 +44,14 @@ internal object B4DiscoverVector {
                 when (node.type) {
                     'Z', 'z' -> {
                         check(node.params.isEmpty())
-                        pathType.getDeclaredMethod("d").invoke(path)
+                        pathType.hostAbiMethod("d").invoke(path)
                     }
                     'A', 'a' -> {
                         check(node.params.size % 7 == 0)
                         node.params.toList().chunked(7).forEach { values ->
                             // 顶栏三点图稿只用零旋转圆弧；宿主已内联旋转槽，拒绝默默丢参数。
                             check(values[2] == 0f && values[3] in listOf(0f, 1f) && values[4] in listOf(0f, 1f))
-                            pathType.getDeclaredMethod(
+                            pathType.hostAbiMethod(
                                 if (node.type == 'A') "b" else "c", float, float,
                                 Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType, float, float,
                             ).invoke(path, values[0], values[1], values[3] != 0f, values[4] != 0f, values[5], values[6])
@@ -60,15 +63,15 @@ internal object B4DiscoverVector {
                         node.params.toList().chunked(arity).forEachIndexed { index, values ->
                             val actual = if (index > 0 && node.type == 'M') "i"
                                 else if (index > 0 && node.type == 'm') "j" else method
-                            pathType.getDeclaredMethod(actual, *Array(arity) { float })
+                            pathType.hostAbiMethod(actual, *Array(arity) { float })
                                 .invoke(path, *values.toTypedArray())
                         }
                     }
                 }
             }
-            add.invoke(null, builder, pathType.getDeclaredField("a").get(path),
+            add.invoke(null, builder, pathType.hostAbiField("a").get(path),
                 if (evenOddFill) 1 else 0, brush.newInstance(color.invoke(null, argb)), 1f, 1f, 0f, 0, 4f)
         }
-        return requireNotNull(builderType.getDeclaredMethod("e").invoke(builder))
+        return requireNotNull(builderType.hostAbiMethod("e").invoke(builder))
     }
 }

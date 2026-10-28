@@ -250,7 +250,7 @@ object HostDexKit {
         }
     }
 
-    private fun openBridge(hostApkPath: String, hostDataDir: String?): DexKitBridge? {
+    internal fun openBridge(hostApkPath: String, hostDataDir: String?): DexKitBridge? {
         if (!ensureLibrary(hostDataDir)) return null
         return runCatching {
             val startedAt = System.nanoTime()

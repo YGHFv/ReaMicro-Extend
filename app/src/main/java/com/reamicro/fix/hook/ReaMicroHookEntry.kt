@@ -12,6 +12,7 @@ import com.reamicro.fix.association.model.BookSource
 import com.reamicro.fix.association.provider.ExternalFeatureApi
 import com.reamicro.fix.association.provider.ExternalSourceLoader
 import com.reamicro.fix.association.provider.YouShuWebSearchBridge
+import com.reamicro.fix.core.ExternalFeatureCompatibility
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.cloud.api.ApiPackageAutoUpdater
 import com.reamicro.fix.cloud.api.CloudTaskNotificationPoller
@@ -33,6 +34,7 @@ class ReaMicroHookEntry {
     private val activityProvider: () -> Activity? = { currentActivityRef?.get() }
     private val settingsProvider: () -> ModuleSettingsSnapshot = moduleSettings::snapshot
     private val installedFeatureIds = linkedSetOf<String>()
+    private val disabledFeatureIds = linkedSetOf<String>()
     @Volatile private var memoryCallbacksInstalled: Boolean = false
     @Volatile private var apiSettingsMirrored: Boolean = false
     private val heartbeatHandler = Handler(Looper.getMainLooper())
@@ -132,6 +134,12 @@ class ReaMicroHookEntry {
             activityProvider = activityProvider,
         )
         installFeature("BookDetailsAssociationActionHook", bookDetailsAssociationActionHook::install)
+        if (com.reamicro.fix.core.HostSymbols.abiProfileId in setOf("2.3.3-b2", "2.3.3-b4")) {
+            installFeature("BookDetailsAssociationBridge") {
+                B2BookDetailsAssociationBridge(classLoader, activityProvider, settingsProvider,
+                    bookDetailsAssociationActionHook::requestCoverFixFromBarcode).install()
+            }
+        }
         installFeature("BookOverviewImageSelectionHook") {
             BookOverviewImageSelectionHook(
                 classLoader = classLoader,
@@ -373,6 +381,19 @@ class ReaMicroHookEntry {
             onSearchSourceDisabled = ::disableSearchSource,
         )
         features.forEach { feature ->
+            val disabledReason = ExternalFeatureCompatibility.disabledReason(feature.id, feature.capabilities)
+            if (disabledReason != null) {
+                if (disabledFeatureIds.add(feature.id)) {
+                    HookInstallReport.record("ExternalFeature", feature.id, false,
+                        UnsupportedOperationException(disabledReason))
+                    XposedBridge.logAlways("$LOG_PREFIX external feature disabled: ${feature.id}, " +
+                        "profile=${com.reamicro.fix.core.HostSymbols.profileId}, reason=$disabledReason")
+                    if (settingsProvider().canUseManualEdit) {
+                        Toast.makeText(activity, disabledReason, Toast.LENGTH_LONG).show()
+                    }
+                }
+                return@forEach
+            }
             if (!installedFeatureIds.add(feature.id)) return@forEach
             runCatching {
                 feature.install(api)

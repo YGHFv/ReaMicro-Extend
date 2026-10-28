@@ -174,8 +174,13 @@ internal object StructureHost232Colors {
     private class Reader(loader: ClassLoader) {
         private val theme = loader.hostClass(THEME)
         val schemeType: Class<*> = loader.hostClass("androidx.compose.material3.ColorScheme")
+        private val roleAccessors = roleNames.associateWith { role ->
+            requireNotNull(com.reamicro.fix.core.HostAccessor.bind(schemeType, "get$role-0d7_KjU")) {
+                "Host colour accessor unavailable: $role"
+            }
+        }
         val helpers = helperNames.filterNot {
-            HostSymbols.profileId in setOf("2.3.3-b2", "2.3.3-b4") && it == "getBorderDark"
+            HostSymbols.abiProfileId in setOf("2.3.3-b2", "2.3.3-b4") && it == "getBorderDark"
         }.associateWith { theme.hostMethod(it, schemeType) }
         private val toArgb = loader.hostClass("androidx.compose.ui.graphics.ColorKt")
             .hostMethod("toArgb-8_81llA", java.lang.Long.TYPE)
@@ -199,7 +204,7 @@ internal object StructureHost232Colors {
         }
 
         fun read(scheme: Any, source: String): Snapshot {
-            val packed = roleNames.associateWith { XposedHelpers.callMethod(scheme, "get$it-0d7_KjU") as Long }
+            val packed = roleAccessors.mapValues { (_, accessor) -> accessor.get(scheme) as Long }
             if (source == "host232/current-theme" && packed == previousPacked) {
                 previousCurrent?.let { return it }
             }
@@ -210,7 +215,7 @@ internal object StructureHost232Colors {
                 pageArgb = helper("getBackgroundAuto"),
                 contentArgb = helper("getBackgroundDim"),
                 brightArgb = helper("getBackgroundBright"),
-                borderArgb = if (HostSymbols.profileId in setOf("2.3.3-b2", "2.3.3-b4"))
+                borderArgb = if (HostSymbols.abiProfileId in setOf("2.3.3-b2", "2.3.3-b4"))
                     argb(packed.getValue("SurfaceContainerHigh"))
                     else helper("getBorderDark"),
                 borderVariantArgb = helper("getBorderVariant"),

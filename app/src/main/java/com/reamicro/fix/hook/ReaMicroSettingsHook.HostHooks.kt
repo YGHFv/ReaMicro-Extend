@@ -1,5 +1,8 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostNameMatches
+
+
 import android.app.Activity
 import android.content.Intent
 import com.reamicro.fix.xposed.XC_MethodHook
@@ -27,7 +30,7 @@ internal fun ReaMicroSettingsHook.hookNavGraphScope() {
         val navGraphScopeClass = cls(NAV_GRAPH_SCOPE_CLASS)
 
         navGraphScopeClass.declaredMethods
-            .filter { it.name == NAV_GRAPH_COMPOSABLE_METHOD }
+            .filter { it.hostNameMatches(NAV_GRAPH_COMPOSABLE_METHOD) }
             .forEach { candidate ->
                 runCatching {
                     XposedBridge.hookMethod(candidate, object : XC_MethodHook() {
@@ -141,7 +144,7 @@ internal fun ReaMicroSettingsHook.hookLazyListItem() {
     runCatching {
         val lazyListScopeClass = cls(LAZY_LIST_SCOPE_CLASS)
         val method = lazyListScopeClass.declaredMethods.firstOrNull {
-            it.name == LAZY_ITEM_DEFAULT_METHOD && it.parameterTypes.size == 6
+            it.hostNameMatches(LAZY_ITEM_DEFAULT_METHOD) && it.parameterTypes.size == 6
         } ?: error("LazyListScope.item\$default not found")
         method.isAccessible = true
         lazyItemDefaultMethod = method
@@ -286,10 +289,6 @@ internal fun ReaMicroSettingsHook.hookFontDocumentPickerResult() {
                 val intent = param.args?.getOrNull(2) as? Intent ?: return
                 if (requestCode == ONLINE_SOURCE_DOCUMENT_REQUEST_CODE) {
                     importOnlineSourceDocumentResult(activity, intent)
-                    return
-                }
-                if (requestCode == READ_ALOUD_SOURCE_DOCUMENT_REQUEST_CODE) {
-                    importTtsSourceDocumentResult(activity, intent)
                     return
                 }
                 val uri = intent.data ?: return

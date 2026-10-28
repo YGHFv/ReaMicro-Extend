@@ -2,7 +2,7 @@ package com.reamicro.fix.core
 
 /** B4 由设置页真实调用链核实；未列出的门面不继承 B2 的短名。 */
 object HostNativeUiAbi {
-    fun supports(profileId: String): Boolean = profileId == "2.3.3-b2" || profileId == "2.3.3-b4"
+    fun supports(profileId: String): Boolean = profileId == "2.3.3-b2" || profileId in setOf("2.3.3-b4", "2.3.3-rc3")
 
     private val b4Methods = mapOf(
         "AboutEntry#a" to "a",
@@ -39,7 +39,7 @@ object HostNativeUiAbi {
 
     fun method(profileId: String, role: String, b2Name: String): String = when (profileId) {
         "2.3.3-b2" -> b2Name
-        "2.3.3-b4" -> b4Methods["$role#$b2Name"]
+        "2.3.3-b4", "2.3.3-rc3" -> b4Methods["$role#$b2Name"]
             ?: error("Unverified B4 UI member: $role#$b2Name")
         else -> error("Unverified native UI host: $profileId")
     }
@@ -51,7 +51,7 @@ object HostNativeUiAbi {
             "centerVertically" -> "k"
             else -> error("Unknown alignment: $role")
         }
-        "2.3.3-b4" -> when (role) {
+        "2.3.3-b4", "2.3.3-rc3" -> when (role) {
             "start" -> "n"
             "center" -> "f"
             "centerVertically" -> "l"

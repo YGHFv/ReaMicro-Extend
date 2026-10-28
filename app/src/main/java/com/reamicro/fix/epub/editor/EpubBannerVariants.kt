@@ -1,12 +1,14 @@
 package com.reamicro.fix.epub.editor
 
+import com.reamicro.fix.core.hostClass
+
 internal object EpubBannerVariants {
     fun names(cover: String, loader: ClassLoader? = null): List<String> {
         val path = cover.replace('\\', '/')
         if (path.isBlank()) return emptyList()
         if (loader != null) {
             val native = runCatching {
-                loader.loadClass("app.zhendong.reamicro.ui.home.BannerVariantKt")
+                loader.hostClass("app.zhendong.reamicro.ui.home.BannerVariantKt")
                     .getMethod("toBannerVariantNames", String::class.java).invoke(null, path) as? List<*>
             }.getOrNull()?.filterIsInstance<String>()
             if (!native.isNullOrEmpty()) return native.distinct()

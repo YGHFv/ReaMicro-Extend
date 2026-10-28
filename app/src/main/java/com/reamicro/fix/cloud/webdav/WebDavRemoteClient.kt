@@ -297,6 +297,8 @@ internal class WebDavRemoteClient(
             }.parse(value)?.time ?: 0L
         }.getOrDefault(0L)
 
+    private val b2Http by lazy { B2HostHttp(classLoader, cleartextScope) }
+
     private fun executeOkHttpRequest(
         credentials: WebDavCredentials,
         method: String,
@@ -310,6 +312,11 @@ internal class WebDavRemoteClient(
         absoluteUrl: String? = null,
     ): WebDavHttpResponse {
         val url = absoluteUrl ?: buildUrl(credentials.url, path, directory).toString()
+        if (com.reamicro.fix.core.HostNativeAbi.hasNativeHttp(com.reamicro.fix.core.HostSymbols.profileId)) {
+            val token = Base64.encodeToString("${credentials.username}:${credentials.password}".toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+            val payload = requestBodyOverride ?: body?.let { b2Http.stringBody(it, "application/xml; charset=utf-8") }
+            return b2Http.request(url, method, mapOf("Authorization" to "Basic $token") + headers, payload, outputFile, onProgress)
+        }
         val requestBuilder = cls(OKHTTP_REQUEST_BUILDER_CLASS).getDeclaredConstructor()
             .apply { isAccessible = true }
             .newInstance()
@@ -404,6 +411,7 @@ internal class WebDavRemoteClient(
         headers: Map<String, String> = emptyMap(),
         requestBodyOverride: Any? = null,
     ): WebDavHttpResponse {
+        if (com.reamicro.fix.core.HostNativeAbi.hasNativeHttp(com.reamicro.fix.core.HostSymbols.profileId)) return b2Http.request(url, method, headers, requestBodyOverride)
         val requestBuilder = cls(OKHTTP_REQUEST_BUILDER_CLASS).getDeclaredConstructor()
             .apply { isAccessible = true }
             .newInstance()
@@ -467,6 +475,7 @@ internal class WebDavRemoteClient(
             ?: error("OkHttp RequestBody.create returned null")
 
     private fun newOkHttpStringRequestBody(content: String, mimeType: String): Any {
+        if (com.reamicro.fix.core.HostNativeAbi.hasNativeHttp(com.reamicro.fix.core.HostSymbols.profileId)) return b2Http.stringBody(content, mimeType)
         val mediaType = cls(OKHTTP_MEDIA_TYPE_CLASS).getDeclaredMethod("get", String::class.java)
             .apply { isAccessible = true }
             .invoke(null, mimeType)
@@ -484,6 +493,7 @@ internal class WebDavRemoteClient(
     }
 
     private fun newOkHttpFileRequestBody(file: File, mimeType: String): Any {
+        if (com.reamicro.fix.core.HostNativeAbi.hasNativeHttp(com.reamicro.fix.core.HostSymbols.profileId)) return b2Http.fileBody(file, mimeType)
         val mediaType = cls(OKHTTP_MEDIA_TYPE_CLASS).getDeclaredMethod("get", String::class.java)
             .apply { isAccessible = true }
             .invoke(null, mimeType)

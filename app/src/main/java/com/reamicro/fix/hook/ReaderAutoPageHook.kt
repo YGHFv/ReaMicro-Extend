@@ -106,7 +106,7 @@ class ReaderAutoPageHook(
     }
 
     private fun hookReaderSettings() {
-        if (HostSymbols.profileId == "2.3.3-b4") {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
             hookB4ReaderSettings()
             return
         }
@@ -149,7 +149,7 @@ class ReaderAutoPageHook(
             })
 
             val lazyListScopeClass = cls(LAZY_LIST_SCOPE_CLASS)
-            val itemDefaultMethod = if (HostSymbols.profileId == "2.3.3-b4") {
+            val itemDefaultMethod = if (HostSymbols.abiProfileId == "2.3.3-b4") {
                 lazyListScopeClass.declaredMethods.firstOrNull {
                     it.name == "n" && it.parameterTypes.size == 3
                 }
@@ -195,7 +195,7 @@ class ReaderAutoPageHook(
             })
 
             // nf8 是更多设置的唯一 LazyList 回调，不能依赖外层组合结束后的 ThreadLocal。
-            val callback = classLoader.loadClass("nf8").getDeclaredMethod("invoke", Any::class.java)
+            val callback = cls("ReaMicroHost.ReaderMoreSettingsContent").getDeclaredMethod("invoke", Any::class.java)
             XposedBridge.hookMethod(callback, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!canRunAutoPage()) return
@@ -291,7 +291,7 @@ class ReaderAutoPageHook(
                 targetUnit()
             }
 
-            if (HostSymbols.profileId == "2.3.3-b4") {
+            if (HostSymbols.abiProfileId == "2.3.3-b4") {
                 lazyListScope.javaClass.getDeclaredMethod(
                     "n", Any::class.java, Any::class.java, cls(FUNCTION3_CLASS),
                 ).apply { isAccessible = true }.invoke(lazyListScope, AUTO_PAGE_ITEM_KEY, null, itemContent)
@@ -703,7 +703,7 @@ class ReaderAutoPageHook(
         settingsProvider().canRunReaderAutoPage
 
     private fun mutableState(value: Any): Any =
-        if (HostSymbols.profileId == "2.3.3-b4") B2NativeUi(classLoader).mutableState(value)
+        if (HostSymbols.abiProfileId == "2.3.3-b4") B2NativeUi(classLoader).mutableState(value)
         else method(SNAPSHOT_STATE_KT_CLASS, MUTABLE_STATE_OF_DEFAULT_METHOD, 4).invoke(null, value, null, 2, null)
 
     private fun circleShape(): Any =

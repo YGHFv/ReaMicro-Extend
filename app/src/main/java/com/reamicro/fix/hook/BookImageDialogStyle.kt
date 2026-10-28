@@ -25,7 +25,7 @@ internal object BookImageDialogStyle {
     fun capture(loader: ClassLoader, composer: Any?) {
         if (composer == null) return
         runCatching {
-            if (HostSymbols.profileId == "2.3.3-b4") {
+            if (HostSymbols.abiProfileId == "2.3.3-b4") {
                 val metrics = HostTypographyMetrics(loader, composer)
                 fun unit(value: HostTypographyMetrics.UnitValue?) = value?.let { UnitValue(it.value, it.em) }
                 types = roles.associateWith { role ->

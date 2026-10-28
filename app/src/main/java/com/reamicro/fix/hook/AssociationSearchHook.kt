@@ -1,5 +1,10 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostMethodOrNull
+import com.reamicro.fix.core.HostSymbols
+
+
 import android.app.Activity
 import com.reamicro.fix.association.AssociationSearchService
 import com.reamicro.fix.association.model.BookSearchResult
@@ -26,6 +31,8 @@ class AssociationSearchHook(
     private val searchGeneration = AtomicInteger(0)
     private val searchResultsLock = Any()
     private var viewModelRef: WeakReference<Any>? = null
+    private var publishFlowRef: WeakReference<Any>? = null
+    @Volatile private var observedPublishBookKey = ""
     @Volatile private var latestSearchResults: List<BookSearchResult> = emptyList()
     @Volatile private var latestSearchKeyword: String = ""
     @Volatile private var latestSearchAuthor: String = ""
@@ -89,6 +96,10 @@ class AssociationSearchHook(
     private fun hookSearchByThird() {
         HookInstallReport.install("AssociationSearchHook", "hookSearchByThird") {
             val viewModelClass = XposedHelpers.findClass(BOOK_PUBLISH_VIEW_MODEL_CLASS, classLoader)
+            if (viewModelClass.hostMethodOrNull("searchByThird") == null && !HostSymbols.isIdentity) {
+                hookPublishStateSearch(viewModelClass)
+                return@install
+            }
             XposedHelpers.findAndHookMethod(
                 viewModelClass,
                 "searchByThird",
@@ -110,6 +121,57 @@ class AssociationSearchHook(
         }
     }
 
+    private fun hookPublishStateSearch(viewModelClass: Class<*>) {
+        val stateType = XposedHelpers.findClass("app.zhendong.reamicro.ui.book.BookPublishUIState", classLoader)
+        val flowType = XposedHelpers.findClass("kotlinx.coroutines.flow.StateFlowImpl", classLoader)
+        fun observer(nextIndex: Int, compareAndSet: Boolean) = object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if (param.thisObject !== publishFlowRef?.get()) return
+                val next = param.args?.getOrNull(nextIndex) ?: return
+                if (!stateType.isInstance(next)) return
+                param.args[nextIndex] = reconcileSearchState(next)
+            }
+            override fun afterHookedMethod(param: MethodHookParam) {
+                if (param.throwable != null || (compareAndSet && param.result != true)) return
+                if (param.thisObject !== publishFlowRef?.get()) return
+                val vm = viewModelRef?.get() ?: return
+                val next = param.args?.getOrNull(nextIndex) ?: return
+                val book = runCatching { XposedHelpers.callMethod(next, "getBook") }.getOrNull() ?: return
+                val title = firstNonBlankString(book, "getTitle", "getName")
+                val author = firstNonBlankString(book, "getAuthor")
+                val key = "$title\u0000$author"
+                if (title.isBlank()) return
+                synchronized(searchResultsLock) {
+                    if (key == observedPublishBookKey) return
+                    observedPublishBookKey = key
+                }
+                activityProvider()?.runOnUiThread {
+                    if (viewModelRef?.get() === vm && settingsProvider().canRunAssociationSearch) refreshSearchResults(vm)
+                }
+            }
+        }
+        // searchByThird 被内联后，订阅这个 VM 独有的状态流，保留搜索触发与结果注入。
+        XposedBridge.hookMethod(flowType.hostMethod("compareAndSet", Any::class.java, Any::class.java), observer(1, true))
+        XposedBridge.hookMethod(flowType.hostMethod("setValue", Any::class.java), observer(0, false))
+        XposedBridge.hookAllConstructors(viewModelClass, object : XC_MethodHook() {
+            override fun afterHookedMethod(param: MethodHookParam) {
+                val vm = param.thisObject ?: return
+                clearLatestSearchResults()
+                observedPublishBookKey = ""
+                viewModelRef = WeakReference(vm)
+                publishFlowRef = WeakReference(XposedHelpers.getObjectField(vm, "_uiState"))
+                val title = readBookTitle(vm)
+                if (title.isNotBlank()) {
+                    observedPublishBookKey = "$title\u0000${readBookAuthor(vm)}"
+                    activityProvider()?.runOnUiThread {
+                        if (viewModelRef?.get() === vm && settingsProvider().canRunAssociationSearch) refreshSearchResults(vm)
+                    }
+                }
+            }
+        })
+        XposedBridge.log("$LOG_PREFIX association search state-flow fallback installed")
+    }
+
     private fun hookViewModelCleared() {
         HookInstallReport.install("AssociationSearchHook", "hookViewModelCleared") {
             val viewModelClass = XposedHelpers.findClass(BOOK_PUBLISH_VIEW_MODEL_CLASS, classLoader)
@@ -117,6 +179,8 @@ class AssociationSearchHook(
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (viewModelRef?.get() !== param.thisObject) return
                     viewModelRef = null
+                    publishFlowRef = null
+                    observedPublishBookKey = ""
                     clearLatestSearchResults()
                 }
             })
@@ -231,9 +295,8 @@ class AssociationSearchHook(
                 )
         }
         val withSearchGroups = (thirdPartyNotOurs + searchGroups).sortThirdPartyGroupsByMatch()
-        XposedHelpers.callMethod(
+        copyPublishState(
             state,
-            "copy",
             XposedHelpers.callMethod(state, "getBook"),
             XposedHelpers.callMethod(state, "getRecommend"),
             withSearchGroups,
@@ -258,9 +321,8 @@ class AssociationSearchHook(
                     val current = runCatching { XposedHelpers.callMethod(state, "getSearching") as? Boolean }
                         .getOrNull() ?: false
                     if (current == searching) state
-                    else XposedHelpers.callMethod(
+                    else copyPublishState(
                         state,
-                        "copy",
                         XposedHelpers.callMethod(state, "getBook"),
                         XposedHelpers.callMethod(state, "getRecommend"),
                         XposedHelpers.callMethod(state, "getThirdPartyBooks"),
@@ -298,9 +360,8 @@ class AssociationSearchHook(
 
     private fun copySearching(state: Any, searching: Boolean): Any =
         runCatching {
-            XposedHelpers.callMethod(
+            copyPublishState(
                 state,
-                "copy",
                 XposedHelpers.callMethod(state, "getBook"),
                 XposedHelpers.callMethod(state, "getRecommend"),
                 XposedHelpers.callMethod(state, "getThirdPartyBooks"),
@@ -314,6 +375,19 @@ class AssociationSearchHook(
             XposedBridge.log("$LOG_PREFIX failed to copy association searching=$searching: ${it.stackTraceToString()}")
             state
         }
+
+    private fun copyPublishState(state: Any, vararg values: Any?): Any {
+        val original = runCatching { XposedHelpers.callMethod(state, "copy", *values) }
+        if (original.isSuccess) return requireNotNull(original.getOrNull())
+        val failure = original.exceptionOrNull()
+        if (HostSymbols.isIdentity || (failure !is NoSuchMethodError && failure !is NoSuchMethodException)) {
+            throw requireNotNull(failure)
+        }
+        // R8 删除 full copy 后，六个属性仍保留在主构造器，不能拿 copy$default 的掩码槽冒充。
+        val constructor = state.javaClass.declaredConstructors.single { it.parameterTypes.size == values.size }
+        constructor.isAccessible = true
+        return constructor.newInstance(*values)
+    }
 
     private fun List<Any>.sortThirdPartyGroupsByMatch(): List<Any> {
         val normalizedKeyword = latestSearchKeyword.normalizedAssociationTitleKey()
@@ -398,7 +472,7 @@ class AssociationSearchHook(
         if (target == null) return ""
         return methods.asSequence()
             .map { method ->
-                runCatching { target.javaClass.getMethod(method).invoke(target) as? String }
+                runCatching { XposedHelpers.callMethod(target, method) as? String }
                     .getOrNull()
                     .orEmpty()
                     .trim()
@@ -410,7 +484,7 @@ class AssociationSearchHook(
     private fun targetFunction1(block: (Any?) -> Any?): Any {
         val f1Class = XposedHelpers.findClass(KOTLIN_FUNCTION1_CLASS, classLoader)
         return Proxy.newProxyInstance(classLoader, arrayOf(f1Class)) { proxy, method, args ->
-            when (method.name) {
+            when (com.reamicro.fix.core.HostSymbols.logicalMethodName(method)) {
                 "invoke" -> block((args as? Array<*>)?.getOrNull(0))
                 "toString" -> REDUCER_PROXY_NAME
                 "hashCode" -> System.identityHashCode(proxy)

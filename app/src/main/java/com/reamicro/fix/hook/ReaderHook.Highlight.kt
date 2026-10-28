@@ -1,5 +1,10 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+
+import com.reamicro.fix.core.hostNameMatches
+
+import com.reamicro.fix.core.hostClass
 import android.graphics.Color
 import android.graphics.Typeface
 import android.text.SpannableString
@@ -69,7 +74,7 @@ internal fun ReaderHook.createNativeHighlightAction(icon: Any): Any? =
 
 internal fun ReaderHook.highlightImageVector(): Any? {
     val outlined = runCatching {
-        classLoader.loadClass(ICONS_OUTLINED_CLASS).getField("INSTANCE").get(null)
+        classLoader.hostClass(ICONS_OUTLINED_CLASS).hostField("INSTANCE").get(null)
     }.getOrNull() ?: return null
     return listOf(
         HIGHLIGHT_ICON_BORDER_COLOR_CLASS to "getBorderColor",
@@ -77,8 +82,8 @@ internal fun ReaderHook.highlightImageVector(): Any? {
         HIGHLIGHT_ICON_MODE_EDIT_CLASS to "getModeEdit",
     ).firstNotNullOfOrNull { (className, methodName) ->
         runCatching {
-            classLoader.loadClass(className).declaredMethods.firstOrNull {
-                it.name == methodName && it.parameterTypes.size == 1
+            classLoader.hostClass(className).declaredMethods.firstOrNull {
+                it.hostNameMatches(methodName) && it.parameterTypes.size == 1
             }?.apply { isAccessible = true }?.invoke(null, outlined)
         }.getOrNull()
     }
@@ -90,6 +95,10 @@ internal fun ReaderHook.highlightNativeSelection() {
     val selection = currentNativeSelectionPayload()
     val controller = selection.controller
     val quote = selection.quote
+    XposedBridge.log(
+        "$LOG_PREFIX selection highlight requested quote=${quote.take(160)} " +
+            "start=${selection.startCfi} end=${selection.endCfi}",
+    )
     if (quote.isBlank()) {
         Toast.makeText(activity, "\u672a\u83b7\u53d6\u5230\u9009\u4e2d\u6587\u672c", Toast.LENGTH_SHORT).show()
         return
@@ -104,6 +113,10 @@ internal fun ReaderHook.highlightNativeSelection() {
         Toast.makeText(activity, "\u6dfb\u52a0\u9ad8\u4eae\u89c4\u5219\u5931\u8d25", Toast.LENGTH_SHORT).show()
         return
     }
+    XposedBridge.log(
+        "$LOG_PREFIX selection highlight rule added id=${rule.id} book=${bookKey.take(160)} " +
+            "pattern=${rule.pattern.take(160)}",
+    )
     callNoArg(controller, "clearSelection")
     refreshReaderAfterSelectionHighlight()
     Toast.makeText(activity, "\u5df2\u6dfb\u52a0\u672c\u4e66\u9ad8\u4eae", Toast.LENGTH_SHORT).show()
@@ -129,7 +142,7 @@ internal fun ReaderHook.createReaderMark(
     color: String,
 ): Any? =
     runCatching {
-        val markClass = classLoader.loadClass(MARK_CLASS)
+        val markClass = classLoader.hostClass(MARK_CLASS)
         val now = System.currentTimeMillis()
         val bookId = (callNoArg(lastCatalogContext?.book, "getId") as? Number)?.toLong() ?: 0L
         val constructors = markClass.declaredConstructors.onEach { it.isAccessible = true }
@@ -218,20 +231,18 @@ internal fun ReaderHook.isSelectionInjectedHighlightMark(mark: Any): Boolean {
 }
 
 internal fun ReaderHook.transientHighlightMarkId(mark: Any): Long? =
-    searchResultHighlightMarkId(mark) ?: readAloudHighlightMarkId(mark)
+    searchResultHighlightMarkId(mark)
 
 internal fun ReaderHook.transientHighlightResolvedMarkId(mark: Any): Long? {
     val id = (callNoArg(mark, "getId") as? Number)?.toLong() ?: return null
     return when {
         SearchHighlightPlanner.isHighlightId(id, SEARCH_HIGHLIGHT_MARK_ID_BASE, SEARCH_HIGHLIGHT_MARK_ID_RANGE) -> id
-        id >= READ_ALOUD_HIGHLIGHT_MARK_ID_BASE &&
-            id < READ_ALOUD_HIGHLIGHT_MARK_ID_BASE + READ_ALOUD_HIGHLIGHT_MARK_ID_RANGE -> id
         else -> null
     }
 }
 
 internal fun ReaderHook.activeTransientHighlightMarks(): List<Any> =
-    listOfNotNull(activeSearchHighlightMark?.takeIf { currentSearchPaintSession() != null }, activeReadAloudHighlightMark)
+    listOfNotNull(activeSearchHighlightMark?.takeIf { currentSearchPaintSession() != null })
 
 internal fun ReaderHook.currentHighlightBookIdentity(): Pair<String, String>? {
     currentUiStateBook()?.let { book ->

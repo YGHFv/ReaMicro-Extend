@@ -41,7 +41,7 @@ internal object DiscoverVectorBuilder {
         evenOddFill: Boolean = false,
         viewport: Float = VIEWPORT,
     ): Any? = runCatching {
-        if (HostSymbols.profileId == "2.3.3-b4") {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
             return@runCatching B4DiscoverVector.build(
                 classLoader, name, layers, B2NativeUi(classLoader).dp(sizeDp), viewport, evenOddFill,
             )

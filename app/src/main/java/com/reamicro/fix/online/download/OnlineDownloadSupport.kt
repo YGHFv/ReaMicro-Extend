@@ -110,7 +110,7 @@ internal fun paragraphCommentCacheDir(filesDir: File): File =
     File(filesDir, OnlineParagraphCommentCacheStore.DIRECTORY_NAME)
 
 internal fun cancelExistingBackupTasks(tracker: Any, bookId: Long) {
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         val loader = tracker.javaClass.classLoader
         val gate = tracker.javaClass.getDeclaredField("a").get(tracker)
         val lock = gate.javaClass.getDeclaredField("a").get(gate) as java.util.concurrent.locks.ReentrantLock

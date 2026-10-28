@@ -1,5 +1,10 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+
+import com.reamicro.fix.core.hostNameMatches
+
+
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -38,6 +43,7 @@ internal fun WebDavDriveHook.canShowLocalLibraryEntry(): Boolean =
     settingsProvider().canRunLocalLibraryCloud
 
 internal fun WebDavDriveHook.renderImportLocalLibraryRow(composer: Any) {
+    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b2") return
     val context = importLocalLibraryRow.get()
     runCatching {
         renderImportLocalLibraryDivider(composer)
@@ -140,16 +146,14 @@ internal fun WebDavDriveHook.enqueueLocalLibraryImport(workerManager: Any, book:
     val name = book.callString("getName").ifBlank { LOCAL_LIBRARY_TITLE }
     val path = cloudPathOf(book)
     val sourceUrl = book.callString("getUrl").ifBlank { localLibraryBookUrl(path) }
-    val sourceSize = book.javaClass.methods.firstOrNull {
-        it.name == "getSize" && it.parameterTypes.isEmpty()
-    }?.apply { isAccessible = true }?.invoke(book) as? Number
-    val tracker = workerManager.javaClass.getDeclaredField("tracker")
+    val sourceSize = book.invokeNoArg("getSize") as? Number
+    val tracker = workerManager.javaClass.hostField("tracker")
         .apply { isAccessible = true }
         .get(workerManager)
     rememberWorkerManager(workerManager)
     val id = UUID.randomUUID().toString()
     val stateFlow = tracker.javaClass.methods.first {
-        it.name == "createTask" && it.parameterTypes.size == 4
+        it.hostNameMatches("createTask") && it.parameterTypes.size == 4
     }.apply { isAccessible = true }.invoke(
         tracker,
         id,
@@ -157,9 +161,7 @@ internal fun WebDavDriveHook.enqueueLocalLibraryImport(workerManager: Any, book:
         path.ifBlank { name },
         newWorkState("Running", 0, null, null, name),
     )
-    val handle = cls(WORK_HANDLE_CLASS).getDeclaredConstructor(String::class.java, cls(STATE_FLOW_CLASS))
-        .apply { isAccessible = true }
-        .newInstance(id, stateFlow)
+    val handle = newNativeWorkHandle(id, requireNotNull(stateFlow))
 
     Thread({
         runCatching {
@@ -228,17 +230,7 @@ internal fun WebDavDriveHook.renderLocalLibraryFolderRows(composer: Any) {
                 ?: error("No context for local library folder rows")
             createLocalLibraryFolderRowsView(context, roots)
         }
-        cls(ANDROID_VIEW_KT_CLASS).declaredMethods.first {
-            it.name == ANDROID_VIEW_METHOD && it.parameterTypes.size == 6
-        }.apply { isAccessible = true }.invoke(
-            null,
-            factory,
-            fillMaxWidthModifier(),
-            null,
-            composer,
-            0,
-            4,
-        )
+        androidViews.render(factory, fillMaxWidthModifier(), composer, null)
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX failed to render local library folder rows: ${it.stackTraceToString()}")
     }
@@ -342,16 +334,7 @@ internal fun WebDavDriveHook.localLibraryPickerDir(): Any =
     newDir(LOCAL_LIBRARY_ROOT_PATH, LOCAL_LIBRARY_PICK_FOLDER_TEXT)
 
 internal fun WebDavDriveHook.localLibraryCloudUserInfo(): Any =
-    cls(CLOUD_USER_INFO_CLASS).getDeclaredConstructor(
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        java.lang.Long.TYPE,
-        java.lang.Long.TYPE,
-    ).apply { isAccessible = true }.newInstance(
+    newCloudUserInfo(
         "local-library",
         LOCAL_LIBRARY_TITLE,
         "",
@@ -393,14 +376,14 @@ internal fun WebDavDriveHook.refreshLocalLibrary(path: String = currentLocalLibr
                 if (it.isDirectory) newLocalLibraryCloudFolder(it) else newLocalLibraryCloudBook(it)
             }
         flow.javaClass.methods.first {
-            it.name == "setValue" && it.parameterTypes.size == 1
+            it.hostNameMatches("setValue") && it.parameterTypes.size == 1
         }.apply { isAccessible = true }.invoke(flow, pagingDataFrom(items))
         logWebDav("refresh local library path=$normalizedPath items=${items.size}")
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX failed to refresh local library: ${it.stackTraceToString()}")
         runCatching {
             flow.javaClass.methods.first { method ->
-                method.name == "setValue" && method.parameterTypes.size == 1
+                method.hostNameMatches("setValue") && method.parameterTypes.size == 1
             }.apply { isAccessible = true }.invoke(flow, emptyPagingData())
         }
     }
@@ -517,13 +500,7 @@ internal fun WebDavDriveHook.localLibraryDirTree(path: String): List<Any> {
     val parentRoot = roots.firstOrNull { entry?.treeUri == it.treeUri }
     parentRoot?.let { dirs.add(newDir(it.path, it.name)) }
     entry?.let { dirs.add(newDir(it.path, it.name)) }
-    return dirs.distinctBy { dir ->
-        dir.javaClass.methods.firstOrNull { it.name == "getId" && it.parameterTypes.isEmpty() }
-            ?.apply { isAccessible = true }
-            ?.invoke(dir)
-            ?.toString()
-            .orEmpty()
-    }
+    return dirs.distinctBy { dir -> dir.callString("getId") }
 }
 
 internal fun WebDavDriveHook.updateLocalLibraryStorageTrees(path: String) {
@@ -539,23 +516,15 @@ internal fun WebDavDriveHook.updateLocalLibraryStorageTree(viewModel: Any, path:
     runCatching {
         val tree = localLibraryDirTree(path)
         val updateMethod = viewModel.javaClass.superclass?.methods?.firstOrNull {
-            it.name == "updateUiState" && it.parameterTypes.size == 1
+            it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
         } ?: viewModel.javaClass.methods.first {
-            it.name == "updateUiState" && it.parameterTypes.size == 1
+            it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
         }
         updateMethod.apply { isAccessible = true }.invoke(
             viewModel,
             functionProxy("LocalLibraryStorageTreeState", FUNCTION1_CLASS) { args ->
                 val state = args?.getOrNull(0) ?: return@functionProxy args?.getOrNull(0)
-                cls(CLOUD_STORAGE_UI_STATE_CLASS).declaredMethods.first {
-                    it.name == "copy" && it.parameterTypes.size == 2
-                }.apply { isAccessible = true }.invoke(
-                    state,
-                    state.javaClass.methods.first { it.name == "getUserInfo" && it.parameterTypes.isEmpty() }
-                        .apply { isAccessible = true }
-                        .invoke(state),
-                    tree,
-                )
+                storageStateWithTree(state, tree)
             },
         )
         logWebDav("update local library tree path=$path size=${tree.size}")
@@ -565,12 +534,7 @@ internal fun WebDavDriveHook.updateLocalLibraryStorageTree(viewModel: Any, path:
 }
 
 internal fun WebDavDriveHook.newLocalLibraryCloudFolder(entry: LocalLibraryEntry): Any =
-    cls(CLOUD_FOLDER_CLASS).getDeclaredConstructor(
-        String::class.java,
-        String::class.java,
-        java.lang.Boolean.TYPE,
-        java.lang.Long.TYPE,
-    ).apply { isAccessible = true }.newInstance(
+    newStorageFolder(
         entry.name,
         entry.path,
         false,

@@ -51,7 +51,7 @@ internal fun ReaderHook.selectionMenuMaxItemsPerRow(actionCount: Int): Int? {
 internal fun ReaderHook.renderWrappedSelectionMenu(
     actions: List<Any>, tint: Long, composer: Any, maxPerRow: Int, bubbleArrowOnTop: Boolean? = null,
 ) {
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         renderB4WrappedSelectionMenu(actions, tint, composer, maxPerRow, bubbleArrowOnTop)
         return
     }
@@ -254,7 +254,7 @@ private fun ReaderHook.selectionMenuCellWidthDp(actions: List<Any>): Int {
         }
     } ?: 0
     // 普通 B4 菜单收紧横向留白，长标题仍按内容扩宽，紧凑模式和旧版保持原样。
-    if (HostSymbols.profileId == "2.3.3-b4" && !settingsProvider().canUseCompactReaderSelectionMenu) {
+    if (HostSymbols.abiProfileId == "2.3.3-b4" && !settingsProvider().canUseCompactReaderSelectionMenu) {
         return (maxTitleWidth + 32).coerceIn(60, 100)
     }
     return (maxTitleWidth + 42).coerceIn(72, 112)

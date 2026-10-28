@@ -1,4 +1,6 @@
 package com.reamicro.fix.hook
+import com.reamicro.fix.core.hostAbiMethod
+import com.reamicro.fix.core.hostAbiField
 
 import com.reamicro.fix.core.hostMethod
 import com.reamicro.fix.core.hostNameMatches
@@ -110,7 +112,7 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                 }
             },
         )
-        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
             XposedBridge.deoptimize(target)
         }
     }
@@ -151,13 +153,13 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
     private fun hookRowScopeWeight() {
         // B4 RowScope 只剩抽象声明，实际调用位于已核实的 RowScopeInstance。
         val clazz = classLoader.hostClass(
-            if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") "ReaMicroHost.RowScopeInstance"
+            if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") "ReaMicroHost.RowScopeInstance"
             else ROW_SCOPE_CLASS,
         )
         val target = clazz.declaredMethods.firstOrNull {
             !java.lang.reflect.Modifier.isAbstract(it.modifiers) &&
                 (it.hostNameMatches(WEIGHT_DEFAULT_METHOD) || it.hostNameMatches(WEIGHT_METHOD) ||
-                    (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4" && it.name == "b")) &&
+                    (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4" && it.name == "b")) &&
                 (it.parameterTypes.size == WEIGHT_PARAMETER_COUNT ||
                     it.parameterTypes.size == B4_WEIGHT_PARAMETER_COUNT)
         } ?: error("$ROW_SCOPE_CLASS weight method not found")
@@ -243,8 +245,8 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                         if (b4Clickable) {
                             if (!typeMatches(onClick.javaClass, FUNCTION0_CLASS)) return@runCatching
                             // 社区有多个同形回调，只拆分真实书院行的 byte=12 分支。
-                            if (onClick.javaClass.name != "mb" ||
-                                onClick.javaClass.getDeclaredField("a").getByte(onClick) != 12.toByte()) return@runCatching
+                            if (!typeMatches(onClick.javaClass, "ReaMicroHost.CommunityRowClick") ||
+                                onClick.javaClass.hostAbiField("a").getByte(onClick) != 12.toByte()) return@runCatching
                         } else if (onClick.javaClass.name != HOST_COMMUNITY_ROW_CLICK) {
                             return@runCatching
                         }
@@ -322,7 +324,7 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!inCommunity()) return
                     if (communityBookSeen.get() != true &&
-                        !(com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4" &&
+                        !(com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4" &&
                             communityLabelPending.get() == true)) return
                     if (communityInjected.get() == true) return
                     val hook = ReaMicroSettingsHook.activeInstanceOrNull() ?: return
@@ -366,7 +368,7 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                             hook.leftCellLabelModifier(composer, hostRowClickInvoker())
 
                         clearDefaultBit(args, defaultMaskIndex, TEXT_MODIFIER_DEFAULT_BIT)
-                        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+                        if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
                             communityTextSeen.set(true)
                         }
                     }.onFailure { probeFailed("rowLabelText", it) }
@@ -376,8 +378,8 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
     }
 
     private fun hookRowSpacer() {
-        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
-            val target = classLoader.hostClass("ReaMicroHost.Spacer").getDeclaredMethod(
+        if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
+            val target = classLoader.hostClass("ReaMicroHost.Spacer").hostAbiMethod(
                 "b", classLoader.hostClass(COMPOSER_CLASS),
                 classLoader.hostClass("androidx.compose.ui.Modifier"),
             )

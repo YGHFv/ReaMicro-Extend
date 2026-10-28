@@ -1,5 +1,11 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+
+import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.typeMatches
+
+
 import android.app.Activity
 import android.content.ContentValues
 import android.graphics.BitmapFactory
@@ -48,10 +54,11 @@ class BookOverviewImageSelectionHook(
         runCatching {
             val itemsClass = cls(BOOK_OVERVIEW_ITEMS_CLASS)
             val methods = itemsClass.declaredMethods.filter { method ->
-                method.name == BOOK_COVER_BANNER_ITEM_METHOD &&
+                method.hostNameMatches(BOOK_COVER_BANNER_ITEM_METHOD) &&
                     method.parameterTypes.size == 5 &&
-                    method.parameterTypes.getOrNull(1)?.name == BOOK_CLASS &&
-                    method.parameterTypes.getOrNull(2)?.name == FUNCTION1_CLASS
+                    // B4 把 Book 混淆为 of0，直接比名字会永远不成立，必须走符号解析。
+                    typeMatches(method.parameterTypes.getOrNull(1), BOOK_CLASS) &&
+                    typeMatches(method.parameterTypes.getOrNull(2), FUNCTION1_CLASS)
             }
             if (methods.isEmpty()) error("BookCoverBannerItem composable not found")
             methods.forEach { method ->
@@ -85,16 +92,16 @@ class BookOverviewImageSelectionHook(
             val itemsClass = cls(BOOK_OVERVIEW_ITEMS_CLASS)
             val callbackCount = if (target == ImageTarget.Cover) 4 else 3
             val entry = itemsClass.declaredMethods.single { method ->
-                method.name == methodName &&
+                method.hostNameMatches(methodName) &&
                     method.parameterTypes.map { it.name } == listOf("boolean") +
                     List(callbackCount) { FUNCTION0_CLASS } + listOf(COMPOSER_CLASS, "int")
             }.apply { isAccessible = true }
             val content = itemsClass.declaredMethods.single { method ->
-                method.name == "$methodName\$lambda\$2" &&
+                method.hostNameMatches("$methodName\$lambda\$2") &&
                     method.parameterTypes.size == callbackCount + 6 &&
-                    method.parameterTypes[0].name == "kotlinx.coroutines.CoroutineScope" &&
-                    method.parameterTypes[1].name == "androidx.compose.material3.SheetState" &&
-                    method.parameterTypes.count { it.name == FUNCTION0_CLASS } == callbackCount &&
+                    typeMatches(method.parameterTypes[0], "kotlinx.coroutines.CoroutineScope") &&
+                    typeMatches(method.parameterTypes[1], "androidx.compose.material3.SheetState") &&
+                    method.parameterTypes.count { typeMatches(it, FUNCTION0_CLASS) } == callbackCount &&
                     method.parameterTypes.takeLast(3).map { it.name } ==
                     listOf("androidx.compose.foundation.layout.ColumnScope", COMPOSER_CLASS, "int")
             }.apply { isAccessible = true }
@@ -176,7 +183,7 @@ class BookOverviewImageSelectionHook(
         val hasSecondary: Boolean,
         val callbacks: List<Any>,
     ) : InvocationHandler {
-        override fun invoke(proxy: Any, method: Method, args: Array<out Any?>?): Any? = when (method.name) {
+        override fun invoke(proxy: Any, method: Method, args: Array<out Any?>?): Any? = when (com.reamicro.fix.core.HostSymbols.logicalMethodName(method)) {
             "invoke" -> { invokeFunction0(callbacks.first()); targetUnit() }
             "toString" -> "ReaMicro-NativeImageSheetBinding"
             "hashCode" -> System.identityHashCode(proxy)
@@ -852,7 +859,7 @@ class BookOverviewImageSelectionHook(
     }
 
     private fun targetUnit(): Any? =
-        runCatching { cls(KOTLIN_UNIT_CLASS).getField("INSTANCE").get(null) }.getOrNull()
+        runCatching { cls(KOTLIN_UNIT_CLASS).hostField("INSTANCE").get(null) }.getOrNull()
 
     private fun cls(name: String): Class<*> =
         XposedHelpers.findClass(name, classLoader)

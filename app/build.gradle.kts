@@ -182,7 +182,6 @@ dependencies {
     implementation("com.google.re2j:re2j:1.8")
 
     implementation("androidx.compose.material3:material3:1.5.0-alpha22")
-    implementation("io.github.proify.lyricon:provider:0.1.70")
 
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.4")
@@ -194,6 +193,9 @@ dependencies {
     implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
 
     compileOnly("io.github.libxposed:api:102.0.0")
+
+    // 运行期 dex 结构校验（宿主重新混淆后用于判定 profile 是否仍然适用）。
+    implementation("org.luckypray:dexkit:2.0.6")
 
     testImplementation("junit:junit:4.13.2")
 }

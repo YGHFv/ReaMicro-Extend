@@ -2617,3 +2617,5 @@ method=ReaMicroHost.BuiltInFontItems#invoke=y
 methodOwner=androidx.compose.ui.unit.TextUnitKt#TextUnit-anM5pPY=jtd
 method=androidx.compose.ui.unit.TextUnitKt#TextUnit-anM5pPY=k
 typeAlias=androidx.compose.ui.graphics.SolidColor=hea
+typeAlias=ReaMicroHost.ReaderMoreSettingsContent=nf8
+typeAlias=ReaMicroHost.CommunityRowClick=mb

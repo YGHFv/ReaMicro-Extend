@@ -1,5 +1,10 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostNameMatches
+
 import android.app.Activity
 import android.app.Dialog
 import android.content.Context
@@ -26,6 +31,7 @@ import java.lang.reflect.Proxy
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
+import com.reamicro.fix.core.typeMatches
 
 object OnlineCompletionImportSignal {
     private data class Mark(
@@ -95,8 +101,8 @@ class ReaderImportOverwriteHook(
                 }
             })
             val importMethods = (bookshelfClass.methods.asSequence() + bookshelfClass.declaredMethods.asSequence())
-                .filter { it.name == BOOKSHELF_IMPORT_BOOK_METHOD && it.parameterTypes.size >= 6 &&
-                    it.parameterTypes.last().name == KOTLIN_CONTINUATION_CLASS }
+                .filter { it.hostNameMatches(BOOKSHELF_IMPORT_BOOK_METHOD) && it.parameterTypes.size >= 6 &&
+                    typeMatches(it.parameterTypes.last(), KOTLIN_CONTINUATION_CLASS) }
                 .distinct()
                 .toList()
             if (importMethods.isEmpty()) error("BookshelfRepository.importBook hook target not found")
@@ -249,15 +255,16 @@ class ReaderImportOverwriteHook(
 
     private fun hookEpubFileManagerImport(): Boolean {
         return runCatching {
-            val managerClass = XposedHelpers.findClass(EPUB_FILE_MANAGER_CLASS, classLoader)
+            val managerClass = XposedHelpers.findClass(com.reamicro.fix.core.HostSymbols.resolveMethodOwner(
+                EPUB_FILE_MANAGER_CLASS, EPUB_IMPORT_METHOD), classLoader)
 
             val importMethod = (managerClass.methods.asSequence() + managerClass.declaredMethods.asSequence())
                 .filter { candidate ->
-                    candidate.name == EPUB_IMPORT_METHOD &&
-                        candidate.returnType.name == KOTLIN_PAIR_CLASS &&
+                    (candidate.name == com.reamicro.fix.core.HostSymbols.resolveMethodName(EPUB_FILE_MANAGER_CLASS, EPUB_IMPORT_METHOD) ||
+                        candidate.hostNameMatches(EPUB_IMPORT_METHOD)) &&
                         candidate.parameterTypes.size >= 2 &&
-                        candidate.parameterTypes[0].name == OKIO_PATH_CLASS &&
-                        candidate.parameterTypes[1].name == OKIO_PATH_CLASS
+                        typeMatches(candidate.parameterTypes[0], OKIO_PATH_CLASS) &&
+                        typeMatches(candidate.parameterTypes[1], OKIO_PATH_CLASS)
                 }
                 .minByOrNull { it.parameterTypes.size }
                 ?.apply { isAccessible = true }
@@ -429,9 +436,12 @@ class ReaderImportOverwriteHook(
         val uuidBook = if (uuid.isNotBlank()) findExistingBookByUuid(repository, uuid) else null
         val duplicateByUuid = uuidBook != null
         val urlBook = if (uriOverride.isNotBlank()) {
-            runCatching { invokeSuspendBlocking(method(repository.javaClass, "findBookByUrl", 2), repository, uriOverride) }
-                .getOrNull()
-                ?.takeIf { it.hasLocalBookData(repository) }
+            findExistingBookByUrl(repository, uriOverride)
+                ?.takeIf { book ->
+                    book.hasLocalBookData(repository) ||
+                        OnlineCompletionImportSignal.matches(uuid, title, uriOverride) ||
+                        isOnlineCompletionBook(book)
+                }
         } else {
             null
         }
@@ -447,6 +457,38 @@ class ReaderImportOverwriteHook(
             byUrl = urlBook != null,
             byTitle = titleBook != null,
         )
+    }
+
+    private fun findExistingBookByUrl(repository: Any, url: String): Any? {
+        val candidates = (
+            repository.javaClass.methods.asSequence() +
+                repository.javaClass.declaredMethods.asSequence()
+            )
+            .filter { method ->
+                (method.hostNameMatches("liveBookByUrl") || method.hostNameMatches("findBookByUrl")) &&
+                    method.parameterTypes.size in 1..2
+            }
+            .distinct()
+            .toList()
+        candidates.firstOrNull { it.parameterTypes.size == 1 }?.let { flowMethod ->
+            flowMethod.isAccessible = true
+            val flow = runCatching { flowMethod.invoke(repository, url) }.getOrNull()
+            if (flow != null) return firstFlowValue(flow)
+        }
+        val findMethod = candidates.firstOrNull { method ->
+            method.parameterTypes.size == 2 &&
+                typeMatches(method.parameterTypes.last(), KOTLIN_CONTINUATION_CLASS)
+        }?.apply { isAccessible = true } ?: return null
+        return invokeSuspendBlocking(findMethod, repository, url)
+    }
+
+    private fun firstFlowValue(flow: Any): Any? {
+        val flowKt = XposedHelpers.findClass(FLOW_KT_CLASS, classLoader)
+        val firstMethod = (flowKt.methods.asSequence() + flowKt.declaredMethods.asSequence())
+            .firstOrNull { it.hostNameMatches("first") && it.parameterTypes.size == 2 }
+            ?.apply { isAccessible = true }
+            ?: return null
+        return invokeSuspendBlocking(firstMethod, null, flow)
     }
 
     private fun resolveImportTitle(opf: Any?, file: Any?): String? =
@@ -640,12 +682,11 @@ class ReaderImportOverwriteHook(
         }
         if (listedBook != null) return listedBook
 
-        val user = currentUser(repository) ?: return null
-        val uid = user.longOrNull("getId") ?: return null
+        val uid = currentUserId(repository) ?: return null
         val bookDao = repository.fieldValue("bookDao") ?: return null
         val searchMethod = (bookDao.javaClass.methods.asSequence() + bookDao.javaClass.declaredMethods.asSequence())
             .firstOrNull { candidate ->
-                candidate.name == "search" &&
+                candidate.hostNameMatches("search") &&
                     candidate.parameterTypes.size == 3 &&
                     candidate.parameterTypes[1] == String::class.java
             }
@@ -665,12 +706,11 @@ class ReaderImportOverwriteHook(
     }
 
     private fun listExistingBooks(repository: Any): Iterable<*>? {
-        val user = currentUser(repository) ?: return null
-        val uid = user.longOrNull("getId") ?: return null
+        val uid = currentUserId(repository) ?: return null
         val bookDao = repository.fieldValue("bookDao") ?: return null
         val listMethod = (bookDao.javaClass.methods.asSequence() + bookDao.javaClass.declaredMethods.asSequence())
             .firstOrNull { candidate ->
-                candidate.name == "listByUid" &&
+                candidate.hostNameMatches("listByUid") &&
                     candidate.parameterTypes.size == 1 &&
                     candidate.parameterTypes[0] == java.lang.Long.TYPE
             }
@@ -684,7 +724,7 @@ class ReaderImportOverwriteHook(
             ?: return null
         val flowKt = XposedHelpers.findClass(FLOW_KT_CLASS, classLoader)
         val firstMethod = (flowKt.methods.asSequence() + flowKt.declaredMethods.asSequence())
-            .firstOrNull { it.name == "first" && it.parameterTypes.size == 2 }
+            .firstOrNull { it.hostNameMatches("first") && it.parameterTypes.size == 2 }
             ?.apply { isAccessible = true }
             ?: return null
         return runCatching { invokeSuspendBlocking(firstMethod, null, flow) as? Iterable<*> }
@@ -695,12 +735,11 @@ class ReaderImportOverwriteHook(
     }
 
     private fun findExistingBookByUuid(repository: Any, uuid: String): Any? {
-        val user = currentUser(repository) ?: return null
-        val uid = user.longOrNull("getId") ?: return null
+        val uid = currentUserId(repository) ?: return null
         val bookDao = repository.fieldValue("bookDao") ?: return null
         val findMethod = (bookDao.javaClass.methods.asSequence() + bookDao.javaClass.declaredMethods.asSequence())
             .firstOrNull { candidate ->
-                candidate.name == "findByUidAndUuid" &&
+                candidate.hostNameMatches("findByUidAndUuid") &&
                     candidate.parameterTypes.size == 3 &&
                     candidate.parameterTypes[1] == String::class.java
             }
@@ -711,26 +750,42 @@ class ReaderImportOverwriteHook(
             ?.takeIf { it.hasLocalBookData(repository) }
     }
 
-    private fun currentUser(repository: Any): Any? =
+    private fun currentUserId(repository: Any): Long? =
         runCatching {
-            val flow = method(repository.javaClass, "getCurrentUserFlow", 0).invoke(repository)
-                ?: repository.fieldValue("currentUserFlow")
-                ?: return null
-            val flowKt = XposedHelpers.findClass(FLOW_KT_CLASS, classLoader)
-            val firstMethod = (flowKt.methods.asSequence() + flowKt.declaredMethods.asSequence())
-                .firstOrNull { it.name == "first" && it.parameterTypes.size == 2 }
+            val flow = (repository.javaClass.methods.asSequence() + repository.javaClass.declaredMethods.asSequence())
+                .firstOrNull { it.hostNameMatches("getCurrentUserFlow") && it.parameterTypes.isEmpty() }
                 ?.apply { isAccessible = true }
-                ?: return null
-            invokeSuspendBlocking(firstMethod, null, flow)
+                ?.invoke(repository)
+                ?: repository.fieldValue("currentUserFlow")
+            flow?.let {
+                val flowKt = XposedHelpers.findClass(FLOW_KT_CLASS, classLoader)
+                val firstMethod = (flowKt.methods.asSequence() + flowKt.declaredMethods.asSequence())
+                    .firstOrNull { candidate -> candidate.hostNameMatches("first") && candidate.parameterTypes.size == 2 }
+                    ?.apply { isAccessible = true }
+                    ?: return@runCatching null
+                invokeSuspendBlocking(firstMethod, null, it)?.longOrNull("getId")
+                    ?.takeIf { userId -> userId > 0L }
+                    ?.let { userId -> return@runCatching userId }
+            }
+
+            val userStorage = repository.fieldValue("userStorage")
+            val storedUid = userStorage?.fieldValue("uid")
+                ?: userStorage?.let { storage ->
+                    (storage.javaClass.declaredFields.asSequence() + storage.javaClass.fields.asSequence())
+                        .firstOrNull { it.type == java.lang.Long::class.java }
+                        ?.apply { isAccessible = true }
+                        ?.get(storage)
+                }
+            (storedUid as? Number)?.toLong()?.takeIf { it > 0L }
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to resolve current user: ${it.stackTraceToString()}")
+            XposedBridge.log("$LOG_PREFIX failed to resolve current user id: ${it.stackTraceToString()}")
         }.getOrNull()
 
     private fun Any.fieldValue(name: String): Any? =
         runCatching {
             var current: Class<*>? = javaClass
             while (current != null) {
-                current.declaredFields.firstOrNull { it.name == name }?.let { field ->
+                current.declaredFields.firstOrNull { it.hostNameMatches(name) }?.let { field ->
                     field.isAccessible = true
                     return field.get(this)
                 }
@@ -741,37 +796,37 @@ class ReaderImportOverwriteHook(
 
     private fun Any?.titleOrNull(): String? =
         runCatching {
-            this?.javaClass?.methods?.firstOrNull { it.name == "getTitle" && it.parameterTypes.isEmpty() }
+            this?.javaClass?.methods?.firstOrNull { it.hostNameMatches("getTitle") && it.parameterTypes.isEmpty() }
                 ?.invoke(this)?.toString()
         }.getOrNull()?.takeIf { it.isNotBlank() }
 
     private fun Any?.uuidOrNull(): String? =
         runCatching {
-            this?.javaClass?.methods?.firstOrNull { it.name == "getUuid" && it.parameterTypes.isEmpty() }
+            this?.javaClass?.methods?.firstOrNull { it.hostNameMatches("getUuid") && it.parameterTypes.isEmpty() }
                 ?.invoke(this)?.toString()
         }.getOrNull()?.takeIf { it.isNotBlank() }
 
     private fun Any?.uriOrNull(): String? =
         runCatching {
-            this?.javaClass?.methods?.firstOrNull { it.name == "getUri" && it.parameterTypes.isEmpty() }
+            this?.javaClass?.methods?.firstOrNull { it.hostNameMatches("getUri") && it.parameterTypes.isEmpty() }
                 ?.invoke(this)?.toString()
         }.getOrNull()?.takeIf { it.isNotBlank() }
 
     private fun Any?.longOrNull(methodName: String): Long? =
         runCatching {
-            (this?.javaClass?.methods?.firstOrNull { it.name == methodName && it.parameterTypes.isEmpty() }
+            (this?.javaClass?.methods?.firstOrNull { it.hostNameMatches(methodName) && it.parameterTypes.isEmpty() }
                 ?.invoke(this) as? Number)?.toLong()
         }.getOrNull()
 
     private fun Any?.intOrNull(methodName: String): Int? =
         runCatching {
-            (this?.javaClass?.methods?.firstOrNull { it.name == methodName && it.parameterTypes.isEmpty() }
+            (this?.javaClass?.methods?.firstOrNull { it.hostNameMatches(methodName) && it.parameterTypes.isEmpty() }
                 ?.invoke(this) as? Number)?.toInt()
         }.getOrNull()
 
     private fun Any?.stringOrNull(methodName: String): String? =
         runCatching {
-            this?.javaClass?.methods?.firstOrNull { it.name == methodName && it.parameterTypes.isEmpty() }
+            this?.javaClass?.methods?.firstOrNull { it.hostNameMatches(methodName) && it.parameterTypes.isEmpty() }
                 ?.invoke(this)?.toString()
         }.getOrNull()?.takeIf { it.isNotBlank() }
 
@@ -782,10 +837,10 @@ class ReaderImportOverwriteHook(
         val hostResult = runCatching {
             val checkMethod = (repository.javaClass.methods.asSequence() + repository.javaClass.declaredMethods.asSequence())
                 .firstOrNull {
-                    it.name == "checkBookExists" &&
+                    it.hostNameMatches("checkBookExists") &&
                         it.parameterTypes.size == 2 &&
                         it.parameterTypes[0] == String::class.java &&
-                        it.parameterTypes[1].name == KOTLIN_CONTINUATION_CLASS
+                        typeMatches(it.parameterTypes[1], KOTLIN_CONTINUATION_CLASS)
                 }
                 ?.apply { isAccessible = true }
                 ?: return@runCatching null
@@ -805,7 +860,7 @@ class ReaderImportOverwriteHook(
     private fun currentApplicationContext(): Context? =
         runCatching {
             Class.forName("android.app.ActivityThread")
-                .getDeclaredMethod("currentApplication")
+                .hostMethod("currentApplication")
                 .apply { isAccessible = true }
                 .invoke(null) as? Context
         }.getOrNull()?.applicationContext
@@ -878,7 +933,7 @@ class ReaderImportOverwriteHook(
         val companion = pathClass.getField("Companion").get(null) ?: return null
         companion.javaClass.methods
             .firstOrNull {
-                it.name == "toPath" && it.parameterTypes.size == 1 &&
+                it.hostNameMatches("toPath") && it.parameterTypes.size == 1 &&
                     it.parameterTypes[0] == String::class.java
             }
             ?.apply { isAccessible = true }
@@ -889,7 +944,7 @@ class ReaderImportOverwriteHook(
         if (source == null) return ""
         val reflective = runCatching {
             source.javaClass.methods
-                .firstOrNull { it.parameterTypes.isEmpty() && it.name == "getName" }
+                .firstOrNull { it.parameterTypes.isEmpty() && it.hostNameMatches("getName") }
                 ?.invoke(source)
                 ?.toString()
         }.getOrNull()
@@ -942,7 +997,7 @@ class ReaderImportOverwriteHook(
             val cleanUuid = uuid?.trim()?.takeIf { it.isNotBlank() } ?: return
             val basePath = booksDir ?: return
             val targetPath = basePath.javaClass.methods.firstOrNull {
-                it.name == "resolve" &&
+                it.hostNameMatches("resolve") &&
                     it.parameterTypes.size == 2 &&
                     it.parameterTypes[0] == String::class.java
             }?.invoke(basePath, cleanUuid, true) ?: return
@@ -967,10 +1022,10 @@ class ReaderImportOverwriteHook(
         runCatching {
             val sourcePath = bookDir ?: return null
             val parentPath = sourcePath.javaClass.methods.firstOrNull {
-                it.name == "parent" && it.parameterTypes.isEmpty()
+                it.hostNameMatches("parent") && it.parameterTypes.isEmpty()
             }?.invoke(sourcePath) ?: return null
             val targetPath = parentPath.javaClass.methods.firstOrNull {
-                it.name == "resolve" &&
+                it.hostNameMatches("resolve") &&
                     it.parameterTypes.size == 2 &&
                     it.parameterTypes[0] == String::class.java
             }?.invoke(parentPath, oldUuid, true) ?: return null
@@ -985,7 +1040,7 @@ class ReaderImportOverwriteHook(
                 source.deleteRecursively()
             }
             newOpf.javaClass.methods.firstOrNull {
-                it.name == "overwrite" && it.parameterTypes.size == 1
+                it.hostNameMatches("overwrite") && it.parameterTypes.size == 1
             }?.invoke(newOpf, targetPath)
             targetPath
         }.onFailure {
@@ -996,10 +1051,10 @@ class ReaderImportOverwriteHook(
         runCatching {
             val sourcePath = bookDir ?: return null
             val parentPath = sourcePath.javaClass.methods.firstOrNull {
-                it.name == "parent" && it.parameterTypes.isEmpty()
+                it.hostNameMatches("parent") && it.parameterTypes.isEmpty()
             }?.invoke(sourcePath) ?: return null
             val targetPath = parentPath.javaClass.methods.firstOrNull {
-                it.name == "resolve" &&
+                it.hostNameMatches("resolve") &&
                     it.parameterTypes.size == 2 &&
                     it.parameterTypes[0] == String::class.java
             }?.invoke(parentPath, newUuid, true) ?: return null
@@ -1010,7 +1065,7 @@ class ReaderImportOverwriteHook(
             if (target.exists()) target.deleteRecursively()
             source.copyRecursively(target, overwrite = true)
             newOpf.javaClass.methods.firstOrNull {
-                it.name == "overwrite" && it.parameterTypes.size == 1
+                it.hostNameMatches("overwrite") && it.parameterTypes.size == 1
             }?.invoke(newOpf, targetPath)
             targetPath
         }.onFailure {
@@ -1041,7 +1096,7 @@ class ReaderImportOverwriteHook(
                     .firstOrNull()
                 ?: return null
             (instance.javaClass.methods.asSequence() + instance.javaClass.declaredMethods.asSequence())
-                .firstOrNull { it.name == "obtain" && it.parameterTypes.size == 1 }
+                .firstOrNull { it.hostNameMatches("obtain") && it.parameterTypes.size == 1 }
                 ?.apply { isAccessible = true }
                 ?.invoke(instance, root)
         }.onFailure {
@@ -1055,7 +1110,7 @@ class ReaderImportOverwriteHook(
 
     private fun Any.overwriteToRoot(root: Any): Any =
         runCatching {
-            javaClass.methods.firstOrNull { it.name == "overwrite" && it.parameterTypes.size == 1 }
+            javaClass.methods.firstOrNull { it.hostNameMatches("overwrite") && it.parameterTypes.size == 1 }
                 ?.apply { isAccessible = true }
                 ?.invoke(this, root) ?: this
         }.onFailure {
@@ -1065,11 +1120,11 @@ class ReaderImportOverwriteHook(
     private fun Any.withUuid(uuid: String): Any =
         runCatching {
             val metadata = (
-                javaClass.methods.firstOrNull { it.name == "getMetadata" && it.parameterTypes.isEmpty() }
+                javaClass.methods.firstOrNull { it.hostNameMatches("getMetadata") && it.parameterTypes.isEmpty() }
                     ?: error("getMetadata not found")
                 ).invoke(this)
             val identifier = (
-                metadata.javaClass.methods.firstOrNull { it.name == "getUuid" && it.parameterTypes.isEmpty() }
+                metadata.javaClass.methods.firstOrNull { it.hostNameMatches("getUuid") && it.parameterTypes.isEmpty() }
                     ?: error("Metadata.getUuid not found")
                 ).invoke(metadata) ?: error("Metadata.uuid is null")
             if (rewriteIdentifierValue(identifier, uuid)) {
@@ -1082,11 +1137,11 @@ class ReaderImportOverwriteHook(
 
     private fun rewriteIdentifierValue(identifier: Any, uuid: String): Boolean = runCatching {
         val currentValue = runCatching {
-            identifier.javaClass.methods.firstOrNull { it.name == "getValue" && it.parameterTypes.isEmpty() }
+            identifier.javaClass.methods.firstOrNull { it.hostNameMatches("getValue") && it.parameterTypes.isEmpty() }
                 ?.invoke(identifier) as? String
         }.getOrNull()
         val fields = identifier.javaClass.declaredFields.filter { it.type == String::class.java }
-        val target = fields.firstOrNull { it.name == "value" }
+        val target = fields.firstOrNull { it.hostNameMatches("value") }
             ?: fields.firstOrNull { field ->
                 currentValue != null && runCatching {
                     field.isAccessible = true
@@ -1166,8 +1221,8 @@ class ReaderImportOverwriteHook(
     private fun deleteBookEntity(repository: Any, book: Any) {
         val method = (repository.javaClass.methods.asSequence() + repository.javaClass.declaredMethods.asSequence())
             .firstOrNull {
-                it.name == "deleteBook" &&
-                    it.parameterTypes.lastOrNull()?.name == KOTLIN_CONTINUATION_CLASS
+                it.hostNameMatches("deleteBook") &&
+                    it.parameterTypes.lastOrNull()?.let { typeMatches(it, KOTLIN_CONTINUATION_CLASS) } == true
             }
             ?.apply { isAccessible = true }
             ?: error("BookshelfRepository.deleteBook not found")
@@ -1176,7 +1231,7 @@ class ReaderImportOverwriteHook(
 
     private fun method(targetClass: Class<*>, name: String, parameterCount: Int): Method =
         (targetClass.methods.asSequence() + targetClass.declaredMethods.asSequence())
-            .firstOrNull { it.name == name && it.parameterTypes.size == parameterCount }
+            .firstOrNull { it.hostNameMatches(name) && it.parameterTypes.size == parameterCount }
             ?.apply { isAccessible = true }
             ?: error("Method not found: ${targetClass.name}#$name/$parameterCount")
 
@@ -1188,7 +1243,7 @@ class ReaderImportOverwriteHook(
                 else -> runCatching {
                     current.javaClass.methods.firstOrNull {
                         it.parameterTypes.isEmpty() &&
-                            (it.name == name || it.name == "get" + name.replaceFirstChar { ch -> ch.uppercaseChar() })
+                            (it.hostNameMatches(name) || it.hostNameMatches("get" + name.replaceFirstChar { ch -> ch.uppercaseChar() }))
                     }?.apply { isAccessible = true }?.invoke(current)
                 }.getOrNull() ?: return null
             }
@@ -1198,7 +1253,7 @@ class ReaderImportOverwriteHook(
 
     private fun resolveImportTitleFromFile(file: Any?): String? =
         runCatching {
-            file?.javaClass?.methods?.firstOrNull { it.name == "getNameWithoutExtension" && it.parameterTypes.isEmpty() }
+            file?.javaClass?.methods?.firstOrNull { it.hostNameMatches("getNameWithoutExtension") && it.parameterTypes.isEmpty() }
                 ?.invoke(file)?.toString()
         }.getOrNull()
 
@@ -1218,61 +1273,25 @@ class ReaderImportOverwriteHook(
     private fun noArgValue(target: Any?, name: String): Any? {
         if (target == null) return null
         return runCatching {
-            target.javaClass.methods.firstOrNull { it.name == name && it.parameterTypes.isEmpty() }
+            target.javaClass.methods.firstOrNull { it.hostNameMatches(name) && it.parameterTypes.isEmpty() }
                 ?.apply { isAccessible = true }
                 ?.invoke(target)
         }.getOrNull()
     }
 
-    private fun invokeSuspendBlocking(method: Method, target: Any?, vararg args: Any?): Any? {
-        val latch = CountDownLatch(1)
-        var value: Any? = null
-        var error: Throwable? = null
-        val continuationClass = XposedHelpers.findClass(KOTLIN_CONTINUATION_CLASS, classLoader)
-        val throwOnFailure = XposedHelpers.findClass(KOTLIN_RESULT_KT_CLASS, classLoader).declaredMethods.first {
-            it.name == "throwOnFailure" && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }
-        val continuation = Proxy.newProxyInstance(classLoader, arrayOf(continuationClass)) { proxy, proxyMethod, proxyArgs ->
-            when (proxyMethod.name) {
-                "getContext" -> emptyCoroutineContext()
-                "resumeWith" -> {
-                    val result = proxyArgs?.getOrNull(0)
-                    runCatching {
-                        throwOnFailure.invoke(null, result)
-                        value = result
-                    }.onFailure {
-                        error = if (it is InvocationTargetException) it.targetException ?: it else it
-                    }
-                    latch.countDown()
-                    Unit
-                }
-                "toString" -> "ReaMicroReaderContinuation"
-                "hashCode" -> System.identityHashCode(proxy)
-                "equals" -> proxy === proxyArgs?.getOrNull(0)
-                else -> null
-            }
-        }
-        val returned = try {
-            method.invoke(target, *args.toMutableList().apply { add(continuation) }.toTypedArray())
-        } catch (e: InvocationTargetException) {
-            throw e.targetException ?: e
-        }
-        if (returned !== coroutineSuspended()) return returned
-        latch.await()
-        error?.let { throw it }
-        return value
-    }
+    private fun invokeSuspendBlocking(method: Method, target: Any?, vararg args: Any?): Any? =
+        com.reamicro.fix.core.HostCoroutines.invoke(classLoader, method, target, *args)
 
     private fun emptyCoroutineContext(): Any =
         XposedHelpers.findClass(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS, classLoader)
-            .getDeclaredField("INSTANCE")
+            .hostField("INSTANCE")
             .apply { isAccessible = true }
             .get(null) ?: error("EmptyCoroutineContext unavailable")
 
     private fun coroutineSuspended(): Any =
         runCatching {
             XposedHelpers.findClass(KOTLIN_INTRINSICS_CLASS, classLoader).methods.first {
-                it.name == "getCOROUTINE_SUSPENDED" && it.parameterTypes.isEmpty()
+                it.hostNameMatches("getCOROUTINE_SUSPENDED") && it.parameterTypes.isEmpty()
             }.apply { isAccessible = true }.invoke(null)
         }.getOrElse {
             XposedHelpers.findClass(KOTLIN_COROUTINE_SINGLETONS_CLASS, classLoader)

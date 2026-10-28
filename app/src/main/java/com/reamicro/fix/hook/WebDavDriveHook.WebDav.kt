@@ -1,5 +1,11 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostNameMatches
+
+
 import android.app.Activity
 import android.app.Dialog
 import android.content.Context
@@ -32,6 +38,7 @@ import com.reamicro.fix.cloud.webdav.WebDavCredentials
 import com.reamicro.fix.cloud.webdav.WebDavHttpException
 import com.reamicro.fix.cloud.webdav.WebDavImportSource
 import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.XposedHelpers
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.lang.ref.WeakReference
@@ -160,24 +167,18 @@ internal fun WebDavDriveHook.webDavImportClickCallback(): Any =
     }
 
 internal fun WebDavDriveHook.enqueueWebDavDownload(workerManager: Any, book: Any): Any {
-    val name = book.javaClass.methods.firstOrNull {
-        it.name == "getName" && it.parameterTypes.isEmpty()
-    }?.apply { isAccessible = true }?.invoke(book)?.toString().orEmpty().ifBlank { WEBDAV_TITLE }
+    val name = book.callString("getName").ifBlank { WEBDAV_TITLE }
     val path = cloudPathOf(book)
-    val sourceUrl = book.javaClass.methods.firstOrNull {
-        it.name == "getUrl" && it.parameterTypes.isEmpty()
-    }?.apply { isAccessible = true }?.invoke(book)?.toString().orEmpty()
-    val sourceSize = book.javaClass.methods.firstOrNull {
-        it.name == "getSize" && it.parameterTypes.isEmpty()
-    }?.apply { isAccessible = true }?.invoke(book) as? Number
+    val sourceUrl = book.callString("getUrl")
+    val sourceSize = book.invokeNoArg("getSize") as? Number
     val uniqueName = path.ifBlank { name }
-    val tracker = workerManager.javaClass.getDeclaredField("tracker")
+    val tracker = workerManager.javaClass.hostField("tracker")
         .apply { isAccessible = true }
         .get(workerManager)
     rememberWorkerManager(workerManager)
     val id = UUID.randomUUID().toString()
     val stateFlow = tracker.javaClass.methods.first {
-        it.name == "createTask" && it.parameterTypes.size == 4
+        it.hostNameMatches("createTask") && it.parameterTypes.size == 4
     }.apply { isAccessible = true }.invoke(
         tracker,
         id,
@@ -185,9 +186,7 @@ internal fun WebDavDriveHook.enqueueWebDavDownload(workerManager: Any, book: Any
         uniqueName,
         newWorkState("Running", 0, null, null, name),
     )
-    val handle = cls(WORK_HANDLE_CLASS).getDeclaredConstructor(String::class.java, cls(STATE_FLOW_CLASS))
-        .apply { isAccessible = true }
-        .newInstance(id, stateFlow)
+    val handle = newNativeWorkHandle(id, requireNotNull(stateFlow))
     val localFile = importCacheFile(
         currentContext()?.cacheDir,
         "reamicro-webdav",
@@ -201,6 +200,7 @@ internal fun WebDavDriveHook.enqueueWebDavDownload(workerManager: Any, book: Any
         tracker = tracker,
         localFile = localFile,
         createdAtMs = System.currentTimeMillis(),
+        handle = handle,
     )
     runningWebDavDownloads[downloadKey] = token
 
@@ -249,14 +249,14 @@ internal fun WebDavDriveHook.enqueueWebDavDownload(workerManager: Any, book: Any
 
 internal fun WebDavDriveHook.enqueueWebDavBackup(workerManager: Any, bookId: Long, dir: String): Any {
     rememberWorkerManager(workerManager)
-    val tracker = workerManager.javaClass.getDeclaredField("tracker")
+    val tracker = workerManager.javaClass.hostField("tracker")
         .apply { isAccessible = true }
         .get(workerManager)
     val normalizedDir = normalizeWebDavPath(dir.ifBlank { currentWebDavBackupDir() })
     cancelExistingBackupTasks(tracker, bookId)
     val id = UUID.randomUUID().toString()
     val stateFlow = tracker.javaClass.methods.first {
-        it.name == "createTask" && it.parameterTypes.size == 4
+        it.hostNameMatches("createTask") && it.parameterTypes.size == 4
     }.apply { isAccessible = true }.invoke(
         tracker,
         id,
@@ -264,9 +264,7 @@ internal fun WebDavDriveHook.enqueueWebDavBackup(workerManager: Any, bookId: Lon
         bookId.toString(),
         newWorkState("Running", 0, null, null, null),
     )
-    val handle = cls(WORK_HANDLE_CLASS).getDeclaredConstructor(String::class.java, cls(STATE_FLOW_CLASS))
-        .apply { isAccessible = true }
-        .newInstance(id, stateFlow)
+    val handle = newNativeWorkHandle(id, requireNotNull(stateFlow))
 
     webDavRunningBackupBookIds[bookId] = true
     Thread({
@@ -333,6 +331,10 @@ internal fun WebDavDriveHook.tryHandleRunningWebDavDownloadTap(book: Any): Boole
     token.thread?.interrupt()
     cancelTrackedWork(token.tracker, token.id)
     cleanupDownloadToken(token)
+    val stateFlow = token.handle.javaClass.hostField("state").get(token.handle)
+    val state = XposedHelpers.callMethod(stateFlow, "getValue")
+    val status = XposedHelpers.callMethod(state, "getStatus")
+    XposedBridge.logAlways("ReaMicro WebDAV cancellation verified status=$status cacheExists=${token.localFile.exists()}")
     runningWebDavDownloads.remove(token.key, token)
     webDavDownloadCancelPrompts.remove(token.id)
     showToast("\u5df2\u53d6\u6d88\u4e0b\u8f7d\u5e76\u6e05\u7406\u7f13\u5b58")
@@ -362,16 +364,21 @@ internal fun WebDavDriveHook.updateWebDavBackupViewModels(bookId: Long, book: An
                 ?: return@runCatching
             if (vmBookId != bookId) return@runCatching
             val updateMethod = viewModel.javaClass.superclass?.methods?.firstOrNull {
-                it.name == "updateUiState" && it.parameterTypes.size == 1
+                it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
             } ?: viewModel.javaClass.methods.first {
-                it.name == "updateUiState" && it.parameterTypes.size == 1
+                it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
             }
             updateMethod.apply { isAccessible = true }.invoke(
                 viewModel,
                 functionProxy("WebDavBackupUiState", FUNCTION1_CLASS) { args ->
                     val state = args?.getOrNull(0) ?: return@functionProxy args?.getOrNull(0)
+                    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
+                        return@functionProxy state.javaClass.getDeclaredConstructor(
+                            cls(BOOK_CLASS), cls(CLOUD_BOOK_CLASS), Boolean::class.javaPrimitiveType,
+                        ).newInstance(book, backup, false)
+                    }
                     state.javaClass.methods.first {
-                        it.name == "copy" && it.parameterTypes.size == 3
+                        it.hostNameMatches("copy") && it.parameterTypes.size == 3
                     }.apply { isAccessible = true }.invoke(state, book, backup, false)
                 },
             )
@@ -398,20 +405,10 @@ internal fun WebDavDriveHook.renderWebDavLoginRoute(navGraphScope: Any, composer
             createWebDavLoginRouteView(context, navGraphScope)
         }
         val modifier = fillMaxSizeModifier()
-        cls(ANDROID_VIEW_KT_CLASS).declaredMethods.first {
-            it.name == ANDROID_VIEW_METHOD && it.parameterTypes.size == 6
-        }.apply { isAccessible = true }.invoke(
-            null,
-            factory,
-            modifier,
-            null,
-            composer,
-            0,
-            4,
-        )
+        androidViews.render(factory, modifier, composer, null)
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX failed to render WebDAV login route: ${it.stackTraceToString()}")
-    }
+    }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.renderWebDavAccountRoute(navGraphScope: Any, composer: Any): Boolean {
@@ -478,16 +475,7 @@ internal fun WebDavDriveHook.createWebDavLoginRouteView(context: Context, navGra
 
 internal fun WebDavDriveHook.webDavAuth(): Any {
     val credentials = webDavCredentials()
-    return cls(AUTH_BAIDU_CLASS).getDeclaredConstructor(
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        java.lang.Long.TYPE,
-        java.lang.Long.TYPE,
-        String::class.java,
-        String::class.java,
-    ).apply { isAccessible = true }.newInstance(
+    return newBaiduAuth(
         credentials?.username.orEmpty(),
         currentWebDavOrderBy(),
         currentWebDavOrderDirection(),
@@ -525,16 +513,7 @@ internal fun WebDavDriveHook.webDavYun115Auth(): Any {
 
 internal fun WebDavDriveHook.webDavCloudUserInfo(): Any {
     val credentials = webDavCredentials()
-    return cls(CLOUD_USER_INFO_CLASS).getDeclaredConstructor(
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        java.lang.Long.TYPE,
-        java.lang.Long.TYPE,
-    ).apply { isAccessible = true }.newInstance(
+    return newCloudUserInfo(
         "webdav",
         credentials?.username?.ifBlank { WEBDAV_TITLE } ?: WEBDAV_TITLE,
         "",
@@ -546,7 +525,7 @@ internal fun WebDavDriveHook.webDavCloudUserInfo(): Any {
     )
 }
 
-internal fun WebDavDriveHook.webDavResult(block: () -> Any?): Any =
+internal fun WebDavDriveHook.webDavResult(block: () -> Any?): Any? =
     runCatching { block() }
         .fold(
             onSuccess = { kotlinResultSuccess(it) },
@@ -594,14 +573,14 @@ internal fun WebDavDriveHook.refreshWebDavLibrary(path: String = currentWebDavBr
             }
         logWebDav("refresh library path=$normalizedPath items=${items.size}")
         flow.javaClass.methods.first {
-            it.name == "setValue" && it.parameterTypes.size == 1
+            it.hostNameMatches("setValue") && it.parameterTypes.size == 1
         }.apply { isAccessible = true }.invoke(flow, pagingDataFrom(items))
         logWebDav("refresh library setValue done path=$normalizedPath")
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX failed to refresh WebDAV library: ${it.stackTraceToString()}")
         runCatching {
             flow.javaClass.methods.first { method ->
-                method.name == "setValue" && method.parameterTypes.size == 1
+                method.hostNameMatches("setValue") && method.parameterTypes.size == 1
             }.apply { isAccessible = true }.invoke(flow, emptyPagingData())
         }
     }
@@ -680,9 +659,9 @@ internal fun WebDavDriveHook.updateHomeWebDavSearchResults(
     rememberHomeViewModelDependencies(viewModel)
     runCatching {
         val updateMethod = viewModel.javaClass.superclass?.methods?.firstOrNull {
-            it.name == "updateUiState" && it.parameterTypes.size == 1
+            it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
         } ?: viewModel.javaClass.methods.first {
-            it.name == "updateUiState" && it.parameterTypes.size == 1
+            it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
         }
         updateMethod.apply { isAccessible = true }.invoke(
             viewModel,
@@ -727,12 +706,13 @@ internal fun WebDavDriveHook.addHomeWebDavSearchSection(
     results: List<*>,
     intentReceiver: Any,
     generation: Long,
+    navGraphScope: Any? = null,
 ) {
     runCatching {
         val itemMethod = lazyListScope.javaClass.methods.firstOrNull {
-            it.name == "item" && it.parameterTypes.size == 3
+            it.hostNameMatches("item") && it.parameterTypes.size == 3
         } ?: lazyListScope.javaClass.declaredMethods.first {
-            it.name == "item" && it.parameterTypes.size == 3
+            it.hostNameMatches("item") && it.parameterTypes.size == 3
         }
         itemMethod.isAccessible = true
         itemMethod.invoke(
@@ -753,11 +733,11 @@ internal fun WebDavDriveHook.addHomeWebDavSearchSection(
                                 if (isOnlineCompletionPath(cloudPathOf(book))) {
                                     handleOnlineCompletionSearchTap(book)
                                 } else if (!tryHandleRunningCloudDownloadTap(book, type)) {
-                                    homeSearchTapMethod().invoke(
-                                        null,
-                                        intentReceiver,
-                                        book,
-                                    )
+                                    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
+                                        B4HomeSearchEvents.open(this, intentReceiver, book, requireNotNull(navGraphScope))
+                                    } else {
+                                        homeSearchTapMethod().invoke(null, intentReceiver, book)
+                                    }
                                 }
                             }
                             targetUnit()
@@ -825,23 +805,15 @@ internal fun WebDavDriveHook.updateWebDavStorageTree(viewModel: Any, path: Strin
     runCatching {
         val tree = webDavDirTree(path)
         val updateMethod = viewModel.javaClass.superclass?.methods?.firstOrNull {
-            it.name == "updateUiState" && it.parameterTypes.size == 1
+            it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
         } ?: viewModel.javaClass.methods.first {
-            it.name == "updateUiState" && it.parameterTypes.size == 1
+            it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
         }
         updateMethod.apply { isAccessible = true }.invoke(
             viewModel,
             functionProxy("WebDavStorageTreeState", FUNCTION1_CLASS) { args ->
                 val state = args?.getOrNull(0) ?: return@functionProxy args?.getOrNull(0)
-                cls(CLOUD_STORAGE_UI_STATE_CLASS).declaredMethods.first {
-                    it.name == "copy" && it.parameterTypes.size == 2
-                }.apply { isAccessible = true }.invoke(
-                    state,
-                    state.javaClass.methods.first { it.name == "getUserInfo" && it.parameterTypes.isEmpty() }
-                        .apply { isAccessible = true }
-                        .invoke(state),
-                    tree,
-                )
+                storageStateWithTree(state, tree)
             },
         )
         logWebDav("update storage tree path=${normalizeWebDavPath(path)} size=${tree.size}")
@@ -855,7 +827,7 @@ internal fun WebDavDriveHook.webDavLocalBookFlow(url: String): Any {
     return runCatching {
         val bookshelf = currentBookshelfRepository() ?: return@runCatching emptyFlow()
         bookshelf.javaClass.methods.first {
-            it.name == "liveBookByUrl" && it.parameterTypes.size == 1
+            it.hostNameMatches("liveBookByUrl") && it.parameterTypes.size == 1
         }.apply { isAccessible = true }.invoke(bookshelf, url)
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX failed to create WebDAV local book flow: ${it.stackTraceToString()}")
@@ -867,7 +839,7 @@ internal fun WebDavDriveHook.webDavWorkFlow(uniqueName: String): Any {
     return runCatching {
         val tracker = currentWorkTracker() ?: return@runCatching emptyFlow()
         tracker.javaClass.methods.first {
-            it.name == "getWorkInfosForUniqueWorkFlow" && it.parameterTypes.size == 1
+            it.hostNameMatches("getWorkInfosForUniqueWorkFlow") && it.parameterTypes.size == 1
         }.apply { isAccessible = true }.invoke(tracker, uniqueName)
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX failed to create WebDAV work flow: ${it.stackTraceToString()}")
@@ -1755,6 +1727,9 @@ internal inline fun <T> WebDavDriveHook.withWebDavIcon(block: () -> T): T {
 internal fun WebDavDriveHook.getComposeWebDavVector(): Any? {
     composeWebDavVector?.let { return it }
     return runCatching {
+        if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
+            return@runCatching B4WebDavVector(this).build().also { composeWebDavVector = it }
+        }
         val builderClass = cls(IMAGE_VECTOR_BUILDER_CLASS)
         val markerClass = cls(DEFAULT_CONSTRUCTOR_MARKER_CLASS)
         val builder = builderClass.getDeclaredConstructor(
@@ -1783,7 +1758,7 @@ internal fun WebDavDriveHook.getComposeWebDavVector(): Any? {
         addVectorPath(builderClass, builder, WEBDAV_ICON_BODY_PATH, 0xFF4BAFA7L)
         addVectorPath(builderClass, builder, WEBDAV_ICON_CLOUD_PATH, 0xFFFFFFFFL)
         addVectorPath(builderClass, builder, WEBDAV_ICON_SLOT_PATH, 0xFFFFFFFFL, 0.84f)
-        val imageVector = builderClass.getDeclaredMethod("build")
+        val imageVector = builderClass.hostMethod("build")
             .apply { isAccessible = true }
             .invoke(builder)
         composeWebDavVector = imageVector

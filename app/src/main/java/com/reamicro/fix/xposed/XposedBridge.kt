@@ -1,6 +1,7 @@
 package com.reamicro.fix.xposed
 
 import android.util.Log
+import com.reamicro.fix.core.hostMethodsNamed
 import com.reamicro.fix.logging.ModuleLogBuffer
 import com.reamicro.fix.logging.ModuleLogLevel
 import com.reamicro.fix.logging.ModuleLogSink
@@ -51,6 +52,10 @@ object XposedBridge {
         log(Log.ERROR, Log.getStackTraceString(throwable), throwable)
     }
 
+    /** 解除核实过的调用方内联，保证其内部 hook 能被实际调用。 */
+    fun deoptimize(method: Executable): Boolean =
+        requireNotNull(frameworkRef.get()) { "LibXposed framework is not attached" }.deoptimize(method)
+
     fun hookMethod(method: Executable, callback: XC_MethodHook): XposedInterface.HookHandle {
         method.isAccessible = true
         val framework = frameworkRef.get()
@@ -73,7 +78,8 @@ object XposedBridge {
     }
 
     fun hookAllMethods(clazz: Class<*>, methodName: String, callback: XC_MethodHook): List<XposedInterface.HookHandle> {
-        return hookBatch(clazz.declaredMethods.asSequence().filter { it.name == methodName }, callback)
+        // 原生宿主返回逻辑名，混淆宿主由 profile 解析到实际方法名。
+        return hookBatch(clazz.hostMethodsNamed(methodName).asSequence(), callback)
     }
 
     fun hookAllMethodsIncludingInherited(
@@ -81,12 +87,7 @@ object XposedBridge {
         methodName: String,
         callback: XC_MethodHook,
     ): List<XposedInterface.HookHandle> {
-        return hookBatch(
-            (clazz.methods.asSequence() + clazz.declaredMethods.asSequence())
-                .distinct()
-                .filter { it.name == methodName },
-            callback,
-        )
+        return hookBatch(clazz.hostMethodsNamed(methodName).asSequence(), callback)
     }
 
     fun hookAllConstructors(clazz: Class<*>, callback: XC_MethodHook): List<XposedInterface.HookHandle> {

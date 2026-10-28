@@ -19,7 +19,7 @@ internal object StructureBookDetailDividerStyle {
     private data class Reader(val instance: Any, val getter: java.lang.reflect.Method)
     private val readers = WeakHashMap<ClassLoader, Reader?>()
     fun scale(loader: ClassLoader): Float = runCatching {
-        if (HostSymbols.profileId == "2.3.3-b4") {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
             // getUdp(1f) 复用宿主懒初始化的真实缩放因子，不读取未初始化字段或重复计算。
             return@runCatching normalizeScale((loader.hostStaticMethod(
                 "app.zhendong.reamicro.arch.extensions.UnitExtKt", "getUdp", Float::class.javaPrimitiveType,

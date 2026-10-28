@@ -19,6 +19,9 @@ object InjectedModuleContext {
         }
     }
 
+    /** 供符号解析层读取模块 APK 路径；未初始化时返回 null。 */
+    fun sourceDirOrNull(): String? = moduleInfo?.sourceDir
+
     fun runUiAction(base: Context?, action: () -> Unit) {
         ModuleResourceRecovery.run(action) { error ->
             XposedBridge.logError("Module resource generation expired; restart the host instead of loading another APK", error)

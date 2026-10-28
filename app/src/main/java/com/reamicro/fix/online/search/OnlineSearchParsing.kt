@@ -1,6 +1,7 @@
 package com.reamicro.fix.online.search
 
 import android.util.Base64
+import com.reamicro.fix.core.HostHomeSearchState
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.OnlineJsonPathCompat
 import com.reamicro.fix.online.search.formatOnlineWordCountValue
@@ -345,7 +346,8 @@ internal fun resolveOnlineUrl(baseUrl: String, value: String): String =
     resolveOnlineUrlCompat(baseUrl, value)
 
 internal fun homeCloudSearchResults(state: Any): Map<*, *>? =
-    state.javaClass.methods.firstOrNull {
+    if (HostHomeSearchState.isB4(state)) HostHomeSearchState.cloudResults(state)
+    else state.javaClass.methods.firstOrNull {
         it.name == "getCloudSearchResults" && it.parameterTypes.isEmpty()
     }?.apply { isAccessible = true }?.invoke(state) as? Map<*, *>
 

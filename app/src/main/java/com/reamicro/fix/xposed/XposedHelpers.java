@@ -1,5 +1,6 @@
 package com.reamicro.fix.xposed;
 
+import com.reamicro.fix.core.HostSymbols;
 import io.github.libxposed.api.XposedInterface;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -16,8 +17,18 @@ public final class XposedHelpers {
     }
 
     public static Class<?> findClass(String className, ClassLoader classLoader) throws ClassNotFoundException {
-        return Class.forName(className, false,
-                classLoader != null ? classLoader : XposedHelpers.class.getClassLoader());
+        // 统一经符号解析层：未命中 profile 时逻辑名原样透传，混淆版按映射改写
+        String resolved = HostSymbols.resolveClass(className);
+        ClassLoader loader = classLoader != null
+                ? classLoader
+                : XposedHelpers.class.getClassLoader();
+        try {
+            return Class.forName(resolved, false, loader);
+        } catch (ClassNotFoundException error) {
+            if (resolved.equals(className)) throw error;
+            // profile 映射失效时回退原始名，避免单个符号错误放大为整模块失效
+            return Class.forName(className, false, loader);
+        }
     }
 
     public static XposedInterface.HookHandle findAndHookMethod(
@@ -26,7 +37,9 @@ public final class XposedHelpers {
             String methodName,
             Object... parameterTypesAndCallback
     ) throws ClassNotFoundException {
-        return findAndHookMethod(findClass(className, classLoader), methodName, parameterTypesAndCallback);
+        Class<?> clazz = findClass(className, classLoader);
+        return findAndHookMethod(clazz, HostSymbols.resolveMethodName(className, methodName),
+                parameterTypesAndCallback);
     }
 
     public static XposedInterface.HookHandle findAndHookMethod(
@@ -34,6 +47,7 @@ public final class XposedHelpers {
             String methodName,
             Object... parameterTypesAndCallback
     ) {
+        String resolvedName = HostSymbols.resolveMethodName(clazz, methodName);
         if (parameterTypesAndCallback.length == 0
                 || !(parameterTypesAndCallback[parameterTypesAndCallback.length - 1] instanceof XC_MethodHook)) {
             throw new IllegalArgumentException("last argument must be XC_MethodHook");
@@ -43,7 +57,15 @@ public final class XposedHelpers {
         for (int i = 0; i < parameterTypes.length; i++) {
             parameterTypes[i] = resolveParameterType(parameterTypesAndCallback[i], clazz.getClassLoader());
         }
-        Method method = findMethodExact(clazz, methodName, parameterTypes);
+        Method method = findExactOrNull(clazz, resolvedName, parameterTypes);
+        if (method == null && !resolvedName.equals(methodName)) {
+            // profile 过期时保留对未混淆宿主的兼容路径
+            method = findExactOrNull(clazz, methodName, parameterTypes);
+        }
+        if (method == null) {
+            throw new NoSuchMethodError(clazz.getName() + "#" + methodName);
+        }
+        method.setAccessible(true);
         return XposedBridge.INSTANCE.hookMethod(method, callback);
     }
 
@@ -70,16 +92,47 @@ public final class XposedHelpers {
     public static Object callMethod(Object target, String methodName, Object... args) throws Exception {
         if (target == null) throw new IllegalArgumentException("target must not be null");
         Class<?> clazz = target instanceof Class<?> ? (Class<?>) target : target.getClass();
-        Method method = findMethodBestMatch(clazz, methodName, target instanceof Class<?>, args);
-        return method.invoke(target instanceof Class<?> ? null : target, args);
+        String owner = HostSymbols.logicalClass(clazz.getName());
+        String resolvedName = HostSymbols.resolveMethodName(clazz, methodName);
+        try {
+            Method method = findMethodBestMatch(clazz, resolvedName, target instanceof Class<?>, args);
+            return method.invoke(target instanceof Class<?> ? null : target, args);
+        } catch (NoSuchMethodError error) {
+            Object fieldValue = readAccessorField(target, clazz, owner, methodName, args);
+            if (fieldValue != NO_FIELD_VALUE) return fieldValue;
+            if (!resolvedName.equals(methodName)) {
+                Method method = findMethodBestMatch(clazz, methodName, target instanceof Class<?>, args);
+                return method.invoke(target instanceof Class<?> ? null : target, args);
+            }
+            throw error;
+        }
     }
 
     public static Object callStaticMethod(Class<?> clazz, String methodName, Object... args) throws Exception {
-        Method method = findMethodBestMatch(clazz, methodName, true, args);
-        return method.invoke(null, args);
+        String owner = HostSymbols.logicalClass(clazz.getName());
+        String resolvedName = HostSymbols.resolveMethodName(clazz, methodName);
+        try {
+            Method method = findMethodBestMatch(clazz, resolvedName, true, args);
+            return method.invoke(null, args);
+        } catch (NoSuchMethodError error) {
+            Object fieldValue = readAccessorField(clazz, clazz, owner, methodName, args);
+            if (fieldValue != NO_FIELD_VALUE) return fieldValue;
+            throw error;
+        }
     }
 
     public static Field findField(Class<?> clazz, String fieldName) {
+        String resolved = HostSymbols.resolveFieldName(clazz, fieldName);
+        Field mapped = findFieldOrNull(clazz, resolved);
+        if (mapped != null) return mapped;
+        if (!resolved.equals(fieldName)) {
+            Field original = findFieldOrNull(clazz, fieldName);
+            if (original != null) return original;
+        }
+        throw new NoSuchFieldError(clazz.getName() + "#" + fieldName);
+    }
+
+    private static Field findFieldOrNull(Class<?> clazz, String fieldName) {
         Class<?> current = clazz;
         while (current != null) {
             try {
@@ -90,7 +143,26 @@ public final class XposedHelpers {
                 current = current.getSuperclass();
             }
         }
-        throw new NoSuchFieldError(clazz.getName() + "#" + fieldName);
+        return null;
+    }
+
+    private static final Object NO_FIELD_VALUE = new Object();
+
+    private static Object readAccessorField(
+            Object target,
+            Class<?> clazz,
+            String owner,
+            String methodName,
+            Object[] args
+    ) throws IllegalAccessException {
+        if (args.length != 0) return NO_FIELD_VALUE;
+        String fieldName = HostSymbols.resolveAccessorFieldName(clazz, methodName);
+        if (fieldName == null) fieldName = HostSymbols.resolveAccessorFieldName(owner, methodName);
+        if (fieldName == null) return NO_FIELD_VALUE;
+        Field field = findFieldOrNull(clazz, fieldName);
+        if (field == null) return NO_FIELD_VALUE;
+        Object receiver = target instanceof Class<?> ? null : target;
+        return field.get(receiver);
     }
 
     public static Object getObjectField(Object target, String fieldName) throws IllegalAccessException {
@@ -126,7 +198,11 @@ public final class XposedHelpers {
     }
 
     public static Method findMethodExact(Class<?> clazz, String methodName, Class<?>... parameterTypes) {
-        Method method = findExactOrNull(clazz, methodName, parameterTypes);
+        String resolved = HostSymbols.resolveMethodName(clazz, methodName);
+        Method method = findExactOrNull(clazz, resolved, parameterTypes);
+        if (method == null && !resolved.equals(methodName)) {
+            method = findExactOrNull(clazz, methodName, parameterTypes);
+        }
         if (method == null) throw new NoSuchMethodError(clazz.getName() + "#" + methodName);
         method.setAccessible(true);
         return method;
@@ -148,7 +224,13 @@ public final class XposedHelpers {
     }
 
     public static Method findMethodBestMatch(Class<?> clazz, String methodName, Object... args) {
-        return findMethodBestMatch(clazz, methodName, false, args);
+        String resolved = HostSymbols.resolveMethodName(clazz, methodName);
+        try {
+            return findMethodBestMatch(clazz, resolved, false, args);
+        } catch (NoSuchMethodError error) {
+            if (resolved.equals(methodName)) throw error;
+            return findMethodBestMatch(clazz, methodName, false, args);
+        }
     }
 
     private static Method findMethodBestMatch(Class<?> clazz, String name, boolean staticOnly, Object[] args) {

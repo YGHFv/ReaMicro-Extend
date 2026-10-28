@@ -127,7 +127,7 @@ class LocalExportHook(
                 openDirectoryPicker(context)
                 targetUnit()
             }
-            if (HostSymbols.profileId == "2.3.3-b4") {
+            if (HostSymbols.abiProfileId == "2.3.3-b4") {
                 // 恢复旧 authCardColumnModifier 的外层缩进，不能直接插入全宽的备份页 Column。
                 val ui = B2NativeUi(classLoader)
                 val content = functionProxy("LocalExportColumnContent", HostClasses.Kotlin.FUNCTION3) { args ->

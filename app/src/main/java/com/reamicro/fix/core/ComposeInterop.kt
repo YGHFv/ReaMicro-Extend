@@ -14,7 +14,7 @@ class ComposeInterop(
     fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any {
         val functionClass = resolveClass(functionClassName)
         return Proxy.newProxyInstance(classLoader, arrayOf(functionClass)) { proxy, method, args ->
-            when (method.name) {
+            when (com.reamicro.fix.core.HostSymbols.logicalMethodName(method)) {
                 "invoke" -> runCatching { block(args) }
                     .onFailure {
                         XposedBridge.logAlways("$logPrefix failed in $name callback: ${it.stackTraceToString()}")
@@ -59,10 +59,10 @@ class ComposeInterop(
         candidates
             .filter { method ->
                 val types = method.parameterTypes
-                (method.name == baseName || method.name.startsWith("$baseName-")) &&
+                (method.hostNameStartsWith(baseName)) &&
                     types.size >= COMPOSABLE_MIN_PARAMETER_COUNT &&
                     (firstParameterType == null || types.first() == firstParameterType) &&
-                    types[types.size - 3].name == composerClassName &&
+                    typeMatches(types[types.size - 3], composerClassName) &&
                     types[types.size - 2] == Integer.TYPE &&
                     types[types.size - 1] == Integer.TYPE
             }

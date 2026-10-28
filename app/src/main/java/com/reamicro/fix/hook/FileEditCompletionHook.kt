@@ -224,7 +224,7 @@ class FileEditCompletionHook(
         formatFileSize(callLong(book, "getSize")).replace(" ", "")
 
     private fun backupTypeName(book: Any): String =
-        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+        if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
             // 与 B4 BookSyncSizeItem 的存储类型参数保持一致，旧 BackupType 门面已被内联。
             when (callInt(book, "getBackupType")) {
                 1 -> "百度网盘"
@@ -587,7 +587,7 @@ class FileEditCompletionHook(
         middleEllipsis: Boolean = false,
         nativeTrailingGlyph: String? = null,
     ) {
-        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4" &&
+        if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4" &&
             (secondaryValue != null || nativeTrailingGlyph == "\u276F")) {
             renderB4SyncActionRow(label, value, secondaryValue, afterValueIcon, composer, onClickName, onClick)
             return
@@ -787,7 +787,7 @@ class FileEditCompletionHook(
 
     private fun navigateNextImageVector(): Any? =
         runCatching {
-            if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+            if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
                 return@runCatching cls("ReaMicroHost.NavigateNextIcon").getDeclaredMethod("i").invoke(null)
             }
             method(NAVIGATE_NEXT_ICON_CLASS, "getNavigateNext", 1).invoke(
@@ -808,7 +808,7 @@ class FileEditCompletionHook(
         when (callInt(book, "getBackupType")) {
             1 -> coloredAppIcon(BAIDU_ICON_CLASS, "getBaiduNetdisk")
             2 -> coloredAppIcon(YUN115_ICON_CLASS, "getYun115")
-            4 -> if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+            4 -> if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
                 cls("ReaMicroHost.AliyunIcon").getDeclaredMethod("d").invoke(null)
             } else coloredAppIcon(ALIYUN_ICON_CLASS, "getAliyun")
             else -> coloredAppIcon(ANDROID_OS_ICON_CLASS, "getAndroidOs")

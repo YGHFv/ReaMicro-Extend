@@ -1,5 +1,9 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostNameMatches
+
+import com.reamicro.fix.core.hostClass
 import android.os.SystemClock
 import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.xposed.XposedHelpers
@@ -18,20 +22,20 @@ internal fun ReaderHook.saveAndReloadReaderSelection(
     onDemandRefreshCoordinator.cancelActiveIf { true }
     val mutex = XposedHelpers.getObjectField(viewModel, "virtualPageLoadMutex")
         ?: error("宿主缺少章节加载锁，未写入")
-    val owner = Any()
+    val lease = com.reamicro.fix.core.HostMutex(mutex, Any())
     var locked = false
     var saved = false
     try {
         val deadline = SystemClock.elapsedRealtime() + 8_000L
         while (!locked && SystemClock.elapsedRealtime() < deadline) {
             checkSelectionEditSession(viewModel, epub)
-            locked = XposedHelpers.callMethod(mutex, "tryLock", owner) as? Boolean == true
+            locked = lease.tryAcquire()
             if (!locked) Thread.sleep(25)
         }
         check(locked) { "章节仍在加载，请稍后保存；未修改文件" }
         checkSelectionEditSession(viewModel, epub)
         val method = findOnDemandRecenterMethod(viewModel, epub, anchor)
-            ?.takeIf { it.name == "recenterVirtualWindow" } ?: error("宿主重排接口不匹配，未写入")
+            ?.takeIf { it.hostNameMatches("recenterVirtualWindow") } ?: error("宿主重排接口不匹配，未写入")
 
         val oldPages = XposedHelpers.getObjectField(viewModel, "virtualPages") as? Map<*, *>
         val oldMapping = XposedHelpers.getObjectField(viewModel, "virtualToReal") as? Map<*, *>
@@ -94,7 +98,7 @@ internal fun ReaderHook.saveAndReloadReaderSelection(
         return ReaderSelectionRefreshResult(null, error.message)
     } finally {
         selectionWindow = null
-        if (locked) runCatching { XposedHelpers.callMethod(mutex, "unlock", owner) }
+        if (locked) runCatching { lease.release() }
             .onFailure { XposedBridge.logError("ReaMicro LSP selection load mutex unlock failed: ${it.message}") }
     }
 }
@@ -102,36 +106,11 @@ internal fun ReaderHook.saveAndReloadReaderSelection(
 private fun ReaderHook.invokeSelectionRecenter(
     target: Any, method: Method, spine: Int, epub: Any, cfi: Any?,
 ): Any? = invokeSelectionHostSuspend { continuation ->
-    method.invoke(target, spine, epub, cfi, false, continuation)
+    invokeOnDemandRecenter(method, target, spine, epub, cfi, continuation)
 }
 
 internal fun ReaderHook.invokeSelectionHostSuspend(
     parentContext: Any = emptyCoroutineContext(), operation: (Any?) -> Any?,
 ): Any? {
-    val f2 = classLoader.loadClass("kotlin.jvm.functions.Function2")
-    val continuationType = classLoader.loadClass("kotlin.coroutines.Continuation")
-    val timeout = classLoader.loadClass("kotlinx.coroutines.TimeoutKt")
-        .getMethod("withTimeout", Long::class.javaPrimitiveType, f2, continuationType)
-    fun block(fn: (Array<out Any?>) -> Any?): Any =
-        Proxy.newProxyInstance(classLoader, arrayOf(f2)) { proxy, called, args ->
-            when (called.name) {
-                "invoke" -> fn(args ?: emptyArray())
-                "toString" -> "ReaMicroSelectionRecenter"
-                "hashCode" -> System.identityHashCode(proxy)
-                "equals" -> proxy === args?.firstOrNull()
-                else -> null
-            }
-        }
-    fun invokeUnwrapped(block: () -> Any?): Any? =
-        try { block() } catch (e: InvocationTargetException) { throw e.targetException ?: e }
-    val timed = block { args ->
-        val recenter = block { inner ->
-            invokeUnwrapped { operation(inner[1]) }
-        }
-        invokeUnwrapped { timeout.invoke(null, 20_000L, recenter, args[1]) }
-    }
-    val runBlocking = classLoader.loadClass("kotlinx.coroutines.BuildersKt").getMethod(
-        "runBlocking", classLoader.loadClass("kotlin.coroutines.CoroutineContext"), f2,
-    )
-    return invokeUnwrapped { runBlocking.invoke(null, parentContext, timed) }
+    return com.reamicro.fix.core.HostCoroutines.runBlocking(classLoader, parentContext, 20_000L, operation)
 }

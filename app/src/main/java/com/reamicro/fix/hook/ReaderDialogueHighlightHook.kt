@@ -993,7 +993,7 @@ class ReaderDialogueHighlightHook(
 
     private fun packTextUnit(methodName: String, amount: Float): Long? =
         runCatching {
-            if (HostSymbols.profileId == "2.3.3-b4") {
+            if (HostSymbols.abiProfileId == "2.3.3-b4") {
                 // getSp/getEm 已被 R8 内联；通用 TextUnit 工厂仍在，类型位必须与旧实现一致。
                 val kind = if (methodName == "getEm") 0x200000000L else 0x100000000L
                 return@runCatching classLoader.hostStaticMethod(
@@ -1155,7 +1155,7 @@ class ReaderDialogueHighlightHook(
     }
 
     private fun compareJustifyTextForHighlight(param: XC_MethodHook.MethodHookParam) {
-        val index = if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") 5
+        val index = if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") 5
             else JUSTIFY_TEXT_CHANGED_FLAGS_INDEX
         val flags = param.args?.getOrNull(index) as? Int ?: return
         // 参数可能被模块替换，交给宿主当前节点的 changed(text) 比较，不能每帧强制标脏。
@@ -1279,7 +1279,7 @@ class ReaderDialogueHighlightHook(
                     }.onFailure { logNinePatchDrawFailure("text-node", it) }
                 }
             })
-            if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+            if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
                 // B4 在唯一的 drawDirect 调用点内联了节点 draw，必须反优化调用点才能命中 hook。
                 val caller = cls("androidx.compose.ui.node.LayoutNodeDrawScope").declaredMethods.single {
                     it.hostNameMatches("drawDirect") && it.parameterCount == 5

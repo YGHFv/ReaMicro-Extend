@@ -8,6 +8,9 @@ import android.content.Context
 import android.view.View
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.core.ComposeInterop
+import com.reamicro.fix.core.HostObject
+import com.reamicro.fix.core.HostObjects
+import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.settings.ReaderHighlightBookContext
 import com.reamicro.fix.settings.XposedModuleSettings
@@ -26,7 +29,7 @@ class ReaderHook(
 
     internal val composeInterop = ComposeInterop(
         classLoader = classLoader,
-        resolveClass = classLoader::loadClass,
+        resolveClass = classLoader::hostClass,
         unitInstance = ::targetUnit,
         logPrefix = LOG_PREFIX,
     )
@@ -65,31 +68,7 @@ class ReaderHook(
     internal var searchOverlayThemeCallbacksActivityRef: WeakReference<Activity>? = null
     internal var bottomSearchReceiverRef: WeakReference<Any>? = null
     internal var bottomSearchBookRef: WeakReference<Any>? = null
-    internal var bottomReadAloudReceiverRef: WeakReference<Any>? = null
-    internal var bottomReadAloudBookRef: WeakReference<Any>? = null
     internal var currentReaderNavGraphScopeRef: WeakReference<Any>? = null
-    internal var readAloudMenuButtonRef: WeakReference<View>? = null
-    internal var readAloudMenuButtonActivityRef: WeakReference<Activity>? = null
-    internal val readAloudRestartLock = Any()
-    internal val readAloudHighlightReceiverLock = Any()
-    internal var readAloudHighlightReceiver: BroadcastReceiver? = null
-    internal var readAloudHighlightReceiverContextRef: WeakReference<Context>? = null
-    @Volatile internal var activeReadAloudBookKey: String = ""
-    @Volatile internal var activeReadAloudSessionId: String = ""
-    @Volatile internal var activeReadAloudPaused: Boolean = false
-    @Volatile internal var lastReadAloudPageKey: String = ""
-    @Volatile internal var suppressReadAloudRestartUntilMs: Long = 0L
-    @Volatile internal var readAloudRestartSeq: Long = 0L
-    @Volatile internal var readAloudPageProbeLogKey: String = ""
-    @Volatile internal var activeReadAloudHighlightId: Long? = null
-    @Volatile internal var activeReadAloudHighlightMark: Any? = null
-    @Volatile internal var lastReadAloudFollowCfi: String = ""
-    @Volatile internal var lastReadAloudFollowAtMs: Long = 0L
-    @Volatile internal var isDispatchingReadAloudStatistics: Boolean = false
-    @Volatile internal var lastReadAloudStatisticsSessionId: String = ""
-    @Volatile internal var lastReadAloudStatisticsCfi: String = ""
-    @Volatile internal var lastReadAloudStatisticsElapsedMs: Long = 0L
-    @Volatile internal var pendingReadAloudProgressRestore: Boolean = false
     internal val replayingOnDemandJump = ThreadLocal<Boolean>()
     internal val onDemandPrefetchInFlight = ConcurrentHashMap.newKeySet<String>()
     internal val onDemandPrefetchRetryCount = ConcurrentHashMap<String, Int>()
@@ -100,8 +79,8 @@ class ReaderHook(
     @Volatile internal var onDemandVisibleBusyRetries = 0
     @Volatile internal var onDemandVisibleSlot: Int? = null
     @Volatile internal var onDemandJumpLease: ReaderRefreshCoordinator.Lease? = null
-    @Volatile internal var lastRestoredReadAloudProgressKey: String = ""
-    @Volatile internal var lastReadAloudProgressSyncAtMs: Long = 0L
+    // 当前页面定位失败时的一次性诊断日志去重键（选中文本编辑与全文搜索共用）。
+    @Volatile internal var currentPageProbeLogKey: String = ""
     @Volatile internal var pendingReaderHighlightSheet: ReaderHighlightSheetRequest? = null
 
     @Volatile internal var readerHighlightScreenBackRef: WeakReference<Any>? = null
@@ -110,6 +89,13 @@ class ReaderHook(
     internal val udpValueCache = HashMap<Int, Float>()
 
     internal val noArgMethodCache = HashMap<String, Method?>()
+    /**
+     * 宿主 `org.epub.UIEpubWindow` 访问器。
+     *
+     * 混淆版（B2）会被 R8 归约成纯静态类并删除 INSTANCE，必须走这里而不是
+     * `getField("INSTANCE")`，否则排版测量与 CFI 解析全部失效。
+     */
+    internal val epubWindow: HostObject by lazy { HostObjects.get(classLoader, UI_EPUB_WINDOW_CLASS) }
     internal val renderingHighlightScreenEntry = ThreadLocal.withInitial { false }
     internal val highlightScreenEntryInjected = ThreadLocal.withInitial { false }
 
@@ -160,7 +146,6 @@ class ReaderHook(
 
     fun install() {
         ReaderHighlightBookContext.refreshRequester = highlightRefreshQueue::request
-        ensureReadAloudHighlightReceiver()
 
         HookInstallReport.installAll(
             FEATURE_ID,

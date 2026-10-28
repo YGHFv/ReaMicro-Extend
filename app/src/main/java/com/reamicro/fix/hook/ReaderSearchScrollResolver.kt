@@ -1,5 +1,7 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostMethod
 import com.reamicro.fix.epub.editor.*
 import com.reamicro.fix.hook.reader.*
 import com.reamicro.fix.reader.SearchHighlightMarkDraft
@@ -25,7 +27,13 @@ internal class ReaderSearchScrollResolver(private val reader: ReaderHook) {
             cache[it] = f
         } }
         fun offset(flow: Flow, p: SelectionCfiPoint): Int {
-            val span = flow.spans.singleOrNull { it.key == p.key } ?: error("滚动文本节点无法无损定位")
+            val candidates = flow.spans.filter { it.key == p.key }
+            val span = candidates.singleOrNull()
+                ?: candidates.firstOrNull { p.offset in 0..(it.until - it.from) }
+                ?: error(
+                    "滚动文本节点无法无损定位 key=${p.key} offset=${p.offset} " +
+                        "spans=${flow.spans.take(12).joinToString { "${it.key ?: "null"}:${it.from}-${it.until}" }}",
+                )
             require(p.offset in 0..(span.until - span.from))
             return span.from + p.offset
         }
@@ -46,21 +54,15 @@ internal class ReaderSearchScrollResolver(private val reader: ReaderHook) {
         val start = mapper.cfiForPoint(flows.first().id, flows.first().point.copy(offset = flows.first().point.offset + from))
         val finish = mapper.cfiForPoint(flows.last().id, flows.last().point.copy(offset = flows.last().point.offset + until))
         val layout = reader.callNoArg(flows.first().dom, "getTextLayout") ?: error("滚动文本尚未完成测量")
-        val line = (XposedHelpers.callMethod(layout, "getLineForOffset", from) as Number).toInt()
-        var y = (XposedHelpers.callMethod(layout, "getLineTop", line) as Number).toFloat()
-        val lineHeight = ((XposedHelpers.callMethod(layout, "getLineBottom", line) as Number).toFloat() - y).toInt().coerceAtLeast(1)
+        // B2 将 TextLayoutResult 的三个转发 getter 内联，几何仍由原生 MultiParagraph 提供。
+        val geometry = if (com.reamicro.fix.core.HostSymbols.isIdentity) layout
+            else reader.callNoArg(layout, "getMultiParagraph") ?: error("滚动文本缺少原生段落布局")
+        val line = (XposedHelpers.callMethod(geometry, "getLineForOffset", from) as Number).toInt()
+        val y = (XposedHelpers.callMethod(geometry, "getLineTop", line) as Number).toFloat()
+        val lineHeight = ((XposedHelpers.callMethod(geometry, "getLineBottom", line) as Number).toFloat() - y).toInt().coerceAtLeast(1)
 
-        val element = flows.first().element
-        val paddingValues = listOf(
-            element.javaClass.getMethod("boxPadding").invoke(element),
-            element.javaClass.getMethod("boxMargin", Boolean::class.javaPrimitiveType).invoke(element, false),
-        )
-        for (padding in paddingValues) {
-            val top = padding.javaClass.methods.first { it.name.startsWith("calculateTopPadding") && it.parameterCount == 0 }
-                .apply { isAccessible = true }.invoke(padding) as Number
-            val window = reader.classLoader.loadClass("org.epub.UIEpubWindow").getField("INSTANCE").get(null)
-            y += (XposedHelpers.callMethod(window, "px", top) as Number).toFloat()
-        }
+        // B2 已内联 boxPadding/boxMargin 的聚合门面；行内偏移从文本布局取得，
+        // 不再用未确认的边框值猜测滚动距离。
         return ResolvedSearchTarget(result.copy(cfi = start.toString(), startCfi = start.toString(), endCfi = finish.toString()),
             start, finish, ranges, 3, reader.callNoArg(flows.first().element, "getId"), y.toInt(), lineHeight)
     }
@@ -80,8 +82,9 @@ internal class ReaderSearchScrollResolver(private val reader: ReaderHook) {
         val dom = reader.callNoArg(element, "buildContentDom") ?: error("滚动内容无法渲染")
         val id = reader.callNoArg(dom, "getLocation")!!
         val point = mapper.anchorPoint(id)
-        val ext = reader.classLoader.loadClass("org.epub.utils.NodeExtKt")
-        val getStep = ext.getMethod("getSteps", reader.classLoader.loadClass("com.fleeksoft.ksoup.nodes.Node"))
+        val ext = reader.classLoader.hostClass("org.epub.utils.NodeExtKt")
+        val nodeClass = reader.classLoader.hostClass("com.fleeksoft.ksoup.nodes.Node")
+        val getStep = ext.hostMethod("getSteps", nodeClass)
         fun path(node: Any): String? {
             var n: Any? = node
             val steps = arrayListOf<Int>()

@@ -1,4 +1,5 @@
 package com.reamicro.fix.hook
+import com.reamicro.fix.core.hostAbiMethod
 
 import com.reamicro.fix.core.hostMethod
 import com.reamicro.fix.core.hostNameMatches
@@ -62,7 +63,7 @@ internal fun ReaMicroSettingsHook.renderDiscoverContent(innerPaddings: Any, comp
     }
 
     val background = backgroundDim(composer)
-    val modifier = if (HostSymbols.profileId == "2.3.3-b4") {
+    val modifier = if (HostSymbols.abiProfileId == "2.3.3-b4") {
         b2Ui.background(pageModifier(innerPaddings, true), background)
     } else method(BACKGROUND_KT_CLASS, BACKGROUND_DEFAULT_METHOD, 5).invoke(null,
         pageModifier(innerPaddings, true), background, null, 2, null)
@@ -98,7 +99,7 @@ private fun ReaMicroSettingsHook.renderDiscoverTopBarAction(
     icon: Any?, description: String, tint: Long, composer: Any, name: String, onClick: () -> Unit,
 ) {
     if (icon == null) return
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         val clickable = clickableModifier(modifierInstance(), name, onClick)
         val padded = b2Ui.padding(clickable, 10f, 10f, 10f, 10f)
         renderDiscoverIcon(icon, tint, composer, description, padded)
@@ -170,7 +171,7 @@ private fun ReaMicroSettingsHook.renderDiscoverKindRow(
         }
         val mod = discoverWeight(scope, modifierInstance())
 
-        if (HostSymbols.profileId == "2.3.3-b4") {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
             b2Ui.lazyRow(mod, list, inner)
             renderDiscoverKindExpandButton(inner)
             return@composableLambda targetUnit()
@@ -199,14 +200,14 @@ private fun ReaMicroSettingsHook.renderDiscoverKindExpandButton(composer: Any) {
         renderDiscoverIcon(DiscoverUiIcons.chevronDown(classLoader), colorScheme(inner).longMethod("getOnBackground"), inner)
         targetUnit()
     }
-    val width = if (HostSymbols.profileId == "2.3.3-b4") b2Ui.width(modifierInstance(), udp(48))
+    val width = if (HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.width(modifierInstance(), udp(48))
         else method(SIZE_KT_CLASS, WIDTH_METHOD, 2).invoke(null, modifierInstance(), udp(48))
-    val sized = if (HostSymbols.profileId == "2.3.3-b4") b2Ui.height(width, udp(48))
+    val sized = if (HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.height(width, udp(48))
         else method(SIZE_KT_CLASS, HEIGHT_METHOD, 2).invoke(null, width, udp(48))
     val modifier = clickableModifier(sized, "DiscoverKindExpand") {
         if (activity != null) openDiscoverKindDialog(activity)
     }
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         renderDiscoverIcon(DiscoverUiIcons.chevronDown(classLoader), colorScheme(composer).longMethod("getOnBackground"),
             composer, "选择发现分类", b2Ui.padding(modifier, udp(12), udp(12), udp(12), udp(12)))
         return
@@ -219,7 +220,7 @@ private fun ReaMicroSettingsHook.renderDiscoverKindChip(
 ) {
     val selected = kind.title == selection.kindTitle
     val activity = activityProvider()
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         val clickable = clickableModifier(modifierInstance(), "DiscoverKind${kind.title}") {
             DiscoverState.select(source.source.id, kind.title, activity?.applicationContext)
         }
@@ -469,7 +470,7 @@ private fun ReaMicroSettingsHook.renderDiscoverText(
 }
 
 private fun ReaMicroSettingsHook.renderDiscoverSpacer(composer: Any, widthDp: Int) {
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         b2Ui.spacer(b2Ui.width(modifierInstance(), udp(widthDp)), composer)
         return
     }
@@ -479,7 +480,7 @@ private fun ReaMicroSettingsHook.renderDiscoverSpacer(composer: Any, widthDp: In
 }
 
 private fun ReaMicroSettingsHook.renderDiscoverVGap(composer: Any, heightDp: Int) {
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         b2Ui.spacer(b2Ui.height(modifierInstance(), udp(heightDp)), composer)
         return
     }
@@ -546,7 +547,7 @@ private fun ReaMicroSettingsHook.renderDiscoverCover(
     var modifier = if (widthDp == null) {
         discoverFillMaxWidth(coverBase)
     } else {
-        if (HostSymbols.profileId == "2.3.3-b4") b2Ui.width(coverBase, udp(widthDp))
+        if (HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.width(coverBase, udp(widthDp))
         else method(SIZE_KT_CLASS, WIDTH_METHOD, DISCOVER_SIZE_PARAMETER_COUNT)
             .invoke(null, coverBase, udp(widthDp))
     }
@@ -554,11 +555,11 @@ private fun ReaMicroSettingsHook.renderDiscoverCover(
 
         modifier = discoverAspectRatio(modifier, DiscoverShelfStyle.COVER_RATIO)
     } else {
-        modifier = if (HostSymbols.profileId == "2.3.3-b4") b2Ui.height(modifier, udp(heightDp))
+        modifier = if (HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.height(modifier, udp(heightDp))
             else method(SIZE_KT_CLASS, HEIGHT_METHOD, DISCOVER_SIZE_PARAMETER_COUNT)
                 .invoke(null, modifier, udp(heightDp))
     }
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         HostAndroidViews(classLoader).render(factory, modifier, composer, update)
     } else androidViewMethod().invoke(null, factory, modifier, update, composer, 0, 0)
 }
@@ -844,38 +845,38 @@ private fun ReaMicroSettingsHook.textStyle(composer: Any, name: String, fallback
         .getOrElse { typography(composer).method0(fallback) }
 
 private fun ReaMicroSettingsHook.discoverFillMaxWidth(base: Any): Any =
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") b2Ui.fillWidth(base)
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.fillWidth(base)
     else
     method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, DISCOVER_FILL_MAX_WIDTH_PARAMETER_COUNT)
         .invoke(null, base, 0f, DISCOVER_FILL_MAX_WIDTH_DEFAULT_MASK, null)
 
 private fun ReaMicroSettingsHook.discoverAspectRatio(base: Any, ratio: Float): Any =
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         // B4 默认参数已内联，false 的高度优先槽不再出现在实际签名中。
-        cls("ReaMicroHost.AspectRatio").getDeclaredMethod("a",
+        cls("ReaMicroHost.AspectRatio").hostAbiMethod("a",
             cls("androidx.compose.ui.Modifier"), Float::class.javaPrimitiveType)
             .invoke(null, base, ratio)
     } else method(DISCOVER_ASPECT_RATIO_CLASS, DISCOVER_ASPECT_RATIO_METHOD, DISCOVER_ASPECT_RATIO_PARAMETER_COUNT)
         .invoke(null, base, ratio, false)
 
 private fun ReaMicroSettingsHook.paddingSides(base: Any, start: Int, top: Int, end: Int, bottom: Int): Any =
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         b2Ui.padding(base, udp(start), udp(top), udp(end), udp(bottom))
     } else
     method(PADDING_KT_CLASS, DISCOVER_PADDING_SIDES_METHOD, DISCOVER_PADDING_SIDES_PARAMETER_COUNT)
         .invoke(null, base, udp(start), udp(top), udp(end), udp(bottom))
 
 private fun ReaMicroSettingsHook.alignmentTop(): Any =
-    if (HostSymbols.profileId == "2.3.3-b4") cls("ReaMicroHost.Alignment").getDeclaredField("k").get(null)
+    if (HostSymbols.abiProfileId == "2.3.3-b4") cls("ReaMicroHost.Alignment").getDeclaredField("k").get(null)
     else staticObject(ALIGNMENT_CLASS, "INSTANCE").method0("getTop")
 
 private fun ReaMicroSettingsHook.discoverWeight(scope: Any, base: Any): Any =
-    if (HostSymbols.profileId == "2.3.3-b4") b2Ui.weight(scope, base)
+    if (HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.weight(scope, base)
     else method(DISCOVER_ROW_SCOPE_INSTANCE_CLASS, DISCOVER_ROW_WEIGHT_METHOD, DISCOVER_ROW_WEIGHT_PARAMETER_COUNT)
         .invoke(scope, base, 1f, true)
 
 private fun ReaMicroSettingsHook.discoverColumn(modifier: Any, content: Any, composer: Any) {
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         b2Ui.column(modifier, arrangementTop(), alignmentStart(), content, composer)
     } else method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(null, modifier,
         arrangementTop(), alignmentStart(), content, composer, 0, 0)
@@ -884,7 +885,7 @@ private fun ReaMicroSettingsHook.discoverColumn(modifier: Any, content: Any, com
 private fun ReaMicroSettingsHook.discoverRow(
     modifier: Any, content: Any, composer: Any, arrangement: Any? = null, alignment: Any? = null,
 ) {
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         b2Ui.row(modifier, content, composer, arrangement, alignment)
     } else method(ROW_KT_CLASS, ROW_METHOD, 7).invoke(null, modifier,
         arrangement ?: arrangementStart(), alignment ?: alignmentCenterVertically(), content, composer, 0, 0)

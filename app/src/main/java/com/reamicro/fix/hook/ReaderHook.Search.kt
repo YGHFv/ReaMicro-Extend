@@ -1,9 +1,19 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+
+import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.typeMatches
+
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostMethod
 import android.app.Activity
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.res.Configuration
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.widget.Toast
 import com.reamicro.fix.reader.SearchHighlightPlanner
@@ -20,8 +30,14 @@ internal fun ReaderHook.canRunFullTextSearch(): Boolean {
     return snapshot.moduleEnabled
 }
 
-internal fun ReaderHook.canSearchCurrentBook(): Boolean =
-    canRunFullTextSearch() && currentEpubRoot() != null && (currentReaderPage() != null || currentScrollElement != null)
+internal fun ReaderHook.canSearchCurrentBook(): Boolean {
+    val hasPage = currentReaderPage() != null
+    if (!hasPage && currentEpubStrong != null && currentSessionRef?.get() != null) {
+        currentSearchPagerMode = 3
+    }
+    return canRunFullTextSearch() && currentEpubRoot() != null &&
+        (hasPage || currentScrollElement != null || currentSearchPagerMode == 3)
+}
 
 internal fun ReaderHook.injectSearchHighlightIntoReaderCatalog(param: XC_MethodHook.MethodHookParam) {
     val args = param.args ?: return
@@ -98,9 +114,12 @@ internal fun ReaderHook.updateSearchNavigationForBottomState(activity: Activity)
 }
 
 internal fun ReaderHook.searchImageVector(): Any? = runCatching {
-    val outlined = classLoader.loadClass(ICONS_OUTLINED_CLASS).getField("INSTANCE").get(null)
-    classLoader.loadClass(SEARCH_ICON_CLASS).declaredMethods.firstOrNull {
-        it.name == "getSearch" && it.parameterTypes.size == 1
+    if (!HostSymbols.isIdentity) {
+        return@runCatching classLoader.hostClass(SEARCH_ICON_CLASS).hostMethod("getSearch").invoke(null)
+    }
+    val outlined = classLoader.hostClass(ICONS_OUTLINED_CLASS).hostField("INSTANCE").get(null)
+    classLoader.hostClass(SEARCH_ICON_CLASS).declaredMethods.firstOrNull {
+        it.hostNameMatches("getSearch") && it.parameterTypes.size == 1
     }?.apply { isAccessible = true }?.invoke(null, outlined)
 }.getOrNull()
 
@@ -274,7 +293,7 @@ internal fun ReaderHook.showFullTextSearchPage(activity: Activity, context: Cata
             } else {
                 searchNavigationState = lastSearchState
                 chosen = runCatching { jumpToSearchResult(result, index) }.getOrElse {
-                    XposedBridge.log("ReaMicro search entry failed type=${it.javaClass.simpleName}")
+                    XposedBridge.logError("ReaMicro search entry failed", it)
                     false
                 }
                 if (!chosen) {
@@ -312,7 +331,7 @@ internal fun ReaderHook.isSearchHighlightContentOverlayMethod(method: Method): B
     if (params.size !in 4..6) return false
     if (!List::class.java.isAssignableFrom(params.getOrNull(1) ?: return false)) return false
     if (params.getOrNull(3) != Int::class.javaPrimitiveType) return false
-    val names = params.map { it.name }
+    val names = params.map { HostSymbols.logicalClass(it.name) }
     val hasContentDom = names.getOrNull(0) == "org.epub.html.node.ContentDom" ||
         names.getOrNull(0)?.endsWith(".ContentDom") == true
     val hasVisibleWindow = names.getOrNull(2) == "org.epub.ui.ContentVisibleTextWindow" ||
@@ -321,9 +340,11 @@ internal fun ReaderHook.isSearchHighlightContentOverlayMethod(method: Method): B
 }
 
 internal fun ReaderHook.jumpToSearchResult(result: FullTextSearchResult, resultIndex: Int): Boolean {
-    val state = searchNavigationState ?: lastSearchState ?: return false
-    val origin = activeSearchNavigation?.returnTarget ?: currentReadingTarget() ?: return false
-    if (result.cfi.isNullOrBlank()) return false
+    val state = searchNavigationState ?: lastSearchState
+    if (state == null) return false.also { XposedBridge.log("ReaMicro search jump rejected: state") }
+    val origin = activeSearchNavigation?.returnTarget ?: currentReadingTarget()
+    if (origin == null) return false.also { XposedBridge.log("ReaMicro search jump rejected: origin") }
+    if (result.cfi.isNullOrBlank()) return false.also { XposedBridge.log("ReaMicro search jump rejected: cfi") }
     searchNavigationState = state
     if (activeSearchNavigation == null) {
         activeSearchNavigation = SearchNavigationState(state.bookKey, origin, -1)
@@ -344,21 +365,22 @@ internal fun ReaderHook.returnToSearchOrigin(
         clearStaleSearchNavigation()
         return
     }
-    // 先结束搜索并释放索引，再让宿主加载原章节；清掉持久化标记以阻止重入恢复。
+    // 先结束搜索并释放索引，再让宿主加载原章节；标记等目标页确认到达后再清除。
     cancelSearchPageWork()
     searchDocumentCache.clear()
     searchIndexState = null
     val previousState = searchNavigationState
     activeSearchNavigation = null
-    clearPersistedSearchOrigin()
     clearHostSearchJump()
     pendingSearchReturnCaptures = 0
     clearSearchResultHighlight()
     val target = navigation.returnTarget
     val jumped = runCatching {
+        val vm = currentViewModelRef?.get()
+        if (vm != null && searchScrollBridge?.originCommand(vm, target) != null) return@runCatching true
         jumpToSearchCfi(
             receiver = lastCatalogContext?.intentReceiver,
-            viewModel = currentViewModelRef?.get(),
+            viewModel = vm,
             cfi = target.cfi,
             chapterIndex = target.chapterIndex,
             title = target.title,
@@ -379,6 +401,56 @@ internal fun ReaderHook.returnToSearchOrigin(
             if (removeBar && jumped) removeSearchNavigationBar()
         }
     }
+    if (jumped) currentViewModelRef?.get()?.let { scheduleSearchOriginClear(target, it) }
+}
+
+/** 跳转只代表意图已派发；缓存必须在真实页面确认到达后才释放。 */
+private fun ReaderHook.scheduleSearchOriginClear(target: ReadingTarget, viewModel: Any) {
+    val handler = Handler(Looper.getMainLooper())
+    var attempts = 0
+    var scrollRequested = false
+    val epub = currentEpubStrong ?: currentEpubRef?.get()
+    val check = object : Runnable {
+        override fun run() {
+            if (currentViewModelRef?.get() !== viewModel) {
+                XposedBridge.log("$LOG_PREFIX search origin arrival unconfirmed: view model changed")
+                return
+            }
+            if (target.scrollOffsetPx != null && currentSearchPagerMode == 3 && !scrollRequested) {
+                searchScrollBridge?.originCommand(viewModel, target)?.let { command ->
+                    scrollRequested = true
+                    val bridge = searchScrollBridge
+                    Thread({
+                        runCatching {
+                            bridge?.execute(command) {
+                                currentViewModelRef?.get() === viewModel &&
+                                    (currentEpubStrong ?: currentEpubRef?.get()) === epub &&
+                                    activeSearchNavigation == null
+                            }
+                        }.onFailure { XposedBridge.logError("$LOG_PREFIX scroll origin restore failed", it) }
+                    }, "ReaMicroSearchOrigin").start()
+                }
+            }
+            val current = currentReadingTarget()
+            val targetCfi = createEpubCfi(target.cfi)
+            val pageRange = runCatching { searchPageBridge?.page(viewModel)?.let { callNoArg(it, "getRange") } }.getOrNull()
+            val arrived = if (target.scrollOffsetPx != null && currentSearchPagerMode == 3) {
+                current?.cfi == target.cfi && current.scrollOffsetPx?.let {
+                    kotlin.math.abs(it.toLong() - target.scrollOffsetPx.toLong()) <= 2
+                } == true
+            } else current?.cfi == target.cfi ||
+                (targetCfi != null && pageRange != null &&
+                    runCatching { XposedHelpers.callMethod(pageRange, "contains", targetCfi) == true }.getOrDefault(false))
+            if (arrived) {
+                clearPersistedSearchOrigin()
+                XposedBridge.log("$LOG_PREFIX search origin arrival confirmed cfi=${target.cfi}")
+                return
+            }
+            if (++attempts < 24) handler.postDelayed(this, 125L)
+            else XposedBridge.log("$LOG_PREFIX search origin arrival unconfirmed; preserving recovery marker")
+        }
+    }
+    handler.postDelayed(check, 200L)
 }
 
 internal fun ReaderHook.jumpRelativeSearchResult(step: Int) {
@@ -477,6 +549,9 @@ internal fun ReaderHook.restorePersistedSearchOrigin(reason: String) {
         return
     }
     val jumped = runCatching {
+        if (viewModel != null && searchScrollBridge?.originCommand(viewModel, persisted.returnTarget) != null) {
+            return@runCatching true
+        }
         jumpToSearchCfi(
             receiver = lastCatalogContext?.intentReceiver,
             viewModel = viewModel,
@@ -489,8 +564,8 @@ internal fun ReaderHook.restorePersistedSearchOrigin(reason: String) {
         XposedBridge.log("$LOG_PREFIX persisted search origin restore failed: ${it.stackTraceToString()}")
     }.getOrDefault(false)
     if (jumped) {
-        XposedBridge.log("$LOG_PREFIX persisted search origin restored reason=$reason cfi=${persisted.returnTarget.cfi}")
-        clearPersistedSearchOrigin()
+        XposedBridge.log("$LOG_PREFIX persisted search origin dispatched reason=$reason cfi=${persisted.returnTarget.cfi}")
+        viewModel?.let { scheduleSearchOriginClear(persisted.returnTarget, it) }
         activeSearchNavigation = null
         clearSearchResultHighlight()
         activityProvider()?.runOnUiThread { removeSearchNavigationBar() }
@@ -528,6 +603,7 @@ internal fun ReaderHook.persistSearchOrigin(navigation: SearchNavigationState) {
         .putInt(SEARCH_ORIGIN_KEY_CHAPTER_INDEX, target.chapterIndex)
         .putString(SEARCH_ORIGIN_KEY_TITLE, target.title)
         .putString(SEARCH_ORIGIN_KEY_SUMMARY, target.summary)
+        .putInt(SEARCH_ORIGIN_KEY_SCROLL_OFFSET, target.scrollOffsetPx ?: -1)
         .apply()
 }
 
@@ -544,6 +620,7 @@ internal fun ReaderHook.readPersistedSearchOrigin(): PersistedSearchOrigin? {
             chapterIndex = prefs.getInt(SEARCH_ORIGIN_KEY_CHAPTER_INDEX, 0),
             title = prefs.getString(SEARCH_ORIGIN_KEY_TITLE, null).orEmpty().ifBlank { "\u539f\u6765\u8fdb\u5ea6" },
             summary = prefs.getString(SEARCH_ORIGIN_KEY_SUMMARY, null).orEmpty(),
+            scrollOffsetPx = prefs.getInt(SEARCH_ORIGIN_KEY_SCROLL_OFFSET, -1).takeIf { it >= 0 },
         ),
     )
 }
@@ -618,7 +695,6 @@ internal fun ReaderHook.appendActiveSearchHighlightMark(original: List<*>, label
     val cleanMarks = original
         .filterNotNull()
         .filterNot(::isSearchResultHighlightMark)
-        .filterNot(::isReadAloudHighlightMark)
         .filterNot(::isSelectionInjectedHighlightMark)
     if (activeMarks.isEmpty()) {
         return if (cleanMarks.size == original.filterNotNull().size) null else ArrayList(cleanMarks)
@@ -669,7 +745,7 @@ internal fun ReaderHook.catalogItemMapContainsSearchHighlight(map: Map<*, *>, id
 internal fun ReaderHook.createSearchHighlightCatalogChapterItem(mark: Any): Any? =
     runCatching {
         val cfi = createEpubCfi(callString(mark, "getStartCfi")) ?: return@runCatching null
-        val itemClass = classLoader.loadClass(CATALOG_CHAPTER_ITEM_CLASS)
+        val itemClass = classLoader.hostClass(CATALOG_CHAPTER_ITEM_CLASS)
         val ctor = itemClass.declaredConstructors.firstOrNull { it.parameterTypes.size == 4 }
             ?: return@runCatching null
         ctor.isAccessible = true
@@ -745,10 +821,10 @@ internal fun ReaderHook.logSearchHighlightContentOverlay(status: String, count: 
 
 internal fun ReaderHook.createResolvedSearchHighlightMark(mark: Any): Any? =
     runCatching {
-        val cfiClass = classLoader.loadClass("org.epub.html.EpubCFI")
+        val cfiClass = classLoader.hostClass("org.epub.html.EpubCFI")
         val cfiObject = companionObject(cfiClass) ?: return@runCatching null
         val create = cfiObject.javaClass.methods.firstOrNull {
-            it.name == "create" && it.parameterTypes.size == 1 && it.parameterTypes[0] == String::class.java
+            it.hostNameMatches("create") && it.parameterTypes.size == 1 && it.parameterTypes[0] == String::class.java
         } ?: return@runCatching null
         val start = create.invoke(cfiObject, callString(mark, "getStartCfi")) ?: return@runCatching null
         val end = create.invoke(cfiObject, callString(mark, "getEndCfi")) ?: return@runCatching null
@@ -757,7 +833,7 @@ internal fun ReaderHook.createResolvedSearchHighlightMark(mark: Any): Any? =
         val style = (callNoArg(mark, "getStyle") as? Number)?.toInt() ?: MARK_STYLE_FILL
         val color = callString(mark, "getColor")
         val note = callString(mark, "getNote")
-        val resolvedClass = classLoader.loadClass("org.epub.ui.ResolvedMark")
+        val resolvedClass = classLoader.hostClass("org.epub.ui.ResolvedMark")
 
         resolvedClass.declaredConstructors.firstOrNull { it.parameterTypes.size == 9 }?.let { ctor ->
             ctor.isAccessible = true
@@ -849,18 +925,18 @@ internal fun ReaderHook.createSearchHighlightContentOverlay(
         val resolved = createResolvedSearchHighlightMark(mark) ?: return@runCatching null
         val textRange = textRange(localStart, localEnd) ?: return@runCatching null
         val color = markColorTokenToColor(callString(mark, "getColor")) ?: return@runCatching null
-        val overlayClass = classLoader.loadClass("org.epub.ui.ContentMarkOverlay")
+        val overlayClass = classLoader.hostClass("org.epub.ui.ContentMarkOverlay")
         val ctor = overlayClass.declaredConstructors.firstOrNull { ctor ->
             val params = ctor.parameterTypes
             params.size == 5 &&
-                params[0].name == "org.epub.ui.ResolvedMark" &&
+                typeMatches(params[0], "org.epub.ui.ResolvedMark") &&
                 params[1] == Long::class.javaPrimitiveType &&
                 params[2] == Int::class.javaPrimitiveType &&
                 params[3] == Long::class.javaPrimitiveType
         } ?: overlayClass.declaredConstructors.firstOrNull { ctor ->
             val params = ctor.parameterTypes
             params.size == 4 &&
-                params[0].name == "org.epub.ui.ResolvedMark" &&
+                typeMatches(params[0], "org.epub.ui.ResolvedMark") &&
                 params[1] == Long::class.javaPrimitiveType &&
                 params[2] == Int::class.javaPrimitiveType &&
                 params[3] == Long::class.javaPrimitiveType
@@ -869,7 +945,7 @@ internal fun ReaderHook.createSearchHighlightContentOverlay(
         ctor.isAccessible = true
         val style = (callNoArg(mark, "getStyle") as? Number)?.toInt() ?: MARK_STYLE_FILL
         if (ctor.parameterTypes.size == 5) {
-            ctor.newInstance(resolved, textRange, style, color, null)
+            ctor.newInstance(resolved, textRange, style, color, 1f)
         } else {
             ctor.newInstance(resolved, textRange, style, color)
         }
@@ -895,7 +971,7 @@ internal fun ReaderHook.updateSearchMarks(viewModel: Any?, label: String, transf
         var cls: Class<*>? = target.javaClass
         var marksField: java.lang.reflect.Field? = null
         while (cls != null && marksField == null) {
-            marksField = cls.declaredFields.firstOrNull { it.name == "_marks" }
+            marksField = cls.declaredFields.firstOrNull { it.hostNameMatches("_marks") }
             cls = cls.superclass
         }
         marksField ?: return@runCatching false.also {
@@ -925,7 +1001,6 @@ internal fun ReaderHook.updateSearchMarks(viewModel: Any?, label: String, transf
         }
         if (!updated) return@runCatching false
         val activeId = activeSearchHighlightId
-            ?: activeReadAloudHighlightId
             ?: 0L
         XposedBridge.log(
             "$LOG_PREFIX full-text search highlight $label marks ${current.size}->${next.size} " +
@@ -944,11 +1019,6 @@ internal fun ReaderHook.isSearchResultHighlightMark(mark: Any): Boolean {
 internal fun ReaderHook.isInjectedTransientHighlightMark(mark: Any): Boolean {
     val id = (callNoArg(mark, "getId") as? Number)?.toLong() ?: return false
     if (SearchHighlightPlanner.isHighlightId(id, SEARCH_HIGHLIGHT_MARK_ID_BASE, SEARCH_HIGHLIGHT_MARK_ID_RANGE)) {
-        return true
-    }
-    if (id >= READ_ALOUD_HIGHLIGHT_MARK_ID_BASE &&
-        id < READ_ALOUD_HIGHLIGHT_MARK_ID_BASE + READ_ALOUD_HIGHLIGHT_MARK_ID_RANGE
-    ) {
         return true
     }
     return id >= SELECTION_HIGHLIGHT_MARK_ID_BASE &&

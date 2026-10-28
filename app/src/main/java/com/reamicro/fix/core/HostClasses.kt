@@ -77,8 +77,6 @@ object HostClasses {
         const val PADDING_KT = "androidx.compose.foundation.layout.PaddingKt"
         const val PADDING_VALUES = "androidx.compose.foundation.layout.PaddingValues"
         const val PLACEHOLDER_VERTICAL_ALIGN = "androidx.compose.ui.text.PlaceholderVerticalAlign"
-        const val READ_ALOUD_ICON_RECORD_VOICE_OVER = "androidx.compose.material.icons.outlined.RecordVoiceOverKt"
-        const val READ_ALOUD_ICON_VOLUME_UP = "androidx.compose.material.icons.outlined.VolumeUpKt"
         const val RECTANGLE_SHAPE_KT = "androidx.compose.ui.graphics.RectangleShapeKt"
         const val ROW_KT = "androidx.compose.foundation.layout.RowKt"
         const val ROW_SCOPE = "androidx.compose.foundation.layout.RowScope"
@@ -248,5 +246,6 @@ object HostClasses {
         const val OKHTTP_REQUEST = "okhttp3.Request"
         const val OKHTTP_REQUEST_BODY = "okhttp3.RequestBody"
         const val OKIO_PATH = "okio.Path"
+        const val OKIO_PATHS = "okio.Paths"
     }
 }

@@ -46,7 +46,11 @@ internal fun ReaderHook.searchFullTextStreaming(
     val documents = ArrayList<SearchDocument>()
     val indexBudget = SearchIndexBudget()
     var complete = true
+    var documentCount = 0
+    var characterCount = 0L
     forEachSearchDocument(context, shouldContinue = ::current) { document ->
+        documentCount++
+        characterCount += document.text.length
         if (!current()) { complete = false; return@forEachSearchDocument false }
         if (results.size < MAX_SEARCH_RESULTS) {
             val previousSize = results.size
@@ -57,6 +61,9 @@ internal fun ReaderHook.searchFullTextStreaming(
         if (indexBudget.retain(document.searchMemoryWeight())) documents.add(document) else documents.clear()
         if (results.size >= MAX_SEARCH_RESULTS) { complete = false; false } else true
     }
+    com.reamicro.fix.xposed.XposedBridge.logAlways(
+        "ReaMicro search index documents=$documentCount characters=$characterCount results=${results.size}",
+    )
     if (complete && indexBudget.cacheable && current() && bookKey(context) == key) {
         searchIndexState = SearchIndexState(key, documents, SearchState(key, keyword, results.toList()))
     }
@@ -87,7 +94,7 @@ internal fun ReaderHook.appendSearchMatches(
         val titles = ReaderSearchPresentation.titles(
             chapterAnchor?.titleParts ?: document.titleParts,
             resultChapter?.let { catalogChapterTitle(it).normalizeChapterTitle() }.orEmpty()
-                .ifBlank { document.readAloudChapterTitle },
+                .ifBlank { document.chapterTitleHint },
             document.file.nameWithoutExtension,
         )
         val startCfi = document.indexedText.cfiAt(index)
@@ -129,7 +136,7 @@ internal fun ReaderHook.forEachSearchDocument(
 ) {
     if (!shouldContinue()) return
     val epub = currentEpubRef?.get()
-    val root = currentEpubRoot() ?: return
+    val root = currentEpubRoot() ?: error("当前书籍解包目录不可用")
     val epubTitlePaths = epubCatalogTitlePaths(root)
     val indexedCatalog = indexedCatalogChapters(context.catalog, root, epubTitlePaths)
     val chaptersByHref = indexedCatalog
@@ -153,6 +160,7 @@ internal fun ReaderHook.forEachSearchDocument(
         ?.distinctBy { it.absolutePath }
         ?.takeIf { it.isNotEmpty() }
         ?: catalogFiles
+    require(files.isNotEmpty()) { "当前书籍没有可索引的正文文件" }
     for (file in files) {
         if (!shouldContinue()) return
         val cached = searchDocumentCache.get(file, epub)
@@ -176,9 +184,9 @@ internal fun ReaderHook.forEachSearchDocument(
                 chapterIndex = chapter?.index ?: -1,
                 chapter = chapter?.entry?.chapter,
                 chapterTitle = searchChapterTitle(raw, chapter?.entry, file, fallbackTitlePath.joinToString(" ")),
-                readAloudChapterTitle = chooseReadAloudDirectTitle(
-                    readAloudHtmlChapterTitleHint(raw),
-                    directReadAloudChapterTitle(chapter?.entry),
+                chapterTitleHint = chooseDirectChapterTitle(
+                    htmlHeadingChapterTitleHint(raw),
+                    catalogChapterTitleOf(chapter?.entry),
                 ),
                 text = text,
                 indexedText = indexedText,
@@ -194,3 +202,39 @@ internal fun ReaderHook.forEachSearchDocument(
 internal fun SearchState.resultsForReceiver(receiver: Any?): List<FullTextSearchResult> =
     if (results.all { it.intentReceiver === receiver }) results
     else results.map { it.copy(intentReceiver = receiver) }
+
+// 以下三个标题辅助函数原先属于听书子系统，全文搜索仍需要它们来推断章节标题，故去听书化后保留。
+internal fun ReaderHook.catalogChapterTitleOf(chapter: CatalogChapterEntry?): String =
+    chapter?.chapter
+        ?.let(::catalogChapterTitle)
+        ?.normalizeChapterTitle()
+        .orEmpty()
+
+internal fun ReaderHook.chooseDirectChapterTitle(primary: String, fallback: String): String {
+    val cleanPrimary = primary.normalizeChapterTitle()
+    val cleanFallback = fallback.normalizeChapterTitle()
+    return when {
+        cleanPrimary.isBlank() -> cleanFallback
+        cleanFallback.isBlank() -> cleanPrimary
+        cleanPrimary == cleanFallback -> cleanPrimary
+        cleanFallback.length >= 4 && cleanPrimary.endsWith(cleanFallback) -> cleanFallback
+        cleanFallback.length >= 4 && cleanPrimary.contains(cleanFallback) -> cleanFallback
+        else -> cleanPrimary
+    }
+}
+
+internal fun ReaderHook.htmlHeadingChapterTitleHint(raw: String): String {
+    Regex("""(?is)<h[1-3]\b[^>]*>(.*?)</h[1-3]>""")
+        .find(raw)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.normalizeChapterTitle()
+        ?.takeIf { it.isNotBlank() }
+        ?.let { return it }
+    return Regex("""(?is)<title\b[^>]*>(.*?)</title>""")
+        .find(raw)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.normalizeChapterTitle()
+        .orEmpty()
+}

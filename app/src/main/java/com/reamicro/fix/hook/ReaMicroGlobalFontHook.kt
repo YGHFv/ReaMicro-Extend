@@ -7,6 +7,12 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
 import com.reamicro.fix.core.HostClasses
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.hostNameStartsWith
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostClassOrNull
+import com.reamicro.fix.core.typeMatches
 import com.reamicro.fix.settings.XposedModuleSettings
 import com.reamicro.fix.xposed.XC_MethodHook
 import com.reamicro.fix.xposed.XposedBridge
@@ -46,6 +52,8 @@ class ReaMicroGlobalFontHook(
     }
 
     private fun hookThemeSerifFont() {
+        // B2 已将主题 family getter 内联；UI 字体由原生 Text 输入桥负责。
+        if (!HostSymbols.isIdentity) return
         runCatching {
             val textStyleClass = cls(HOST_TEXT_STYLE_KT_CLASS)
             val methods = textStyleClass.declaredMethods.filter {
@@ -73,14 +81,8 @@ class ReaMicroGlobalFontHook(
     private fun hookReaderTextScopes() {
         runCatching {
             val methods = cls(READER_SCREEN_KT_CLASS).declaredMethods.filter { method ->
-                method.name == "ReaderScreen" ||
-                    method.name.startsWith("ReaderScreen\$") ||
-                    method.name == "ReaderToolBox" ||
-                    method.name.startsWith("ReaderToolBox\$") ||
-                    method.name == "InitEpubWindow" ||
-                    method.name.startsWith("InitEpubWindow\$") ||
-                    method.name == "BottomSheet" ||
-                    method.name.startsWith("BottomSheet\$")
+                listOf("ReaderScreen", "ReaderToolBox", "InitEpubWindow", "BottomSheet")
+                    .any(method::hostNameStartsWith)
             }
             methods.forEach { method ->
                 method.isAccessible = true
@@ -102,10 +104,19 @@ class ReaMicroGlobalFontHook(
 
     private fun hookReaderFontPreviewScopes() {
         runCatching {
-            val methods = cls(READER_FAMILY_USER_KT_CLASS).declaredMethods.filter { method ->
-                method.name == "FamilyRow" || method.name.startsWith("FamilyRow$")
+            val previewClass = classLoader.hostClassOrNull(READER_FAMILY_USER_KT_CLASS)
+                ?: run {
+                    // B4 删除了独立的 ReaderFamilyUser 页面；主字体 hook 仍保持有效。
+                    XposedBridge.log("$LOG_PREFIX global UI font preview scope hook skipped: ReaderFamilyUser absent")
+                    return
+                }
+            val methods = previewClass.declaredMethods.filter { method ->
+                method.hostNameStartsWith("FamilyRow")
             }
-            if (methods.isEmpty()) error("ReaderFamilyUser FamilyRow not found")
+            if (methods.isEmpty()) {
+                XposedBridge.log("$LOG_PREFIX global UI font preview scope hook skipped: FamilyRow absent")
+                return
+            }
             methods.forEach { method ->
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
@@ -128,15 +139,15 @@ class ReaMicroGlobalFontHook(
         runCatching {
             val textKtClass = cls(MATERIAL_TEXT_KT_CLASS)
             val methods = textKtClass.declaredMethods.filter { method ->
-                method.name.startsWith("Text") &&
-                    method.parameterTypes.any { it.name == FONT_FAMILY_CLASS } &&
+                method.hostNameStartsWith("Text") &&
+                    method.parameterTypes.any { typeMatches(it, FONT_FAMILY_CLASS) } &&
                     method.parameterTypes.lastOrNull() == Int::class.javaPrimitiveType
             }
             if (methods.isEmpty()) error("Material Text methods with FontFamily not found")
             methods.forEach { method ->
-                val fontFamilyIndex = method.parameterTypes.indexOfFirst { it.name == FONT_FAMILY_CLASS }
+                val fontFamilyIndex = method.parameterTypes.indexOfFirst { typeMatches(it, FONT_FAMILY_CLASS) }
                 if (fontFamilyIndex < 0) return@forEach
-                val textStyleIndex = method.parameterTypes.indexOfFirst { it.name == TEXT_STYLE_CLASS }
+                val textStyleIndex = method.parameterTypes.indexOfFirst { typeMatches(it, TEXT_STYLE_CLASS) }
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
@@ -149,7 +160,8 @@ class ReaMicroGlobalFontHook(
                         ) return
                         val resolved = resolveGlobalUiFontCached() ?: return
                         args[fontFamilyIndex] = resolved.family
-                        clearDefaultMask(args, fontFamilyIndex)
+                        clearDefaultMask(args, fontFamilyIndex,
+                            com.reamicro.fix.core.HostTextDefaults.fontFamilyBit(HostSymbols.profileId, fontFamilyIndex))
                         logApplied("text", resolved.selection)
                     }
                 })
@@ -202,11 +214,11 @@ class ReaMicroGlobalFontHook(
         else Typeface.create(baseTypeface, style)
     }
 
-    private fun clearDefaultMask(args: Array<Any?>, parameterIndex: Int) {
+    private fun clearDefaultMask(args: Array<Any?>, parameterIndex: Int, bit: Int) {
         if (parameterIndex !in 0..30) return
         val maskIndex = args.lastIndex
         val mask = (args.getOrNull(maskIndex) as? Number)?.toInt() ?: return
-        args[maskIndex] = mask and (1 shl parameterIndex).inv()
+        args[maskIndex] = mask and bit.inv()
     }
 
     private fun isReaderTextScope(): Boolean =
@@ -219,10 +231,12 @@ class ReaMicroGlobalFontHook(
         if (textStyleIndex !in args.indices) return false
         val textStyle = args[textStyleIndex] ?: return false
         return runCatching {
-            textStyle.javaClass.methods.firstOrNull {
-                it.parameterTypes.isEmpty() &&
-                    (it.name == "getFontFamily" || it.name.startsWith("getFontFamily-"))
-            }?.invoke(textStyle) != null
+            if (HostSymbols.isIdentity) {
+                XposedHelpers.callMethod(textStyle, "getFontFamily") != null
+            } else {
+                val span = XposedHelpers.callMethod(textStyle, "getSpanStyle")
+                span != null && XposedHelpers.callMethod(span, "getFontFamily") != null
+            }
         }.getOrDefault(false)
     }
 
@@ -296,20 +310,7 @@ class ReaMicroGlobalFontHook(
         }
         val file = resolvedFile ?: return null
         return runCatching {
-            val provider = staticObject(FONT_PROVIDER_CLASS, "INSTANCE")
-            val normal = fontWeight("getNormal")
-            val bold = fontWeight("getBold")
-            val fromPath = method(FONT_PROVIDER_CLASS, "fromPath", 2)
-            val fonts = listOfNotNull(
-                fromPath.invoke(provider, file.absolutePath, normal),
-                fromPath.invoke(provider, file.absolutePath, bold),
-            )
-            if (fonts.isEmpty()) return null
-            val family = cls(FONT_FAMILY_KT_CLASS).declaredMethods.first {
-                it.name == "FontFamily" &&
-                    it.parameterTypes.size == 1 &&
-                    List::class.java.isAssignableFrom(it.parameterTypes[0])
-            }.invoke(null, fonts)
+            val family = com.reamicro.fix.core.HostFontFamilies.fromFile(classLoader, file) ?: return null
             synchronized(fontFamilyCache) {
                 fontFamilyCache[cacheKey] = family
             }
@@ -321,19 +322,13 @@ class ReaMicroGlobalFontHook(
         runCatching {
             when (selection) {
                 FAMILY_SYSTEM -> resolveDefaultFontFamily()
-                FAMILY_SOURCE_HAN_SERIF -> callMethod(staticObject(FONT_PROVIDER_CLASS, "INSTANCE"), "builtInSong")
+                FAMILY_SOURCE_HAN_SERIF -> com.reamicro.fix.core.HostFontFamilies.song(classLoader)
                 else -> null
             }
         }.onFailure { logResolveFontFamilyFailure(selection, it) }.getOrNull()
 
-    private fun resolveDefaultFontFamily(): Any? {
-        fieldObjectOrNull(FONT_FAMILY_CLASS, "Default")?.let { return it }
-        for (fieldName in listOf("Companion", "INSTANCE")) {
-            val companion = fieldObjectOrNull(FONT_FAMILY_CLASS, fieldName) ?: continue
-            callMethod(companion, "getDefault")?.let { return it }
-        }
-        return staticMethod(FONT_FAMILY_CLASS, "getDefault")?.invoke(null)
-    }
+    private fun resolveDefaultFontFamily(): Any? =
+        com.reamicro.fix.core.HostFontFamilies.system(classLoader)
 
     private fun fontWeight(methodName: String): Any {
         val clazz = cls(FONT_WEIGHT_CLASS)
@@ -418,13 +413,13 @@ class ReaMicroGlobalFontHook(
     private fun callMethod(target: Any?, name: String): Any? {
         if (target == null) return null
         return target.javaClass.methods.firstOrNull {
-            it.name == name && it.parameterTypes.isEmpty()
+            it.hostNameMatches(name) && it.parameterTypes.isEmpty()
         }?.invoke(target)
     }
 
     private fun staticMethod(className: String, name: String): Method? =
         cls(className).methods.firstOrNull {
-            it.name == name && it.parameterTypes.isEmpty()
+            it.hostNameMatches(name) && it.parameterTypes.isEmpty()
         }?.apply { isAccessible = true }
 
     private fun fieldObjectOrNull(className: String, fieldName: String): Any? =
@@ -439,17 +434,17 @@ class ReaMicroGlobalFontHook(
         }.getOrNull()
 
     private fun cls(className: String): Class<*> =
-        XposedHelpers.findClass(className, classLoader)
+        classLoader.hostClass(className)
 
     private fun method(className: String, methodName: String, parameterCount: Int): Method {
         val cacheKey = "$className#$methodName/$parameterCount"
         return synchronized(methodCache) {
             methodCache.getOrPut(cacheKey) {
                 cls(className).declaredMethods.firstOrNull {
-                    it.name == methodName && it.parameterTypes.size == parameterCount
+                    it.hostNameMatches(methodName) && it.parameterTypes.size == parameterCount
                 }?.apply { isAccessible = true }
                     ?: cls(className).methods.firstOrNull {
-                        it.name == methodName && it.parameterTypes.size == parameterCount
+                        it.hostNameMatches(methodName) && it.parameterTypes.size == parameterCount
                     }?.apply { isAccessible = true }
                     ?: error("$className.$methodName/$parameterCount not found")
             }

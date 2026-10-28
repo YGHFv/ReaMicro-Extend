@@ -155,6 +155,10 @@ internal fun WebDavDriveHook.renderOnlineCompletionUpdateGroupActionRow(
         )
         targetUnit()
     }
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
+        com.reamicro.fix.core.B2NativeUi(classLoader).row(fillMaxWidthModifier(), content, composer)
+        return
+    }
     method(ROW_KT_CLASS, ROW_METHOD, 7).invoke(
         null,
         fillMaxWidthModifier(),
@@ -192,6 +196,12 @@ internal fun WebDavDriveHook.renderBookLocalActionCell(
     onClick: Any,
     composer: Any,
 ) {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
+        method(BOOK_LOCAL_SHEET_CLASS, BOOK_META_ACTION_ROW_METHOD, 6).invoke(
+            null, modifier, image, title, onClick, composer, 0,
+        )
+        return
+    }
     method(BOOK_LOCAL_SHEET_CLASS, BOOK_ACTION_CELL_METHOD, 7).invoke(
         null,
         modifier,
@@ -306,7 +316,11 @@ internal fun WebDavDriveHook.renderOnlineCompletionUpdateDivider(composer: Any) 
 }
 
 internal fun WebDavDriveHook.rowWeightModifier(rowScope: Any, modifier: Any): Any =
-    rowScope.javaClass.methods.first {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
+        rowScope.javaClass.methods.first {
+            it.hostNameMatches("weight") && it.parameterTypes.size == 2
+        }.invoke(rowScope, modifier, 1f)
+    } else rowScope.javaClass.methods.first {
         it.hostNameMatches("weight") && it.parameterTypes.size == 3
     }.invoke(rowScope, modifier, 1f, true)
 
@@ -314,7 +328,9 @@ internal fun WebDavDriveHook.sizeModifier(baseModifier: Any, size: Int): Any =
     method(SIZE_KT_CLASS, SIZE_METHOD, 2).invoke(null, baseModifier, udp(size))
 
 internal fun WebDavDriveHook.widthModifier(baseModifier: Any, widthDp: Float): Any =
-    cls(SIZE_KT_CLASS).declaredMethods.first {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
+        com.reamicro.fix.core.B2NativeUi(classLoader).width(baseModifier, udp(widthDp))
+    } else cls(SIZE_KT_CLASS).declaredMethods.first {
         it.name.startsWith("width") &&
             !it.name.contains("fill", ignoreCase = true) &&
             it.parameterTypes.size == 2 &&
@@ -322,7 +338,9 @@ internal fun WebDavDriveHook.widthModifier(baseModifier: Any, widthDp: Float): A
     }.apply { isAccessible = true }.invoke(null, baseModifier, udp(widthDp))
 
 internal fun WebDavDriveHook.heightModifier(baseModifier: Any, heightDp: Float): Any =
-    cls(SIZE_KT_CLASS).declaredMethods.first {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
+        com.reamicro.fix.core.B2NativeUi(classLoader).height(baseModifier, udp(heightDp))
+    } else cls(SIZE_KT_CLASS).declaredMethods.first {
         it.name.startsWith("height") &&
             !it.name.contains("fill", ignoreCase = true) &&
             it.parameterTypes.size == 2 &&
@@ -348,7 +366,7 @@ internal fun WebDavDriveHook.paddingModifier(
     bottom: Int,
 ): Any =
     // B4 的 PaddingKt 没有保留 padding-qDBjuR0 门面名，改走已核实的原生 ABI，避免注入时抛异常被吞。
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         val ui = B2NativeUi(classLoader)
         runCatching { ui.padding(baseModifier, ui.dp(start), ui.dp(top), ui.dp(end), ui.dp(bottom)) }
             .getOrNull() ?: baseModifier
@@ -405,7 +423,7 @@ internal fun WebDavDriveHook.onlineCompletionUpdateImageVector(): Any? =
         }.getOrNull()
     } ?: onlineCompletionRefreshVectorCache ?: run {
         // B4 混淆了 material icons 门面，回退到与原生图标同构造器的矢量图。
-        if (com.reamicro.fix.core.HostSymbols.profileId != "2.3.3-b4") return@run null
+        if (com.reamicro.fix.core.HostSymbols.abiProfileId != "2.3.3-b4") return@run null
         runCatching { B4WebDavVector(this).buildRefresh() }.getOrNull()?.also {
             onlineCompletionRefreshVectorCache = it
         }
@@ -438,7 +456,7 @@ internal fun WebDavDriveHook.typography(composer: Any): Any {
 }
 
 internal fun WebDavDriveHook.modifierInstance(): Any =
-    if (HostSymbols.profileId == "2.3.3-b4") B2NativeUi(classLoader).modifier()
+    if (HostSymbols.abiProfileId == "2.3.3-b4") B2NativeUi(classLoader).modifier()
     else staticObject(MODIFIER_CLASS, "INSTANCE")
 
 internal fun WebDavDriveHook.showToast(message: String) {
@@ -455,7 +473,7 @@ internal fun WebDavDriveHook.showToast(message: String) {
 }
 
 internal fun WebDavDriveHook.fillMaxSizeModifier(): Any {
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         val ui = B2NativeUi(classLoader)
         return ui.fillSize(ui.modifier())
     }
@@ -471,7 +489,7 @@ internal fun WebDavDriveHook.fillMaxSizeModifier(): Any {
 }
 
 internal fun WebDavDriveHook.fillMaxWidthModifier(): Any {
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         val ui = B2NativeUi(classLoader)
         return ui.fillWidth(ui.modifier())
     }
@@ -517,7 +535,7 @@ internal fun WebDavDriveHook.udp(value: Int): Float =
 internal fun WebDavDriveHook.udp(value: Float): Float = value
 
 internal fun WebDavDriveHook.emptyModifier(): Any {
-    if (HostSymbols.profileId == "2.3.3-b4") return B2NativeUi(classLoader).modifier()
+    if (HostSymbols.abiProfileId == "2.3.3-b4") return B2NativeUi(classLoader).modifier()
     val modifierClass = cls(MODIFIER_CLASS)
     return runCatching {
         modifierClass.hostField("INSTANCE").apply { isAccessible = true }.get(null)

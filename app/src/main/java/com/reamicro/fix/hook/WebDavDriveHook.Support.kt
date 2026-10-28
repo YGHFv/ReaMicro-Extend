@@ -138,7 +138,7 @@ internal fun WebDavDriveHook.install() {
             "homeSearchResultWebDavSection" to ::hookHomeSearchResultWebDavSection,
             "thirdAccountWebDavRoute" to ::hookThirdAccountWebDavRoute,
         ).filterNot { (name, _) ->
-            com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4" &&
+            com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4" &&
                 name in setOf(
                     "backupTypeName",
                     "onlineCompletionBookRowDuration",
@@ -159,7 +159,7 @@ internal fun WebDavDriveHook.install() {
                 )
         },
     )
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         HookInstallReport.install(FEATURE_ID, "b4RegisteredStorageRoutes") {
             B4StorageRouteBridge(this).install()
         }
@@ -328,7 +328,7 @@ internal fun cloudTypeTitle(type: Int): String =
 internal fun WebDavDriveHook.findLocalBookById(bookId: Long): Any? {
     val bookshelf = currentBookshelfRepository()
         ?: error("BookshelfRepository not available for WebDAV backup")
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         val dao = bookshelf.javaClass.hostField("bookDao").get(bookshelf)
         val method = dao.javaClass.getDeclaredMethod(
             "b", Long::class.javaPrimitiveType, cls("kotlin.coroutines.Continuation"),
@@ -413,7 +413,7 @@ internal fun copyBookWithBackupAndPublisher(
 }
 
 internal fun WebDavDriveHook.copyCloudBookWithType(book: Any, type: Int): Any {
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         val props = listOf("id", "name", "type", "url", "size", "updatedAt", "path", "hash", "local", "workers")
         val values = props.map { book.javaClass.hostField(it).get(book) }.toMutableList()
         values[2] = type
@@ -580,7 +580,7 @@ internal fun WebDavDriveHook.newHomeRoute(): Any =
 
 internal fun WebDavDriveHook.newCloudFolderRoute(path: String? = null, bookId: Long? = null, type: Int = BACKUP_TYPE_WEBDAV): Any {
     val route = cls(ROUTE_CLOUD_FOLDER_CLASS)
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         return route.getDeclaredConstructor(
             Int::class.javaPrimitiveType, String::class.java, java.lang.Long::class.java,
             Int::class.javaPrimitiveType,
@@ -684,13 +684,13 @@ internal fun WebDavDriveHook.emptyFlow(): Any =
     }.apply { isAccessible = true }.invoke(null)
 
 internal fun WebDavDriveHook.kotlinResultSuccess(value: Any?): Any? =
-    if (com.reamicro.fix.core.HostSymbols.profileId in setOf("2.3.3-b2", "2.3.3-b4")) value
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId in setOf("2.3.3-b2", "2.3.3-b4")) value
     else cls(KOTLIN_RESULT_CLASS).declaredMethods.first {
         it.name.contains("constructor") && it.parameterTypes.size == 1
     }.apply { isAccessible = true }.invoke(null, value)
 
 internal fun WebDavDriveHook.kotlinResultFailure(throwable: Throwable): Any {
-    if (com.reamicro.fix.core.HostSymbols.profileId in setOf("2.3.3-b2", "2.3.3-b4")) {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId in setOf("2.3.3-b2", "2.3.3-b4")) {
         return cls("kotlin.Result\$Failure").getDeclaredConstructor(Throwable::class.java).newInstance(throwable)
     }
     val failure = cls(KOTLIN_RESULT_KT_CLASS).declaredMethods.first {
@@ -1637,9 +1637,24 @@ internal fun onlineCompletionFailedLogFile(bookDir: File): File =
 
 internal fun WebDavDriveHook.findLocalBookByUrl(bookshelf: Any, url: String): Any? {
     if (url.isBlank()) return null
-    val findMethod = (bookshelf.javaClass.methods.asSequence() + bookshelf.javaClass.declaredMethods.asSequence())
-        .firstOrNull { it.hostNameMatches("findBookByUrl") && it.parameterTypes.size == 2 }
+    val candidates = (bookshelf.javaClass.methods.asSequence() + bookshelf.javaClass.declaredMethods.asSequence())
+        .filter {
+            (it.hostNameMatches("liveBookByUrl") || it.hostNameMatches("findBookByUrl")) &&
+                it.parameterTypes.size in 1..2
+        }
+        .distinct()
+        .toList()
+    // B2/B4 的 liveBookByUrl 返回 Flow，旧版 findBookByUrl 才是挂起函数。
+    candidates.firstOrNull { it.parameterTypes.size == 1 }?.let { flowMethod ->
+        flowMethod.isAccessible = true
+        val flow = runCatching { flowMethod.invoke(bookshelf, url) }.getOrNull()
+        if (flow != null) return firstFlowValue(flow)
+    }
+    val findMethod = candidates.firstOrNull {
+        it.parameterTypes.size == 2 && typeMatches(it.parameterTypes.last(), "kotlin.coroutines.Continuation")
+    }
         ?.apply { isAccessible = true }
+        ?: candidates.firstOrNull { it.parameterTypes.size == 2 }?.apply { isAccessible = true }
         ?: return null
     return invokeSuspendBlocking(findMethod, bookshelf, url)
 }
@@ -1650,22 +1665,38 @@ internal fun currentOnlineCompletionBooksDir(bookshelf: Any): Any {
             ?.apply { isAccessible = true }
             ?.invoke(bookshelf)
         ?: error("阅微书库目录不可用：UserStorage 未找到")
-    val defaultMethod = (userStorage.javaClass.methods.asSequence() + userStorage.javaClass.declaredMethods.asSequence())
-        .firstOrNull {
-            it.hostNameMatches("userBooksDir\$default") &&
-                Modifier.isStatic(it.modifiers) &&
-                it.parameterTypes.size == 4
-        }
-    if (defaultMethod != null) {
-        defaultMethod.isAccessible = true
-        return defaultMethod.invoke(null, userStorage, null, 1, null)
+    val uid = (fieldValue(userStorage, "uid") as? Number)?.toLong()?.takeIf { it > 0L }
+        ?: (userStorage.javaClass.declaredFields.asSequence() + userStorage.javaClass.fields.asSequence())
+            .firstOrNull { it.type == java.lang.Long::class.java }
+            ?.apply { isAccessible = true }
+            ?.get(userStorage)
+            ?.let { it as? Number }
+            ?.toLong()
+            ?.takeIf { it > 0L }
+        ?: error("阅微书库目录不可用：当前用户 UID 未找到")
+    val userStorageMethods =
+        userStorage.javaClass.methods.asSequence() + userStorage.javaClass.declaredMethods.asSequence()
+    val directMethod = userStorageMethods.firstOrNull {
+        it.hostNameMatches("userBooksDir") &&
+            it.parameterTypes.size == 1 &&
+            (it.parameterTypes[0] == java.lang.Long.TYPE || it.parameterTypes[0] == java.lang.Long::class.java)
+    }
+    if (directMethod != null) {
+        directMethod.isAccessible = true
+        return directMethod.invoke(userStorage, java.lang.Long.valueOf(uid))
             ?: error("阅微书库目录不可用：userBooksDir 返回空")
     }
-    val uid = fieldValue(userStorage, "uid")
-    val method = (userStorage.javaClass.methods.asSequence() + userStorage.javaClass.declaredMethods.asSequence())
-        .first { it.hostNameMatches("userBooksDir") && it.parameterTypes.size == 1 }
-        .apply { isAccessible = true }
-    return method.invoke(userStorage, uid) ?: error("阅微书库目录不可用：userBooksDir 返回空")
+
+    // Kotlin 默认参数桥接不能传 null，否则 B4 会按默认 uid=0 返回 files/0/books，
+    // 导致书架记录属于当前用户、EPUB 文件却落在 0 用户目录。
+    val defaultMethod = userStorageMethods.firstOrNull {
+        it.hostNameMatches("userBooksDir\$default") &&
+            Modifier.isStatic(it.modifiers) &&
+            it.parameterTypes.size == 4
+    } ?: error("阅微书库目录不可用：userBooksDir 方法未找到")
+    defaultMethod.isAccessible = true
+    return defaultMethod.invoke(null, userStorage, java.lang.Long.valueOf(uid), 0, null)
+        ?: error("阅微书库目录不可用：userBooksDir 返回空")
 }
 
 internal fun onlineCompletionCancelPendingIntent(context: Context, id: Int, key: String): PendingIntent {
@@ -1837,8 +1868,20 @@ internal fun WebDavDriveHook.currentUserId(repository: Any): Long? =
             ?.apply { isAccessible = true }
             ?.invoke(repository)
             ?: fieldValue(repository, "currentUserFlow")
-            ?: return null
-        firstFlowValue(flow)?.callLong("getId")?.takeIf { it > 0L }
+        flow?.let {
+            firstFlowValue(it)?.callLong("getId")?.takeIf { userId -> userId > 0L }?.let { return@runCatching it }
+        }
+
+        // B4 的 BookshelfRepository 不再暴露 getCurrentUserFlow，UserStorage.uid 是同一份当前用户 ID。
+        val userStorage = fieldValue(repository, "userStorage")
+        val storedUid = fieldValue(userStorage, "uid")
+            ?: userStorage?.let { storage ->
+                (storage.javaClass.declaredFields.asSequence() + storage.javaClass.fields.asSequence())
+                    .firstOrNull { it.type == java.lang.Long::class.java }
+                    ?.apply { isAccessible = true }
+                    ?.get(storage)
+            }
+        (storedUid as? Number)?.toLong()?.takeIf { it > 0L }
     }.onFailure {
         logWebDav("online completion current user lookup failed: ${it.message ?: it.javaClass.name}")
     }.getOrNull()

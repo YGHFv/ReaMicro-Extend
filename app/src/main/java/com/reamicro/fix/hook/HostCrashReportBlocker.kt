@@ -38,7 +38,7 @@ internal object HostCrashReportBlocker {
 
     @Synchronized
     fun install(classLoader: ClassLoader, packageName: String) {
-        if (HostSymbols.profileId == "2.3.3-b4") {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
             installB4InitGuard(classLoader, packageName)
             return
         }

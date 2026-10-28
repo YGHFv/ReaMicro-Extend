@@ -34,7 +34,7 @@ internal class HostTypographyMetrics(
     )
 
     init {
-        check(HostSymbols.profileId == "2.3.3-b4") { "Unverified typography host" }
+        check(HostSymbols.abiProfileId == "2.3.3-b4") { "Unverified typography host" }
         check(densityType.isInstance(density))
     }
 

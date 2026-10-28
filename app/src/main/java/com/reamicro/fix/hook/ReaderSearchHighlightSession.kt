@@ -1,5 +1,6 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.reader.SearchCfiAddress
 import com.reamicro.fix.reader.SearchHighlightMarkDraft
 import com.reamicro.fix.reader.SearchHighlightPlanner
@@ -40,7 +41,7 @@ internal class ReaderSearchHighlightSession(val marker: Any, val plan: SearchHig
             val ranges = projector.project(location, content, start, end, renderedLength)
             if (ranges.isEmpty()) return@runCatching emptyList()
             val resolved = resolvedMarker(reader) ?: return@runCatching emptyList()
-            val constructor = overlayConstructor ?: reader.classLoader.loadClass("org.epub.ui.ContentMarkOverlay")
+            val constructor = overlayConstructor ?: reader.classLoader.hostClass("org.epub.ui.ContentMarkOverlay")
                 .declaredConstructors.first { it.parameterTypes.size in 4..5 }
                 .apply { isAccessible = true }.also { overlayConstructor = it }
             ranges.mapNotNull { range ->
@@ -49,7 +50,7 @@ internal class ReaderSearchHighlightSession(val marker: Any, val plan: SearchHig
                 val color = colors[token] ?: reader.markColorTokenToColor(token)?.also { colors[token] = it }
                     ?: return@mapNotNull null
                 if (constructor.parameterTypes.size == 5) {
-                    constructor.newInstance(resolved, textRange, MARK_STYLE_FILL, color, null)
+                    constructor.newInstance(resolved, textRange, MARK_STYLE_FILL, color, 1f)
                 } else {
                     constructor.newInstance(resolved, textRange, MARK_STYLE_FILL, color)
                 }

@@ -1,5 +1,12 @@
 package com.reamicro.fix.epub.editor
 
+import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.typeMatches
+
+import com.reamicro.fix.core.hostClass
+
 internal data class SelectionRenderedSlice(val start: SelectionCfiPoint, val text: String)
 
 internal class HostReadingContext(
@@ -17,22 +24,27 @@ internal class HostReadingProjection(
 
     fun map(source: String, document: Any, positions: NormalizedSelectionPositions): SelectionSourceMap {
         host.checkReadingContext()
-        val sheets = loader.loadClass("org.epub.css.StyleSheets").getConstructor(List::class.java)
+        val sheets = loader.hostClass("org.epub.css.StyleSheets").getConstructor(List::class.java)
             .newInstance(context.rules)
         val body = call(document, "body")!!
         val builder = call(context.builder, "newBuilder")!!
-        val nodeType = loader.loadClass("com.fleeksoft.ksoup.nodes.Node")
-        val ext = loader.loadClass("org.epub.utils.NodeExtKt")
-        call(builder, "body", ext.getMethod("getSteps", nodeType).invoke(null, body))
-        val factory = loader.loadClass("org.epub.html.node.BodyDom").getField("INSTANCE").get(null)
-        val rendered = call(factory, "parseBody", body, builder, sheets, context.directory, context.fullScreen)!!
-        val parser = loader.loadClass("com.fleeksoft.ksoup.parser.Parser").getField("Companion").get(null)
-        val entityCache = hashMapOf<String, String>()
-        fun range(node: Any): Pair<Int, Int> {
-            val r = call(node, "sourceRange")!!
-            require(call(r, "isTracked") == true) { "排版生成的节点没有源码位置" }
-            return positions.original((call(r, "startPos") as Number).toInt(), (call(r, "endPos") as Number).toInt())
+        val nodeType = loader.hostClass("com.fleeksoft.ksoup.nodes.Node")
+        val ext = loader.hostClass("org.epub.utils.NodeExtKt")
+        val bodyStep = ext.hostMethod("getSteps", nodeType).invoke(null, body)
+        val bodyType = loader.hostClass("org.epub.html.node.BodyDom")
+        val rendered = if (HostSymbols.isIdentity) {
+            call(builder, "body", bodyStep)
+            call(bodyType.hostField("INSTANCE").get(null), "parseBody", body, builder, sheets,
+                context.directory, context.fullScreen)!!
+        } else {
+            // B2 的 Builder setter 与 BodyDom 单例均已内联；保留相同原生 parseBody 入口。
+            builder.javaClass.getDeclaredField(HostSymbols.resolveFieldName("org.epub.html.EpubCFI\$Builder", "body")).set(builder, bodyStep)
+            bodyType.hostMethod("parseBody", nodeType, builder.javaClass, sheets.javaClass,
+                String::class.java, Boolean::class.javaPrimitiveType)
+                .invoke(null, body, builder, sheets, context.directory, context.fullScreen)!!
         }
+        val entityCache = hashMapOf<String, String>()
+        fun range(node: Any) = host.sourceRange(node)
         val text = StringBuilder()
         val starts = SelectionInts()
         val ends = SelectionInts()
@@ -58,7 +70,7 @@ internal class HostReadingProjection(
                     if (value.isEmpty()) return
                     val style = call(dom, "getStyle")!!
                     val mode = call(call(style, "getWritingMode")!!, "getActualValue")!!
-                    if (!mode.javaClass.name.endsWith("\$HorizontalTB")) {
+                    if (!typeMatches(mode.javaClass, "org.epub.css.property.WritingMode\$HorizontalTB")) {
 
                         add(value.filterNot { it.isWhitespace() }.map { it.toString() }.joinToString("\n"))
                         return
@@ -66,7 +78,7 @@ internal class HostReadingProjection(
                     val mapped = runCatching {
                         val (a, b) = range(node)
                         mapSelectionTextNode(source.substring(a, b), a, value) { candidate ->
-                            entityCache.getOrPut(candidate) { call(parser, "unescapeEntities", candidate, false) as String }
+                            entityCache.getOrPut(candidate) { host.unescape(candidate) }
                         }
                     }.getOrNull()
                     if (mapped == null) add(value)
@@ -89,10 +101,9 @@ internal class HostReadingProjection(
         }
         fun visit(dom: Any, depth: Int) {
             require(depth < 256) { "章节嵌套过深" }
-            val type = dom.javaClass.simpleName
             val location = call(dom, "getLocation")!!
             val nodeKey = key(location)
-            if (type == "ContentDom") {
+            if (typeMatches(dom.javaClass, "org.epub.html.node.ContentDom")) {
                 val parent = call(dom, "getParent")
                 val container = parent?.let { call(it, "getElement") }?.let { runCatching { range(it).first }.getOrNull() }
 
@@ -119,7 +130,7 @@ internal class HostReadingProjection(
             } else {
 
                 anchors.putIfAbsent(nodeKey, text.length)
-                val nested = if (type == "TableDom") listOfNotNull(
+                val nested = if (typeMatches(dom.javaClass, "org.epub.html.node.TableDom")) listOfNotNull(
                     call(dom, "getHead"), call(dom, "getBody"), call(dom, "getFoot"),
                 ) else children(dom)
                 for (child in nested) visit(child, depth + 1)

@@ -1,5 +1,10 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+
+import com.reamicro.fix.core.hostNameMatches
+
+
 import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.xposed.XposedHelpers
@@ -138,7 +143,7 @@ internal object ReaMicroBookMetadataSync {
     private fun coverFromOpf(opf: Any?): String? =
         runCatching {
             opf ?: return null
-            opf.javaClass.methods.firstOrNull { it.name == "coverRelativePath" && it.parameterTypes.isEmpty() }
+            opf.javaClass.methods.firstOrNull { it.hostNameMatches("coverRelativePath") && it.parameterTypes.isEmpty() }
                 ?.apply { isAccessible = true }
                 ?.invoke(opf)
                 ?.toString()
@@ -170,14 +175,14 @@ internal object ReaMicroBookMetadataSync {
         return runCatching {
             current.javaClass.methods.firstOrNull {
                 it.parameterTypes.isEmpty() &&
-                    (it.name == name || it.name == "get" + name.replaceFirstChar { ch -> ch.uppercaseChar() })
+                    (it.hostNameMatches(name) || it.name == "get" + name.replaceFirstChar { ch -> ch.uppercaseChar() })
             }?.apply { isAccessible = true }?.invoke(current)
         }.getOrNull()
     }
 
     private fun method(targetClass: Class<*>, name: String, parameterCount: Int): Method =
         (targetClass.methods.asSequence() + targetClass.declaredMethods.asSequence())
-            .firstOrNull { it.name == name && it.parameterTypes.size == parameterCount }
+            .firstOrNull { it.hostNameMatches(name) && it.parameterTypes.size == parameterCount }
             ?.apply { isAccessible = true }
             ?: error("Method not found: ${targetClass.name}#$name/$parameterCount")
 
@@ -193,55 +198,19 @@ internal object ReaMicroBookMetadataSync {
     private fun floatValue(target: Any, getter: String): Float =
         runCatching { (method(target.javaClass, getter, 0).invoke(target) as? Number)?.toFloat() ?: 0f }.getOrDefault(0f)
 
-    private fun invokeSuspendBlocking(classLoader: ClassLoader, method: Method, target: Any?, vararg args: Any?): Any? {
-        val latch = CountDownLatch(1)
-        var value: Any? = null
-        var error: Throwable? = null
-        val continuationClass = XposedHelpers.findClass(KOTLIN_CONTINUATION_CLASS, classLoader)
-        val throwOnFailure = XposedHelpers.findClass(KOTLIN_RESULT_KT_CLASS, classLoader).declaredMethods.first {
-            it.name == "throwOnFailure" && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }
-        val continuation = Proxy.newProxyInstance(classLoader, arrayOf(continuationClass)) { proxy, proxyMethod, proxyArgs ->
-            when (proxyMethod.name) {
-                "getContext" -> emptyCoroutineContext(classLoader)
-                "resumeWith" -> {
-                    val result = proxyArgs?.getOrNull(0)
-                    runCatching {
-                        throwOnFailure.invoke(null, result)
-                        value = result
-                    }.onFailure {
-                        error = if (it is InvocationTargetException) it.targetException ?: it else it
-                    }
-                    latch.countDown()
-                    Unit
-                }
-                "toString" -> "ReaMicroBookMetadataContinuation"
-                "hashCode" -> System.identityHashCode(proxy)
-                "equals" -> proxy === proxyArgs?.getOrNull(0)
-                else -> null
-            }
-        }
-        val returned = try {
-            method.invoke(target, *args.toMutableList().apply { add(continuation) }.toTypedArray())
-        } catch (e: InvocationTargetException) {
-            throw e.targetException ?: e
-        }
-        if (returned !== coroutineSuspended(classLoader)) return returned
-        check(latch.await(30, java.util.concurrent.TimeUnit.SECONDS)) { "等待宿主书架写入超时" }
-        error?.let { throw it }
-        return value
-    }
+    private fun invokeSuspendBlocking(classLoader: ClassLoader, method: Method, target: Any?, vararg args: Any?): Any? =
+        com.reamicro.fix.core.HostCoroutines.invokeTimed(classLoader, method, target, 30_000L, *args)
 
     private fun emptyCoroutineContext(classLoader: ClassLoader): Any =
         XposedHelpers.findClass(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS, classLoader)
-            .getDeclaredField("INSTANCE")
+            .hostField("INSTANCE")
             .apply { isAccessible = true }
             .get(null) ?: error("EmptyCoroutineContext unavailable")
 
     private fun coroutineSuspended(classLoader: ClassLoader): Any =
         runCatching {
             XposedHelpers.findClass(KOTLIN_INTRINSICS_CLASS, classLoader).methods.first {
-                it.name == "getCOROUTINE_SUSPENDED" && it.parameterTypes.isEmpty()
+                it.hostNameMatches("getCOROUTINE_SUSPENDED") && it.parameterTypes.isEmpty()
             }.apply { isAccessible = true }.invoke(null)
         }.getOrElse {
             XposedHelpers.findClass(KOTLIN_COROUTINE_SINGLETONS_CLASS, classLoader)

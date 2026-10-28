@@ -1,5 +1,8 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostAbiMethod
+import com.reamicro.fix.core.hostAbiField
+
 import androidx.core.graphics.PathParser
 import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.hook.webdav.*
@@ -22,7 +25,7 @@ internal class B4WebDavVector(private val drive: WebDavDriveHook) {
     )
 
     private fun buildVector(name: String, paths: List<Pair<String, Pair<Long, Float>>>): Any {
-        check(HostSymbols.profileId == "2.3.3-b4")
+        check(HostSymbols.abiProfileId == "2.3.3-b4")
         val float = Float::class.javaPrimitiveType!!
         val int = Int::class.javaPrimitiveType!!
         val builderType = drive.cls("ReaMicroHost.VectorBuilder")
@@ -32,10 +35,10 @@ internal class B4WebDavVector(private val drive: WebDavDriveHook) {
             String::class.java, float, float, float, float, Long::class.javaPrimitiveType,
             int, Boolean::class.javaPrimitiveType, int,
         ).newInstance(name, 24f, 24f, 24f, 24f, 0L, 0, false, 224)
-        val add = builderType.getDeclaredMethod(
+        val add = builderType.hostAbiMethod(
             "d", builderType, ArrayList::class.java, int, brushType, float, float, float, int, float,
         )
-        val color = drive.cls("ReaMicroHost.VectorColor").getDeclaredMethod("d", Long::class.javaPrimitiveType)
+        val color = drive.cls("ReaMicroHost.VectorColor").hostAbiMethod("d", Long::class.javaPrimitiveType)
         val brush = brushType.getDeclaredConstructor(Long::class.javaPrimitiveType)
         val commands = mapOf(
             'M' to ("k" to 2), 'm' to ("l" to 2), 'L' to ("i" to 2), 'l' to ("j" to 2),
@@ -47,23 +50,23 @@ internal class B4WebDavVector(private val drive: WebDavDriveHook) {
             PathParser.createNodesFromPathData(data).forEach { node ->
                 if (node.type == 'z' || node.type == 'Z') {
                     check(node.params.isEmpty())
-                    pathType.getDeclaredMethod("d").invoke(path)
+                    pathType.hostAbiMethod("d").invoke(path)
                 } else {
                     val (name, arity) = requireNotNull(commands[node.type]) { "Unverified vector path command" }
                     check(node.params.isNotEmpty() && node.params.size % arity == 0)
                     node.params.toList().chunked(arity).forEachIndexed { index, args ->
                         val actual = if (index > 0 && node.type == 'M') "i"
                             else if (index > 0 && node.type == 'm') "j" else name
-                        pathType.getDeclaredMethod(actual, *Array(arity) { float })
+                        pathType.hostAbiMethod(actual, *Array(arity) { float })
                             .invoke(path, *args.toTypedArray())
                     }
                 }
             }
-            val nodes = pathType.getDeclaredField("a").get(path)
+            val nodes = pathType.hostAbiField("a").get(path)
             add.invoke(null, builder, nodes, 0, brush.newInstance(color.invoke(null, argb)),
                 alpha, 1f, 0f, 0, 4f)
         }
         paths.forEach { (data, paint) -> addPath(data, paint.first, paint.second) }
-        return requireNotNull(builderType.getDeclaredMethod("e").invoke(builder))
+        return requireNotNull(builderType.hostAbiMethod("e").invoke(builder))
     }
 }

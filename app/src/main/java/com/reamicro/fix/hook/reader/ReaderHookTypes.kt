@@ -47,7 +47,7 @@ internal data class SearchDocument(
     val chapterIndex: Int,
     val chapter: Any?,
     val chapterTitle: String,
-    val readAloudChapterTitle: String,
+    val chapterTitleHint: String,
     val text: String,
     val indexedText: IndexedSearchText,
     val chapterAnchors: List<ChapterAnchor>,
@@ -56,32 +56,12 @@ internal data class SearchDocument(
     val titleParts: List<String> = emptyList(),
 )
 
-internal data class ReadAloudSegment(
-    val chapterTitle: String,
-    val chapterIndex: Int,
-    val text: String,
-    val highlightText: String = text,
-    val startCfi: String = "",
-    val endCfi: String = "",
-)
-
-internal data class ReadAloudTextPart(
-    val text: String,
-    val highlightText: String,
-    val startOffset: Int,
-    val endOffset: Int,
-)
-
-internal data class ReadAloudSelectionLocation(
-    val documentIndex: Int,
-    val offset: Int,
-)
-
 internal data class ReadingTarget(
     val cfi: String,
     val chapterIndex: Int,
     val title: String,
     val summary: String,
+    val scrollOffsetPx: Int? = null,
 )
 
 internal data class SearchNavigationState(
@@ -95,20 +75,6 @@ internal data class PersistedSearchOrigin(
     val bookKey: String,
     val epubRoot: String,
     val returnTarget: ReadingTarget,
-)
-
-internal data class PersistedReadAloudProgress(
-    val timestamp: Long,
-    val sessionId: String,
-    val bookKey: String,
-    val bookIdentity: String,
-    val epubRoot: String,
-    val bookTitle: String,
-    val target: ReadingTarget,
-    val endCfi: String,
-    val paragraphIndex: Int,
-    val elapsedMs: Long,
-    val recordedElapsedMs: Long,
 )
 
 internal data class IndexedChapter(
@@ -221,73 +187,6 @@ internal data class DictionaryDialogHandle(
     var currentPresetId: String,
 ) {
     var requestId: Long = 0L
-}
-
-internal class ReadAloudMenuButtonView(context: Context) : View(context) {
-    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-    }
-    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = dp(context, 1).toFloat()
-    }
-    private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = dp(context, 3).toFloat()
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-    }
-
-    init {
-        refreshColors()
-    }
-
-    fun refreshColors() {
-        val colors = DialogColors(context)
-        fillPaint.color = colors.cardBackground
-        strokePaint.color = colors.stroke
-        iconPaint.color = colors.actionBackground
-        invalidate()
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        val cx = width / 2f
-        val cy = height / 2f
-        val radius = (minOf(width, height) / 2f) - dp(context, 1)
-        canvas.drawCircle(cx, cy, radius, fillPaint)
-        canvas.drawCircle(cx, cy, radius, strokePaint)
-        val left = cx - dp(context, 10)
-        val top = cy - dp(context, 7)
-        val mid = cy
-        val bottom = cy + dp(context, 7)
-        val right = cx - dp(context, 2)
-        canvas.drawLine(left, top, right, top - dp(context, 2), iconPaint)
-        canvas.drawLine(left, bottom, right, bottom + dp(context, 2), iconPaint)
-        canvas.drawLine(left, top, left, bottom, iconPaint)
-        canvas.drawLine(right, top - dp(context, 2), right, bottom + dp(context, 2), iconPaint)
-        canvas.drawArc(
-            cx - dp(context, 3).toFloat(),
-            cy - dp(context, 12).toFloat(),
-            cx + dp(context, 14).toFloat(),
-            cy + dp(context, 12).toFloat(),
-            -38f,
-            76f,
-            false,
-            iconPaint,
-        )
-        canvas.drawArc(
-            cx + dp(context, 2).toFloat(),
-            cy - dp(context, 7).toFloat(),
-            cx + dp(context, 10).toFloat(),
-            cy + dp(context, 7).toFloat(),
-            -38f,
-            76f,
-            false,
-            iconPaint,
-        )
-        canvas.drawPoint(right, mid, iconPaint)
-    }
 }
 
 internal class DialogColors(context: Context) {

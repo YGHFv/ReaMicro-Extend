@@ -1,0 +1,154 @@
+package com.reamicro.fix.hook
+
+import com.reamicro.fix.cloud.webdav.hasWebDavLogin
+import com.reamicro.fix.core.B2NativeUi
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostMethodsNamed
+import com.reamicro.fix.hook.webdav.APP_TOP_BAR_CLASS
+import com.reamicro.fix.hook.webdav.BACKUP_TYPE_WEBDAV
+import com.reamicro.fix.hook.webdav.BACKUP_TYPE_LOCAL_LIBRARY
+import com.reamicro.fix.hook.webdav.BOOK_LIBRARY_LOCAL_METHOD
+import com.reamicro.fix.hook.webdav.BOOK_LIBRARY_SHEET_CLASS
+import com.reamicro.fix.hook.webdav.CLOUD_AUTHORIZED_ROW_METHOD
+import com.reamicro.fix.hook.webdav.CLOUD_UNAUTH_ROW_METHOD
+import com.reamicro.fix.hook.webdav.FUNCTION0_CLASS
+import com.reamicro.fix.hook.webdav.MATERIAL3_TEXT_CLASS
+import com.reamicro.fix.hook.webdav.WEBDAV_TITLE
+import com.reamicro.fix.xposed.XC_MethodHook
+import com.reamicro.fix.xposed.XposedBridge
+import java.lang.ref.WeakReference
+
+/** B4 已内联旧列表 lambda；在仍稳定的原生行和顶栏边界补回存储入口。 */
+internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
+    @Volatile private var importScope: WeakReference<Any>? = null
+    private val ui = B2NativeUi(drive.classLoader)
+    private val nativeStorageTitles = setOf("百度网盘", "阿里云盘", "115网盘", "本地存储")
+
+    fun install() {
+        check(HostSymbols.abiProfileId == "2.3.3-b4")
+        installImportRows()
+        installAvailableDriveLabels()
+        installStorageTitle()
+    }
+
+    private fun installImportRows() {
+        val sheet = drive.cls(BOOK_LIBRARY_SHEET_CLASS)
+        val content = sheet.hostMethodsNamed("BookLibrarySheet").single { it.parameterCount == 5 }
+        XposedBridge.hookMethod(content, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                // 工作表内容延后组合，外层返回时清 ThreadLocal 会丢失实际导航上下文。
+                importScope = if (param.args[2] == true) WeakReference(param.args[0]) else null
+            }
+        })
+        val local = sheet.hostMethodsNamed(BOOK_LIBRARY_LOCAL_METHOD).single { it.parameterCount == 3 }
+        XposedBridge.hookMethod(local, object : XC_MethodHook() {
+            override fun afterHookedMethod(param: MethodHookParam) {
+                if (param.throwable != null) return
+                val composer = param.args?.getOrNull(1) ?: return
+                val scope = importScope?.get() ?: return
+                if (drive.canShowLocalLibraryEntry()) {
+                    divider(composer)
+                    drive.pushLocalLibraryIcon()
+                    try {
+                        drive.method(BOOK_LIBRARY_SHEET_CLASS, CLOUD_AUTHORIZED_ROW_METHOD, 5).invoke(
+                            null, BACKUP_TYPE_LOCAL_LIBRARY, drive.localLibraryAuth(),
+                            drive.functionProxy("B4LocalLibraryImportOpen", FUNCTION0_CLASS) {
+                                drive.navigateStorage(scope, BACKUP_TYPE_LOCAL_LIBRARY)
+                                drive.targetUnit()
+                            }, composer, 0,
+                        )
+                    } finally {
+                        drive.popLocalLibraryIcon()
+                    }
+                }
+                if (!drive.canShowWebDavEntry()) return
+                divider(composer)
+                if (hasWebDavLogin(drive.currentContext())) {
+                    drive.pushWebDavIcon()
+                    try {
+                        drive.method(BOOK_LIBRARY_SHEET_CLASS, CLOUD_AUTHORIZED_ROW_METHOD, 5).invoke(
+                            null,
+                            BACKUP_TYPE_WEBDAV,
+                            drive.webDavAuth(),
+                            drive.functionProxy("B4WebDavImportOpen", FUNCTION0_CLASS) {
+                                drive.navigateStorage(scope)
+                                drive.targetUnit()
+                            },
+                            composer,
+                            0,
+                        )
+                    } finally {
+                        drive.popWebDavIcon()
+                    }
+                } else {
+                    drive.method(BOOK_LIBRARY_SHEET_CLASS, CLOUD_UNAUTH_ROW_METHOD, 4).invoke(
+                        null,
+                        BACKUP_TYPE_WEBDAV,
+                        drive.functionProxy("B4WebDavImportLogin", FUNCTION0_CLASS) {
+                            drive.navigateStorage(scope)
+                            drive.targetUnit()
+                        },
+                        composer,
+                        0,
+                    )
+                }
+                XposedBridge.logAlways("ReaMicro B4 WebDAV import row rendered")
+            }
+        })
+        XposedBridge.deoptimize(content)
+        XposedBridge.deoptimize(local)
+    }
+
+    private fun divider(composer: Any) {
+        ui.divider(ui.padding(ui.modifier(), ui.dp(56), 0f, 0f, 0f), composer)
+    }
+
+    private fun installAvailableDriveLabels() {
+        drive.cls(MATERIAL3_TEXT_CLASS).declaredMethods
+            .filter { it.parameterTypes.firstOrNull() == String::class.java }
+            .forEach { method ->
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val title = param.args?.getOrNull(0) as? String ?: return
+                        if (title !in nativeStorageTitles) return
+                        if ((drive.webDavIconDepth.get() ?: 0) > 0 ||
+                            (drive.webDavBackupCardDepth.get() ?: 0) > 0) {
+                            param.args?.set(0, WEBDAV_TITLE)
+                            return
+                        }
+                        if ((drive.localLibraryIconDepth.get() ?: 0) > 0) {
+                            param.args?.set(0, "本地书库")
+                            return
+                        }
+                        val types = drive.syncAvailableTypes.get() ?: return
+                        val index = drive.syncAvailableRowIndex.get() ?: 0
+                        if (types.getOrNull(index) == BACKUP_TYPE_WEBDAV) {
+                            param.args?.set(0, WEBDAV_TITLE)
+                        }
+                        drive.syncAvailableRowIndex.set(index + 1)
+                    }
+                })
+            }
+    }
+
+    private fun installStorageTitle() {
+        val topBar = drive.cls(APP_TOP_BAR_CLASS).hostMethodsNamed("AppTopBar-1YH7lEI")
+            .single { it.parameterCount >= 11 }
+        XposedBridge.hookMethod(topBar, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                val title = when {
+                    (drive.localLibraryCloudTitleDepth.get() ?: 0) > 0 -> "本地书库"
+                    (drive.webDavCloudTitleDepth.get() ?: 0) > 0 -> WEBDAV_TITLE
+                    else -> return
+                }
+                val args = param.args ?: return
+                args[0] = title
+                val changedIndex = args.size - 2
+                val defaultIndex = args.size - 1
+                args[changedIndex] = ((args[changedIndex] as Int) and 1.inv()) or 6
+                args[defaultIndex] = (args[defaultIndex] as Int) and 1.inv()
+            }
+        })
+        XposedBridge.deoptimize(topBar)
+    }
+}

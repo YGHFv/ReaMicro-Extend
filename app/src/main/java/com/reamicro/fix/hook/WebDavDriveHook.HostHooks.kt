@@ -254,6 +254,17 @@ internal fun WebDavDriveHook.hookOnlineCompletionBookGroupRow(sheetClass: Class<
                 val info = onlineImportedBookSourceInfo(book) ?: return
                 val groupIcon = param.args?.getOrNull(0) ?: return
                 val composer = param.args?.getOrNull(3) ?: return
+                if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
+                    val groupClick = param.args?.getOrNull(2) ?: return
+                    try {
+                        onlineCompletionUpdateRowInjecting.set(true)
+                        renderOnlineCompletionUpdateGroupActionRow(book, info, groupIcon, groupClick, composer)
+                        param.result = targetUnit()
+                    } finally {
+                        onlineCompletionUpdateRowInjecting.remove()
+                    }
+                    return
+                }
                 val hostUpdateRowMethod = updateRowMethod ?: return
                 val updateIcon = onlineCompletionUpdateImageVector() ?: groupIcon
                 val updateModifier = paddingModifier(
@@ -1141,7 +1152,7 @@ internal fun WebDavDriveHook.hookWebDavStorageNavigate() {
 }
 
 internal fun WebDavDriveHook.hookCloudStorageWebDavData() {
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         B4StorageDataBridge(this).install()
         return
     }
@@ -1350,7 +1361,7 @@ internal fun WebDavDriveHook.hookHomeViewModelDependencies() {
 
 internal fun WebDavDriveHook.hookHomeWebDavSearch() {
     runCatching {
-        val b4Events = if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4")
+        val b4Events = if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4")
             B4HomeSearchEvents(this) else null
         val method = b4Events?.method ?: cls(HOME_VIEW_MODEL_CLASS).declaredMethods.first {
             it.hostNameMatches(HOME_SEARCH_METHOD) &&
@@ -1465,7 +1476,7 @@ internal fun WebDavDriveHook.hookHomeWebDavSearch() {
 
 internal fun WebDavDriveHook.hookHomeSearchResultWebDavSection() {
     runCatching {
-        val b4 = com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4"
+        val b4 = com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4"
         val method = cls(HOME_SEARCH_BAR_CLASS).declaredMethods.first {
             (it.hostNameMatches(HOME_SEARCH_RESULT_LAZY_METHOD) ||
                 (b4 && it.hostNameMatches("SearchResult"))) &&
@@ -1558,7 +1569,7 @@ internal fun WebDavDriveHook.hookHomeSearchResultWebDavSection() {
 }
 
 internal fun WebDavDriveHook.hookHomeSearchTapCancellation() {
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         B4HomeSearchEvents(this).installTapGuard()
         return
     }
@@ -1668,7 +1679,7 @@ internal fun WebDavDriveHook.hookNativeCloudDownloadCancellation() {
 }
 
 internal fun WebDavDriveHook.hookWebDavImportBookSource() {
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         B4ImportSourceBridge(this).install()
         return
     }
@@ -2010,7 +2021,7 @@ internal fun WebDavDriveHook.hookCloudStorageWebDavViewModelState() {
 }
 
 internal fun WebDavDriveHook.hookWebDavCloudTap() {
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         B4StorageTapBridge(this).install()
         return
     }
@@ -2292,7 +2303,7 @@ internal fun WebDavDriveHook.hookWebDavAccountSettingComponents() {
 internal fun WebDavDriveHook.hookWebDavAccountAuthFlow() {
     // B4 的账号 VM 只有 g/i/l，鉴权状态已由 native state/intent 链路承载。
     // 旧版 getAuth 门面在 B4 不存在，不能把缺失 ABI 记成安装失败。
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         XposedBridge.log("$LOG_PREFIX B4 account auth flow uses native VM state/intent; legacy getAuth hooks skipped")
         return
     }
@@ -2355,7 +2366,7 @@ internal fun WebDavDriveHook.hookWebDavAccountTopBarTitle() {
 internal fun WebDavDriveHook.hookWebDavAccountDefaultFolderLambda() {
     // B4 已由 bid.b/l2e.a 的真实 DefaultFolder composable 处理回调，旧 lambda
     // 在 R8 后不存在；避免用历史合成方法名制造假失败。
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         XposedBridge.log("$LOG_PREFIX B4 default-folder lambda uses native account screen methods; legacy lambda hook skipped")
         return
     }

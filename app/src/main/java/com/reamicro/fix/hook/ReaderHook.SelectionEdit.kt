@@ -1,5 +1,7 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostMethod
+
 import android.app.Dialog
 import android.widget.Toast
 import com.reamicro.fix.epub.editor.*
@@ -65,7 +67,7 @@ internal fun ReaderHook.openAnchoredSelectionEditor() {
         val href = callString(refs[position], "getHref")
         require(href.isNotBlank()) { "选区所属章节路径为空" }
 
-        val resolver = epub.javaClass.getDeclaredMethod("resolveHtmlPath", String::class.java).apply { isAccessible = true }
+        val resolver = epub.javaClass.hostMethod("resolveHtmlPath", String::class.java).apply { isAccessible = true }
         val resolved = resolver.invoke(epub, href) ?: error("选区所属章节文件不存在")
         val root = File(callNoArg(epub, "getDirectory").toString()).canonicalFile
         val file = File(resolved.toString()).canonicalFile

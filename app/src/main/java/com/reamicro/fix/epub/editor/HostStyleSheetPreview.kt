@@ -9,7 +9,7 @@ import org.json.JSONObject
 import java.io.File
 
 internal fun hostStyleSheetPreview(loader: ClassLoader, file: File): JSONArray {
-    if (HostSymbols.profileId == "2.3.3-b4") return B4HostCssPreview(loader).preview(file)
+    if (HostSymbols.abiProfileId == "2.3.3-b4") return B4HostCssPreview(loader).preview(file)
     val providerType = loader.hostClass("org.epub.css.StyleSheetsProvider")
     val provider = providerType.hostField("INSTANCE").get(null)
 
@@ -52,7 +52,7 @@ internal fun hostStyleSheetPreview(loader: ClassLoader, file: File): JSONArray {
 }
 
 internal fun invalidateHostCssPreview(loader: ClassLoader, file: File) {
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         B4HostCssPreview(loader).invalidate(file)
         return
     }

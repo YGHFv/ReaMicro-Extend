@@ -2025,6 +2025,14 @@ internal fun WebDavDriveHook.okioPath(file: File): Any =
 
 internal fun WebDavDriveHook.obtainOnlineCompletionOpf(bookDir: Any): Any {
     val opfClass = cls(OPF_CLASS)
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
+        // B4 将解析器并入 trd.k；使用已取证的静态成员映射，不再拿缺失的 Companion 做动态猜测。
+        val pathClass = cls(OKIO_PATH_CLASS)
+        require(pathClass.isInstance(bookDir)) { "EPUB 目录参数类型不匹配" }
+        val obtain = classLoader.hostStaticMethod(OPF_CLASS, "obtain", pathClass)
+        check(opfClass.isAssignableFrom(obtain.returnType)) { "EPUB OPF 解析器返回类型不匹配" }
+        return obtain.invoke(null, bookDir) ?: error("EPUB OPF 解析失败")
+    }
     val companion = sequenceOf("INSTANCE", "Companion")
         .mapNotNull { fieldName ->
             runCatching {

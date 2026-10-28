@@ -1,15 +1,20 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostNameMatches
+
+
 import com.reamicro.fix.core.HostClasses
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 
 internal class BookImageSheetUi(private val loader: ClassLoader) {
-    private fun cls(name: String) = loader.loadClass(name)
+    private fun cls(name: String) = loader.hostClass(name)
     private fun method(owner: String, name: String, count: Int, first: String? = null, second: String? = null, third: String? = null): Method =
         cls(owner).declaredMethods.single {
-            (it.name == name || it.name.startsWith("$name-")) &&
+            (it.hostNameMatches(name) || it.name.startsWith("$name-")) &&
                 (!it.name.endsWith("\$default") || name.endsWith("\$default")) &&
                 it.parameterTypes.size == count &&
                 (first == null || it.parameterTypes.first().name == first) &&
@@ -18,7 +23,7 @@ internal class BookImageSheetUi(private val loader: ClassLoader) {
         }.apply { isAccessible = true }
     private fun singleton(owner: String): Any {
         val type = cls(owner)
-        return (type.declaredFields.firstOrNull { it.name == "INSTANCE" }
+        return (type.declaredFields.firstOrNull { it.hostNameMatches("INSTANCE") }
             ?: type.getDeclaredField("Companion")).apply { isAccessible = true }.get(null)
     }
     private fun getter(owner: String, name: String) = method(owner, name, 0)
@@ -32,10 +37,10 @@ internal class BookImageSheetUi(private val loader: ClassLoader) {
     private val alignment = singleton(HostClasses.Compose.ALIGNMENT)
     private val top = getter(HostClasses.Compose.ARRANGEMENT, "getTop").invoke(arrangement)
     private val start = getter(HostClasses.Compose.ARRANGEMENT, "getStart").invoke(arrangement)
-    private val alignStart = alignment.javaClass.getMethod("getStart").invoke(alignment)
-    private val center = alignment.javaClass.getMethod("getCenterVertically").invoke(alignment)
-    private val startGroup = cls(HostClasses.Compose.COMPOSER).getMethod("startReplaceableGroup", Int::class.javaPrimitiveType)
-    private val endGroup = cls(HostClasses.Compose.COMPOSER).getMethod("endReplaceableGroup")
+    private val alignStart = alignment.javaClass.hostMethod("getStart").invoke(alignment)
+    private val center = alignment.javaClass.hostMethod("getCenterVertically").invoke(alignment)
+    private val startGroup = cls(HostClasses.Compose.COMPOSER).hostMethod("startReplaceableGroup", Int::class.javaPrimitiveType)
+    private val endGroup = cls(HostClasses.Compose.COMPOSER).hostMethod("endReplaceableGroup")
     private val row = method(HostClasses.Compose.ROW_KT, "Row", 7)
     private val column = method(HostClasses.Compose.COLUMN_KT, "Column", 7)
     private val spacer = method(HostClasses.Compose.SPACER_KT, "Spacer", 3)
@@ -55,7 +60,7 @@ internal class BookImageSheetUi(private val loader: ClassLoader) {
     private val scrollState = method("androidx.compose.foundation.ScrollKt", "rememberScrollState", 4)
     private val scroll = method("androidx.compose.foundation.ScrollKt", "verticalScroll\$default", 7)
     private val navPadding = method("androidx.compose.foundation.layout.WindowInsetsPadding_androidKt", "navigationBarsPadding", 1)
-    private val weight = cls("androidx.compose.foundation.layout.RowScope").getMethod(
+    private val weight = cls("androidx.compose.foundation.layout.RowScope").hostMethod(
         "weight", cls(HostClasses.Compose.MODIFIER), Float::class.javaPrimitiveType, Boolean::class.javaPrimitiveType)
     private val colors = method(HostClasses.Compose.MATERIAL_THEME, "getColorScheme", 2)
     private val typography = method(HostClasses.Compose.MATERIAL_THEME, "getTypography", 2)
@@ -78,14 +83,14 @@ internal class BookImageSheetUi(private val loader: ClassLoader) {
         }
     private val nextIcon = call(method(HostClasses.Compose.NAVIGATE_NEXT_ICON, "getNavigateNext", 1),
         null, singleton("androidx.compose.material.icons.Icons\$AutoMirrored\$Filled"))!!
-    private val hide = cls("androidx.compose.material3.SheetState").getMethod("hide", cls("kotlin.coroutines.Continuation"))
+    private val hide = cls("androidx.compose.material3.SheetState").hostMethod("hide", cls("kotlin.coroutines.Continuation"))
     private val isVisible = getter("androidx.compose.material3.SheetState", "isVisible")
     private val launch = method("kotlinx.coroutines.BuildersKt", "launch\$default", 6)
-    private val completion = cls("kotlinx.coroutines.Job").getMethod("invokeOnCompletion", cls(HostClasses.Kotlin.FUNCTION1))
+    private val completion = cls("kotlinx.coroutines.Job").hostMethod("invokeOnCompletion", cls(HostClasses.Kotlin.FUNCTION1))
 
     private fun function(arity: Int, name: String, block: (Array<Any?>) -> Any?): Any =
         Proxy.newProxyInstance(loader, arrayOf(cls("kotlin.jvm.functions.Function$arity"))) { proxy, m, args ->
-            when (m.name) {
+            when (com.reamicro.fix.core.HostSymbols.logicalMethodName(m)) {
                 "invoke" -> block(args ?: emptyArray())
                 "toString" -> "ReaMicro-$name"
                 "hashCode" -> System.identityHashCode(proxy)

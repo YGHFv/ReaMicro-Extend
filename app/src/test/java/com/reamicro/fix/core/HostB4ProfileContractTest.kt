@@ -19,6 +19,42 @@ class HostB4ProfileContractTest {
     }
 
     @Test
+    fun `reader draw accessors follow actual b4 node and canvas bytecode`() {
+        val parsed = profile()
+        assertEquals("n", parsed.fieldOf("androidx.compose.ui.Modifier\$Node", "isAttached"))
+        assertEquals("f", parsed.fieldOf("androidx.compose.ui.text.MultiParagraph", "lineCount"))
+        assertEquals("b", parsed.methodOf("androidx.compose.ui.text.TextLayoutResult", "getBoundingBox"))
+        assertEquals("i", parsed.methodOf("androidx.compose.ui.text.TextLayoutResult", "getLineStart"))
+        assertEquals("l0", parsed.methodOf("androidx.compose.ui.graphics.drawscope.DrawScope", "getDrawContext"))
+        assertEquals("t", parsed.methodOf("androidx.compose.ui.graphics.drawscope.DrawContext", "getCanvas"))
+        assertEquals("c", parsed.methodOf("androidx.compose.ui.graphics.AndroidCanvas_androidKt", "getNativeCanvas"))
+        assertEquals("o", parsed.methodOf("androidx.compose.ui.node.DrawModifierNodeKt", "invalidateDraw"))
+        assertEquals("a", parsed.methodOf("androidx.compose.foundation.layout.RowKt", "rowMeasurePolicy"))
+        assertEquals("e79", parsed.classOf("androidx.compose.foundation.layout.RowKt"))
+        assertEquals("a", parsed.methodOf(
+            "app.zhendong.reamicro.arch.components.JustifyText_androidKt", "JustifyText",
+        ))
+        assertEquals("a", parsed.methodOf("androidx.compose.foundation.text.BasicTextKt", "BasicTextAnnotated"))
+    }
+
+    @Test
+    fun `highlight entry binds inside the highlight page before its dialogue preset`() {
+        val parsed = profile()
+        val screen = "app.zhendong.reamicro.ui.reader.compose.ReaderHighlightScreenKt"
+        assertEquals("i", parsed.methodOf(screen, "PresetDialogueRow"))
+        assertEquals("je8", parsed.classOf("ReaMicroHost.ReaderHighlightPagerContent"))
+        assertEquals("y", parsed.methodOf("ReaMicroHost.ReaderHighlightPagerContent", "invoke"))
+        val sources = assets().parentFile.resolve("java/com/reamicro/fix/hook/ReaderHook.HostHooks.kt")
+            .readText(Charsets.UTF_8)
+        val b4Entry = sources.substringAfter("internal fun ReaderHook.hookReaderHighlightScreenEntry()")
+            .substringAfter("if (HostSymbols.profileId == \"2.3.3-b4\")")
+            .substringBefore("return@install")
+        assertTrue(b4Entry.contains("method.hostNameMatches(\"PresetDialogueRow\")"))
+        assertFalse(b4Entry.contains("HighlightPageContentTabs"))
+        assertTrue(b4Entry.contains("param.args?.getOrNull(5)"))
+    }
+
+    @Test
     fun `b4 fingerprint and class names are dex names not jadx display aliases`() {
         val parsed = profile()
         assertEquals("2.3.3-b4", parsed.fingerprint.id)

@@ -1,5 +1,10 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+
+import com.reamicro.fix.core.hostNameMatches
+
+import com.reamicro.fix.core.hostClass
 import android.widget.Toast
 import com.reamicro.fix.online.OnlineReaderContextBridge
 import com.reamicro.fix.settings.ReaderHighlightBookContext
@@ -39,7 +44,7 @@ internal fun ReaderHook.jumpToCfi(
     summary: String,
 ): Boolean {
     val markJumped = runCatching {
-        val markClass = classLoader.loadClass(MARK_CLASS)
+        val markClass = classLoader.hostClass(MARK_CLASS)
         val targetMark = mark ?: createReaderMark(
             id = -System.currentTimeMillis(),
             chapter = title,
@@ -49,7 +54,7 @@ internal fun ReaderHook.jumpToCfi(
             style = MARK_STYLE_LINE,
             color = MARK_COLOR_RED,
         ) ?: return@runCatching false
-        val intentClass = classLoader.loadClass("$READER_UI_INTENT_CLASS\$MarkJump")
+        val intentClass = classLoader.hostClass("$READER_UI_INTENT_CLASS\$MarkJump")
         val intent = intentClass.getDeclaredConstructor(markClass).newInstance(targetMark)
         dispatchReaderIntent(receiver, viewModel, intent, "MarkJump")
     }.onFailure {
@@ -60,7 +65,7 @@ internal fun ReaderHook.jumpToCfi(
         return true
     }
 
-    val bookmarkClass = classLoader.loadClass(BOOKMARK_CLASS)
+    val bookmarkClass = classLoader.hostClass(BOOKMARK_CLASS)
     val bookmark = bookmarkClass
         .getDeclaredConstructor(
             Int::class.javaPrimitiveType,
@@ -78,7 +83,7 @@ internal fun ReaderHook.jumpToCfi(
             "",
             0,
         )
-    val intentClass = classLoader.loadClass("$READER_UI_INTENT_CLASS\$BookmarkJump")
+    val intentClass = classLoader.hostClass("$READER_UI_INTENT_CLASS\$BookmarkJump")
     val intent = intentClass.getDeclaredConstructor(bookmarkClass).newInstance(bookmark)
     return dispatchReaderIntent(receiver, viewModel, intent, "BookmarkJump").also {
         XposedBridge.log("$LOG_PREFIX full-text search bookmark jump dispatched=$it cfi=$cfi")
@@ -88,12 +93,12 @@ internal fun ReaderHook.jumpToCfi(
 internal fun ReaderHook.isValidEpubCfi(cfi: String): Boolean {
     val looksValid = Regex("""^epubcfi\(/\d+/\d+/4(?:/\d+)*(?::\d+)?\)$""").matches(cfi)
     return runCatching {
-        val epubCfiClass = classLoader.loadClass("org.epub.html.EpubCFI")
-        val companion = runCatching { epubCfiClass.getField("INSTANCE").get(null) }.getOrNull()
+        val epubCfiClass = classLoader.hostClass("org.epub.html.EpubCFI")
+        val companion = runCatching { epubCfiClass.hostField("INSTANCE").get(null) }.getOrNull()
             ?: runCatching { epubCfiClass.getField("Companion").get(null) }.getOrNull()
             ?: return@runCatching looksValid
         val create = companion.javaClass.methods.firstOrNull {
-            it.name == "create" && it.parameterTypes.size == 1 && it.parameterTypes[0] == String::class.java
+            it.hostNameMatches("create") && it.parameterTypes.size == 1 && it.parameterTypes[0] == String::class.java
         } ?: return@runCatching looksValid
         create.invoke(companion, cfi) != null
     }.onFailure {
@@ -117,10 +122,10 @@ internal fun ReaderHook.resolveCatalogIndexForCfi(cfi: String, catalog: List<Any
 internal fun ReaderHook.createEpubCfi(cfi: String): Any? =
     runCatching {
         if (cfi.isBlank()) return@runCatching null
-        val cfiClass = classLoader.loadClass("org.epub.html.EpubCFI")
+        val cfiClass = classLoader.hostClass("org.epub.html.EpubCFI")
         val cfiObject = companionObject(cfiClass) ?: return@runCatching null
         val create = cfiObject.javaClass.methods.firstOrNull {
-            it.name == "create" && it.parameterTypes.size == 1 && it.parameterTypes[0] == String::class.java
+            it.hostNameMatches("create") && it.parameterTypes.size == 1 && it.parameterTypes[0] == String::class.java
         } ?: return@runCatching null
         create.invoke(cfiObject, cfi)
     }.getOrNull()

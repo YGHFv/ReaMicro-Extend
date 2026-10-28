@@ -1,8 +1,18 @@
 package com.reamicro.fix.epub.editor
 
+import com.reamicro.fix.core.B2BookAssociation
+import com.reamicro.fix.core.HostExactRecordCopy
+import com.reamicro.fix.core.HostSymbols
+
 internal object ReaderPositionCopy {
     fun copy(book: Any, cfi: String, chapter: String, progress: Float, updated: Long): Any {
         require(cfi.isNotBlank())
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
+            return HostExactRecordCopy(book.javaClass, B2BookAssociation.properties).copy(book, mapOf(
+                "epubcfi" to cfi, "chapter" to chapter,
+                "progress" to progress.coerceIn(0f, 1f), "updated" to updated,
+            ))
+        }
         val method = book.javaClass.methods.single {
             it.name == "copy" && it.returnType == book.javaClass && it.parameterTypes.size == 26
         }

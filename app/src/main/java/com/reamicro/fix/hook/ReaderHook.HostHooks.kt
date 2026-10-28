@@ -315,7 +315,7 @@ internal fun ReaderHook.hookReaderCatalog() {
             })
         }
         XposedBridge.log("$LOG_PREFIX reader catalog full-text search hook installed: ${methods.size}")
-        if (HostSymbols.profileId == "2.3.3-b4") B4ReaderSearchEntryBridge(this).install()
+        if (HostSymbols.abiProfileId == "2.3.3-b4") B4ReaderSearchEntryBridge(this).install()
     }
 }
 
@@ -554,7 +554,7 @@ internal fun ReaderHook.hookReaderHighlightScreenEntry() {
             }
         })
 
-        if (HostSymbols.profileId == "2.3.3-b4") {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
             // B4 只在高亮页签的滚动 Column 中调用预置对话行；入口作为它的前一个子项，
             // 继承卡片宽度和滚动范围，不再占用角色/高亮切换栏外的空间。
             val presetMethod = screenClass.declaredMethods.firstOrNull { method ->
@@ -755,7 +755,7 @@ internal fun ReaderHook.hookNativeSelectionMenu() {
                         if (action != null) {
                             // B4 新增了宿主高亮动作，但模块选择高亮仍走自己的本书规则链路。
                             // 仅替换同名动作，保留原有位置和划线等其它宿主动作。
-                            if (HostSymbols.profileId == "2.3.3-b4" && nativeHighlightIndex >= 0) {
+                            if (HostSymbols.abiProfileId == "2.3.3-b4" && nativeHighlightIndex >= 0) {
                                 next[nativeHighlightIndex] = action
                             } else if (nativeHighlightIndex < 0) {
                                 next.add(action)
@@ -771,7 +771,7 @@ internal fun ReaderHook.hookNativeSelectionMenu() {
                     if (!HostSymbols.isIdentity && method.parameterTypes.size == 7 &&
                         method.parameterTypes[3] == Boolean::class.javaPrimitiveType &&
                         (settingsProvider().canUseCompactReaderSelectionMenu ||
-                            (HostSymbols.profileId == "2.3.3-b4" && selectionMenuMaxItemsPerRow(next.size) != null))
+                            (HostSymbols.abiProfileId == "2.3.3-b4" && selectionMenuMaxItemsPerRow(next.size) != null))
                     ) {
                         // B4 的第四参控制 widthIn/固定全宽；换行内容也必须按实测宽度收缩气泡。
                         param.args[3] = true
@@ -786,7 +786,7 @@ internal fun ReaderHook.hookNativeSelectionMenu() {
 }
 
 internal fun ReaderHook.hookNativeSelectionMenuContent(bodyClass: Class<*>) {
-    if (HostSymbols.profileId == "2.3.3-b4") {
+    if (HostSymbols.abiProfileId == "2.3.3-b4") {
         // 定位 Modifier、气泡背景和上下箭头仍由 SelectionBubbleMenu 处理，只替换内部动作布局。
         listOf(
             "ReaMicroHost.SelectionMenuFloatingContent" to true,

@@ -21,6 +21,7 @@ internal class CancellableWebDavDownload(
     val tracker: Any,
     val localFile: File,
     val createdAtMs: Long,
+    val handle: Any,
 ) {
     @Volatile var cancelRequested: Boolean = false
     @Volatile var thread: Thread? = null

@@ -1,5 +1,8 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostNameMatches
+
+
 import android.app.Activity
 import android.app.Dialog
 import android.content.Intent
@@ -169,7 +172,7 @@ internal fun ReaMicroSettingsHook.renderOnlineSourceSwitch(source: OnlineSourceE
     val targetChecked = settings.isOnlineSourceEnabled(source.id)
     val state = rememberBooleanState(composer, targetChecked)
     fun updateChecked(value: Boolean) {
-        state.javaClass.methods.firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+        state.javaClass.methods.firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
             ?.invoke(state, value)
     }
     val rememberedChecked = state.method0("getValue") as? Boolean ?: targetChecked
@@ -185,19 +188,7 @@ internal fun ReaMicroSettingsHook.renderOnlineSourceSwitch(source: OnlineSourceE
         updateChecked(applied)
         targetUnit()
     }
-    method(SWITCH_KT_CLASS, SWITCH_METHOD, 10).invoke(
-        null,
-        checked,
-        onCheckedChange,
-        switchModifier(),
-        null,
-        false,
-        switchColors(composer),
-        null,
-        composer,
-        0,
-        88,
-    )
+    renderAbiSwitch(checked, onCheckedChange, composer)
 }
 
 internal fun ReaMicroSettingsHook.setOnlineSourceEnabled(
@@ -977,7 +968,7 @@ internal fun ReaMicroSettingsHook.bumpOnlineSourceVersion() {
     val state = onlineSourceVersionState()
     val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
     state.javaClass.methods
-        .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
         ?.invoke(state, value + 1)
 }
 
@@ -1014,7 +1005,7 @@ internal fun ReaMicroSettingsHook.signalDiscoverRefresh() {
         val state = discoverVersionState()
         val current = (state.method0("getValue") as? Number)?.toInt() ?: 0
         state.javaClass.methods
-            .firstOrNull { it.name == "setValue" && it.parameterTypes.size == 1 }
+            .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
             ?.invoke(state, current + 1)
     }.onFailure {
         XposedBridge.logAlways("[ReaMicro] discover refresh failed: ${it.javaClass.simpleName}: ${it.message}")

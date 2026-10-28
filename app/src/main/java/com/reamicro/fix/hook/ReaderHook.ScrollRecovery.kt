@@ -1,5 +1,10 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostNameMatches
+
 import android.app.ActivityManager
 import android.content.Context
 import android.os.Build
@@ -84,7 +89,7 @@ internal fun ReaderHook.restoreTranslateFlipStyleIfScrollCrashed(session: Any, s
             val flow = callNoArg(session, "getFlipStyleFlow") ?: return@Thread
             val continuation = classLoader.loadClass("kotlin.coroutines.Continuation")
             val first = classLoader.loadClass("kotlinx.coroutines.flow.FlowKt")
-                .getMethod("first", classLoader.loadClass("kotlinx.coroutines.flow.Flow"), continuation)
+                .hostMethod("first", classLoader.loadClass("kotlinx.coroutines.flow.Flow"), continuation)
             val style = (invokeSelectionHostSuspend { first.invoke(null, flow, it) } as? Number)?.toInt()
             if (!mayApplyScrollRecovery(style, currentSessionRef?.get() === session)) return@Thread
             forceTranslateFlipStyle(session)
@@ -105,9 +110,9 @@ internal fun ReaderHook.restoreTranslateFlipStyleIfScrollCrashed(session: Any, s
 
 private fun ReaderHook.forceTranslateFlipStyle(session: Any) {
     val keys = classLoader.loadClass(PREF_KEYS_CLASS)
-    val instance = keys.getDeclaredField("INSTANCE").apply { isAccessible = true }.get(null)
-    val key = keys.getMethod("getFLIP_STYLE").invoke(instance)
-    val update = session.javaClass.methods.single { it.name == "update" && it.parameterTypes.size == 3 }
+    val instance = keys.hostField("INSTANCE").apply { isAccessible = true }.get(null)
+    val key = keys.hostMethod("getFLIP_STYLE").invoke(instance)
+    val update = session.javaClass.methods.single { it.hostNameMatches("update") && it.parameterTypes.size == 3 }
         .apply { isAccessible = true }
     invokeSelectionHostSuspend { update.invoke(session, key, Integer.valueOf(FLIP_STYLE_TRANSLATE), it) }
 }

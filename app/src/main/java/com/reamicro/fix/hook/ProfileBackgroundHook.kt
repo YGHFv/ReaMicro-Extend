@@ -1,4 +1,7 @@
 package com.reamicro.fix.hook
+import com.reamicro.fix.core.hostAbiMethodByArity
+import com.reamicro.fix.core.hostAbiMethod
+import com.reamicro.fix.core.hostAbiField
 
 import com.reamicro.fix.core.hostMethod
 import com.reamicro.fix.core.hostNameMatches
@@ -52,7 +55,7 @@ class ProfileBackgroundHook(
 
     fun install() {
         activeInstance = this
-        if (HostSymbols.profileId == "2.3.3-b4") {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
             installB4ProfileBackground()
             return
         }
@@ -68,10 +71,10 @@ class ProfileBackgroundHook(
 
     private fun installB4ProfileBackground() {
         val root = classLoader.hostClass("ReaMicroHost.ProfileScreen")
-            .getDeclaredMethod("a", classLoader.hostClass(HostClasses.Host.NAV_GRAPH_SCOPE),
+            .hostAbiMethod("a", classLoader.hostClass(HostClasses.Host.NAV_GRAPH_SCOPE),
                 classLoader.hostClass(COMPOSER_CLASS), Int::class.javaPrimitiveType)
         val content = classLoader.hostClass("ReaMicroHost.ProfileContent")
-            .getDeclaredMethod("r", Any::class.java, Any::class.java, Any::class.java)
+            .hostAbiMethod("r", Any::class.java, Any::class.java, Any::class.java)
         XposedBridge.hookMethod(content, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 if (!canHandleProfileBackground(settingsProvider())) return
@@ -85,7 +88,7 @@ class ProfileBackgroundHook(
                 fillMaxSizeCallCount.remove()
             }
         })
-        val materialize = classLoader.hostClass("ReaMicroHost.Materialize").getDeclaredMethod(
+        val materialize = classLoader.hostClass("ReaMicroHost.Materialize").hostAbiMethod(
             "h", classLoader.hostClass(COMPOSER_CLASS), classLoader.hostClass(HostClasses.Compose.MODIFIER),
         )
         XposedBridge.hookMethod(materialize, object : XC_MethodHook() {
@@ -103,7 +106,7 @@ class ProfileBackgroundHook(
                 XposedBridge.logAlways("$LOG_PREFIX B4 root background applied")
             }
         })
-        val colorBackground = classLoader.hostClass(BACKGROUND_KT_CLASS).getDeclaredMethod(
+        val colorBackground = classLoader.hostClass(BACKGROUND_KT_CLASS).hostAbiMethod(
             "g", classLoader.hostClass(HostClasses.Compose.MODIFIER),
             Long::class.javaPrimitiveType, classLoader.hostClass("androidx.compose.ui.graphics.Shape"),
         )
@@ -123,7 +126,7 @@ class ProfileBackgroundHook(
         val community = classLoader.hostClass("app.zhendong.reamicro.ui.profile.components.CommunityKt")
             .declaredMethods.single { it.hostNameMatches("Community") }
         val privilege = classLoader.hostClass("ReaMicroHost.ProfilePrivilegeCard")
-            .declaredMethods.single { it.name == "g" && it.parameterCount == 12 }
+            .hostAbiMethodByArity("g", 12)
         listOf(community to (2 to 6), privilege to (9 to 27)).forEach { (target, slots) ->
             XposedBridge.hookMethod(target, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
@@ -194,7 +197,7 @@ class ProfileBackgroundHook(
                     }
                 },
             )
-            if (HostSymbols.profileId == "2.3.3-b4") XposedBridge.deoptimize(target)
+            if (HostSymbols.abiProfileId == "2.3.3-b4") XposedBridge.deoptimize(target)
             XposedBridge.log("$LOG_PREFIX SimpleDivider hook installed")
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX failed to hook SimpleDivider: ${it.stackTraceToString()}")
@@ -599,7 +602,7 @@ class ProfileBackgroundHook(
     private fun verticalGradientBottomEdgeBrush(bitmap: Bitmap, bottomArgb: Int): Any? = runCatching {
         val activity = activityProvider() ?: return@runCatching null
         val brushCompanionClass = XposedHelpers.findClass(BRUSH_COMPANION_CLASS, classLoader)
-            .getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+            .hostAbiField("Companion").apply { isAccessible = true }.get(null)
         val companionClass = XposedHelpers.findClass("$BRUSH_COMPANION_CLASS\$Companion", classLoader)
         val gradientMethod = companionClass.declaredMethods.firstOrNull { m ->
             m.hostNameMatches(VERTICAL_GRADIENT_DEFAULT_METHOD) && m.parameterTypes.size == 7
@@ -679,7 +682,7 @@ class ProfileBackgroundHook(
         val shader = BitmapShader(brushBitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).apply {
             setLocalMatrix(matrix)
         }
-        if (HostSymbols.profileId == "2.3.3-b4") {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
             return@runCatching classLoader.hostClass("ReaMicroHost.ShaderBrush")
                 .getDeclaredConstructor(Shader::class.java).newInstance(shader)
         }
@@ -1103,7 +1106,7 @@ class ProfileBackgroundHook(
     private fun verticalGradientFadeToWhiteBrush(bitmap: Bitmap): Any? = runCatching {
         val activity = activityProvider() ?: return@runCatching null
         val brushCompanionClass = XposedHelpers.findClass(BRUSH_COMPANION_CLASS, classLoader)
-            .getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+            .hostAbiField("Companion").apply { isAccessible = true }.get(null)
         val companionClass = XposedHelpers.findClass("$BRUSH_COMPANION_CLASS\$Companion", classLoader)
         val gradientMethod = companionClass.declaredMethods.firstOrNull { m ->
             m.hostNameMatches(VERTICAL_GRADIENT_DEFAULT_METHOD) && m.parameterTypes.size == 7
@@ -1157,12 +1160,12 @@ class ProfileBackgroundHook(
     }.getOrNull()
 
     private fun materialColorScheme(composer: Any): Any? = runCatching {
-        if (HostSymbols.profileId == "2.3.3-b4") {
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
             return@runCatching B2NativeUi(classLoader).theme(composer, "getColorScheme")
         }
         val materialThemeClass = XposedHelpers.findClass(MATERIAL_THEME_CLASS, classLoader)
         val materialTheme = staticObject(materialThemeClass, "INSTANCE")
-        val stable = materialThemeClass.getDeclaredField("\$stable").apply { isAccessible = true }.getInt(null)
+        val stable = materialThemeClass.hostAbiField("\$stable").apply { isAccessible = true }.getInt(null)
         materialThemeClass.declaredMethods.firstOrNull { method ->
             method.hostNameMatches("getColorScheme") && method.parameterTypes.size == 2
         }?.apply { isAccessible = true }?.invoke(materialTheme, composer, stable)
@@ -1190,7 +1193,7 @@ class ProfileBackgroundHook(
     private fun verticalGradientBannerOverlayBrush(backgroundArgb: Int): Any? = runCatching {
         val activity = activityProvider() ?: return@runCatching null
         val brushCompanionClass = XposedHelpers.findClass(BRUSH_COMPANION_CLASS, classLoader)
-            .getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+            .hostAbiField("Companion").apply { isAccessible = true }.get(null)
         val companionClass = XposedHelpers.findClass("$BRUSH_COMPANION_CLASS\$Companion", classLoader)
         val gradientMethod = companionClass.declaredMethods.firstOrNull { m ->
             m.hostNameMatches(VERTICAL_GRADIENT_DEFAULT_METHOD) && m.parameterTypes.size == 7
@@ -1234,7 +1237,7 @@ class ProfileBackgroundHook(
     private fun verticalGradientHeaderFadeBrush(backgroundArgb: Int): Any? = runCatching {
         val activity = activityProvider() ?: return@runCatching null
         val brushCompanionClass = XposedHelpers.findClass(BRUSH_COMPANION_CLASS, classLoader)
-            .getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+            .hostAbiField("Companion").apply { isAccessible = true }.get(null)
         val companionClass = XposedHelpers.findClass("$BRUSH_COMPANION_CLASS\$Companion", classLoader)
         val gradientMethod = companionClass.declaredMethods.firstOrNull { m ->
             m.hostNameMatches(VERTICAL_GRADIENT_DEFAULT_METHOD) && m.parameterTypes.size == 7
@@ -1273,7 +1276,7 @@ class ProfileBackgroundHook(
     private fun verticalGradientHostFadeBrush(backgroundArgb: Int): Any? = runCatching {
         val activity = activityProvider() ?: return@runCatching null
         val brushCompanionClass = XposedHelpers.findClass(BRUSH_COMPANION_CLASS, classLoader)
-            .getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+            .hostAbiField("Companion").apply { isAccessible = true }.get(null)
         val companionClass = XposedHelpers.findClass("$BRUSH_COMPANION_CLASS\$Companion", classLoader)
         val gradientMethod = companionClass.declaredMethods.firstOrNull { m ->
             m.hostNameMatches(VERTICAL_GRADIENT_DEFAULT_METHOD) && m.parameterTypes.size == 7
@@ -1384,8 +1387,8 @@ class ProfileBackgroundHook(
     }
 
     private fun invokeBrushBackground(modifier: Any, brush: Any, shape: Any?): Any? = runCatching {
-        if (HostSymbols.profileId == "2.3.3-b4") {
-            return@runCatching classLoader.hostClass(BACKGROUND_KT_CLASS).getDeclaredMethod(
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
+            return@runCatching classLoader.hostClass(BACKGROUND_KT_CLASS).hostAbiMethod(
                 "f", classLoader.hostClass(HostClasses.Compose.MODIFIER),
                 classLoader.hostClass("androidx.compose.ui.graphics.Brush"),
                 classLoader.hostClass("androidx.compose.ui.graphics.Shape"), Int::class.javaPrimitiveType,
@@ -1409,13 +1412,13 @@ class ProfileBackgroundHook(
 
     private fun rectangleShape(): Any? = runCatching {
         val cls = XposedHelpers.findClass(RECTANGLE_SHAPE_KT_CLASS, classLoader)
-        val field = cls.getDeclaredField("RectangleShape").apply { isAccessible = true }
+        val field = cls.hostAbiField("RectangleShape").apply { isAccessible = true }
         field.get(null)
     }.getOrNull()
 
     private fun staticObject(clazz: Class<*>, fieldName: String): Any {
         listOf(fieldName, "Companion").forEach { candidate ->
-            val field = runCatching { clazz.getDeclaredField(candidate) }
+            val field = runCatching { clazz.hostAbiField(candidate) }
                 .recoverCatching { clazz.getField(candidate) }
                 .getOrNull()
             if (field != null) {

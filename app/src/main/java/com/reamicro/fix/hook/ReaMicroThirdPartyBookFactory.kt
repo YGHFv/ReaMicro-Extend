@@ -1,5 +1,9 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.HostSymbols
+
+
 import com.reamicro.fix.association.model.BookSearchResult
 import com.reamicro.fix.association.model.ManualAssociationCandidate
 import com.reamicro.fix.core.HostClasses
@@ -39,7 +43,7 @@ class ReaMicroThirdPartyBookFactory(
     }
 
     fun createThirdPartyGroup(publisher: String, books: List<Any>): Any {
-        val thirdPartyClass = classLoader.loadClass(THIRD_PARTY_CLASS)
+        val thirdPartyClass = classLoader.hostClass(THIRD_PARTY_CLASS)
         val constructor = thirdPartyClass.getConstructor(String::class.java, List::class.java)
         return constructor.newInstance(publisher, books)
     }
@@ -56,7 +60,7 @@ class ReaMicroThirdPartyBookFactory(
         rating: Double,
         status: String,
     ): Any {
-        val thirdPartyBookClass = classLoader.loadClass(THIRD_PARTY_BOOK_CLASS)
+        val thirdPartyBookClass = classLoader.hostClass(THIRD_PARTY_BOOK_CLASS)
         val stringClass = String::class.java
         val commonArgs = arrayOf(
             title,
@@ -73,6 +77,17 @@ class ReaMicroThirdPartyBookFactory(
             "",
             words,
         )
+        if (HostSymbols.abiProfileId == "2.3.3-b4") {
+            val types = arrayOf(
+                Int::class.javaPrimitiveType!!,
+                *Array(14) { stringClass },
+                Double::class.javaPrimitiveType!!,
+                stringClass,
+            )
+            // B4 仅保留序列化构造器；全部必填/可选字段均显式提供。
+            return thirdPartyBookClass.getDeclaredConstructor(*types)
+                .newInstance(65535, *commonArgs, detail, rating, status)
+        }
         return runCatching {
             thirdPartyBookClass
                 .getConstructor(

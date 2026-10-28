@@ -37,6 +37,7 @@ class ReaMicroSettingsHook(
         logPrefix = LOG_PREFIX,
     )
 
+    internal val b2Ui by lazy { com.reamicro.fix.core.B2NativeUi(classLoader) }
     internal val accountController = AccountCompletionController(classLoader, activityProvider)
     internal val settingsBuildDepth = ThreadLocal.withInitial { 0 }
     internal val itemCount = ThreadLocal.withInitial { 0 }
@@ -107,8 +108,6 @@ class ReaMicroSettingsHook(
     @Volatile internal var lastOnlineSourceImportAtMs: Long = 0L
     @Volatile internal var lastExternalImportToken: String = ""
     @Volatile internal var lastExternalImportAtMs: Long = 0L
-    @Volatile internal var pendingDeleteTtsSourceId: String = ""
-    @Volatile internal var pendingDeleteTtsSourceAtMs: Long = 0L
     @Volatile internal var pendingHighlightNinePatchInputRef: WeakReference<EditText>? = null
     internal val previewFontFamilyCache = HashMap<String, Any>()
     internal val failedPreviewFontFamilyLogKeys = HashSet<String>()
@@ -130,6 +129,23 @@ class ReaMicroSettingsHook(
 
     fun install() {
         activeInstance = this
+        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b2") {
+            B2SettingsUiBridge(this).install()
+            hookFontDocumentPickerResult()
+            hookExternalSourceImportIntent()
+            hookHostAccountSignOut()
+            hookAccountSecurityScreen()
+            hookAccountSecurityColumn()
+            return
+        }
+        if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
+            B4SettingsUiBridge(this).install()
+            hookFontDocumentPickerResult()
+            hookExternalSourceImportIntent()
+            hookHostAccountSignOut()
+            B4AccountSecurityBridge(this).install()
+            return
+        }
 
         HookInstallReport.installAll(
             FEATURE_ID,
@@ -299,7 +315,6 @@ class ReaMicroSettingsHook(
     )
 
     internal val READER_CHILD_ROUTES = setOf(
-        InjectedRoute.ReaderReadAloudSettings,
         InjectedRoute.ReaderSelectionMenuSettings,
         InjectedRoute.ReaderHighlightSettings,
         InjectedRoute.ReaderHighlightConfigSettings,

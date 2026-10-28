@@ -412,7 +412,7 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightScreenEntryCard(
         renderHostActionCard(rows, innerComposer)
         targetUnit()
     }
-    val b4 = com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4"
+    val b4 = com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4"
     val paddedModifier = readerHighlightPaddingSides(
         modifierInstance(),
         0f,
@@ -1716,7 +1716,7 @@ internal fun ReaMicroSettingsHook.readerHighlightSheetModifier(composer: Any): A
         udp(READER_RULE_SHEET_HEIGHT_DP),
     )
     val surface = colorScheme(composer).longMethod("getSurface")
-    return if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    return if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         b2Ui.background(requireNotNull(height), surface)
     } else {
         method(BACKGROUND_KT_CLASS, BACKGROUND_DEFAULT_METHOD, 5).invoke(
@@ -1749,7 +1749,7 @@ private fun ReaMicroSettingsHook.readerHighlightPaddingSides(
     bottom: Float,
     mask: Int,
 ): Any =
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         b2Ui.padding(baseModifier, start, top, end, bottom)
     } else {
         method(PADDING_KT_CLASS, PADDING_ABSOLUTE_DEFAULT_METHOD, 7).invoke(
@@ -1770,7 +1770,7 @@ private fun ReaMicroSettingsHook.readerHighlightHorizontalPadding(
     vertical: Float,
     mask: Int,
 ): Any =
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         b2Ui.padding(baseModifier, horizontal, vertical, horizontal, vertical)
     } else {
         method(PADDING_KT_CLASS, PADDING_HORIZONTAL_DEFAULT_METHOD, 5).invoke(
@@ -1790,7 +1790,7 @@ private fun ReaMicroSettingsHook.readerHighlightColumn(
     content: Any,
     composer: Any,
 ) {
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         b2Ui.column(modifier, arrangement, alignment, content, composer)
     } else {
         method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
@@ -1812,7 +1812,7 @@ private fun ReaMicroSettingsHook.readerHighlightLazyColumn(
     content: Any,
     composer: Any,
 ) {
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b4") {
+    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         b2Ui.lazyColumn(modifier, arrangement, content, composer)
     } else {
         method(LAZY_DSL_KT_CLASS, LAZY_COLUMN_METHOD, 13).invoke(

@@ -1,5 +1,7 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostNameMatches
+
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -14,6 +16,7 @@ import java.lang.reflect.Method
 import java.io.File
 import com.reamicro.fix.hook.reader.*
 import com.reamicro.fix.online.download.OnlineOnDemandMetadataStore
+import com.reamicro.fix.core.typeMatches
 
 internal fun ReaderHook.logOnDemandPrefetchDebug(message: String) {
     XposedBridge.log("$LOG_PREFIX on-demand prefetch $message")
@@ -434,14 +437,14 @@ internal fun ReaderHook.rebuildOnDemandVirtualWindow(
     requireRefreshCurrent(current)
     val mutex = XposedHelpers.getObjectField(session.viewModel, "virtualPageLoadMutex")
         ?: error("宿主缺少章节加载锁，未修改分页缓存")
-    val owner = Any()
+    val lease = com.reamicro.fix.core.HostMutex(mutex, Any())
     var locked = false
     var window: ReaderSelectionWindow? = null
     try {
         val deadline = SystemClock.elapsedRealtime() + 8_000L
         while (!locked) {
             requireRefreshCurrent(current)
-            locked = XposedHelpers.callMethod(mutex, "tryLock", owner) == true
+            locked = lease.tryAcquire()
             if (!locked) {
                 if (SystemClock.elapsedRealtime() >= deadline) throw ReaderRefreshLockBusy()
                 Thread.sleep(40L)
@@ -462,7 +465,7 @@ internal fun ReaderHook.rebuildOnDemandVirtualWindow(
         }
 
         val rebuilt = (invokeRefreshHostSuspend(session, current) {
-            method.invoke(session.viewModel, anchorSpineIndex, session.epub, anchorCfi, false, it)
+            invokeOnDemandRecenter(method, session.viewModel, anchorSpineIndex, session.epub, anchorCfi, it)
         } as? Number)?.toInt() ?: error("宿主重排没有返回有效页码")
         val target = if (window?.applied == true) window!!.visibleSlot else rebuilt
 
@@ -477,7 +480,7 @@ internal fun ReaderHook.rebuildOnDemandVirtualWindow(
         return target
     } finally {
         if (window != null && selectionWindow === window) selectionWindow = null
-        if (locked) XposedHelpers.callMethod(mutex, "unlock", owner)
+        if (locked) lease.release()
     }
 }
 
@@ -496,16 +499,28 @@ internal fun ReaderHook.findOnDemandRecenterMethod(viewModel: Any, epub: Any, an
     }
     fun Method.matchesSignature(): Boolean {
         val parameters = parameterTypes
-        return parameters.size == 5 &&
+        return (parameters.size == 4 || parameters.size == 5) &&
             parameters[0] == Int::class.javaPrimitiveType &&
             parameters[1].isAssignableFrom(epub.javaClass) &&
             parameters[2].isAssignableFrom(anchorCfi.javaClass) &&
-            parameters[3] == Boolean::class.javaPrimitiveType &&
-            parameters[4].name == KOTLIN_CONTINUATION_CLASS
+            (if (parameters.size == 4) {
+                typeMatches(parameters[3], KOTLIN_CONTINUATION_CLASS)
+            } else {
+                parameters[3] == Boolean::class.javaPrimitiveType &&
+                    typeMatches(parameters[4], KOTLIN_CONTINUATION_CLASS)
+            })
     }
-    return candidates.firstOrNull { it.name == "recenterVirtualWindow" && it.matchesSignature() }
+    return candidates.firstOrNull { it.hostNameMatches("recenterVirtualWindow") && it.matchesSignature() }
         ?.apply { isAccessible = true }
 
+}
+
+internal fun invokeOnDemandRecenter(
+    method: Method, target: Any, spine: Int, epub: Any, cfi: Any?, continuation: Any?,
+): Any? = when (method.parameterTypes.size) {
+    4 -> method.invoke(target, spine, epub, cfi, continuation)
+    5 -> method.invoke(target, spine, epub, cfi, false, continuation)
+    else -> error("宿主重排接口参数不匹配：${method.parameterTypes.size}")
 }
 
 internal fun ReaderHook.isOnDemandSpineLoaded(viewModel: Any, spineIndex: Int): Boolean =

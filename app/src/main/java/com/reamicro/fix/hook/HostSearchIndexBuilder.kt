@@ -1,45 +1,38 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.HostHtmlParser
 import com.reamicro.fix.hook.reader.*
 
 internal class HostSearchIndexBuilder(loader: ClassLoader) {
-    private val parserClass = loader.loadClass("com.fleeksoft.ksoup.parser.Parser")
-    private val companion = parserClass.getField("Companion").get(null)
-    private val htmlParser = companion.javaClass.getMethod("htmlParser")
-    private val parse = parserClass.getMethod("parseInput", String::class.java, String::class.java)
-    private val normalize = loader.loadClass("app.zhendong.reamicro.arch.fs.PathExtKt")
-        .getDeclaredMethod("normalizeSelfClosingNonVoidTags", String::class.java).apply { isAccessible = true }
-    private val nodeClass = loader.loadClass("com.fleeksoft.ksoup.nodes.Node")
-    private val textClass = loader.loadClass("com.fleeksoft.ksoup.nodes.TextNode")
-    private val nodeName = nodeClass.getMethod("nodeName")
-    private val childNodes = nodeClass.getMethod("childNodes")
-    private val nodeText = textClass.getMethod("text")
-    private val body = loader.loadClass("com.fleeksoft.ksoup.nodes.Document").getMethod("body")
-    private val ext = loader.loadClass("org.epub.utils.NodeExtKt")
-    private val getSteps = ext.getMethod("getAllSteps", nodeClass)
-    private val getStep = ext.getMethod("getSteps", nodeClass)
-    private val cfiClass = loader.loadClass("org.epub.html.EpubCFI")
-    private val cfiCompanion = cfiClass.getField("Companion").get(null)
-    private val create = cfiCompanion.javaClass.getMethod("create", String::class.java)
-    private val toBuilder = cfiClass.getMethod("toBuilder")
-    private val builderClass = loader.loadClass("org.epub.html.EpubCFI\$Builder")
-    private val stepClass = loader.loadClass("org.epub.html.EpubCFI\$StepReference")
-    private val offsetClass = loader.loadClass("org.epub.html.EpubCFI\$CharacterOffset")
-    private val setBody = builderClass.getMethod("body", stepClass)
-    private val setSteps = builderClass.getMethod("steps", List::class.java)
-    private val setOffset = builderClass.getMethod("offset", offsetClass)
-    private val build = builderClass.getMethod("build")
+    private val parser = HostHtmlParser(loader)
+    private val nodeClass = loader.hostClass("com.fleeksoft.ksoup.nodes.Node")
+    private val textClass = loader.hostClass("com.fleeksoft.ksoup.nodes.TextNode")
+    private val nodeName = nodeClass.hostMethod("nodeName")
+    private val childNodes = nodeClass.hostMethod("childNodes")
+    private val nodeText = textClass.hostMethod("text")
+    private val body = loader.hostClass("com.fleeksoft.ksoup.nodes.Document").hostMethod("body")
+    private val ext = loader.hostClass("org.epub.utils.NodeExtKt")
+    private val getSteps = ext.hostMethod("getAllSteps", nodeClass)
+    private val getStep = ext.hostMethod("getSteps", nodeClass)
+    private val cfiClass = loader.hostClass("org.epub.html.EpubCFI")
+    private val stepClass = loader.hostClass("org.epub.html.EpubCFI\$StepReference")
+    private val idClass = loader.hostClass("org.epub.html.EpubCFI\$IDAssertion")
+    private val offsetClass = loader.hostClass("org.epub.html.EpubCFI\$CharacterOffset")
+    private val biasClass = loader.hostClass("org.epub.html.EpubCFI\$SideBias")
+    private val step = stepClass.getConstructor(Int::class.javaPrimitiveType, idClass)
+    private val cfi = cfiClass.getDeclaredConstructor(stepClass, stepClass, stepClass,
+        List::class.java, offsetClass, biasClass).apply { isAccessible = true }
     private val zeroOffset = offsetClass.getConstructor(Int::class.javaPrimitiveType, Int::class.javaPrimitiveType).newInstance(1, 0)
 
     fun index(raw: String, base: CfiBase): IndexedSearchText {
         require(raw.length <= 4_000_000) { "章节超过索引范围" }
-        val doc = parse.invoke(htmlParser.invoke(companion), normalize.invoke(null, raw), "/search-source.xhtml")!!
+        val doc = parser.parse(raw, "/search-source.xhtml")
         val root = body.invoke(doc)!!
-        val template = create.invoke(cfiCompanion, "epubcfi(/${base.spineIndex}/${base.itemRefIndex}/4/0)")!!
-        val builder = toBuilder.invoke(template)!!
-
-        setBody.invoke(builder, getStep.invoke(null, root))
-        setOffset.invoke(builder, zeroOffset)
+        val spine = step.newInstance(base.spineIndex, null)
+        val item = step.newInstance(base.itemRefIndex, null)
+        val bodyStep = getStep.invoke(null, root)
         val text = StringBuilder()
         val spans = ArrayList<TextSpan>()
         fun separator() { if (text.isNotEmpty() && text.last() != '\n') text.append('\n') }
@@ -55,8 +48,9 @@ internal class HostSearchIndexBuilder(loader: ClassLoader) {
                     val value = (nodeText.invoke(node) as String).trim(' ', '\n')
                     if (value.isNotEmpty()) {
                         val start = text.length; text.append(value)
-                        setSteps.invoke(builder, getSteps.invoke(null, node))
-                        val prefix = build.invoke(builder).toString().substringBeforeLast(':') + ":"
+                        // 使用同一宿主 CFI 数据类型，省去已内联的 Builder setter；不改节点步进与字符偏移。
+                        val location = cfi.newInstance(spine, item, bodyStep, getSteps.invoke(null, node), zeroOffset, null)
+                        val prefix = location.toString().substringBeforeLast(':') + ":"
                         spans += TextSpan(start, text.length, base, emptyList(), 1, 0, prefix)
                     }
                 }

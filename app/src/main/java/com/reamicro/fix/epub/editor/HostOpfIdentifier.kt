@@ -1,5 +1,6 @@
 package com.reamicro.fix.epub.editor
 
+import com.reamicro.fix.core.hostClass
 import java.io.File
 import java.lang.reflect.InvocationTargetException
 
@@ -20,11 +21,11 @@ internal object HostOpfIdentifier {
 
     fun read(loader: ClassLoader, root: File): Snapshot {
         require(root.isDirectory) { "EPUB 解包目录不存在" }
-        val pathType = loader.loadClass("okio.Path")
+        val pathType = loader.hostClass("okio.Path")
         val pathCompanion = pathType.getField("Companion").get(null)
         val path = pathCompanion.javaClass.getMethod("get", String::class.java, Boolean::class.javaPrimitiveType)
             .invoke(pathCompanion, root.canonicalPath, false)
-        val opfType = loader.loadClass("org.epub.structure.opf.Opf")
+        val opfType = loader.hostClass("org.epub.structure.opf.Opf")
         val companion = opfType.getField("Companion").get(null)
         val opf = try {
             companion.javaClass.getMethod("obtain", pathType).invoke(companion, path)
