@@ -1,5 +1,11 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostField
+
+import com.reamicro.fix.core.hostNameMatches
+
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.HostSymbols
 import android.app.Activity
 import android.app.Dialog
 import android.os.Build
@@ -20,6 +26,7 @@ import com.reamicro.fix.ai.AiApiConfig
 import com.reamicro.fix.ai.AiDictionaryPreset
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.ai.AiApiTestResult
+import com.reamicro.fix.core.B2NativeUi
 import com.reamicro.fix.xposed.XposedBridge
 import java.lang.reflect.Method
 import com.reamicro.fix.hook.reader.*
@@ -42,6 +49,10 @@ internal fun ReaderHook.selectionMenuMaxItemsPerRow(actionCount: Int): Int? {
 }
 
 internal fun ReaderHook.renderWrappedSelectionMenu(actions: List<Any>, tint: Long, composer: Any, maxPerRow: Int) {
+    if (HostSymbols.profileId == "2.3.3-b4") {
+        renderB4WrappedSelectionMenu(actions, tint, composer, maxPerRow)
+        return
+    }
     if (settingsProvider().canUseCompactReaderSelectionMenu) {
         renderCompactWrappedSelectionMenu(actions, tint, composer, maxPerRow)
         return
@@ -90,6 +101,111 @@ internal fun ReaderHook.renderWrappedSelectionMenu(actions: List<Any>, tint: Lon
         selectionMenuPaddingModifier(),
         arrangementSpacedBy(2),
         selectionMenuAlignmentStart(),
+        content,
+        composer,
+        0,
+        0,
+    )
+}
+
+/**
+ * B4 已内联删除 Column，并把 Row/FlowRow 合并进 btd。这里直接复用已核实的
+ * FlowRow ABI，再以原生 ColumnPolicy 组合图标和完整标题，避免旧 SelectionMenuItem
+ * 的固定窄宽度把双字标签裁成单字。
+ */
+private fun ReaderHook.renderB4WrappedSelectionMenu(
+    actions: List<Any>,
+    tint: Long,
+    composer: Any,
+    maxPerRow: Int,
+) {
+    val nativeUi = B2NativeUi(classLoader)
+    val cellWidth = selectionMenuCellWidthDp(actions)
+    val contentWidth = (maxPerRow.coerceAtLeast(1) * cellWidth + (maxPerRow - 1) * 2 + 16)
+        .coerceAtMost(320)
+    val contentModifier = nativeUi.width(
+        nativeUi.padding(nativeUi.modifier(), 8f, 6f, 8f, 6f),
+        nativeUi.dp(contentWidth),
+    )
+    val content = nativeUi.lambda(
+        actions.fold(0x524d4234) { key, action -> key * 31 + callString(action, "getTitle").hashCode() },
+        functionProxy("ReaderSelectionB4Flow", "kotlin.jvm.functions.Function3") { args ->
+            val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
+            actions.forEachIndexed { index, action ->
+                val title = callString(action, "getTitle")
+                val icon = callNoArg(action, "getIcon") ?: return@forEachIndexed
+                val callback = selectionMenuActionCallback(action) ?: return@forEachIndexed
+                val itemModifier = nativeUi.clickable(
+                    nativeUi.width(nativeUi.modifier(), nativeUi.dp(cellWidth)),
+                    callback,
+                )
+                val itemContent = functionProxy(
+                    "ReaderSelectionB4Item${index}_${title.hashCode()}",
+                    KOTLIN_FUNCTION3_CLASS,
+                ) { itemArgs ->
+                    val itemComposer = itemArgs?.getOrNull(1) ?: return@functionProxy targetUnit()
+                    val iconModifier = nativeUi.width(
+                        nativeUi.height(nativeUi.modifier(), nativeUi.dp(20)),
+                        nativeUi.dp(20),
+                    )
+                    composeMethod("androidx.compose.material3.IconKt", "Icon-ww6aTOc", 7).invoke(
+                        null,
+                        icon,
+                        title,
+                        iconModifier,
+                        tint,
+                        itemComposer,
+                        0,
+                        0,
+                    )
+                    val typography = nativeUi.theme(itemComposer, "getTypography")
+                    val style = runCatching { callNoArg(typography, "getLabelSmall") }.getOrNull()
+                        ?: runCatching { callNoArg(typography, "getLabelMedium") }.getOrNull()
+                    nativeUi.text(arrayOf(
+                        title,
+                        null,
+                        tint,
+                        null,
+                        0L,
+                        null,
+                        null,
+                        null,
+                        0L,
+                        null,
+                        null,
+                        0L,
+                        0,
+                        false,
+                        1,
+                        1,
+                        null,
+                        style,
+                        itemComposer,
+                        0,
+                        0,
+                        131066,
+                    ))
+                    targetUnit()
+                }
+                nativeUi.column(
+                    itemModifier,
+                    nativeUi.spacedBy(2f),
+                    nativeUi.centerHorizontally(),
+                    itemContent,
+                    innerComposer,
+                )
+            }
+            targetUnit()
+        },
+    )
+    composeMethod(FLOW_LAYOUT_KT_CLASS, FLOW_ROW_METHOD, 10).invoke(
+        null,
+        contentModifier,
+        nativeUi.spacedBy(2f),
+        nativeUi.spacedBy(2f),
+        null,
+        maxPerRow,
+        Int.MAX_VALUE,
         content,
         composer,
         0,
@@ -154,29 +270,64 @@ private fun ReaderHook.selectionMenuAlignmentCenterVertically(): Any =
         ?: error("Alignment.CenterVertically not found")
 
 internal fun ReaderHook.renderNativeSelectionMenuItem(action: Any, tint: Long, composer: Any) {
-    nativeSelectionMenuItemMethod().invoke(
-        null,
-        callString(action, "getTitle"),
-        callNoArg(action, "getIcon") ?: return,
-        tint,
-        selectionMenuActionCallback(action) ?: return,
-        composer,
-        0,
-    )
+    val method = nativeSelectionMenuItemMethod()
+    val title = callString(action, "getTitle")
+    val icon = callNoArg(action, "getIcon") ?: return
+    val callback = selectionMenuActionCallback(action) ?: return
+    if (method.parameterTypes.size == 7) {
+        method.invoke(
+            null,
+            title,
+            icon,
+            tint,
+            callback,
+            modifierInstance(),
+            composer,
+            0,
+        )
+    } else {
+        method.invoke(
+            null,
+            title,
+            icon,
+            tint,
+            callback,
+            composer,
+            0,
+        )
+    }
 }
 
 internal fun ReaderHook.nativeSelectionMenuItemMethod(): Method =
     synchronized(composeMethodCache) {
-        composeMethodCache.getOrPut("org.epub.ui.BodyKt#SelectionMenuItem/6") {
-            classLoader.loadClass("org.epub.ui.BodyKt").declaredMethods.firstOrNull { method ->
+        composeMethodCache.getOrPut("org.epub.ui.BodyKt#SelectionMenuItem/6-or-7") {
+            val methods = classLoader.hostClass("org.epub.ui.BodyKt").declaredMethods
+            (methods.firstOrNull { method ->
                 method.name.contains("SelectionMenuItem") &&
                     method.parameterTypes.size == 6 &&
                     method.parameterTypes[0] == String::class.java &&
                     method.parameterTypes[2] == Long::class.javaPrimitiveType
-            }?.apply { isAccessible = true }
+            } ?: methods.firstOrNull { method ->
+                // B4 的 SelectionMenuItem 增加了 Modifier 参数，不能再只按旧 6 参签名查找。
+                method.parameterTypes.size == 7 &&
+                    method.parameterTypes[0] == String::class.java &&
+                    method.parameterTypes[2] == Long::class.javaPrimitiveType &&
+                    HostSymbols.logicalClass(method.parameterTypes[5].name) ==
+                    "androidx.compose.runtime.Composer"
+            })?.apply { isAccessible = true }
                 ?: error("SelectionMenuItem method not found")
         }
     }
+
+internal fun ReaderHook.selectionMenuTint(composer: Any): Long? =
+    runCatching {
+        callNoArg(hostColorScheme(composer), "getOnBackground") as? Long
+    }.getOrNull()
+
+internal fun ReaderHook.composeColorFromArgb(color: Int): Long? =
+    runCatching {
+        composeMethod(COLOR_KT_CLASS, "Color", 1).invoke(null, color) as? Long
+    }.getOrNull()
 
 internal fun ReaderHook.selectionMenuPaddingModifier(): Any =
     composeMethod(PADDING_KT_CLASS, PADDING_METHOD, 5).invoke(
@@ -206,7 +357,7 @@ internal fun ReaderHook.compactSelectionMenuAction(action: Any): Any? {
 }
 
 internal fun ReaderHook.selectionMenuActionCallback(action: Any): Any? {
-    val function0Class = runCatching { classLoader.loadClass(KOTLIN_FUNCTION0_CLASS) }.getOrNull() ?: return null
+    val function0Class = runCatching { classLoader.hostClass(KOTLIN_FUNCTION0_CLASS) }.getOrNull() ?: return null
     val preferredNames = listOf("getOnClick", "getOnTap", "getAction", "getCallback", "component3")
     preferredNames.forEach { name ->
         callNoArg(action, name)?.takeIf { function0Class.isInstance(it) }?.let { return it }
@@ -235,7 +386,7 @@ internal fun ReaderHook.createNativeDictionaryAction(icon: Any): Any? =
 
 internal fun ReaderHook.createSelectionMenuAction(title: String, icon: Any, callback: Any, logLabel: String): Any? =
     runCatching {
-        val actionClass = classLoader.loadClass("org.epub.ui.SelectionMenuAction")
+        val actionClass = classLoader.hostClass("org.epub.ui.SelectionMenuAction")
         val constructor = actionClass.declaredConstructors.firstOrNull { it.parameterTypes.size == 3 }
             ?: return@runCatching null
         constructor.isAccessible = true
@@ -250,7 +401,7 @@ internal fun ReaderHook.createSelectionMenuAction(title: String, icon: Any, call
 
 internal fun ReaderHook.dictionaryImageVector(): Any? {
     val outlined = runCatching {
-        classLoader.loadClass(ICONS_OUTLINED_CLASS).getField("INSTANCE").get(null)
+        classLoader.hostClass(ICONS_OUTLINED_CLASS).hostField("INSTANCE").get(null)
     }.getOrNull() ?: return null
     return listOf(
         DICTIONARY_ICON_TRANSLATE_CLASS to "getTranslate",
@@ -259,8 +410,8 @@ internal fun ReaderHook.dictionaryImageVector(): Any? {
         DICTIONARY_ICON_BOOK_CLASS to "getBook",
     ).firstNotNullOfOrNull { (className, methodName) ->
         runCatching {
-            classLoader.loadClass(className).declaredMethods.firstOrNull {
-                it.name == methodName && it.parameterTypes.size == 1
+            classLoader.hostClass(className).declaredMethods.firstOrNull {
+                it.hostNameMatches(methodName) && it.parameterTypes.size == 1
             }?.apply { isAccessible = true }?.invoke(null, outlined)
         }.getOrNull()
     }

@@ -13,6 +13,7 @@ class=androidx.compose.foundation.MutatePriority=gn6
 class=androidx.compose.foundation.gestures.ScrollableState=ep9
 class=androidx.compose.foundation.interaction.InteractionSource=ul6
 class=androidx.compose.foundation.layout.BoxKt=bs0
+class=androidx.compose.foundation.layout.FlowLayoutKt=btd
 class=androidx.compose.foundation.layout.PaddingKt=j1e
 class=androidx.compose.foundation.layout.RowScope=g79
 class=androidx.compose.foundation.layout.SizeKt=androidx.compose.foundation.layout.b
@@ -424,8 +425,10 @@ method=androidx.compose.foundation.layout.BoxKt#Box=a
 method=androidx.compose.foundation.layout.BoxKt#cacheFor=b
 method=androidx.compose.foundation.layout.BoxKt#maybeCachedBoxMeasurePolicy=c
 method=androidx.compose.foundation.layout.BoxKt#placeInBox=d
+method=androidx.compose.foundation.layout.FlowLayoutKt#FlowRow=a
 method=androidx.compose.foundation.layout.PaddingKt#padding-3ABfNKs=k
 method=androidx.compose.foundation.layout.PaddingKt#padding-VpY3zN4=l
+method=androidx.compose.foundation.layout.PaddingKt#padding-qDBjuR0=n
 method=androidx.compose.foundation.layout.RowScope#weight=b
 method=androidx.compose.foundation.ClickableKt#clickable-oSLSa3U$default=g
 method=androidx.compose.foundation.layout.SizeKt#height-3ABfNKs=f
