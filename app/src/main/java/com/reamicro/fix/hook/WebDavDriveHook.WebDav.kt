@@ -391,6 +391,8 @@ internal fun WebDavDriveHook.updateWebDavBackupViewModels(bookId: Long, book: An
 
 internal fun WebDavDriveHook.refreshWebDavBackupViewModelsLater(bookId: Long, book: Any, backup: Any) {
     Handler(Looper.getMainLooper()).postDelayed({
+        val current = webDavRecentBackups[bookId]
+        if (current?.book !== book || current.backup !== backup) return@postDelayed
         updateWebDavBackupViewModels(bookId, book, backup)
         logWebDav("backup ui state delayed refresh bookId=$bookId")
     }, 800L)
@@ -1022,6 +1024,13 @@ internal fun WebDavDriveHook.webDavDelete(path: String) {
     val code = webDavRemoteClient.request(credentials, "DELETE", normalizeWebDavPath(path)).code
     if (code !in 200..299 && code != 404) {
         error("WebDAV DELETE failed: HTTP $code")
+    }
+    // 远端删除成功后撤销同路径的临时卡片，防止数据库已清空却被旧快照补回。
+    val deletedPath = normalizeWebDavPath(path)
+    webDavRecentBackups.entries.forEach { (bookId, snapshot) ->
+        if (normalizeWebDavPath(snapshot.backup.callString("getPath")) == deletedPath) {
+            webDavRecentBackups.remove(bookId, snapshot)
+        }
     }
 }
 

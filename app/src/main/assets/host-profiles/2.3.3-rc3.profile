@@ -2676,3 +2676,8 @@ method=app.zhendong.reamicro.data.db.dao.BookDao#findByUidAndUuid=c
 method=app.zhendong.reamicro.data.db.dao.BookDao#listByUid=d
 method=app.zhendong.reamicro.repository.BookshelfRepository#checkBookExists=g
 method=app.zhendong.reamicro.repository.BookshelfRepository#deleteBook=h
+typeAlias=ReaMicroHost.SyncAuthContent=g10
+field=ReaMicroHost.SyncAuthContent#branch=a
+field=ReaMicroHost.SyncAuthContent#onSetupDefaultDir=g
+field=ReaMicroHost.SyncAuthContent#onPick=h
+method=ReaMicroHost.SyncAuthContent#render=y

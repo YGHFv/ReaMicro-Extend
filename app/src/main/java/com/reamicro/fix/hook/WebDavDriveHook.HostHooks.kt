@@ -610,6 +610,7 @@ internal fun WebDavDriveHook.hookSyncAuthCard() {
                 syncWebDavAuthRenderedBeforeAvailable.remove()
             }
         })
+        hookRc3SyncAuthContent()
         XposedBridge.log("$LOG_PREFIX WebDAV sync AuthCard hook installed")
     }.onFailure {
         XposedBridge.log("$LOG_PREFIX failed to hook WebDAV sync AuthCard: ${it.stackTraceToString()}")

@@ -132,6 +132,31 @@ public final class Rc3FeatureProbe {
             check(save.getName().equals("J") && save.getParameterCount()==4,
                 "Reading position write signature differs");
         });
+        test("SYNC_AUTH_CALLBACK_CAPTURE",()->{
+            Class<?> callback=cls("ReaMicroHost.SyncAuthContent");
+            Class<?> state=host.loadClass("eo6");
+            Class<?> f1=cls("kotlin.jvm.functions.Function1");
+            Class<?> f2=cls("kotlin.jvm.functions.Function2");
+            List<String> calls=new ArrayList<>();
+            Object authorize=Proxy.newProxyInstance(host,new Class<?>[]{f1},(p,m,a)->{
+                calls.add("authorize");return cls("kotlin.Unit").getField("a").get(null);
+            });
+            Object setup=Proxy.newProxyInstance(host,new Class<?>[]{f1},(p,m,a)->{
+                calls.add("setup:"+a[0]);return cls("kotlin.Unit").getField("a").get(null);
+            });
+            Object pick=Proxy.newProxyInstance(host,new Class<?>[]{f2},(p,m,a)->{
+                calls.add("pick:"+a[0]+":"+a[1]);return cls("kotlin.Unit").getField("a").get(null);
+            });
+            Object value=callback.getConstructor(Integer.class,state,state,state,f1,f2,f1)
+                .newInstance(null,null,null,null,authorize,pick,setup);
+            check(callback.getField("a").getByte(value)==0,"Wrong callback branch");
+            check(callback.getField("g").get(value)==setup,"Setup callback changed");
+            check(callback.getField("h").get(value)==pick,"Upload callback changed");
+            f1.getMethod("invoke",Object.class).invoke(callback.getField("g").get(value),9);
+            Method two=Arrays.stream(f2.getMethods()).filter(m->m.getParameterCount()==2).findFirst().get();
+            two.invoke(callback.getField("h").get(value),9,"/Backup");
+            check(calls.equals(Arrays.asList("setup:9","pick:9:/Backup")),"Callback forwarding "+calls);
+        });
         test("ASSOCIATION_COPY",()->{
             Map<?,?> before=(Map<?,?>)invoke(copier,"snapshot",new Class<?>[]{Object.class},original);
             Object copy=invoke(copier,"withoutAssociation",new Class<?>[]{Object.class},original);

@@ -107,3 +107,45 @@
 `resume-delete-*`、`resume-independent2-*`、`resume-overwrite-*`、
 `resume-editor-*`、`resume-position-*`、`resume-highlight-*`、
 `resume-webdav-*`。REA/MT 位于上级 RC3 目录；UI、回读结果在本报告专用目录。
+
+## 10:49 续验补充
+
+- 本地提交 `5c6f630` 已保存前述修复，未推送。
+- 本地导出：测试书从详情 → 同步 → 导出到本地存储 → 默认目录完成。
+  输出 `RC3 Audit Fixture Edited.epub`，解包后正文 SHA-256 与书库内文件一致，
+  包含选文保存后的 `PositionPersisted`，不是仅有成功提示。
+- 字体库：使用手机系统 Roboto 的任务副本 `RC3-Audit-Font.ttf` 完成导入，
+  全局字体选择后界面文本指标实际变化；宋楷映射可选择且设置持久化。
+  随后恢复全局系统字体、宋楷不映射并移除测试字体，库计数恢复 0。
+  宋楷 CSS 指定字体的真实渲染仍未验收，不以设置选择代替渲染确认。
+- 全文搜索：新增 `RC3 Audit Reader` 两章自建 EPUB，六个固定标记；
+  六处导航逐项出现正确正文，跨章、上一处和返回原位均通过，
+  返回后正文文本和坐标与起点相同。
+- 自动阅读：原开关为关闭；暂时打开后更多设置成功注入。
+  注入的 AndroidView 没有出现在 Accessibility 树中，使用 Windows 自带 OCR
+  本机识别“开始自动阅读”，截图仅保存在本机，没有载入对话或视觉上下文。
+  10 秒间隔真实触发 `cr8.h` 翻页，多次前后正文和剩余页数变化；
+  点击停止后等待超过一个间隔，正文和坐标保持不变。开关已恢复为关闭。
+- 高亮可见性仍未全验：选文高亮走模块规则而非 marks 表，搜索导航文本正确
+  不等于彩色高亮像素正确。当前清理日志 `_marks not found` 需按 RC3 分支继续核查。
+- 当前 UI、日志及导出证据前缀为 `continue-*`；原始文件不提交。
+
+## 11:05 WebDAV 备份续验
+
+- 实机复现备份页没有 WebDAV 卡片，但旧日志曾打印 `sync auth card rendered`。
+  REA/MT 核实 `njd.a` 将卡片放进 `g10.y` 的 byte=0 延迟组合分支；
+  旧外层 ThreadLocal 无法覆盖后续重组，且复用后的函数槽位不能直接按旧位置取。
+- 新增 `Rc3SyncAuthContent.kt`，仅在 RC3 已确认的授权分支恢复上下文；
+  setup=`g:Function1`、pick=`h:Function2`，其他分支不处理，退出恢复原上下文。
+  原有上传、目录选择、权限及卡片实现保持不变。
+- 实际宿主隔离回归 `SYNC_AUTH_CALLBACK_CAPTURE_PASS` 验证 branch 和回调槽位。
+- 安装修复包后卡片实际出现在页面。点击其默认目录后本机服务收到 PUT，
+  输出 1384 字节 EPUB，正文 SHA-256 与本地一致；
+  数据库 ID 55 的 backup_type=8、backup_id 为测试文件路径，界面显示 WebDAV。
+- 删除备份：服务端 DELETE 204、数据库备份字段清空，但旧近期备份快照又补回卡片。
+  对照旧代码确认原有缓存遗漏，非宿主删除参数变化。
+  已补成功删除后同路径条件清理，以及延迟刷新身份校验。
+  新包已完成再次上传 → 删除回归：DELETE 成功后页面立即恢复“上传到 WebDAV”，
+  ID 55 的备份类型/路径清空，原 EPUB 保留；不再显示已删除的卡片。
+- WebDAV 文件重命名通过：服务端 MOVE 201，列表出现新名称并保留 `.txt` 扩展名。
+- 当前 MT PID 18580，boot ID 不变；无手机重启、MT 关闭或 Git 推送。
