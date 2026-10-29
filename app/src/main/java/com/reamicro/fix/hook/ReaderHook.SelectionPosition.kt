@@ -1,6 +1,7 @@
 package com.reamicro.fix.hook
 
 import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostAbiMethod
 import com.reamicro.fix.core.hostNameMatches
 
 import com.reamicro.fix.core.hostClass
@@ -22,7 +23,7 @@ internal fun ReaderHook.persistSelectionReadingPosition(viewModel: Any, epub: An
     val flowType = classLoader.hostClass("kotlinx.coroutines.flow.Flow")
     val continuation = classLoader.hostClass("kotlin.coroutines.Continuation")
     val first = if (b4) classLoader.hostClass("ReaMicroHost.FlowFirst")
-        .getDeclaredMethod("e", flowType, continuation)
+        .hostAbiMethod("e", flowType, continuation)
     else classLoader.hostClass("kotlinx.coroutines.flow.FlowKt").hostMethod("firstOrNull", flowType, continuation)
     val firstValue = invokeSelectionHostSuspend { cont -> first.invoke(null, flow, cont) }
         ?: error("无法取得本地阅读进度")
@@ -45,7 +46,7 @@ internal fun ReaderHook.persistSelectionReadingPosition(viewModel: Any, epub: An
     ).apply { isAccessible = true }
     val version = (versionMethod.invoke(viewModel, previousVersion) as Number).toLong()
     val patch = ReaderPositionCopy.copy(book, raw, chapter, percent, version)
-    val save = if (b4) repository.javaClass.getDeclaredMethod(
+    val save = if (b4) repository.javaClass.hostAbiMethod(
         "K", book.javaClass, Boolean::class.javaPrimitiveType,
         java.lang.Long::class.java, classLoader.hostClass("kotlin.coroutines.jvm.internal.ContinuationImpl"),
     ) else repository.javaClass.hostMethod(

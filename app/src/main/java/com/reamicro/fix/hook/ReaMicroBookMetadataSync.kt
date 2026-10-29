@@ -1,6 +1,9 @@
 package com.reamicro.fix.hook
 
 import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostAbiMethod
+import com.reamicro.fix.core.HostSymbols
 
 import com.reamicro.fix.core.hostNameMatches
 
@@ -41,7 +44,7 @@ internal object ReaMicroBookMetadataSync {
 
     fun currentBookshelfRepository(): Any? = bookshelfRepositoryRef?.get()
 
-    fun metadataFromOpf(opf: Any?): BookMetadataPatch {
+    fun metadataFromOpf(opf: Any?, root: Any? = null): BookMetadataPatch {
         val uuid = callStringPath(opf, "metadata", "uuid", "value")
             ?: callStringPath(opf, "metadata", "uuid")
         val isOnlineCompletion = uuid.orEmpty().startsWith(ONLINE_COMPLETION_UUID_PREFIX) ||
@@ -50,13 +53,14 @@ internal object ReaMicroBookMetadataSync {
             ""
         } else {
             callStringPath(opf, "metadata", "publisher", "value")
+                ?: callStringPath(opf, "metadata", "publisher", "name")
                 ?: callStringPath(opf, "metadata", "publisher")
         }
         return BookMetadataPatch(
             title = callStringPath(opf, "metadata", "title", "value")?.takeIf { it.isNotBlank() },
             subtitle = callStringPath(opf, "metadata", "subtitle", "value"),
             author = authorsFromOpf(opf),
-            cover = coverFromOpf(opf),
+            cover = coverFromOpf(opf, root),
             publisher = publisher,
         )
     }
@@ -94,6 +98,15 @@ internal object ReaMicroBookMetadataSync {
         runCatching {
             val id = longValue(book, "getId")
             if (id <= 0L) return@runCatching null
+            if (HostSymbols.abiProfileId == "2.3.3-b4") {
+                // 宿主已内联仓库查找门面，保留原 DAO 查询而非返回传入的旧记录。
+                val dao = requireNotNull(repository.javaClass.hostField("bookDao").get(repository))
+                val loader = repository.javaClass.classLoader
+                val find = dao.javaClass.hostAbiMethod(
+                    "b", java.lang.Long.TYPE, loader.hostClass("kotlin.coroutines.Continuation"),
+                )
+                return@runCatching invokeSuspendBlocking(loader, find, dao, id)
+            }
             val findMethod = method(repository.javaClass, "findBookById", 2)
             invokeSuspendBlocking(repository.javaClass.classLoader, findMethod, repository, id)
         }.onFailure {
@@ -101,7 +114,7 @@ internal object ReaMicroBookMetadataSync {
         }.getOrNull()
 
     internal fun verifyPatch(stored: Any, original: Any, patch: BookMetadataPatch): Boolean = runCatching {
-        fun value(target: Any, getter: String): Any? = method(target.javaClass, getter, 0).invoke(target)
+        fun value(target: Any, getter: String): Any? = XposedHelpers.callMethod(target, getter)
         val id = (value(original, "getId") as Number).toLong()
         val uuid = value(original, "getUuid") as String
         if (id <= 0 || (value(stored, "getId") as Number).toLong() != id || value(stored, "getUuid") != uuid)
@@ -140,9 +153,14 @@ internal object ReaMicroBookMetadataSync {
             }?.joinToString(", ")?.takeIf { it.isNotBlank() }
         }.getOrNull()
 
-    private fun coverFromOpf(opf: Any?): String? =
+    private fun coverFromOpf(opf: Any?, root: Any?): String? =
         runCatching {
             opf ?: return null
+            if (HostSymbols.profileId == "2.3.3-rc3" && root != null) {
+                // 无参封面查找已删除；交给宿主在同一 EPUB 根目录中解析，不猜 manifest 路径。
+                return XposedHelpers.callMethod(opf, "coverRelativePath", root)?.toString()
+                    ?.takeIf { it.isNotBlank() }
+            }
             opf.javaClass.methods.firstOrNull { it.hostNameMatches("coverRelativePath") && it.parameterTypes.isEmpty() }
                 ?.apply { isAccessible = true }
                 ?.invoke(opf)
@@ -173,6 +191,13 @@ internal object ReaMicroBookMetadataSync {
         val current = target ?: return null
         if (current is String) return current
         return runCatching {
+            if (!HostSymbols.isIdentity) {
+                val getter = if (name.startsWith("get")) name
+                    else "get" + name.replaceFirstChar { it.uppercaseChar() }
+                HostSymbols.resolveAccessorFieldName(current.javaClass, getter)?.let {
+                    return XposedHelpers.callMethod(current, getter)
+                }
+            }
             current.javaClass.methods.firstOrNull {
                 it.parameterTypes.isEmpty() &&
                     (it.hostNameMatches(name) || it.name == "get" + name.replaceFirstChar { ch -> ch.uppercaseChar() })
@@ -187,10 +212,10 @@ internal object ReaMicroBookMetadataSync {
             ?: error("Method not found: ${targetClass.name}#$name/$parameterCount")
 
     private fun stringValue(target: Any, getter: String): String =
-        runCatching { method(target.javaClass, getter, 0).invoke(target)?.toString().orEmpty() }.getOrDefault("")
+        runCatching { XposedHelpers.callMethod(target, getter)?.toString().orEmpty() }.getOrDefault("")
 
     private fun longValue(target: Any, getter: String): Long =
-        runCatching { (method(target.javaClass, getter, 0).invoke(target) as? Number)?.toLong() ?: 0L }.getOrDefault(0L)
+        runCatching { (XposedHelpers.callMethod(target, getter) as? Number)?.toLong() ?: 0L }.getOrDefault(0L)
 
     private fun intValue(target: Any, getter: String): Int =
         runCatching { (method(target.javaClass, getter, 0).invoke(target) as? Number)?.toInt() ?: 0 }.getOrDefault(0)

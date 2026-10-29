@@ -3,6 +3,8 @@ package com.reamicro.fix.hook
 import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.core.hostClassOrNull
 import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.hostAbiField
+import com.reamicro.fix.core.hostAbiMethod
 import com.reamicro.fix.core.hostMethod
 
 import com.reamicro.fix.core.hostNameMatches
@@ -344,7 +346,7 @@ class BookDetailsAssociationActionHook(
 
     private fun fetchCloudInfoPublishers(repository: Any, details: DetailContext): List<Any> {
         if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            val method = repository.javaClass.getDeclaredMethod(
+            val method = repository.javaClass.hostAbiMethod(
                 "j", Long::class.javaPrimitiveType, Boolean::class.javaPrimitiveType,
                 classLoader.hostClass("ReaMicroHost.SuspendContinuation"),
             )
@@ -372,7 +374,7 @@ class BookDetailsAssociationActionHook(
         if (target == null) return emptyList()
         if (HostSymbols.abiProfileId == "2.3.3-b4" &&
             classLoader.hostClass("ReaMicroHost.CloudBookInfo").isInstance(target)) {
-            return (target.javaClass.getDeclaredField("f").get(target) as List<*>).filterNotNull()
+            return (target.javaClass.hostAbiField("f").get(target) as List<*>).filterNotNull()
         }
         return runCatching {
             (XposedHelpers.callMethod(target, "getPublishers") as? Iterable<*>)
@@ -385,10 +387,10 @@ class BookDetailsAssociationActionHook(
         val covers = publishers.mapNotNull { publisher ->
             val b4 = HostSymbols.abiProfileId == "2.3.3-b4" &&
                 classLoader.hostClass("ReaMicroHost.BookPublisherRecord").isInstance(publisher)
-            val cover = if (b4) (publisher.javaClass.getDeclaredField("b").get(publisher) as String).trim()
+            val cover = if (b4) (publisher.javaClass.hostAbiField("b").get(publisher) as String).trim()
                 else callString(publisher, "getCover").trim()
             if (!isRemoteCoverUrl(cover)) return@mapNotNull null
-            val name = if (b4) publisher.javaClass.getDeclaredField("d").get(publisher) as String
+            val name = if (b4) publisher.javaClass.hostAbiField("d").get(publisher) as String
                 else callString(publisher, "getPublisher")
             name.trim() to cover
         }
@@ -473,7 +475,7 @@ class BookDetailsAssociationActionHook(
 
     private fun postAssociationCover(repository: Any, book: Any, coverUrl: String): Long {
         val api = if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            repository.javaClass.getDeclaredField("h").get(repository)
+            repository.javaClass.hostAbiField("h").get(repository)
         } else fieldValue(repository, "api") ?: error("Api unavailable")
         val requestClass = XposedHelpers.findClass(POST_USER_BOOK_REQ_CLASS, classLoader)
         val request = requestClass.getConstructor(
@@ -494,7 +496,7 @@ class BookDetailsAssociationActionHook(
                 "a1", requestClass, classLoader.hostClass("ReaMicroHost.SuspendContinuation"),
             )
             val envelope = invokeSuspendBlocking(post, api, request)
-            val data = classLoader.hostClass("ReaMicroHost.EnvelopeData").getDeclaredMethod(
+            val data = classLoader.hostClass("ReaMicroHost.EnvelopeData").hostAbiMethod(
                 "b", requireNotNull(envelope).javaClass,
             ).invoke(null, envelope)
             return requireNotNull(data).javaClass.getDeclaredField("a").getLong(data)

@@ -1,6 +1,8 @@
 package com.reamicro.fix.hook
 
 import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.hostAbiField
+import com.reamicro.fix.core.hostAbiMethod
 
 import com.reamicro.fix.core.hostNameMatches
 import com.reamicro.fix.core.HostSymbols
@@ -613,7 +615,7 @@ class AccountCompletionController(
         if (HostSymbols.abiProfileId == "2.3.3-b4") {
             val value = classLoader.hostClass("ReaMicroHost.ReaderMargins")
                 .getDeclaredConstructor(*Array(6) { Integer.TYPE }).newInstance(*snapshot.arguments())
-            val update = session.javaClass.getDeclaredMethod(
+            val update = session.javaClass.hostAbiMethod(
                 "k", value.javaClass, classLoader.hostClass("ReaMicroHost.SuspendContinuation"),
             )
             invokeSuspendMethod(update, session, value)
@@ -650,7 +652,7 @@ class AccountCompletionController(
 
     private fun currentCachedUser(activity: Activity): Any? =
         if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            classLoader.hostClass(CACHED_CLASS).getDeclaredField("a").get(null)
+            classLoader.hostClass(CACHED_CLASS).hostAbiField("a").get(null)
         } else
         runCatching {
             val cached = staticObject(CACHED_CLASS, "INSTANCE")
@@ -1630,7 +1632,7 @@ class AccountCompletionController(
 
     private fun updatePreference(session: Any, prefKey: Any, value: Any) {
         if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            val update = session.javaClass.getDeclaredMethod(
+            val update = session.javaClass.hostAbiMethod(
                 "h", classLoader.hostClass("ReaMicroHost.PreferenceKey"), Any::class.java,
                 classLoader.hostClass(KOTLIN_CONTINUATION_CLASS),
             )
@@ -1645,7 +1647,7 @@ class AccountCompletionController(
 
     private fun firstFlowValue(flow: Any): Any? {
         if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            val first = classLoader.hostClass("ReaMicroHost.FlowFirst").getDeclaredMethod(
+            val first = classLoader.hostClass("ReaMicroHost.FlowFirst").hostAbiMethod(
                 "e", classLoader.hostClass("kotlinx.coroutines.flow.Flow"),
                 classLoader.hostClass(KOTLIN_CONTINUATION_CLASS),
             )
@@ -1687,8 +1689,8 @@ class AccountCompletionController(
     private fun upsertUserRowViaHostDao(activity: Activity, account: StoredAccount) {
         if (HostSymbols.abiProfileId == "2.3.3-b4") {
             val repository = b4UserRepository() ?: error("B4 user repository unavailable")
-            val dao = repository.javaClass.getDeclaredField("g").get(repository)
-            val upsert = dao.javaClass.getDeclaredMethod(
+            val dao = repository.javaClass.hostAbiField("g").get(repository)
+            val upsert = dao.javaClass.hostAbiMethod(
                 "b", classLoader.hostClass(HOST_USER_CLASS),
                 classLoader.hostClass("ReaMicroHost.SuspendContinuation"),
             )
@@ -1714,7 +1716,7 @@ class AccountCompletionController(
             if (HostSymbols.abiProfileId == "2.3.3-b4") {
                 val value = classLoader.hostClass("ReaMicroHost.CachedUserData")
                     .getDeclaredConstructor(classLoader.hostClass(HOST_USER_CLASS)).newInstance(user)
-                classLoader.hostClass(CACHED_CLASS).getDeclaredMethod(
+                classLoader.hostClass(CACHED_CLASS).hostAbiMethod(
                     "b", value.javaClass.superclass,
                 ).invoke(null, value)
                 return@runCatching
@@ -1819,7 +1821,7 @@ class AccountCompletionController(
 
     private fun readPreference(preferences: Any, key: Any): Any? =
         if (HostSymbols.abiProfileId == "2.3.3-b4") preferences.javaClass
-            .getDeclaredMethod("c", classLoader.hostClass("ReaMicroHost.PreferenceKey")).invoke(preferences, key)
+            .hostAbiMethod("c", classLoader.hostClass("ReaMicroHost.PreferenceKey")).invoke(preferences, key)
         else
         allMethods(preferences.javaClass).firstOrNull {
             it.hostNameMatches("get") && it.parameterTypes.size == 1
@@ -1858,7 +1860,7 @@ class AccountCompletionController(
         if (HostSymbols.abiProfileId == "2.3.3-b4" && name == "setToken") {
             val session = classLoader.hostClass(SESSION_CLASS)
             check(session.isInstance(target))
-            session.getDeclaredField("b").set(target, value)
+            session.hostAbiField("b").set(target, value)
             return
         }
         allMethods(target.javaClass).firstOrNull {
@@ -1875,14 +1877,14 @@ class AccountCompletionController(
     private fun b4UserRepository(): Any? {
         if (HostSymbols.abiProfileId != "2.3.3-b4") return null
         val bookshelf = ReaMicroBookMetadataSync.currentBookshelfRepository() ?: return null
-        val userStorage = bookshelf.javaClass.getDeclaredField("l").get(bookshelf) ?: return null
-        return userStorage.javaClass.getDeclaredField("a").get(userStorage)
+        val userStorage = bookshelf.javaClass.hostAbiField("l").get(bookshelf) ?: return null
+        return userStorage.javaClass.hostAbiField("a").get(userStorage)
     }
 
     private fun b4Session(): Any? =
         if (HostSymbols.abiProfileId == "2.3.3-b4") {
             ReaMicroBookMetadataSync.currentBookshelfRepository()?.let {
-                it.javaClass.getDeclaredField("k").get(it)
+                it.javaClass.hostAbiField("k").get(it)
             }
         } else null
 
@@ -1900,7 +1902,7 @@ class AccountCompletionController(
             }
             else -> null
         } ?: return null
-        return target.javaClass.getDeclaredField(field).get(target)
+        return target.javaClass.hostAbiField(field).get(target)
     }
 
     private fun displayIdentity(email: String, thirdBinds: List<String>): String {

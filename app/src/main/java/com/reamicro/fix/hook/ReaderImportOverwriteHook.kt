@@ -1,6 +1,10 @@
 package com.reamicro.fix.hook
 
 import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostAbiMethod
+import com.reamicro.fix.core.hostStaticMethod
 
 import com.reamicro.fix.core.hostMethod
 import com.reamicro.fix.core.hostNameMatches
@@ -175,7 +179,7 @@ class ReaderImportOverwriteHook(
                             ReaMicroBookMetadataSync.syncBookMetadataAsync(
                                 repository = param.thisObject,
                                 book = conflict.oldBook,
-                                patch = ReaMicroBookMetadataSync.metadataFromOpf(param.args?.getOrNull(2))
+                                patch = ReaMicroBookMetadataSync.metadataFromOpf(param.args?.getOrNull(2), param.args?.getOrNull(1))
                                     .withSize(importBookSize(param.args)),
                                 delayMs = POST_IMPORT_METADATA_SYNC_DELAY_MS,
                             )
@@ -292,7 +296,7 @@ class ReaderImportOverwriteHook(
                                     oldUuid = uuid,
                                     oldUri = null,
                                     oldBook = findExistingBookByUuid(repository, uuid),
-                                    metadataPatch = ReaMicroBookMetadataSync.metadataFromOpf(opf),
+                                    metadataPatch = ReaMicroBookMetadataSync.metadataFromOpf(opf, unzipDir),
                                     createdAtMs = System.currentTimeMillis(),
                                 ),
                             )
@@ -321,7 +325,7 @@ class ReaderImportOverwriteHook(
                         oldUuid = conflict.oldUuid,
                         oldUri = null,
                         oldBook = existingBook,
-                        metadataPatch = ReaMicroBookMetadataSync.metadataFromOpf(opf),
+                        metadataPatch = ReaMicroBookMetadataSync.metadataFromOpf(opf, unzipDir),
                         createdAtMs = System.currentTimeMillis(),
                     )
                     rememberPreImportDecision(uuid, title, preDecision)
@@ -386,7 +390,7 @@ class ReaderImportOverwriteHook(
                 ReaMicroBookMetadataSync.syncBookMetadataAsync(
                     repository = param.thisObject,
                     book = preDecision.oldBook,
-                    patch = ReaMicroBookMetadataSync.metadataFromOpf(param.args?.getOrNull(2))
+                    patch = ReaMicroBookMetadataSync.metadataFromOpf(param.args?.getOrNull(2), param.args?.getOrNull(1))
                         .mergeWith(preDecision.metadataPatch)
                         .withSize(importBookSize(param.args)),
                     delayMs = POST_IMPORT_METADATA_SYNC_DELAY_MS,
@@ -483,6 +487,13 @@ class ReaderImportOverwriteHook(
     }
 
     private fun firstFlowValue(flow: Any): Any? {
+        if (HostSymbols.profileId == "2.3.3-rc3") {
+            val first = classLoader.hostClass("ReaMicroHost.FlowFirst").hostAbiMethod(
+                "e", classLoader.hostClass("kotlinx.coroutines.flow.Flow"),
+                classLoader.hostClass(KOTLIN_CONTINUATION_CLASS),
+            )
+            return invokeSuspendBlocking(first, null, flow)
+        }
         val flowKt = XposedHelpers.findClass(FLOW_KT_CLASS, classLoader)
         val firstMethod = (flowKt.methods.asSequence() + flowKt.declaredMethods.asSequence())
             .firstOrNull { it.hostNameMatches("first") && it.parameterTypes.size == 2 }
@@ -722,12 +733,7 @@ class ReaderImportOverwriteHook(
             }
             .getOrNull()
             ?: return null
-        val flowKt = XposedHelpers.findClass(FLOW_KT_CLASS, classLoader)
-        val firstMethod = (flowKt.methods.asSequence() + flowKt.declaredMethods.asSequence())
-            .firstOrNull { it.hostNameMatches("first") && it.parameterTypes.size == 2 }
-            ?.apply { isAccessible = true }
-            ?: return null
-        return runCatching { invokeSuspendBlocking(firstMethod, null, flow) as? Iterable<*> }
+        return runCatching { firstFlowValue(flow) as? Iterable<*> }
             .onFailure {
                 XposedBridge.log("$LOG_PREFIX failed to collect existing books: ${it.stackTraceToString()}")
             }
@@ -741,7 +747,8 @@ class ReaderImportOverwriteHook(
             .firstOrNull { candidate ->
                 candidate.hostNameMatches("findByUidAndUuid") &&
                     candidate.parameterTypes.size == 3 &&
-                    candidate.parameterTypes[1] == String::class.java
+                    candidate.parameterTypes.count { it == String::class.java } == 1 &&
+                    candidate.parameterTypes[0] == java.lang.Long.TYPE
             }
             ?.apply { isAccessible = true }
             ?: return null
@@ -758,12 +765,7 @@ class ReaderImportOverwriteHook(
                 ?.invoke(repository)
                 ?: repository.fieldValue("currentUserFlow")
             flow?.let {
-                val flowKt = XposedHelpers.findClass(FLOW_KT_CLASS, classLoader)
-                val firstMethod = (flowKt.methods.asSequence() + flowKt.declaredMethods.asSequence())
-                    .firstOrNull { candidate -> candidate.hostNameMatches("first") && candidate.parameterTypes.size == 2 }
-                    ?.apply { isAccessible = true }
-                    ?: return@runCatching null
-                invokeSuspendBlocking(firstMethod, null, it)?.longOrNull("getId")
+                firstFlowValue(it)?.longOrNull("getId")
                     ?.takeIf { userId -> userId > 0L }
                     ?.let { userId -> return@runCatching userId }
             }
@@ -795,39 +797,27 @@ class ReaderImportOverwriteHook(
         }.getOrNull()
 
     private fun Any?.titleOrNull(): String? =
-        runCatching {
-            this?.javaClass?.methods?.firstOrNull { it.hostNameMatches("getTitle") && it.parameterTypes.isEmpty() }
-                ?.invoke(this)?.toString()
-        }.getOrNull()?.takeIf { it.isNotBlank() }
+        stringOrNull("getTitle")
 
     private fun Any?.uuidOrNull(): String? =
-        runCatching {
-            this?.javaClass?.methods?.firstOrNull { it.hostNameMatches("getUuid") && it.parameterTypes.isEmpty() }
-                ?.invoke(this)?.toString()
-        }.getOrNull()?.takeIf { it.isNotBlank() }
+        stringOrNull("getUuid")
 
     private fun Any?.uriOrNull(): String? =
-        runCatching {
-            this?.javaClass?.methods?.firstOrNull { it.hostNameMatches("getUri") && it.parameterTypes.isEmpty() }
-                ?.invoke(this)?.toString()
-        }.getOrNull()?.takeIf { it.isNotBlank() }
+        stringOrNull("getUri")
 
     private fun Any?.longOrNull(methodName: String): Long? =
         runCatching {
-            (this?.javaClass?.methods?.firstOrNull { it.hostNameMatches(methodName) && it.parameterTypes.isEmpty() }
-                ?.invoke(this) as? Number)?.toLong()
+            (this?.let { XposedHelpers.callMethod(it, methodName) } as? Number)?.toLong()
         }.getOrNull()
 
     private fun Any?.intOrNull(methodName: String): Int? =
         runCatching {
-            (this?.javaClass?.methods?.firstOrNull { it.hostNameMatches(methodName) && it.parameterTypes.isEmpty() }
-                ?.invoke(this) as? Number)?.toInt()
+            (this?.let { XposedHelpers.callMethod(it, methodName) } as? Number)?.toInt()
         }.getOrNull()
 
     private fun Any?.stringOrNull(methodName: String): String? =
         runCatching {
-            this?.javaClass?.methods?.firstOrNull { it.hostNameMatches(methodName) && it.parameterTypes.isEmpty() }
-                ?.invoke(this)?.toString()
+            this?.let { XposedHelpers.callMethod(it, methodName) }?.toString()
         }.getOrNull()?.takeIf { it.isNotBlank() }
 
     private fun Any?.hasLocalBookData(repository: Any): Boolean {
@@ -1074,6 +1064,11 @@ class ReaderImportOverwriteHook(
 
     private fun obtainOpf(root: Any): Any? =
         runCatching {
+            if (HostSymbols.profileId == "2.3.3-rc3") {
+                return@runCatching classLoader.hostStaticMethod(
+                    OPF_CLASS, "obtain", classLoader.hostClass(OKIO_PATH_CLASS),
+                ).invoke(null, root)
+            }
             val opfClass = XposedHelpers.findClass(OPF_CLASS, classLoader)
             val instance = sequenceOf("INSTANCE", "Companion")
                 .mapNotNull { fieldName ->
@@ -1119,14 +1114,8 @@ class ReaderImportOverwriteHook(
 
     private fun Any.withUuid(uuid: String): Any =
         runCatching {
-            val metadata = (
-                javaClass.methods.firstOrNull { it.hostNameMatches("getMetadata") && it.parameterTypes.isEmpty() }
-                    ?: error("getMetadata not found")
-                ).invoke(this)
-            val identifier = (
-                metadata.javaClass.methods.firstOrNull { it.hostNameMatches("getUuid") && it.parameterTypes.isEmpty() }
-                    ?: error("Metadata.getUuid not found")
-                ).invoke(metadata) ?: error("Metadata.uuid is null")
+            val metadata = XposedHelpers.callMethod(this, "getMetadata") ?: error("Metadata is null")
+            val identifier = XposedHelpers.callMethod(metadata, "getUuid") ?: error("Metadata.uuid is null")
             if (rewriteIdentifierValue(identifier, uuid)) {
                 return this
             }
@@ -1241,6 +1230,11 @@ class ReaderImportOverwriteHook(
             current = when (current) {
                 is String -> return current
                 else -> runCatching {
+                    val getter = if (name.startsWith("get")) name
+                        else "get" + name.replaceFirstChar { it.uppercaseChar() }
+                    if (HostSymbols.resolveAccessorFieldName(current.javaClass, getter) != null) {
+                        return@runCatching XposedHelpers.callMethod(current, getter)
+                    }
                     current.javaClass.methods.firstOrNull {
                         it.parameterTypes.isEmpty() &&
                             (it.hostNameMatches(name) || it.hostNameMatches("get" + name.replaceFirstChar { ch -> ch.uppercaseChar() }))
