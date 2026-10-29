@@ -58,4 +58,6 @@ with (out/"result.log").open("xb") as log:
 text=(out/"result.log").read_text(encoding="utf-8",errors="replace")
 print("\n".join(line for line in text.splitlines()
                 if any(key in line for key in ("PASS","FAIL","Exception","Caused by:"))))
+if "FEATURE_FAILURES=[]" not in text or "_FAIL" in text.replace("FEATURE_FAILURES=[]", ""):
+    raise SystemExit(1)
 raise SystemExit(result.returncode)

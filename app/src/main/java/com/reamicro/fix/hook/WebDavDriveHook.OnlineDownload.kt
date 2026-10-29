@@ -1964,14 +1964,15 @@ internal fun WebDavDriveHook.syncOnlineCompletionImportedBookSize(target: Online
 }
 
 internal fun WebDavDriveHook.importOnlineCompletionEpubDirectory(unzipDir: Any, booksDir: Any): Pair<Any, Any> {
-    val managerClass = cls(EPUB_FILE_MANAGER_CLASS)
-    val manager = runCatching {
+    val managerClass = cls(com.reamicro.fix.core.HostSymbols.resolveMethodOwner(EPUB_FILE_MANAGER_CLASS, EPUB_IMPORT_METHOD))
+    val manager = if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-rc3") null else runCatching {
         managerClass.hostField("INSTANCE").apply { isAccessible = true }.get(null)
     }.getOrNull() ?: error("阅微 EpubFileManager INSTANCE 未找到")
 
     val importMethod = (managerClass.methods.asSequence() + managerClass.declaredMethods.asSequence())
         .filter { candidate ->
-            candidate.hostNameMatches(EPUB_IMPORT_METHOD) &&
+            (candidate.name == com.reamicro.fix.core.HostSymbols.resolveMethodName(EPUB_FILE_MANAGER_CLASS, EPUB_IMPORT_METHOD) ||
+                candidate.hostNameMatches(EPUB_IMPORT_METHOD)) &&
                 candidate.parameterTypes.size >= 2 &&
                 typeMatches(candidate.parameterTypes[0], OKIO_PATH_CLASS) &&
                 typeMatches(candidate.parameterTypes[1], OKIO_PATH_CLASS)

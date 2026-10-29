@@ -149,3 +149,43 @@
   ID 55 的备份类型/路径清空，原 EPUB 保留；不再显示已删除的卡片。
 - WebDAV 文件重命名通过：服务端 MOVE 201，列表出现新名称并保留 `.txt` 扩展名。
 - 当前 MT PID 18580，boot ID 不变；无手机重启、MT 关闭或 Git 推送。
+
+## 11:42 关联菜单实机回读
+
+- 从本轮 ID 51 复制独立测试书 ID 58，不改动用户图书记录。
+  旧测试云 ID 43503 已无法加载；换用当前可读取的 40218 后云端详情正常。
+- 最初 Accessibility 和整屏 OCR 均未列出条码，不据此认定渲染失败。
+  临时诊断确认：顶栏回调、AndroidView factory 实际执行；
+  TextView shown=true，248×119，屏幕位置 (960,118)，可见文本像素存在。
+  点击实测中心后“关联操作”菜单打开，含封面修复、取消关联、重新关联和取消操作。
+  这是采集工具漏读而不是迁移错误，未修改条码入口、布局、导航或长按逻辑。
+- 取消关联实测通过：ID 58 仅 cloud_id=40218→0、publisher→空；
+  其余回读字段、OPF/正文 SHA-256 不变，ID 51/55 完全不变，
+  界面回到本地详情并显示“非公开书籍”。原 27 字段写回校验通过。
+- 临时诊断日志已全部移除，源码与提交前一致，保留 CRLF；
+  正在构建不含诊断日志的包。真实重新关联完成和封面上传仍未验收。
+- 另记录一次快速安装后首次启动 pinned APK 失效、profile=identity；
+  仅重开阅微后恢复 RC3 134/134。这是加载时序边界，未通过切换到另一 APK
+  或降低符号校验绕过。之后安装等待 5 秒再启动未复现。
+
+## 12:08 在线导入与增量更新
+
+- 自建回环源 `rc3-audit-online`，端口 18782；通过“添加在线源”文件选择器导入，
+  不覆盖已有书源或清空配置。服务仅提供自建三章文本。
+- 首次真实下载：搜索/书籍详情/目录/两章正文均 200，EPUB 生成成功，
+  但导入报 `EpubFileManager.import 方法未找到`。
+- REA/MT 确认 RC3 将 import/getItemRefs/getChapters 移到静态门面
+  `u1e.q/o/n`；旧代码仍从 `f8e.INSTANCE` 查方法。
+  两处模块在线导入和目录刷新入口接入 methodOwner，参数和业务流程不变。
+- 目录表替换还缺少 `BookChapterDao.deleteByBookId` /
+  `BookItemRefDao.deleteByBookId` 映射，均为 `a`；
+  已由 REA 的 dh 分支 6/21 与 MT SQL 交叉确认限定 `WHERE book_id=?`。
+- 隔离回归直接调用生产 `importOnlineCompletionEpubDirectory` 并回读
+  返回目录的 container/OPF，`ONLINE_IMPORT_DIRECTORY_PASS`。
+  测试 runner 补上 FAIL 标记检查，避免 su/app_process 退出码掩盖测试失败。
+- 安装后两章书成功导入为 ID 59，来源与 UUID、backup_type=10 正确。
+  本机源由 2 章改为 3 章，实点“更新”只请求 `/chapter/3`；
+  同一书籍 ID 59，item_ref/chapter 表均为 3，失败 0。
+  实际目录显示三章，点击 Chapter 3 后正文出现 `OnlineAuditChapter3`。
+- 当前运行 PID 27826、MT 18580，原 boot ID 不变；
+  当前包包含 DAO 映射且无临时条码诊断。逐章加载仍待后续验收。

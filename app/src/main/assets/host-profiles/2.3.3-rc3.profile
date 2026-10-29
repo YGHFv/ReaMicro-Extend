@@ -2681,3 +2681,5 @@ field=ReaMicroHost.SyncAuthContent#branch=a
 field=ReaMicroHost.SyncAuthContent#onSetupDefaultDir=g
 field=ReaMicroHost.SyncAuthContent#onPick=h
 method=ReaMicroHost.SyncAuthContent#render=y
+method=app.zhendong.reamicro.data.db.dao.BookChapterDao#deleteByBookId=a
+method=app.zhendong.reamicro.data.db.dao.BookItemRefDao#deleteByBookId=a

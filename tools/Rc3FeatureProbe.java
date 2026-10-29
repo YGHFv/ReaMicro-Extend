@@ -204,6 +204,34 @@ public final class Rc3FeatureProbe {
             check("Fixture Author".equals(invoke(patch,"getAuthor",new Class<?>[0])),"Metadata author missing");
             check("Fixture Publisher".equals(invoke(patch,"getPublisher",new Class<?>[0])),"Metadata publisher missing");
         });
+        test("ONLINE_IMPORT_DIRECTORY",()->{
+            Object drive=module.loadClass("com.reamicro.fix.hook.WebDavDriveHook")
+                .getConstructor(ClassLoader.class,f0,f0,f0).newInstance(host,activity,settings,activity);
+            File destination=new File(root,"online-books");
+            check(destination.mkdir(),"Fixture destination already exists");
+            Object books=host.loadClass("q64").getMethod("z0",String.class,boolean.class)
+                .invoke(null,destination.getAbsolutePath(),false);
+            File importRoot=new File(root,"online-source");
+            check(importRoot.mkdir(),"Fixture source already exists");
+            for(String directory:new String[]{"META-INF","OEBPS"}) {
+                File child=new File(importRoot,directory);
+                check(child.mkdir(),"Fixture child already exists");
+                for(File file:new File(root+"/epub/"+directory).listFiles()) {
+                    java.nio.file.Files.copy(file.toPath(),new File(child,file.getName()).toPath());
+                }
+            }
+            Object sourcePath=host.loadClass("q64").getMethod("z0",String.class,boolean.class)
+                .invoke(null,importRoot.getAbsolutePath(),false);
+            Class<?> entry=module.loadClass("com.reamicro.fix.hook.WebDavDriveHook_OnlineDownloadKt");
+            Method importDirectory=Arrays.stream(entry.getDeclaredMethods())
+                .filter(m->m.getName().equals("importOnlineCompletionEpubDirectory")).findFirst().get();
+            importDirectory.setAccessible(true);
+            Object pair=importDirectory.invoke(null,drive,sourcePath,books);
+            Object directory=pair.getClass().getMethod("getFirst").invoke(pair);
+            check(new File(directory.toString(),"META-INF/container.xml").isFile(),
+                "Online import returned no EPUB container");
+            check(pair.getClass().getMethod("getSecond").invoke(pair)!=null,"Online import returned no OPF");
+        });
         test("IMPORT_REWRITE_UUID",()->{
             Object updated=invoke(hook,"withUuid",new Class<?>[]{Object.class,String.class},opf,"full-audit-independent");
             check("full-audit-independent".equals(invoke(hook,"resolveImportUuid",new Class<?>[]{Object.class},updated)),

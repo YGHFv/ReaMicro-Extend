@@ -17,11 +17,35 @@ public final class Rc3AcceptanceProbe {
         return result.toString();
     }
     public static void main(String[] args) throws Exception {
+        if(args.length==1 && args[0].equals("--fixture-use-current-cloud")) {
+            try(SQLiteDatabase db=SQLiteDatabase.openDatabase(
+                    "/data/user/0/app.zhendong.reamicro/databases/app.db",null,SQLiteDatabase.OPEN_READWRITE)) {
+                android.content.ContentValues values=new android.content.ContentValues();
+                try(Cursor source=db.rawQuery("SELECT cloud_id,publisher FROM books WHERE id=26 AND cloud_id=40218",null)) {
+                    if(!source.moveToFirst()) throw new IllegalStateException("Reference association changed");
+                    values.put("cloud_id",source.getLong(0));
+                    values.put("publisher",source.getString(1));
+                }
+                int changed=db.update("books",values,"id=? AND uuid=? AND title=? AND cloud_id=?",
+                    new String[]{"58","f349b5cf-59a0-423f-be0d-e4b0bc5b3ece","RC3 Audit Fixture Association","43503"});
+                if(changed!=1) throw new IllegalStateException("Task-only fixture identity differs");
+                System.out.println("Only task fixture 58 now uses cloud reference 40218");
+            }
+            return;
+        }
+        if(args.length==1 && args[0].equals("--cloud-ids")) {
+            try(SQLiteDatabase db=SQLiteDatabase.openDatabase(
+                    "/data/user/0/app.zhendong.reamicro/databases/app.db",null,SQLiteDatabase.OPEN_READONLY);
+                Cursor rows=db.rawQuery("SELECT id,cloud_id FROM books WHERE cloud_id>0 ORDER BY id",null)) {
+                while(rows.moveToNext()) System.out.println(rows.getLong(0)+":"+rows.getLong(1));
+            }
+            return;
+        }
         if(args.length!=0) throw new IllegalArgumentException("Read-only fixture evidence only");
         try(SQLiteDatabase db=SQLiteDatabase.openDatabase(
                 "/data/user/0/app.zhendong.reamicro/databases/app.db",null,SQLiteDatabase.OPEN_READONLY);
             Cursor rows=db.rawQuery("SELECT * FROM books WHERE title LIKE ? ORDER BY id",
-                new String[]{"RC3 Audit Fixture%"})) {
+                new String[]{"RC3%"})) {
             JSONArray result=new JSONArray();
             while(rows.moveToNext()) {
                 JSONObject row=new JSONObject();

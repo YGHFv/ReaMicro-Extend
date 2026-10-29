@@ -1391,8 +1391,8 @@ internal fun WebDavDriveHook.refreshOnlineCompletionCatalogTables(book: Any, boo
     val bookshelf = currentBookshelfRepository() ?: error("阅微书架服务暂不可用，无法刷新目录")
     val itemRefDao = fieldValue(bookshelf, "bookItemRefDao") ?: error("阅微目录条目 DAO 不可用")
     val chapterDao = fieldValue(bookshelf, "bookChapterDao") ?: error("阅微章节 DAO 不可用")
-    val managerClass = cls(EPUB_FILE_MANAGER_CLASS)
-    val manager = runCatching {
+    val managerClass = cls(com.reamicro.fix.core.HostSymbols.resolveMethodOwner(EPUB_FILE_MANAGER_CLASS, "getItemRefs"))
+    val manager = if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-rc3") null else runCatching {
         managerClass.hostField("INSTANCE").apply { isAccessible = true }.get(null)
     }.getOrNull() ?: error("阅微 EpubFileManager INSTANCE 未找到")
     val bookPath = okioPath(bookDir.canonicalFile)
@@ -1401,7 +1401,8 @@ internal fun WebDavDriveHook.refreshOnlineCompletionCatalogTables(book: Any, boo
         .distinct()
         .toList()
     val itemRefMethod = managerMethods.firstOrNull {
-        it.hostNameMatches("getItemRefs") &&
+        (it.name == com.reamicro.fix.core.HostSymbols.resolveMethodName(EPUB_FILE_MANAGER_CLASS, "getItemRefs") ||
+            it.hostNameMatches("getItemRefs")) &&
             it.parameterTypes.size == 3 &&
             it.parameterTypes[0] == java.lang.Long.TYPE &&
             typeMatches(it.parameterTypes[1], OPF_CLASS) &&
@@ -1420,7 +1421,8 @@ internal fun WebDavDriveHook.refreshOnlineCompletionCatalogTables(book: Any, boo
 
     val chapterMethod = managerMethods
         .filter {
-            it.hostNameMatches("getChapters") &&
+            (it.name == com.reamicro.fix.core.HostSymbols.resolveMethodName(EPUB_FILE_MANAGER_CLASS, "getChapters") ||
+                it.hostNameMatches("getChapters")) &&
                 (it.parameterTypes.size == 3 || it.parameterTypes.size == 4) &&
                 List::class.java.isAssignableFrom(it.parameterTypes[0]) &&
                 typeMatches(it.parameterTypes[1], OPF_CLASS) &&
