@@ -90,6 +90,14 @@
         </receiver>
 
         <activity
+            android:name=".ui.HostRestartActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity="com.reamicro.fix.restart"
+            android:configChanges="orientation|screenSize|screenLayout|uiMode"
+            android:theme="@android:style/Theme.Material.Light.Dialog.NoActionBar" />
+
+        <activity
             android:name=".ui.ModuleMainActivity"
             android:launchMode="singleTop"
             android:configChanges="locale|layoutDirection|uiMode"

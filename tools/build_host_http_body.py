@@ -26,7 +26,7 @@ def main():
     args = parser.parse_args()
     profile = rp.parse_profile(args.profile)
     profile_id = next(line.partition("=")[2] for line in profile["header"] if line.startswith("profile="))
-    if profile_id not in ("2.3.3-b2", "2.3.3-b4", "2.3.3-rc3"):
+    if profile_id not in ("2.3.3-b2", "2.3.3-b4", "2.3.3-rc3", "2.3.3"):
         raise ValueError("HTTP 载体协议尚未对该宿主取证")
     classes = profile["classes"] | profile["typeAliases"]
     body, media, sink = [

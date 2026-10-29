@@ -6,30 +6,33 @@ import java.lang.reflect.Method
 
 /** 既有 B4 私有桥使用的短名独立重定位；不污染业务逻辑名和真实反射方法。 */
 object HostRawAbi {
-    private val mappings by lazy {
-        JSONObject(HostSymbols.bundledAsset("assets/host-profiles/2.3.3-rc3.abi.json")
-            .toString(Charsets.UTF_8))
+    private val mappings = HashMap<String, JSONObject>()
+    private fun mapping(): JSONObject = synchronized(mappings) {
+        mappings.getOrPut(HostSymbols.profileId) {
+            JSONObject(HostSymbols.bundledAsset("assets/host-profiles/${HostSymbols.profileId}.abi.json")
+                .toString(Charsets.UTF_8))
+        }
     }
 
     fun method(type: Class<*>, name: String, types: Array<out Class<*>?>): Method {
-        if (HostSymbols.profileId != "2.3.3-rc3") return type.getDeclaredMethod(name, *types)
+        if (!HostSymbols.usesRc3Abi) return type.getDeclaredMethod(name, *types)
         val descriptor = types.joinToString("") { descriptor(requireNotNull(it)) }
-        val entry = mappings.getJSONObject("methods").optString("${type.name}#$name($descriptor)")
+        val entry = mapping().getJSONObject("methods").optString("${type.name}#$name($descriptor)")
         if (entry.isEmpty()) return type.getDeclaredMethod(name, *types)
         val owner = Class.forName(entry.substringBefore('#'), false, type.classLoader)
         return owner.getDeclaredMethod(entry.substringAfter('#'), *types)
     }
 
     fun methodName(type: Class<*>, name: String, arity: Int): Pair<Class<*>, String> {
-        if (HostSymbols.profileId != "2.3.3-rc3") return type to name
-        val entry = mappings.getJSONObject("arity").optString("${type.name}#$name/$arity")
+        if (!HostSymbols.usesRc3Abi) return type to name
+        val entry = mapping().getJSONObject("arity").optString("${type.name}#$name/$arity")
         if (entry.isEmpty()) return type to name
         return Class.forName(entry.substringBefore('#'), false, type.classLoader) to entry.substringAfter('#')
     }
 
     fun field(type: Class<*>, name: String): Field {
-        if (HostSymbols.profileId != "2.3.3-rc3") return type.getDeclaredField(name)
-        val entry = mappings.getJSONObject("fields").optString("${type.name}#$name")
+        if (!HostSymbols.usesRc3Abi) return type.getDeclaredField(name)
+        val entry = mapping().getJSONObject("fields").optString("${type.name}#$name")
         if (entry.isEmpty()) return type.getDeclaredField(name)
         return Class.forName(entry.substringBefore('#'), false, type.classLoader)
             .getDeclaredField(entry.substringAfter('#'))

@@ -156,7 +156,7 @@ internal object ReaMicroBookMetadataSync {
     private fun coverFromOpf(opf: Any?, root: Any?): String? =
         runCatching {
             opf ?: return null
-            if (HostSymbols.profileId == "2.3.3-rc3" && root != null) {
+            if (HostSymbols.usesRc3Abi && root != null) {
                 // 无参封面查找已删除；交给宿主在同一 EPUB 根目录中解析，不猜 manifest 路径。
                 return XposedHelpers.callMethod(opf, "coverRelativePath", root)?.toString()
                     ?.takeIf { it.isNotBlank() }

@@ -2,6 +2,7 @@ package com.reamicro.fix.epub.editor
 
 import com.reamicro.fix.core.hostField
 import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostStaticMethod
 import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.core.typeMatches
 
@@ -29,8 +30,7 @@ internal class HostReadingProjection(
         val body = call(document, "body")!!
         val builder = call(context.builder, "newBuilder")!!
         val nodeType = loader.hostClass("com.fleeksoft.ksoup.nodes.Node")
-        val ext = loader.hostClass("org.epub.utils.NodeExtKt")
-        val bodyStep = ext.hostMethod("getSteps", nodeType).invoke(null, body)
+        val bodyStep = loader.hostStaticMethod("org.epub.utils.NodeExtKt", "getSteps", nodeType).invoke(null, body)
         val bodyType = loader.hostClass("org.epub.html.node.BodyDom")
         val rendered = if (HostSymbols.isIdentity) {
             call(builder, "body", bodyStep)

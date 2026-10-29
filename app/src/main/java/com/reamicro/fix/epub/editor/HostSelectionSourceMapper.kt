@@ -8,6 +8,7 @@ import com.reamicro.fix.core.HostHtmlNormalization
 import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.core.hostField
 import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostStaticMethod
 import com.reamicro.fix.xposed.XposedHelpers
 import java.lang.reflect.Method
 import java.lang.reflect.InvocationTargetException
@@ -149,7 +150,7 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
         sourcePositions = HostSelectionSourcePositions(loader, normalized, body, positions)
         reading?.let { return HostReadingProjection(this, loader, it).map(source, document, positions) }
         val nodeType = loader.hostClass("com.fleeksoft.ksoup.nodes.Node")
-        val pathMethod = loader.hostClass("org.epub.utils.NodeExtKt").hostMethod("getAllSteps", nodeType)
+        val pathMethod = loader.hostStaticMethod("org.epub.utils.NodeExtKt", "getAllSteps", nodeType)
         val text = StringBuilder()
         val starts = SelectionInts()
         val ends = SelectionInts()

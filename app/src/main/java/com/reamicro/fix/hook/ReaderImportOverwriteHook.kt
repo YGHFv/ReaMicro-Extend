@@ -487,7 +487,7 @@ class ReaderImportOverwriteHook(
     }
 
     private fun firstFlowValue(flow: Any): Any? {
-        if (HostSymbols.profileId == "2.3.3-rc3") {
+        if (HostSymbols.usesRc3Abi) {
             val first = classLoader.hostClass("ReaMicroHost.FlowFirst").hostAbiMethod(
                 "e", classLoader.hostClass("kotlinx.coroutines.flow.Flow"),
                 classLoader.hostClass(KOTLIN_CONTINUATION_CLASS),
@@ -1064,7 +1064,7 @@ class ReaderImportOverwriteHook(
 
     private fun obtainOpf(root: Any): Any? =
         runCatching {
-            if (HostSymbols.profileId == "2.3.3-rc3") {
+            if (HostSymbols.usesRc3Abi) {
                 return@runCatching classLoader.hostStaticMethod(
                     OPF_CLASS, "obtain", classLoader.hostClass(OKIO_PATH_CLASS),
                 ).invoke(null, root)

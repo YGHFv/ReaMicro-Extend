@@ -18,7 +18,11 @@ internal class ReaderSearchScrollBridge(private val reader: ReaderHook) {
     data class Command(val state: Any, val index: Int, val offset: Int)
     fun install() {
         val base = "app.zhendong.reamicro.ui.reader.components.ScrollPagerKt"
-        val methods = reader.classLoader.hostClass(base).declaredMethods.filter { it.hostNameMatches("ScrollPager") }
+        val methodOwner = com.reamicro.fix.core.HostSymbols.resolveMethodOwner(base, "ScrollPager")
+        val actual = com.reamicro.fix.core.HostSymbols.resolveMethodName(base, "ScrollPager")
+        val methods = reader.classLoader.hostClass(methodOwner).declaredMethods.filter {
+            it.name == actual && it.parameterCount >= 9
+        }
         check(methods.isNotEmpty()) { "$base.ScrollPager not found" }
         methods.forEach { method ->
             method.isAccessible = true

@@ -154,6 +154,7 @@ class ReaderHook(
                 "scrollPagerCrashGuard" to ::hookScrollPagerCrashGuard,
                 "nativeSelection" to ::installNativeSelectionHooks,
                 "readerViewModel" to ::hookReaderViewModel,
+                "readerBackKey" to ::hookReaderBackKey,
                 "searchJumpBridge" to { ReaderSearchJumpBridge(this).install() },
                 "readerCatalog" to ::hookReaderCatalog,
                 "readerBottomBar" to ::hookReaderBottomBar,

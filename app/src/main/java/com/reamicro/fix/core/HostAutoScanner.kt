@@ -38,14 +38,16 @@ object HostAutoScanner {
     fun snapshot(): Report? = last
 
     fun scanProfileAvailable(profileId: String): Boolean =
-        profileId == "2.3.3-rc3" || profileId == "identity" || profileId == "automatic"
+        profileId in setOf("2.3.3-rc3", "2.3.3", "identity", "automatic")
 
     fun scan(apk: String, dataDir: String, force: Boolean = false): Report? = synchronized(lock) {
         if (running) return@synchronized null
         running = true
         val started = System.nanoTime()
         try {
-            val bytes = HostSymbols.bundledAsset(ASSET)
+            val asset = if (HostSymbols.profileId == "2.3.3")
+                "assets/host-profiles/automatic-2.3.3.rules.json" else ASSET
+            val bytes = HostSymbols.bundledAsset(asset)
             val rules = JSONObject(bytes.toString(Charsets.UTF_8))
             val apkDigest = File(apk).inputStream().use { input ->
                 val digest = MessageDigest.getInstance("SHA-256")
@@ -81,6 +83,17 @@ object HostAutoScanner {
                 val owners = linkedMapOf<String, String>()
                 val fieldResults = linkedMapOf<String, String>()
                 val callCache = HashMap<String, Set<String>>()
+                val shapeCache = HashMap<String, List<String>>()
+                val allClasses by lazy { bridge.findClass(FindClass.create()) }
+                fun matchesClass(type: ClassData, rule: JSONObject): Boolean {
+                    val expected = rule.optJSONArray("methodShapes")?.strings() ?: return true
+                    val actual = shapeCache.getOrPut(type.name) {
+                        type.methods.map {
+                            HostScanRules.normalize(it.descriptor.substringAfter("->").substringAfter(it.name))
+                        }.sorted()
+                    }
+                    return actual == expected.sorted()
+                }
                 fun stableCalls(method: MethodData, depth: Int): Set<String> =
                     callCache.getOrPut("${method.descriptor}/$depth") {
                         buildSet {
@@ -100,10 +113,10 @@ object HostAutoScanner {
                         anchors.isNotEmpty() -> bridge.findClass(FindClass.create().matcher(
                             ClassMatcher.create().usingEqStrings(anchors),
                         ))
-                        rule.has("methodShapes") -> bridge.findClass(FindClass.create())
+                        rule.has("methodShapes") -> allClasses
                         else -> emptyList()
                     }
-                    val filtered = hits.filter { classMatches(it, rule) }
+                    val filtered = hits.filter { matchesClass(it, rule) }
                     HostScanRules.unique(filtered)?.let { resolved[rule.getString("id")] = it.name }
                 }
                 repeat(8) {

@@ -19,7 +19,7 @@ internal class ReaderVirtualPageLoadGuard(private val reader: ReaderHook) {
         val vm = loader.hostClass("app.zhendong.reamicro.ui.reader.ReaderViewModel")
         val epub = loader.hostClass("app.zhendong.reamicro.data.epub.Epub")
         val continuation = loader.hostClass("kotlin.coroutines.Continuation")
-        val loadContinuation = if (HostSymbols.profileId == "2.3.3-rc3")
+        val loadContinuation = if (HostSymbols.usesRc3Abi)
             loader.hostClass("ReaMicroHost.VirtualPageLoadContinuation") else null
         val pagesField = vm.hostField("virtualPages")
         val spinesField = vm.hostFieldOrNull("spinePagesCache")

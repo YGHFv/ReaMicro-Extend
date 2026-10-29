@@ -10,7 +10,7 @@ import com.reamicro.fix.xposed.XposedBridge
 
 /** RC3 AuthCard 的内容延后重组，在真实授权分支内恢复原有卡片上下文。 */
 internal fun WebDavDriveHook.hookRc3SyncAuthContent() {
-    if (HostSymbols.profileId != "2.3.3-rc3") return
+    if (!HostSymbols.usesRc3Abi) return
     val type = classLoader.hostClass("ReaMicroHost.SyncAuthContent")
     val branch = type.hostField("branch")
     val setup = type.hostField("onSetupDefaultDir")

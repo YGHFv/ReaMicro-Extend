@@ -32,6 +32,6 @@ class HostRc3ContractTest {
         assertTrue(main.resolve("assets/host-bridges/http-2.3.3-rc3.dex").isFile)
         assertTrue(main.resolve("assets/host-bridges/2.3.3-rc3.dex").isFile)
         val paging = main.resolve("java/com/reamicro/fix/core/B2PagingData.kt").readText()
-        assertTrue(paging.contains("HostSymbols.profileId == \"2.3.3-rc3\") 6 else 5"))
+        assertTrue(paging.contains("HostSymbols.usesRc3Abi) 6 else 5"))
     }
 }

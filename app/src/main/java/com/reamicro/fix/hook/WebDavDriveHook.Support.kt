@@ -1157,7 +1157,8 @@ internal fun WebDavDriveHook.updateOnlineCompletionBookIncrementally(
             chapterHrefs = chapterHrefs,
             newChapters = emptyMap(),
         )
-        if (structureChanged) refreshOnlineCompletionCatalogTables(book, bookDir)
+        // 上次更新可能已写完 EPUB 却在目录表刷新时报错；无新增章也必须补齐数据库目录。
+        refreshOnlineCompletionCatalogTables(book, bookDir)
         if (styleChanged || structureChanged || retryResult.changed) {
             val latest = findLocalBookByUuid(book.callLong("getUid"), book.callString("getUuid")) ?: book
             updateLocalBook(
@@ -1392,7 +1393,7 @@ internal fun WebDavDriveHook.refreshOnlineCompletionCatalogTables(book: Any, boo
     val itemRefDao = fieldValue(bookshelf, "bookItemRefDao") ?: error("阅微目录条目 DAO 不可用")
     val chapterDao = fieldValue(bookshelf, "bookChapterDao") ?: error("阅微章节 DAO 不可用")
     val managerClass = cls(com.reamicro.fix.core.HostSymbols.resolveMethodOwner(EPUB_FILE_MANAGER_CLASS, "getItemRefs"))
-    val manager = if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-rc3") null else runCatching {
+    val manager = if (com.reamicro.fix.core.HostSymbols.usesRc3Abi) null else runCatching {
         managerClass.hostField("INSTANCE").apply { isAccessible = true }.get(null)
     }.getOrNull() ?: error("阅微 EpubFileManager INSTANCE 未找到")
     val bookPath = okioPath(bookDir.canonicalFile)

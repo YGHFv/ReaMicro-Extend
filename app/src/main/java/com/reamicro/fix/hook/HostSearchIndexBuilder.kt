@@ -2,6 +2,7 @@ package com.reamicro.fix.hook
 
 import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostStaticMethod
 import com.reamicro.fix.core.HostHtmlParser
 import com.reamicro.fix.hook.reader.*
 
@@ -13,9 +14,8 @@ internal class HostSearchIndexBuilder(loader: ClassLoader) {
     private val childNodes = nodeClass.hostMethod("childNodes")
     private val nodeText = textClass.hostMethod("text")
     private val body = loader.hostClass("com.fleeksoft.ksoup.nodes.Document").hostMethod("body")
-    private val ext = loader.hostClass("org.epub.utils.NodeExtKt")
-    private val getSteps = ext.hostMethod("getAllSteps", nodeClass)
-    private val getStep = ext.hostMethod("getSteps", nodeClass)
+    private val getSteps = loader.hostStaticMethod("org.epub.utils.NodeExtKt", "getAllSteps", nodeClass)
+    private val getStep = loader.hostStaticMethod("org.epub.utils.NodeExtKt", "getSteps", nodeClass)
     private val cfiClass = loader.hostClass("org.epub.html.EpubCFI")
     private val stepClass = loader.hostClass("org.epub.html.EpubCFI\$StepReference")
     private val idClass = loader.hostClass("org.epub.html.EpubCFI\$IDAssertion")

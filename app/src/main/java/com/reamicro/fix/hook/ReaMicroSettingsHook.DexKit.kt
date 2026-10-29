@@ -8,6 +8,8 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.Toast
 import com.reamicro.fix.core.HostAutoScanner
+import com.reamicro.fix.core.HostRestart
+import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -61,20 +63,31 @@ private fun ReaMicroSettingsHook.showDexKitDialog(
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 .apply { gravity = Gravity.CENTER_HORIZONTAL })
     }
+    val notice = dexKitScanNotice(
+        scanning, error, HostSymbols.profileId, report != null, report?.profile != null,
+        report?.failures?.isNotEmpty() == true, report?.unchanged == true,
+    )
     val lines = listOfNotNull(
         reason,
         if (scanning) "正在重新扫描宿主，请稍候…" else report?.summary() ?: "扫描未完成",
         "宿主：${activity.packageManager.getPackageInfo(activity.packageName, 0).versionName}",
         "模块：${moduleBuildVersionLine()}",
         "定位成功不等于全部功能验收；签名变更仍需适配。",
-        when {
-            scanning -> "本次不使用扫描缓存；完成后自动显示结果。"
-            error != null -> error
-            report?.unchanged == true -> "结果与缓存一致，无需重开阅微。"
-            else -> "新结果在下次正常重开阅微时采用。"
-        },
-    ) + if (scanning) emptyList() else report?.failures.orEmpty().take(80)
-    lines.forEach { line -> card.addView(settingsDialogChoiceRow(activity, line, colors) {}) }
+        notice.message,
+    )
+    lines.forEach { line -> card.addView(settingsDialogStatus(activity, line, colors)) }
+    if (notice.restartRequired) {
+        card.addView(settingsDialogButton(activity, "重启阅微", colors).apply {
+            setOnClickListener {
+                if (HostRestart.request(activity)) {
+                    dialog.dismiss()
+                    onClose?.invoke()
+                }
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = settingsDp(activity, 8)
+        })
+    }
     if (!scanning) {
         val actions = settingsDialogActions(activity)
         if (onRescan != null) actions.addView(

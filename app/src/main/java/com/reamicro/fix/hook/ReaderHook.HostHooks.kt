@@ -203,7 +203,7 @@ internal fun ReaderHook.hookReaderViewModel() {
 
 internal fun ReaderHook.hookScrollPagerCrashGuard() {
     HookInstallReport.install(FEATURE_ID, "hookScrollPagerCrashGuard") {
-        val scrollPagerClass = classLoader.hostClass(SCROLL_PAGER_KT_CLASS)
+        val scrollPagerClass = classLoader.hostClass(HostSymbols.resolveMethodOwner(SCROLL_PAGER_KT_CLASS, "ScrollPager"))
         val methodName = HostSymbols.resolveMethodName(SCROLL_PAGER_KT_CLASS, "ScrollPager")
         val methods = scrollPagerClass.declaredMethods.filter {
             it.hostNameMatches(methodName) && it.parameterTypes.size >= 9
@@ -326,10 +326,13 @@ internal fun ReaderHook.hookHomeBookshelfScreen() {
     )
     targets.forEach { (className, methodName) ->
         HookInstallReport.install(FEATURE_ID, "homeBookshelf.$methodName") {
-            val cls = classLoader.hostClass(className)
-            val resolvedName = HostSymbols.resolveMethodName(className, methodName)
+            val entryName = if (methodName == "BookshelfScreen" && HostSymbols.usesRc3Abi)
+                "BookshelfScreen-kWc7xho" else methodName
+            val cls = classLoader.hostClass(HostSymbols.resolveMethodOwner(className, entryName))
+            val resolvedName = HostSymbols.resolveMethodName(className, entryName)
             val methods = cls.declaredMethods.filter {
-                it.hostNameStartsWith(methodName)
+                (if (HostSymbols.isIdentity) it.hostNameStartsWith(methodName) else it.name == resolvedName) &&
+                    it.parameterTypes.any { type -> typeMatches(type, "androidx.compose.runtime.Composer") }
             }
             if (methods.isEmpty()) error("$methodName not found")
             methods.forEach { method ->
@@ -940,7 +943,7 @@ internal fun ReaderHook.hookCurrentEpub() {
 internal fun ReaderHook.hookCurrentEpubPage() {
     HookInstallReport.install(FEATURE_ID, "hookCurrentEpubPage") {
         val containerName = "app.zhendong.reamicro.ui.reader.components.EpubContainerKt"
-        val containerClass = classLoader.hostClass(containerName)
+        val containerClass = classLoader.hostClass(HostSymbols.resolveMethodOwner(containerName, "EpubContainer"))
         val epubContainerMethod = HostSymbols.resolveMethodName(containerName, "EpubContainer")
         val methods = containerClass.declaredMethods.filter {
             it.hostNameMatches(epubContainerMethod) && it.parameterTypes.size >= 2
@@ -1047,7 +1050,7 @@ internal fun ReaderHook.hookSearchHighlightMarksArgument(
     label: String,
 ) {
     HookInstallReport.install(FEATURE_ID, "hookSearchHighlightMarksArgument.$label") {
-        val targetClass = classLoader.hostClass(className)
+        val targetClass = classLoader.hostClass(HostSymbols.resolveMethodOwner(className, methodName))
         val resolvedMethodName = HostSymbols.resolveMethodName(className, methodName)
         var count = 0
         targetClass.declaredMethods

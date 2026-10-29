@@ -24,7 +24,8 @@ object HostSymbols {
     private val classCache = HashMap<String, String>()
 
     val profileId: String get() = active?.fingerprint?.id ?: "identity"
-    val abiProfileId: String get() = if (profileId == "2.3.3-rc3") "2.3.3-b4" else profileId
+    val abiProfileId: String get() = if (usesRc3Abi) "2.3.3-b4" else profileId
+    val usesRc3Abi: Boolean get() = profileId in setOf("2.3.3-rc3", "2.3.3")
     val isIdentity: Boolean get() = active == null
 
     /**
@@ -65,7 +66,7 @@ object HostSymbols {
             val matched = selection.profile
             active = matched
             if (!hostApkPath.isNullOrBlank() && !hostDataDir.isNullOrBlank() &&
-                HostAutoScanner.scanProfileAvailable(profileId)) {
+                HostAutoScanner.scanProfileAvailable(profileId) && profileId != "2.3.3") {
                 val scan = HostAutoScanner.scan(hostApkPath, hostDataDir)
                 HookInstallReport.record("HostSymbols", "automaticScan", scan != null && scan.failures.isEmpty(),
                     scan?.failures?.takeIf { it.isNotEmpty() }?.let { IllegalStateException(it.take(8).joinToString()) })

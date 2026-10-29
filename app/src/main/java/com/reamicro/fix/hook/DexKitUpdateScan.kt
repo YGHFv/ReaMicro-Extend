@@ -105,7 +105,7 @@ internal object DexKitUpdateScan {
                 )
                 check(report?.profile != null && report.cached == false) { "扫描未完成，下次打开阅微将重试" }
                 check(readInstallation(context) == current.installation) { "扫描期间检测到更新，请重新打开阅微" }
-                // 有定位失败的完整扫描仍展示明细并记一次完成，避免每次进入前台反复弹窗。
+                // 有定位失败仍保留报告并记一次完成；弹窗只显示摘要，避免反复打扰。
                 check(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                     .putString(COMPLETED, current.installation.stamp.encode()).commit()) {
                     "扫描已完成，但更新时间未保存，下次打开阅微将重试"

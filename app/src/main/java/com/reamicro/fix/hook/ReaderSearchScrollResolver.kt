@@ -2,6 +2,7 @@ package com.reamicro.fix.hook
 
 import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostStaticMethod
 import com.reamicro.fix.epub.editor.*
 import com.reamicro.fix.hook.reader.*
 import com.reamicro.fix.reader.SearchHighlightMarkDraft
@@ -82,9 +83,8 @@ internal class ReaderSearchScrollResolver(private val reader: ReaderHook) {
         val dom = reader.callNoArg(element, "buildContentDom") ?: error("滚动内容无法渲染")
         val id = reader.callNoArg(dom, "getLocation")!!
         val point = mapper.anchorPoint(id)
-        val ext = reader.classLoader.hostClass("org.epub.utils.NodeExtKt")
         val nodeClass = reader.classLoader.hostClass("com.fleeksoft.ksoup.nodes.Node")
-        val getStep = ext.hostMethod("getSteps", nodeClass)
+        val getStep = reader.classLoader.hostStaticMethod("org.epub.utils.NodeExtKt", "getSteps", nodeClass)
         fun path(node: Any): String? {
             var n: Any? = node
             val steps = arrayListOf<Int>()
