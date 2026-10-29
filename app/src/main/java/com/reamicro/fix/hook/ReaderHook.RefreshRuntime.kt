@@ -14,7 +14,7 @@ internal data class ReaderRefreshSession(
 )
 
 internal fun ReaderHook.captureRefreshSession(viewModel: Any, root: File): ReaderRefreshSession? {
-    if (currentViewModelRef?.get() !== viewModel || currentEpubRoot() != root) return null
+    if (currentViewModelRef?.get() !== viewModel || !sameReaderBookRoot(currentEpubRoot(), root)) return null
     val epub = currentEpubStrong ?: currentEpubRef?.get() ?: return null
     return ReaderRefreshSession(viewModel, epub, root, onDemandRefreshCoordinator.generation())
 }

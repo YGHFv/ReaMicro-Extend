@@ -27,6 +27,16 @@ class Rc3FeatureProfileTest {
     }
 
     @Test
+    fun `on demand chapter accessors preserve the native record fields`() {
+        val chapter = "app.zhendong.reamicro.data.db.entity.BookChapter"
+        assertEquals("d", profile.fieldOf(chapter, "title"))
+        assertEquals("e", profile.fieldOf(chapter, "href"))
+        assertEquals("g", profile.fieldOf(chapter, "epubcfi"))
+        assertEquals("i", profile.fieldOf(chapter, "cfi"))
+        assertEquals("hq8", profile.classOf("ReaMicroHost.VirtualPageLoadContinuation"))
+    }
+
+    @Test
     fun `metadata getters removed by r8 resolve through exact fields`() {
         val metadata = "org.epub.structure.opf.Metadata"
         assertEquals("a", profile.fieldOf(metadata, "title"))

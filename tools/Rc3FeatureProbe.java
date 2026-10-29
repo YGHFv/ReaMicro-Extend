@@ -120,6 +120,19 @@ public final class Rc3FeatureProbe {
             else throw new IllegalStateException("Unexpected book field "+types[i]);
         }
         Object original=ctor.newInstance(args);
+        test("ONDEMAND_CHAPTER_ACCESSORS",()->{
+            Class<?> chapter=cls("app.zhendong.reamicro.data.db.entity.BookChapter");
+            Object value=chapter.getConstructor(int.class,int.class,long.class,long.class,
+                String.class,String.class,String.class,String.class)
+                .newInstance(6,0,12L,34L,"Chapter Seven","Text/chapter_0007.xhtml","p0","epubcfi(/6/14/4/0)");
+            Class<?> helpers=module.loadClass("com.reamicro.fix.xposed.XposedHelpers");
+            Method getter=helpers.getMethod("callMethod",Object.class,String.class,Object[].class);
+            check("Text/chapter_0007.xhtml".equals(getter.invoke(null,value,"getHref",new Object[0])),
+                "Catalog interception cannot read href");
+            check("Chapter Seven".equals(getter.invoke(null,value,"getTitle",new Object[0])),
+                "Catalog title missing");
+            check(getter.invoke(null,value,"getCfi",new Object[0])!=null,"Chapter CFI missing");
+        });
         test("SELECTION_POSITION_ABI",()->{
             Class<?> abi=module.loadClass("com.reamicro.fix.core.HostRawAbi");
             Method lookup=abi.getMethod("method",Class.class,String.class,Class[].class);

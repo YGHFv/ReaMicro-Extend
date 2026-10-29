@@ -59,7 +59,7 @@ internal fun ReaderHook.prefetchOnlineOnDemandChapter(
     reason: String,
 ) {
     val generation = onDemandRefreshCoordinator.generation()
-    if (currentEpubRoot() != bookDir) return
+    if (!sameReaderBookRoot(currentEpubRoot(), bookDir)) return
     val request = OnlineOnDemandBridge.pendingRequest(bookDir, chapterIndex)
         ?: return logOnDemandPrefetchDebug("skip:no-pending:$chapterIndex:$reason")
     val prefetchKey = "${request.bookDir.absolutePath}|${request.chapter.href}"
@@ -284,7 +284,7 @@ internal fun ReaderHook.replayOnDemandJumpWhenSpineCacheReady(
 }
 
 internal fun ReaderHook.onDemandRefreshKey(bookDir: File, href: String): String =
-    "${bookDir.absolutePath}|${href.trim().substringBefore('#').replace('\\', '/')}"
+    "${bookDir.canonicalPath}|${href.trim().substringBefore('#').replace('\\', '/')}"
 
 internal fun ReaderHook.scheduleOnDemandVisiblePageRefresh(viewModel: Any, page: Any) {
     if (Looper.myLooper() != Looper.getMainLooper()) {

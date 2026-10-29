@@ -11,6 +11,7 @@ import com.reamicro.fix.xposed.XC_MethodHook
 import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.xposed.XposedHelpers
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.CancellationException
 
 internal class ReaderVirtualPageLoadGuard(private val reader: ReaderHook) {
     fun install() {
@@ -18,6 +19,8 @@ internal class ReaderVirtualPageLoadGuard(private val reader: ReaderHook) {
         val vm = loader.hostClass("app.zhendong.reamicro.ui.reader.ReaderViewModel")
         val epub = loader.hostClass("app.zhendong.reamicro.data.epub.Epub")
         val continuation = loader.hostClass("kotlin.coroutines.Continuation")
+        val loadContinuation = if (HostSymbols.profileId == "2.3.3-rc3")
+            loader.hostClass("ReaMicroHost.VirtualPageLoadContinuation") else null
         val pagesField = vm.hostField("virtualPages")
         val spinesField = vm.hostFieldOrNull("spinePagesCache")
         val methods = listOf("ensureVirtualPageWindow", "ensureVirtualPageMapped").map { name ->
@@ -51,7 +54,13 @@ internal class ReaderVirtualPageLoadGuard(private val reader: ReaderHook) {
                 val pages = pagesField.get(param.thisObject) as Map<Int, *>
                 if (ReaderVirtualPageLoadPolicy.accepts(requested, pages.keys)) return
                 // p/q 的所有正常出口均返回原生 Unit；不可把此守卫移到返回 List/Integer 的内部方法。
-                param.result = unit
+                // RC3 外层 E 在 r 返回后仍会按旧页码夹紧边界；取消使其走 finally 释放锁而非跳回窗口开头。
+                val continuationIndex = (param.method as java.lang.reflect.Method).parameterTypes.indexOfFirst {
+                    continuation.isAssignableFrom(it)
+                }
+                if (loadContinuation?.isInstance(args.getOrNull(continuationIndex)) == true) {
+                    param.throwable = CancellationException("Stale reader virtual page load: $requested")
+                } else param.result = unit
                 val count = discarded.incrementAndGet()
                 if (count <= 4 || count % 64L == 0L) {
                     val spines = spinesField?.get(param.thisObject) as? Map<*, *>

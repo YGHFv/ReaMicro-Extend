@@ -189,3 +189,53 @@
   实际目录显示三章，点击 Chapter 3 后正文出现 `OnlineAuditChapter3`。
 - 当前运行 PID 27826、MT 18580，原 boot ID 不变；
   当前包包含 DAO 映射且无临时条码诊断。逐章加载仍待后续验收。
+
+## 12:20 逐章模式未闭合
+
+- 删除本轮整本测试书后，以同一自建源打开“逐章加载”，服务改为 7 章。
+  初次确实只请求前三章，目录显示七章。
+- 点击未下载的第七章，请求和文件写入成功，但视口被刷新回第一章，
+  日志为 `visible refresh cancelled: session/viewport changed`；
+  不能把下载成功或目录存在算作逐章阅读通过。
+- 当前调查：`BookChapter` 除 cfi 外缺少 href/title 等 getter-to-field 映射，
+  导致目录跳转前置拦截可能未执行，落到可见占位页刷新路径。
+  REA/MT 已确认 BookChapter.toString：title=d、href=e、anchor=f、epubcfi=g。
+- 旧 `publishVirtualWindow` 在当前混淆 profile 中没有映射；
+  RC3 重排通过 `kq8.v` 直接发布缓存，原稳定窗口 hook 未启用。
+  已保存 REA/MT `cr8.L/M`、`w43.g`、`kq8.v` 证据；不取消视口保护。
+- 正在运行临时窄范围重排参数/本地读章/发布窗口诊断，
+  文件 `Rc3OnDemandProbe.kt` 及两处调用日志尚待清理，不能提交为最终修复。
+
+## 12:50 逐章会话身份根因
+
+- BookChapter 字段补齐后前置拦截已有 pending 日志，但仍退回占位页刷新。
+  实机窄日志确认 VM 身份相同，而目录两种拼写不同：
+  宿主 `/data/user/0/...`，请求 `canonicalFile` 为 `/data/data/...`。
+  原 `File.equals` 比较误判为不同书籍，导致 captureRefreshSession 返回空。
+- 新增 `sameReaderBookRoot`，只按 canonicalFile 比较目录；保留 VM/EPUB/
+  generation/viewport 校验。预取比较及刷新 key 使用同一规范化身份。
+- 增加目录等价/不同书籍/null 的 JVM 回归；临时诊断源码全部移除。
+  当前正在构建并准备删除缓存后的末章跳转实测，尚未宣称通过。
+
+## 收尾：逐章跳转修复已验证
+
+用户调整任务：完成当前逐章跳转问题后保存进度、更新版本并推送，剩余功能交新对话继续。
+这不表示“当前版本全部功能正常”已验收。
+
+- 第三个根因：旧虚拟页守卫在 RC3 返回 Unit 后，外层 `cr8.E` 仍执行
+  `X/Z` 和页码边界夹紧，过期页码 0 被夹到新窗口最小页，表现为返回第一章。
+  REA 与 MT 的 `E` 和 `hq8` 确认持锁/释放路径。
+- 仅对 RC3 的 `VirtualPageLoadContinuation=hq8` 过期加载抛
+  CancellationException，让宿主走异常清理释放锁，不再继续错误边界纠正。
+  其他版本、其他调用者和协程恢复路径不变。
+- 最终三项修复：BookChapter 精确字段、书籍根目录规范化身份、
+  RC3 过期加载取消。未修改下载算法、页表算法或移除会话/视口保护。
+- 从删除后重新下载的七章自建书验证：首次仅前三章请求；
+  点击未下载第七章、第四章都停留在正确正文，末章等待后不再跳回第一章。
+  第四章下一页显示段落 2/3/4；退出重入仍为第四章。
+  证据 `cancelguard-*`、`finish-chapter7-stable.xml`、
+  `finish-chapter4-*`、`finish-ondemand-reopened.xml`；该 PID 无 FATAL。
+- 版本更新为 2.3.10 / 72，最终构建与回归记录见续接文档。
+- 原始 `.gitignore` 修改不提交；未跟踪旧脚本/截图/数据库残留不混入提交。
+- 最终 2.3.10：152 项 JVM 测试及三套隔离回归通过，release 已安装。
+  APK 摘要及锁屏/测试服务清理状态见 `rc3-handoff-20261029.md`。

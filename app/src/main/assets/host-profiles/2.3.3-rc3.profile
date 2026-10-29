@@ -2683,3 +2683,12 @@ field=ReaMicroHost.SyncAuthContent#onPick=h
 method=ReaMicroHost.SyncAuthContent#render=y
 method=app.zhendong.reamicro.data.db.dao.BookChapterDao#deleteByBookId=a
 method=app.zhendong.reamicro.data.db.dao.BookItemRefDao#deleteByBookId=a
+field=app.zhendong.reamicro.data.db.entity.BookChapter#id=a
+field=app.zhendong.reamicro.data.db.entity.BookChapter#bookId=b
+field=app.zhendong.reamicro.data.db.entity.BookChapter#playOrder=c
+field=app.zhendong.reamicro.data.db.entity.BookChapter#title=d
+field=app.zhendong.reamicro.data.db.entity.BookChapter#href=e
+field=app.zhendong.reamicro.data.db.entity.BookChapter#anchor=f
+field=app.zhendong.reamicro.data.db.entity.BookChapter#epubcfi=g
+field=app.zhendong.reamicro.data.db.entity.BookChapter#parentOrder=h
+typeAlias=ReaMicroHost.VirtualPageLoadContinuation=hq8
