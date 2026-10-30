@@ -321,11 +321,8 @@ internal fun ReaderHook.composeMethod(className: String, methodName: String, par
     val cacheKey = "$className#$methodName/$parameterCount"
     return synchronized(composeMethodCache) {
         composeMethodCache.getOrPut(cacheKey) {
-            val clazz = classLoader.hostClass(className)
-            val resolvedName = HostSymbols.resolveMethodName(
-                HostSymbols.logicalClass(clazz.name),
-                methodName,
-            )
+            val clazz = classLoader.loadClass(HostSymbols.resolveMethodOwner(className, methodName))
+            val resolvedName = HostSymbols.resolveMethodName(className, methodName)
             sequenceOf(resolvedName, methodName)
                 .distinct()
                 .flatMap { name -> clazz.declaredMethods.asSequence().filter { it.hostNameMatches(name) } }

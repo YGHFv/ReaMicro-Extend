@@ -79,3 +79,5 @@ artifacts/
 /tools/run-fanqie-regression.py
 *.local.md
 *.audit.md
+/tools/reports/
+/tools/host-mappings/

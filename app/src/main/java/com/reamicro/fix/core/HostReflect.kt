@@ -31,13 +31,14 @@ class HostReflect(
 
     fun method(className: String, methodName: String, parameterCount: Int): Method {
         val resolvedName = HostSymbols.resolveMethodName(className, methodName)
+        val owner = HostSymbols.resolveMethodOwner(className, methodName)
         val cacheKey = "$className#$methodName/$parameterCount"
         return synchronized(methodCache) {
             methodCache.getOrPut(cacheKey) {
-                cls(className).declaredMethods.firstOrNull {
+                cls(owner).declaredMethods.firstOrNull {
                     it.name == resolvedName && it.parameterTypes.size == parameterCount
                 }?.apply { isAccessible = true }
-                    ?: cls(className).methods.firstOrNull {
+                    ?: cls(owner).methods.firstOrNull {
                         it.name == resolvedName && it.parameterTypes.size == parameterCount
                     }?.apply { isAccessible = true }
                     ?: error("$className.$methodName/$parameterCount not found")

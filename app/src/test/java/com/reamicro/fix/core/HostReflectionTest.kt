@@ -86,5 +86,9 @@ class HostReflectionTest {
             "logical.Parent", "staticValue", Int::class.javaPrimitiveType,
         )
         assertEquals(8, direct.invoke(null, 4))
+        val reflected = HostReflect(Parent::class.java.classLoader)
+            .method("logical.Parent", "staticValue", 1)
+        assertEquals(Relocated::class.java, reflected.declaringClass)
+        assertEquals(10, reflected.invoke(null, 5))
     }
 }

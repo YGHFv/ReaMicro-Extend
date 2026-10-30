@@ -1,6 +1,7 @@
 package com.reamicro.fix.hook
 
 import com.reamicro.fix.core.hostField
+import com.reamicro.fix.core.hostMethod
 
 import com.reamicro.fix.core.hostNameMatches
 import com.reamicro.fix.core.typeMatches
@@ -86,6 +87,10 @@ class BookOverviewImageSelectionHook(
     }
 
     private fun hookBottomSheet(methodName: String, target: ImageTarget) {
+        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3") {
+            hookMergedBottomSheet(methodName, target)
+            return
+        }
         runCatching {
 
             val ui = nativeSheetUi
@@ -170,6 +175,70 @@ class BookOverviewImageSelectionHook(
         }.onFailure {
 
             XposedBridge.log("$LOG_PREFIX $methodName native menu kept (unsupported ABI): ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun hookMergedBottomSheet(methodName: String, target: ImageTarget) {
+        com.reamicro.fix.core.HookInstallReport.install("BookOverviewImageSelectionHook", methodName) {
+            val ui = B4BookImageSheetUi(classLoader)
+            val cover = target == ImageTarget.Cover
+            val callbackCount = if (cover) 4 else 3
+            val entry = cls(BOOK_OVERVIEW_ITEMS_CLASS).declaredMethods.single {
+                it.hostNameMatches(methodName) && it.parameterCount == callbackCount + 3 &&
+                    it.parameterTypes.first() == Boolean::class.javaPrimitiveType
+            }
+            XposedBridge.hookMethod(entry, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val args = param.args ?: return
+                    val previous = sheetBinding(args.getOrNull(1))
+                    val context = currentBookContext() ?: previous?.context ?: return
+                    val callbacks = (1..callbackCount).map { index ->
+                        val callback = args[index] ?: return
+                        sheetBinding(callback)?.callbacks?.first() ?: callback
+                    }
+                    val binding = SheetBinding(context, target, args[0] as Boolean, callbacks)
+                    args[1] = Proxy.newProxyInstance(classLoader, arrayOf(cls(FUNCTION0_CLASS)), binding)
+                    args[args.lastIndex] = (args.last() as Int) and (0x7 shl 4).inv()
+                }
+            })
+            val content = cls(if (cover) "ReaMicroHost.BookCoverSheetContent" else "ReaMicroHost.BookBannerSheetContent")
+            val invoke = content.hostMethod("invoke", Any::class.java, Any::class.java, Any::class.java)
+            XposedBridge.hookMethod(invoke, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val closure = param.thisObject ?: return
+                    if (content.hostField("branch").getByte(closure) != 0.toByte()) return
+                    val binding = sheetBinding(content.hostField("pick").get(closure)) ?: return
+                    if (binding.target != target) return
+                    val composer = param.args?.getOrNull(1) ?: return
+                    val activity = activityProvider() ?: return
+                    val state = content.hostField("sheetState").get(closure) ?: return
+                    val scope = content.hostField("coroutineScope").get(closure) ?: return
+                    val gate = synchronized(sheetGates) { sheetGates.getOrPut(state) { BookImageSheetActionGate() } }
+                    ui.render(composer, BookImageSheetActions.items(cover, binding.hasSecondary)) { id ->
+                        if (gate.tryStart()) {
+                            ui.hide(scope, state) { hidden, error ->
+                                gate.hideFinished(hidden)
+                                if (hidden) {
+                                    synchronized(sheetGates) { sheetGates.remove(state) }
+                                    activity.runOnUiThread {
+                                        if (!activity.isFinishing && !activity.isDestroyed) {
+                                            runCatching { binding.execute(id) }.onFailure {
+                                                activity.toast("操作失败，请重试")
+                                                XposedBridge.log("$LOG_PREFIX image action failed: $it")
+                                            }
+                                        }
+                                    }
+                                } else if (error != null) {
+                                    XposedBridge.log("$LOG_PREFIX image sheet dismissal failed: $error")
+                                }
+                            }
+                        }
+                    }
+                    param.result = targetUnit()
+                }
+            })
+            XposedBridge.deoptimize(entry)
+            XposedBridge.deoptimize(invoke)
         }
     }
 

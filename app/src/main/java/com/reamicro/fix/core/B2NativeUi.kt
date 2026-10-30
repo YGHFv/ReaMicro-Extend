@@ -176,7 +176,12 @@ class B2NativeUi(private val loader: ClassLoader) {
 
     fun card(base: Any, color: Long, border: Long, width: Float): Any {
         val shape = field("CardShape", "b")
-        val clipped = requireNotNull(static("Clip", "n", base, shape))
+        // 同一门面里的双参 c 同时对应节点与裁剪，必须按 Modifier/Shape 精确重定位。
+        val clipped = requireNotNull(type("Clip").hostAbiMethod(
+            HostNativeUiAbi.method(HostSymbols.abiProfileId, "Clip", "n"),
+            loader.hostClass("androidx.compose.ui.Modifier"),
+            loader.hostClass("androidx.compose.ui.graphics.Shape"),
+        ).invoke(null, base, shape))
         val bordered = requireNotNull(static("Border", "a", clipped, width, border, shape))
         return fillWidth(requireNotNull(static("Background", "e", bordered, color, field("RectangleShape", "a"))))
     }
