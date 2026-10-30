@@ -139,7 +139,12 @@ object HostProfile {
         classExists: (String) -> Boolean,
     ): Boolean {
         val fp = parsed.fingerprint
-        if (fp.packageName != hostPackage) return false
+        // NPatch 等免 Root 打包器会通过改包名实现共存，但宿主 DEX 仍是同一个构建。
+        // 这里只放行原包名的子包名，后续体积、类指纹和 DEX 校验仍会限制误匹配。
+        val sameHostFamily =
+            fp.packageName == hostPackage ||
+                hostPackage.startsWith("${fp.packageName}.")
+        if (!sameHostFamily) return false
         if (fp.sizeHint > 0L && apkSize > 0L) {
             val low = fp.sizeHint * (1.0 - SIZE_TOLERANCE)
             val high = fp.sizeHint * (1.0 + SIZE_TOLERANCE)

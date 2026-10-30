@@ -44,7 +44,17 @@ class HostProfileTest {
     fun `matches only when fingerprint holds`() {
         val parsed = HostProfile.parse(sample)
         assertTrue(HostProfile.matches(parsed, HostProfile.HOST_PACKAGE, 44_805_028L, ::exists))
+        // NPatch 免 Root 包会改写包名，但宿主 APK 内容不变，仍应命中正式版 profile。
+        assertTrue(
+            HostProfile.matches(
+                parsed,
+                "${HostProfile.HOST_PACKAGE}.fix",
+                44_805_028L,
+                ::exists,
+            ),
+        )
         assertFalse(HostProfile.matches(parsed, "other.package", 44_805_028L, ::exists))
+        assertFalse(HostProfile.matches(parsed, "app.zhendong.reamicro-other", 44_805_028L, ::exists))
         // 体积超出容差：说明是别的构建，不能误用该 profile
         assertFalse(HostProfile.matches(parsed, HostProfile.HOST_PACKAGE, 67_654_280L, ::exists))
     }
