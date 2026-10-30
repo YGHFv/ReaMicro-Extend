@@ -146,10 +146,26 @@ class ReaderDialogueHighlightHook(
         runCatching {
             val methods = hostCompat.contentDomOnContentMethods(className)
             if (methods.isEmpty()) return
+            val highlightBeforeMeasure = HostSymbols.profileId == "2.3.3"
+            if (highlightBeforeMeasure) {
+                val measure = cls(className).getDeclaredMethod(
+                    "G", java.util.concurrent.atomic.AtomicReference::class.java,
+                    Int::class.javaPrimitiveType, ArrayList::class.java,
+                )
+                XposedBridge.hookMethod(measure, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        // 第0轮内容已构建、尚未计算字宽；分页递归不能覆盖宿主追加的逐字对齐样式。
+                        if (param.args[1] == 0) applyDialogueHighlight(param.thisObject)
+                    }
+                })
+                methods.forEach(XposedBridge::deoptimize)
+                XposedBridge.logAlways("$LOG_PREFIX dialogue highlight before native adaptive measure installed")
+            }
             methods.forEach { method ->
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        applyDialogueHighlight(param.thisObject)
+                        // 正式版必须先高亮后测量，不能再把高亮Span追加到adaptiveJustify样式之后。
+                        if (!highlightBeforeMeasure) applyDialogueHighlight(param.thisObject)
                         applyOnlineParagraphComments(param.thisObject)
                     }
                 })
