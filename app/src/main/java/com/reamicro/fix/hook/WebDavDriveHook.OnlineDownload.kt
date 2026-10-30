@@ -296,10 +296,15 @@ internal fun WebDavDriveHook.onlineImportedBookSourceInfo(book: Any): OnlineImpo
     )
 }
 
-internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(book: Any, info: OnlineImportedBookSourceInfo) {
+internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(
+    book: Any,
+    info: OnlineImportedBookSourceInfo,
+    onComplete: ((Boolean) -> Unit)? = null,
+) {
     val context = currentContext()
     if (context == null) {
         showToast("无法启动章节更新：缺少 Context")
+        onComplete?.invoke(false)
         return
     }
     val appContext = context.applicationContext ?: context
@@ -308,10 +313,12 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(book: Any, info:
     })?.let { OnlineSourceDownloadPolicyStore.attach(appContext, it) }
     if (source == null) {
         showToast("在线补全源不可用：${info.sourceName}")
+        onComplete?.invoke(false)
         return
     }
     if (OnlineSourceDownloadPolicyStore.remainingToday(appContext, source) == 0) {
         showToast(OnlineSourceDownloadPolicyStore.limitReachedMessage(source))
+        onComplete?.invoke(false)
         return
     }
     val title = book.callString("getTitle").ifBlank { "未命名图书" }
@@ -319,11 +326,13 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(book: Any, info:
         .ifBlank { book.callString("getUri").takeIf { it.startsWith("http", ignoreCase = true) }.orEmpty() }
     if (detailUrl.isBlank()) {
         showToast("缺少在线源详情地址，无法更新章节")
+        onComplete?.invoke(false)
         return
     }
     val key = "${book.callString("getUuid")}|${source.id}|$detailUrl"
     if (onlineCompletionRunningUpdates.putIfAbsent(key, true) == true) {
         showToast("正在更新：$title")
+        onComplete?.invoke(false)
         return
     }
     val notificationId = onlineCompletionNotificationIds.incrementAndGet()
@@ -341,7 +350,8 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(book: Any, info:
     progressNotifier.running(0, "准备更新", force = true)
     showToast("开始检查更新：$title")
     Thread({
-        runCatching {
+        var completed = false
+        val outcome = runCatching {
             val latest = findLocalBookByUuid(book.callLong("getUid"), book.callString("getUuid")) ?: book
             val target = OnlineDownloadTarget(
                 source = source,
@@ -363,6 +373,7 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(book: Any, info:
                 },
             )
             val message = onlineChapterUpdateMessage(result.added, result.failed, result.retried, result.styled)
+            completed = result.failed == 0
             progressNotifier.finish(message, detailUrl, success = true)
             Handler(Looper.getMainLooper()).post {
                 Toast.makeText(appContext, "$message：$title", Toast.LENGTH_SHORT).show()
@@ -376,6 +387,7 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(book: Any, info:
         }.also {
             onlineCompletionRunningUpdates.remove(key)
         }
+        onComplete?.invoke(outcome.isSuccess && completed)
     }, "ReaMicroOnlineCompletionUpdate").start()
 }
 

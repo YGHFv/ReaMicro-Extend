@@ -35,6 +35,7 @@ class ReaMicroHookEntry {
     private val settingsProvider: () -> ModuleSettingsSnapshot = moduleSettings::snapshot
     private val installedFeatureIds = linkedSetOf<String>()
     private val disabledFeatureIds = linkedSetOf<String>()
+    private var bookshelfCompletion: BookshelfCompletionHook? = null
     @Volatile private var memoryCallbacksInstalled: Boolean = false
     @Volatile private var apiSettingsMirrored: Boolean = false
     private val heartbeatHandler = Handler(Looper.getMainLooper())
@@ -163,6 +164,12 @@ class ReaMicroHookEntry {
             globalTypefaceProvider = globalFontHook::globalAndroidTypeface,
         )
         installFeature("WebDavDriveHook", webDavDriveHook::install)
+        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3") {
+            installFeature("BookshelfCompletionHook") {
+                bookshelfCompletion = BookshelfCompletionHook(classLoader, activityProvider, settingsProvider, webDavDriveHook)
+                    .also { it.install() }
+            }
+        }
 
         installFeature("DiscoverCardHook") {
             DiscoverCardHook(classLoader).install()
@@ -251,6 +258,7 @@ class ReaMicroHookEntry {
                         )
                         RotationOrientationController.apply(activity, moduleSettings.snapshot())
                         webDavDriveHook.cleanupStartupCacheIfNeeded(activity)
+                        bookshelfCompletion?.onHostStarted()
                         profileBackgroundHook.refreshRandomImageFor(activity)
                         ApiPackageAutoUpdater.checkIfDue(activity.applicationContext, moduleSettings)
                         CloudTaskNotificationPoller.poll(activity.applicationContext)

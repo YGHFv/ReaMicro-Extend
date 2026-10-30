@@ -1,4 +1,13 @@
 profile=2.3.3
+typeAlias=ReaMicroShelf233.Header=jc4
+typeAlias=ReaMicroShelf233.SyncState=kc4
+typeAlias=ReaMicroShelf233.LanState=e07
+typeAlias=ReaMicroShelf233.FlowFirst=avd
+typeAlias=ReaMicroShelf233.Unit=hzd
+typeAlias=ReaMicroShelf233.Scale=nw8
+typeAlias=ReaMicroShelf233.Circle=x59
+typeAlias=ReaMicroShelf233.Clip=s3e
+typeAlias=ReaMicroShelf233.SelectionIcon=wrd
 package=app.zhendong.reamicro
 sizeHint=44894945
 requiredClass=app.zhendong.reamicro.MainActivity

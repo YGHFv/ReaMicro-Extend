@@ -223,6 +223,7 @@ internal fun ReaMicroSettingsHook.renderInjectedSettingsScreen(route: InjectedRo
             InjectedRoute.ModuleSettings -> renderHostModuleSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.AssociationCompletionSettings -> renderAssociationCompletionSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.ReaderCompletionSettings -> renderReaderCompletionSettingsContent(innerPaddings, innerComposer)
+            InjectedRoute.BookshelfCompletionSettings -> renderBookshelfCompletionSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.ReaderSelectionMenuSettings -> renderReaderSelectionMenuSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.ReaderHighlightSettings -> renderReaderHighlightSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.ReaderHighlightConfigSettings -> renderReaderHighlightConfigSettingsContent(innerPaddings, innerComposer)
@@ -384,6 +385,14 @@ internal fun ReaMicroSettingsHook.renderHostModuleSettingsContent(innerPaddings:
                 composer = itemComposer,
             )
         }
+        addLazyItem(lazyListScope, 0x524d5348) { itemComposer ->
+            renderNestedSettingsEntry(
+                title = "书架补全",
+                callbackName = "OpenBookshelfCompletion",
+                route = InjectedRoute.BookshelfCompletionSettings,
+                composer = itemComposer,
+            )
+        }
         addLazyItem(lazyListScope, ONLINE_COMPLETION_SETTINGS_ITEM_KEY) { itemComposer ->
             renderNestedSettingsEntry(
                 title = ONLINE_COMPLETION_TITLE,
@@ -461,6 +470,48 @@ internal fun ReaMicroSettingsHook.completionEntryRow(key: String, title: String,
         trailing = "\u8bbe\u7f6e",
         onClick = { openNestedInjectedRoute(route) },
     )
+
+internal fun ReaMicroSettingsHook.renderBookshelfCompletionSettingsContent(innerPaddings: Any, composer: Any) {
+    val content = functionProxy("BookshelfCompletionList", FUNCTION1_CLASS) { args ->
+        val scope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+        val version = bookshelfSettingsVersionUiState ?: mutableState(0).also { bookshelfSettingsVersionUiState = it }
+        addLazyItem(scope, 0x524d5349) { inner ->
+            version.method0("getValue")
+            val snapshot = settings.snapshot()
+            val rows = listOf(
+            ToggleRow(
+                key = ModuleSettings.KEY_SHELF_HIDE_SYNC, title = "隐藏同步按钮",
+                checked = snapshot.shelfHideSync,
+                onChanged = { enabled, _ -> settings.setShelfHideSync(enabled); enabled },
+            ),
+            ToggleRow(
+                key = ModuleSettings.KEY_SHELF_STYLE_BUTTON, title = "书架样式按钮",
+                checked = snapshot.shelfStyleButton,
+                onChanged = { enabled, _ -> settings.setShelfStyleButton(enabled); enabled },
+            ),
+            ToggleRow(
+                key = ModuleSettings.KEY_SHELF_BATCH_UPDATE, title = "批量更新按钮",
+                checked = snapshot.shelfBatchUpdate,
+                onChanged = { enabled, _ ->
+                    settings.setShelfBatchUpdate(enabled)
+                    val value = (version.method0("getValue") as Number).toInt()
+                    com.reamicro.fix.xposed.XposedHelpers.callMethod(version, "setValue", value + 1)
+                    enabled
+                },
+            ),
+            ToggleRow(
+                key = ModuleSettings.KEY_SHELF_AUTO_UPDATE, title = "启用自动更新",
+                checked = snapshot.shelfAutoUpdate,
+                visibleProvider = { settings.snapshot().shelfBatchUpdate },
+                onChanged = { enabled, _ -> settings.setShelfAutoUpdate(enabled); enabled },
+            ),
+            )
+            renderHostSettingsCard(rows, inner)
+        }
+        targetUnit()
+    }
+    renderHostLazyColumn(innerPaddings, content, composer)
+}
 
 internal fun ReaMicroSettingsHook.renderAssociationCompletionSettingsContent(innerPaddings: Any, composer: Any) {
     val listContent = functionProxy("AssociationCompletionList", FUNCTION1_CLASS) { args ->

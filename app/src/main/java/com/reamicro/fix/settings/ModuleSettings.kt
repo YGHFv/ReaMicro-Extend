@@ -23,6 +23,10 @@ object ModuleSettings {
     const val KEY_HOST_CRASH_UPLOAD_ENABLED = "host_crash_upload_enabled"
     const val KEY_CONCISE_LOG_ENABLED = "concise_log_enabled"
     const val KEY_INLINE_SEARCH_ICON_ENABLED = "inline_search_icon_enabled"
+    const val KEY_SHELF_HIDE_SYNC = "shelf_hide_sync"
+    const val KEY_SHELF_STYLE_BUTTON = "shelf_style_button"
+    const val KEY_SHELF_BATCH_UPDATE = "shelf_batch_update"
+    const val KEY_SHELF_AUTO_UPDATE = "shelf_auto_update"
     const val KEY_FONT_ENABLED = "font_enabled"
     const val KEY_FONT_SETTINGS_ENABLED = "font_settings_enabled"
     const val KEY_ACCOUNT_ENABLED = "account_enabled"
@@ -204,6 +208,10 @@ data class ModuleSettingsSnapshot(
     val hostCrashUploadEnabled: Boolean = ModuleSettings.DEFAULT_HOST_CRASH_UPLOAD_ENABLED,
     val conciseLogEnabled: Boolean = ModuleSettings.DEFAULT_CONCISE_LOG_ENABLED,
     val inlineSearchIconEnabled: Boolean = ModuleSettings.DEFAULT_INLINE_SEARCH_ICON_ENABLED,
+    val shelfHideSync: Boolean = false,
+    val shelfStyleButton: Boolean = false,
+    val shelfBatchUpdate: Boolean = false,
+    val shelfAutoUpdate: Boolean = false,
     val fontEnabled: Boolean = ModuleSettings.DEFAULT_FONT_ENABLED,
     val fontSettingsEnabled: Boolean = ModuleSettings.DEFAULT_FONT_SETTINGS_ENABLED,
     val accountEnabled: Boolean = ModuleSettings.DEFAULT_ACCOUNT_ENABLED,

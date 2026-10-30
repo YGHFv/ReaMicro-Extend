@@ -207,6 +207,7 @@ internal sealed class InjectedRoute(val title: String) {
     object ModuleSettings : InjectedRoute(MODULE_ENTRY_TITLE)
     object AssociationCompletionSettings : InjectedRoute("\u5173\u8054\u8865\u5168")
     object ReaderCompletionSettings : InjectedRoute("\u9605\u8bfb\u8865\u5168")
+    object BookshelfCompletionSettings : InjectedRoute("书架补全")
     object ReaderSelectionMenuSettings : InjectedRoute("\u9009\u4e2d\u83dc\u5355")
     object ReaderHighlightSettings : InjectedRoute(READER_HIGHLIGHT_SETTINGS_TITLE)
     object ReaderHighlightConfigSettings : InjectedRoute("\u9ad8\u4eae\u6837\u5f0f")

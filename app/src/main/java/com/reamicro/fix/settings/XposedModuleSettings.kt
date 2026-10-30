@@ -556,6 +556,11 @@ class XposedModuleSettings(
         snapshot()
     }
 
+    fun setShelfHideSync(enabled: Boolean) = putBoolean(ModuleSettings.KEY_SHELF_HIDE_SYNC, enabled)
+    fun setShelfStyleButton(enabled: Boolean) = putBoolean(ModuleSettings.KEY_SHELF_STYLE_BUTTON, enabled)
+    fun setShelfBatchUpdate(enabled: Boolean) = putBoolean(ModuleSettings.KEY_SHELF_BATCH_UPDATE, enabled)
+    fun setShelfAutoUpdate(enabled: Boolean) = putBoolean(ModuleSettings.KEY_SHELF_AUTO_UPDATE, enabled)
+
     private fun putInt(key: String, value: Int) {
         prefs()?.edit()?.putInt(key, value)?.commit()
         cachedSnapshot = null
@@ -760,6 +765,10 @@ class XposedModuleSettings(
             hostCrashUploadEnabled = HostCrashUploadSettings.uploadsAllowed(prefs),
             conciseLogEnabled = conciseLogEnabled,
             inlineSearchIconEnabled = inlineSearchIconEnabled,
+            shelfHideSync = prefs.getBoolean(ModuleSettings.KEY_SHELF_HIDE_SYNC, false),
+            shelfStyleButton = prefs.getBoolean(ModuleSettings.KEY_SHELF_STYLE_BUTTON, false),
+            shelfBatchUpdate = prefs.getBoolean(ModuleSettings.KEY_SHELF_BATCH_UPDATE, false),
+            shelfAutoUpdate = prefs.getBoolean(ModuleSettings.KEY_SHELF_AUTO_UPDATE, false),
             fontEnabled = prefs.getBoolean(
                 ModuleSettings.KEY_FONT_ENABLED,
                 ModuleSettings.DEFAULT_FONT_ENABLED,

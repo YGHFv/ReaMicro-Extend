@@ -97,6 +97,7 @@ class ReaMicroSettingsHook(
 
     @Volatile internal var readerHighlightScreenPlanUiState: Any? = null
     @Volatile internal var profileBackgroundVersionUiState: Any? = null
+    @Volatile internal var bookshelfSettingsVersionUiState: Any? = null
 
     @Volatile internal var discoverVersionUiState: Any? = null
 
@@ -301,6 +302,7 @@ class ReaMicroSettingsHook(
     internal val MODULE_CHILD_ROUTES = setOf(
         InjectedRoute.AssociationCompletionSettings,
         InjectedRoute.ReaderCompletionSettings,
+        InjectedRoute.BookshelfCompletionSettings,
         InjectedRoute.CloudCompletionSettings,
         InjectedRoute.ApiServerSettings,
         InjectedRoute.CloudAutomationSettings,
