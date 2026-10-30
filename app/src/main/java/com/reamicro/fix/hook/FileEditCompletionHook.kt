@@ -1,4 +1,5 @@
 package com.reamicro.fix.hook
+import com.reamicro.fix.core.hostAbiMethod
 
 import android.app.Activity
 import android.content.ClipData
@@ -788,7 +789,7 @@ class FileEditCompletionHook(
     private fun navigateNextImageVector(): Any? =
         runCatching {
             if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-                return@runCatching cls("ReaMicroHost.NavigateNextIcon").getDeclaredMethod("i").invoke(null)
+                return@runCatching cls("ReaMicroHost.NavigateNextIcon").hostAbiMethod("i").invoke(null)
             }
             method(NAVIGATE_NEXT_ICON_CLASS, "getNavigateNext", 1).invoke(
                 null,
@@ -809,7 +810,7 @@ class FileEditCompletionHook(
             1 -> coloredAppIcon(BAIDU_ICON_CLASS, "getBaiduNetdisk")
             2 -> coloredAppIcon(YUN115_ICON_CLASS, "getYun115")
             4 -> if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-                cls("ReaMicroHost.AliyunIcon").getDeclaredMethod("d").invoke(null)
+                cls("ReaMicroHost.AliyunIcon").hostAbiMethod("d").invoke(null)
             } else coloredAppIcon(ALIYUN_ICON_CLASS, "getAliyun")
             else -> coloredAppIcon(ANDROID_OS_ICON_CLASS, "getAndroidOs")
         }

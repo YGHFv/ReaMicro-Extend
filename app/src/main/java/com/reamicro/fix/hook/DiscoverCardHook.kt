@@ -62,6 +62,7 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                 "rowIconImage" to ::hookRowIconImage,
                 "rowLabelText" to ::hookRowLabelText,
                 "rowSpacer" to ::hookRowSpacer,
+                "communityDivider" to ::hookCommunityDivider,
             ),
         )
     }
@@ -436,6 +437,27 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                 probeFailed("hostRowClick", IllegalStateException("host row onClick lambda not captured"))
             }
         }
+    }
+
+    private fun hookCommunityDivider() {
+        if (com.reamicro.fix.core.HostSymbols.profileId != "2.3.3") return
+        val target = classLoader.hostClass("app.zhendong.reamicro.arch.components.DividerKt").hostMethod(
+            "SimpleDivider-iJQMabo",
+            classLoader.hostClass("androidx.compose.ui.Modifier"),
+            Long::class.javaPrimitiveType,
+            classLoader.hostClass(COMPOSER_CLASS),
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+        )
+        XposedBridge.hookMethod(target, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if (!inCommunity() || communityInjected.get() != true) return
+                // 宿主仍按单行书院缩进 52dp；双栏注入后应与下方原生双栏分割线贯通。
+                val hook = ReaMicroSettingsHook.activeInstanceOrNull() ?: return
+                param.args[0] = hook.modifierInstance()
+            }
+        })
+        XposedBridge.deoptimize(target)
     }
 
     private fun composerOf(args: Array<Any?>): Any? {

@@ -1,6 +1,7 @@
 package com.reamicro.fix.hook
 
 import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.hostAbiMethod
 import com.reamicro.fix.core.typeMatches
 
 
@@ -94,7 +95,7 @@ private fun ReaMicroSettingsHook.renderCellArrow(
 private fun ReaMicroSettingsHook.navigateNextImageVector(): Any? =
     runCatching {
         if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-            return@runCatching cls("ReaMicroHost.NavigateNextIcon").getDeclaredMethod("i").invoke(null)
+            return@runCatching cls("ReaMicroHost.NavigateNextIcon").hostAbiMethod("i").invoke(null)
         }
         method(NAVIGATE_NEXT_ICON_CLASS, NAVIGATE_NEXT_METHOD, NAVIGATE_NEXT_PARAMETER_COUNT).invoke(
             null,

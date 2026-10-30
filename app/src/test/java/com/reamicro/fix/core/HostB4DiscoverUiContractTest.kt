@@ -47,6 +47,23 @@ class HostB4DiscoverUiContractTest {
     }
 
     @Test
+    fun `retargeted arrows and community divider retain the native two column geometry`() {
+        val entry = source("hook/DiscoverButtonRenderer.kt")
+        assertTrue(entry.contains("cls(\"ReaMicroHost.NavigateNextIcon\").hostAbiMethod(\"i\")"))
+        assertFalse(entry.contains("cls(\"ReaMicroHost.NavigateNextIcon\").getDeclaredMethod(\"i\")"))
+        val divider = source("hook/DiscoverCardHook.kt")
+            .substringAfter("private fun hookCommunityDivider()")
+            .substringBefore("private fun composerOf")
+        assertTrue(divider.contains("HostSymbols.profileId != \"2.3.3\""))
+        assertTrue(divider.contains("!inCommunity() || communityInjected.get() != true"))
+        assertTrue(divider.contains("param.args[0] = hook.modifierInstance()"))
+        assertTrue(divider.contains("XposedBridge.deoptimize(target)"))
+        val details = source("hook/FileEditCompletionHook.kt")
+        assertTrue(details.contains("cls(\"ReaMicroHost.NavigateNextIcon\").hostAbiMethod(\"i\")"))
+        assertTrue(details.contains("cls(\"ReaMicroHost.AliyunIcon\").hostAbiMethod(\"d\")"))
+    }
+
+    @Test
     fun `highlight card wraps the b4 entry with symmetric spacing`() {
         val entry = source("hook/ReaMicroSettingsHook.Highlight.kt")
             .substringAfter("internal fun ReaMicroSettingsHook.renderReaderHighlightScreenEntryCard")
