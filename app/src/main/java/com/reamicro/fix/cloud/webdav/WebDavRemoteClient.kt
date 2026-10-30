@@ -24,6 +24,8 @@ internal data class WebDavCredentials(
 internal data class WebDavHttpResponse(
     val code: Int,
     val bodyString: String?,
+    val headers: Map<String, String> = emptyMap(),
+    val bodyBytes: ByteArray? = null,
 )
 
 internal data class AlistSearchEntry(

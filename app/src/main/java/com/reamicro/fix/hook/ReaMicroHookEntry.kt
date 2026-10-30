@@ -165,6 +165,9 @@ class ReaMicroHookEntry {
         )
         installFeature("WebDavDriveHook", webDavDriveHook::install)
         if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3") {
+            installFeature("WebDavSyncHook") {
+                WebDavSyncHook(classLoader, activityProvider, settingsProvider, webDavDriveHook).install()
+            }
             installFeature("BookshelfCompletionHook") {
                 bookshelfCompletion = BookshelfCompletionHook(classLoader, activityProvider, settingsProvider, webDavDriveHook)
                     .also { it.install() }

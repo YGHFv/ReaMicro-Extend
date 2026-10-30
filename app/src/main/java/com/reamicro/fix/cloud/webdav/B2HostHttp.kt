@@ -65,7 +65,10 @@ internal class B2HostHttp(private val loader: ClassLoader, private val cleartext
         type("MediaTypeFactory").hostAbiMethod("b", String::class.java).invoke(null, value)
 
     fun stringBody(value: String, mime: String): Any {
-        val bytes = value.toByteArray(StandardCharsets.UTF_8)
+        return byteBody(value.toByteArray(StandardCharsets.UTF_8), mime)
+    }
+
+    fun byteBody(bytes: ByteArray, mime: String): Any {
         return type("ByteBody").getDeclaredConstructor(Int::class.javaPrimitiveType, type("MediaType"), ByteArray::class.java)
             .newInstance(bytes.size, mediaType(mime), bytes)
     }
@@ -75,6 +78,8 @@ internal class B2HostHttp(private val loader: ClassLoader, private val cleartext
     fun request(
         url: String, method: String, headers: Map<String, String>, body: Any?,
         outputFile: File? = null, onProgress: ((Int) -> Unit)? = null,
+        binary: Boolean = false,
+        captureHeaders: Boolean = false,
     ): WebDavHttpResponse {
         check(streamingVerified)
         val builderType = type("RequestBuilder")
@@ -94,12 +99,32 @@ internal class B2HostHttp(private val loader: ClassLoader, private val cleartext
         val response = cleartextScope.run { type("Call").hostAbiMethod("d").invoke(call) }
         try {
             val code = type("Response").hostAbiField("d").getInt(response)
+            val responseHeaders = if (!captureHeaders) emptyMap() else listOf("ETag", "Content-Length", "Content-Type").mapNotNull { name ->
+                (type("Response").getDeclaredMethod("g", type("Response"), String::class.java).invoke(null, response, name) as? String)
+                    ?.let { name to it }
+            }.toMap()
             val responseBody = type("Response").hostAbiField("g").get(response)
+            if (method == "HEAD" || responseBody == null) return WebDavHttpResponse(code, null, responseHeaders)
             val source = type("ResponseBody").hostAbiMethod("c1").invoke(responseBody)
             if (outputFile == null) {
+                if (binary) {
+                    val input = type("BufferedSource").hostAbiMethod("i1").invoke(source) as InputStream
+                    val bytes = input.use {
+                        val output = java.io.ByteArrayOutputStream()
+                        val buffer = ByteArray(8192)
+                        while (true) {
+                            val count = it.read(buffer)
+                            if (count < 0) break
+                            check(output.size().toLong() + count <= 64L * 1024 * 1024) { "WebDAV metadata response is too large" }
+                            output.write(buffer, 0, count)
+                        }
+                        output.toByteArray()
+                    }
+                    return WebDavHttpResponse(code, null, responseHeaders, bytes)
+                }
                 val text = type("BufferedSource").hostAbiMethod("o0", java.nio.charset.Charset::class.java)
                     .invoke(source, StandardCharsets.UTF_8) as String
-                return WebDavHttpResponse(code, text)
+                return WebDavHttpResponse(code, text, responseHeaders)
             }
             if (code in 200..299) {
                 val total = type("ResponseBody").hostAbiMethod("g").invoke(responseBody) as Long
@@ -120,7 +145,7 @@ internal class B2HostHttp(private val loader: ClassLoader, private val cleartext
                     }
                 }
             }
-            return WebDavHttpResponse(code, null)
+            return WebDavHttpResponse(code, null, responseHeaders)
         } finally {
             (response as Closeable).close()
         }

@@ -178,6 +178,10 @@ class XposedModuleSettings(
         putBoolean(ModuleSettings.KEY_CLOUD_WEBDAV_ENABLED, enabled)
     }
 
+    fun setCloudSyncExtensionEnabled(enabled: Boolean) {
+        putBoolean(ModuleSettings.KEY_CLOUD_SYNC_EXTENSION_ENABLED, enabled)
+    }
+
     fun setCloudLocalLibraryEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_CLOUD_LOCAL_LIBRARY_ENABLED, enabled)
     }
@@ -803,6 +807,10 @@ class XposedModuleSettings(
                 cloudWebDavEnabled || cloudLocalLibraryEnabled || ModuleSettings.DEFAULT_CLOUD_ENABLED,
             ),
             cloudWebDavEnabled = cloudWebDavEnabled,
+            cloudSyncExtensionEnabled = prefs.getBoolean(
+                ModuleSettings.KEY_CLOUD_SYNC_EXTENSION_ENABLED,
+                ModuleSettings.DEFAULT_CLOUD_SYNC_EXTENSION_ENABLED,
+            ),
             cloudLocalLibraryEnabled = cloudLocalLibraryEnabled,
             cloudExtendedDisplayEnabled = cloudExtendedDisplayEnabled,
             cloudDownloadCancelEnabled = cloudDownloadCancelEnabled,
@@ -1373,6 +1381,7 @@ class XposedModuleSettings(
             snapshot.editFileEnabled,
             snapshot.cloudEnabled,
             snapshot.cloudWebDavEnabled,
+            snapshot.cloudSyncExtensionEnabled,
             snapshot.cloudLocalLibraryEnabled,
             snapshot.cloudExtendedDisplayEnabled,
             snapshot.cloudDownloadCancelEnabled,
@@ -1422,6 +1431,7 @@ class XposedModuleSettings(
                     "editFile=${snapshot.editFileEnabled}, " +
                     "cloud=${snapshot.cloudEnabled}, " +
                     "cloudWebDav=${snapshot.cloudWebDavEnabled}, " +
+                    "cloudSyncExtension=${snapshot.cloudSyncExtensionEnabled}, " +
                     "cloudLocalLibrary=${snapshot.cloudLocalLibraryEnabled}, " +
                     "cloudExtendedDisplay=${snapshot.cloudExtendedDisplayEnabled}, " +
                     "cloudDownloadCancel=${snapshot.cloudDownloadCancelEnabled}, " +

@@ -39,6 +39,7 @@ object ModuleSettings {
     const val KEY_API_DEBUG_UNLOCKED = "api_debug_unlocked"
     const val KEY_CLOUD_ENABLED = "cloud_enabled"
     const val KEY_CLOUD_WEBDAV_ENABLED = "cloud_webdav_enabled"
+    const val KEY_CLOUD_SYNC_EXTENSION_ENABLED = "cloud_sync_extension_enabled"
     const val KEY_CLOUD_LOCAL_LIBRARY_ENABLED = "cloud_local_library_enabled"
     const val KEY_CLOUD_EXTENDED_DISPLAY_ENABLED = "cloud_extended_display_enabled"
     const val KEY_CLOUD_DOWNLOAD_CANCEL_ENABLED = "cloud_download_cancel_enabled"
@@ -94,6 +95,7 @@ object ModuleSettings {
     const val DEFAULT_EDIT_FILE_ENABLED = false
     const val DEFAULT_CLOUD_ENABLED = true
     const val DEFAULT_CLOUD_WEBDAV_ENABLED = true
+    const val DEFAULT_CLOUD_SYNC_EXTENSION_ENABLED = false
     const val DEFAULT_API_DEBUG_UNLOCKED = false
     const val DEFAULT_CLOUD_LOCAL_LIBRARY_ENABLED = true
     const val DEFAULT_CLOUD_EXTENDED_DISPLAY_ENABLED = false
@@ -225,6 +227,7 @@ data class ModuleSettingsSnapshot(
     val editFileEnabled: Boolean = ModuleSettings.DEFAULT_EDIT_FILE_ENABLED,
     val cloudEnabled: Boolean = ModuleSettings.DEFAULT_CLOUD_ENABLED,
     val cloudWebDavEnabled: Boolean = ModuleSettings.DEFAULT_CLOUD_WEBDAV_ENABLED,
+    val cloudSyncExtensionEnabled: Boolean = ModuleSettings.DEFAULT_CLOUD_SYNC_EXTENSION_ENABLED,
     val cloudLocalLibraryEnabled: Boolean = ModuleSettings.DEFAULT_CLOUD_LOCAL_LIBRARY_ENABLED,
     val cloudExtendedDisplayEnabled: Boolean = ModuleSettings.DEFAULT_CLOUD_EXTENDED_DISPLAY_ENABLED,
     val cloudDownloadCancelEnabled: Boolean = ModuleSettings.DEFAULT_CLOUD_DOWNLOAD_CANCEL_ENABLED,
@@ -316,6 +319,9 @@ data class ModuleSettingsSnapshot(
 
     val canRunWebDavCloud: Boolean
         get() = moduleEnabled && cloudWebDavEnabled
+
+    val canRunWebDavSync: Boolean
+        get() = moduleEnabled && cloudSyncExtensionEnabled
 
     val canRunLocalLibraryCloud: Boolean
         get() = moduleEnabled && cloudLocalLibraryEnabled
