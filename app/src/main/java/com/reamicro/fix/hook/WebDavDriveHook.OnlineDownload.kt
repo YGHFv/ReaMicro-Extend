@@ -58,6 +58,7 @@ import com.reamicro.fix.online.download.OnlineOnDemandMetadataStore
 import com.reamicro.fix.online.download.OnlineChapterContentValidator
 import com.reamicro.fix.online.download.OnlineChapterUpdatePlanner
 import com.reamicro.fix.online.download.onlineChapterUpdateMessage
+import com.reamicro.fix.online.download.OnlineChapterUpdateOutcome
 import com.reamicro.fix.xposed.XposedBridge
 import java.io.File
 import java.lang.reflect.Method
@@ -299,12 +300,18 @@ internal fun WebDavDriveHook.onlineImportedBookSourceInfo(book: Any): OnlineImpo
 internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(
     book: Any,
     info: OnlineImportedBookSourceInfo,
-    onComplete: ((Boolean) -> Unit)? = null,
+    silent: Boolean = false,
+    skipCompleted: Boolean = false,
+    onComplete: ((OnlineChapterUpdateOutcome) -> Unit)? = null,
 ) {
+    val title = book.callString("getTitle").ifBlank { "未命名图书" }
+    fun reject(message: String) {
+        if (!silent) showToast(message)
+        onComplete?.invoke(OnlineChapterUpdateOutcome(title, error = message))
+    }
     val context = currentContext()
     if (context == null) {
-        showToast("无法启动章节更新：缺少 Context")
-        onComplete?.invoke(false)
+        reject("无法启动章节更新：缺少 Context")
         return
     }
     val appContext = context.applicationContext ?: context
@@ -312,27 +319,22 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(
         OnlineSourceStore.matchesIdentity(source, info.sourceId)
     })?.let { OnlineSourceDownloadPolicyStore.attach(appContext, it) }
     if (source == null) {
-        showToast("在线补全源不可用：${info.sourceName}")
-        onComplete?.invoke(false)
+        reject("在线补全源不可用：${info.sourceName}")
         return
     }
     if (OnlineSourceDownloadPolicyStore.remainingToday(appContext, source) == 0) {
-        showToast(OnlineSourceDownloadPolicyStore.limitReachedMessage(source))
-        onComplete?.invoke(false)
+        reject(OnlineSourceDownloadPolicyStore.limitReachedMessage(source))
         return
     }
-    val title = book.callString("getTitle").ifBlank { "未命名图书" }
     val detailUrl = info.detailUrl
         .ifBlank { book.callString("getUri").takeIf { it.startsWith("http", ignoreCase = true) }.orEmpty() }
     if (detailUrl.isBlank()) {
-        showToast("缺少在线源详情地址，无法更新章节")
-        onComplete?.invoke(false)
+        reject("缺少在线源详情地址，无法更新章节")
         return
     }
     val key = "${book.callString("getUuid")}|${source.id}|$detailUrl"
     if (onlineCompletionRunningUpdates.putIfAbsent(key, true) == true) {
-        showToast("正在更新：$title")
-        onComplete?.invoke(false)
+        reject("正在更新：$title")
         return
     }
     val notificationId = onlineCompletionNotificationIds.incrementAndGet()
@@ -346,11 +348,11 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(
         bookName = title,
         tracker = tracker,
         workId = workId,
+        notificationsEnabled = !silent,
     )
     progressNotifier.running(0, "准备更新", force = true)
-    showToast("开始检查更新：$title")
+    if (!silent) showToast("开始检查更新：$title")
     Thread({
-        var completed = false
         val outcome = runCatching {
             val latest = findLocalBookByUuid(book.callLong("getUid"), book.callString("getUuid")) ?: book
             val target = OnlineDownloadTarget(
@@ -368,26 +370,27 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(
             val result = updateOnlineCompletionBookIncrementally(
                 book = latest,
                 target = target,
+                skipCompleted = skipCompleted,
                 onProgress = { progress, message ->
                     progressNotifier.running(progress, message)
                 },
             )
             val message = onlineChapterUpdateMessage(result.added, result.failed, result.retried, result.styled)
-            completed = result.failed == 0
             progressNotifier.finish(message, detailUrl, success = true)
-            Handler(Looper.getMainLooper()).post {
+            if (!silent) Handler(Looper.getMainLooper()).post {
                 Toast.makeText(appContext, "$message：$title", Toast.LENGTH_SHORT).show()
             }
+            OnlineChapterUpdateOutcome(title, result.added, result.failed, result.retried, skipped = result.skipped)
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX online completion update failed: ${it.stackTraceToString()}")
             progressNotifier.finish(it.message ?: "章节更新失败", null, success = false)
-            Handler(Looper.getMainLooper()).post {
+            if (!silent) Handler(Looper.getMainLooper()).post {
                 Toast.makeText(appContext, "章节更新失败：${it.message ?: title}", Toast.LENGTH_SHORT).show()
             }
         }.also {
             onlineCompletionRunningUpdates.remove(key)
         }
-        onComplete?.invoke(outcome.isSuccess && completed)
+        onComplete?.invoke(outcome.getOrElse { OnlineChapterUpdateOutcome(title, error = it.message ?: "章节更新失败") })
     }, "ReaMicroOnlineCompletionUpdate").start()
 }
 

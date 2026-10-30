@@ -1106,6 +1106,7 @@ internal fun WebDavDriveHook.onlineCompletionGeneratedEpubMetadata(book: Any): O
 internal fun WebDavDriveHook.updateOnlineCompletionBookIncrementally(
     book: Any,
     target: OnlineDownloadTarget,
+    skipCompleted: Boolean = false,
     onProgress: (Int, String) -> Unit,
 ): OnlineChapterUpdateResult {
     val bookDir = bookDirectory(book).canonicalFile
@@ -1115,11 +1116,15 @@ internal fun WebDavDriveHook.updateOnlineCompletionBookIncrementally(
     if (!bookDir.isDirectory || !textDir.isDirectory || !contentOpf.isFile || !tocNcx.isFile) {
         error("当前图书不是在线补全生成的标准 EPUB，暂不能增量更新")
     }
-    onProgress(1, "同步 EPUB 默认样式")
-    val styleChanged = syncOnlineCompletionDefaultStyle(bookDir)
     val tocSnapshot = loadOnlineCompletionToc(target) { progress, message ->
         onProgress(progress.coerceAtMost(12), message)
     }
+    // finished是阅读完成时间，不是小说连载状态；只使用源详情解析出的完结状态。
+    if (skipCompleted && target.result.status == "完结") {
+        return OnlineChapterUpdateResult(0, 0, skipped = true)
+    }
+    onProgress(12, "同步 EPUB 默认样式")
+    val styleChanged = syncOnlineCompletionDefaultStyle(bookDir)
     val remoteChapters = tocSnapshot.chapters
     val chapterAllowance = OnlineSourceDownloadPolicyStore.remainingToday(currentContext(), target.source)
     val (chapterHrefs, newRemoteIndices) = onlineChapterUpdatePlan(bookDir, remoteChapters)

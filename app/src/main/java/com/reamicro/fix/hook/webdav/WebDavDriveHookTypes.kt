@@ -95,6 +95,7 @@ internal data class OnlineChapterUpdateResult(
     val failed: Int,
     val retried: Int = 0,
     val styled: Boolean = false,
+    val skipped: Boolean = false,
 )
 
 internal data class OnlineFailedRetryResult(

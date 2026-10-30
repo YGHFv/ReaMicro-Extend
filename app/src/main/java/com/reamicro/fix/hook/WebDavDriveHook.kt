@@ -185,6 +185,7 @@ class WebDavDriveHook(
         private val bookName: String,
         private val tracker: Any?,
         private val workId: String?,
+        private val notificationsEnabled: Boolean = true,
     ) {
         private var lastNotificationAtMs = 0L
         private var lastProgress = -1
@@ -215,6 +216,7 @@ class WebDavDriveHook(
             if (tracker != null && workId != null) {
                 setTrackedWorkState(tracker, workId, "Running", displayProgress, null, null, "$bookName：$compactMessage")
             }
+            if (!notificationsEnabled) return true
             return updateOnlineCompletionNotification(
                 context,
                 notificationId,
@@ -240,7 +242,9 @@ class WebDavDriveHook(
                     bookName,
                 )
             }
-            updateOnlineCompletionNotification(context, notificationId, notificationKey, cancellable, bookName, message, 100, true)
+            if (notificationsEnabled) {
+                updateOnlineCompletionNotification(context, notificationId, notificationKey, cancellable, bookName, message, 100, true)
+            }
         }
     }
 

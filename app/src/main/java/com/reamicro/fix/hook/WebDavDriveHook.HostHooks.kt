@@ -170,6 +170,34 @@ internal fun WebDavDriveHook.hookOnlineCompletionBookLocalSheet() {
 internal fun WebDavDriveHook.hookOnlineCompletionBookSourceLabel() {
     if (onlineCompletionSourceLabelHooked) return
     runCatching {
+        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3") {
+            val sheet = cls(BOOK_LOCAL_SHEET_CLASS)
+            val context = ThreadLocal<Any>()
+            val info = sheet.declaredMethods.single { it.hostNameMatches("BookInfo") && it.parameterCount == 3 }
+            val title = sheet.declaredMethods.single { it.hostNameMatches("BookInfoTitle") && it.parameterCount == 5 }
+            XposedBridge.hookMethod(info, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) { context.set(param.args[0]) }
+                override fun afterHookedMethod(param: MethodHookParam) { context.remove() }
+            })
+            XposedBridge.hookMethod(title, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val book = context.get() ?: return
+                    val source = onlineImportedBookSourceInfo(book)?.sourceName?.takeUnless {
+                        it.isBlank() || it == "未知源" || isPathLikeOnlineSourceName(it)
+                    } ?: when (bookBackupTypeOf(book)) {
+                        BACKUP_TYPE_BAIDU, BACKUP_TYPE_YUN115, BACKUP_TYPE_ALIYUN -> cloudTypeTitle(bookBackupTypeOf(book))
+                        BACKUP_TYPE_WEBDAV -> "WebDAV"
+                        else -> return
+                    }
+                    // 正式版已内联FileSource；仅替换菜单副标题参数，不改数据库或来源URI。
+                    param.args[1] = source
+                    param.args[4] = (param.args[4] as Int) and 0x70.inv()
+                }
+            })
+            XposedBridge.deoptimize(info)
+            onlineCompletionSourceLabelHooked = true
+            return
+        }
         val fileSourceClass = runCatching { cls(FILE_SOURCE_CLASS) }.getOrElse {
             logWebDav("online completion source label skipped: FileSource facade absent")
             return

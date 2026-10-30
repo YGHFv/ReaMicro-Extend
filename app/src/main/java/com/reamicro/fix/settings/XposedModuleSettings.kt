@@ -560,6 +560,8 @@ class XposedModuleSettings(
     fun setShelfStyleButton(enabled: Boolean) = putBoolean(ModuleSettings.KEY_SHELF_STYLE_BUTTON, enabled)
     fun setShelfBatchUpdate(enabled: Boolean) = putBoolean(ModuleSettings.KEY_SHELF_BATCH_UPDATE, enabled)
     fun setShelfAutoUpdate(enabled: Boolean) = putBoolean(ModuleSettings.KEY_SHELF_AUTO_UPDATE, enabled)
+    fun setShelfCurrentOnly(enabled: Boolean) = putBoolean(ModuleSettings.KEY_SHELF_CURRENT_ONLY, enabled)
+    fun setShelfSkipCompleted(enabled: Boolean) = putBoolean(ModuleSettings.KEY_SHELF_SKIP_COMPLETED, enabled)
 
     private fun putInt(key: String, value: Int) {
         prefs()?.edit()?.putInt(key, value)?.commit()
@@ -769,6 +771,8 @@ class XposedModuleSettings(
             shelfStyleButton = prefs.getBoolean(ModuleSettings.KEY_SHELF_STYLE_BUTTON, false),
             shelfBatchUpdate = prefs.getBoolean(ModuleSettings.KEY_SHELF_BATCH_UPDATE, false),
             shelfAutoUpdate = prefs.getBoolean(ModuleSettings.KEY_SHELF_AUTO_UPDATE, false),
+            shelfCurrentOnly = prefs.getBoolean(ModuleSettings.KEY_SHELF_CURRENT_ONLY, false),
+            shelfSkipCompleted = prefs.getBoolean(ModuleSettings.KEY_SHELF_SKIP_COMPLETED, false),
             fontEnabled = prefs.getBoolean(
                 ModuleSettings.KEY_FONT_ENABLED,
                 ModuleSettings.DEFAULT_FONT_ENABLED,

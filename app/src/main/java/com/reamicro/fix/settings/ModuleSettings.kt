@@ -27,6 +27,8 @@ object ModuleSettings {
     const val KEY_SHELF_STYLE_BUTTON = "shelf_style_button"
     const val KEY_SHELF_BATCH_UPDATE = "shelf_batch_update"
     const val KEY_SHELF_AUTO_UPDATE = "shelf_auto_update"
+    const val KEY_SHELF_CURRENT_ONLY = "shelf_current_only"
+    const val KEY_SHELF_SKIP_COMPLETED = "shelf_skip_completed"
     const val KEY_FONT_ENABLED = "font_enabled"
     const val KEY_FONT_SETTINGS_ENABLED = "font_settings_enabled"
     const val KEY_ACCOUNT_ENABLED = "account_enabled"
@@ -212,6 +214,8 @@ data class ModuleSettingsSnapshot(
     val shelfStyleButton: Boolean = false,
     val shelfBatchUpdate: Boolean = false,
     val shelfAutoUpdate: Boolean = false,
+    val shelfCurrentOnly: Boolean = false,
+    val shelfSkipCompleted: Boolean = false,
     val fontEnabled: Boolean = ModuleSettings.DEFAULT_FONT_ENABLED,
     val fontSettingsEnabled: Boolean = ModuleSettings.DEFAULT_FONT_SETTINGS_ENABLED,
     val accountEnabled: Boolean = ModuleSettings.DEFAULT_ACCOUNT_ENABLED,

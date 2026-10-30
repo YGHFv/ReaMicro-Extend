@@ -505,6 +505,18 @@ internal fun ReaMicroSettingsHook.renderBookshelfCompletionSettingsContent(inner
                 visibleProvider = { settings.snapshot().shelfBatchUpdate },
                 onChanged = { enabled, _ -> settings.setShelfAutoUpdate(enabled); enabled },
             ),
+            ToggleRow(
+                key = ModuleSettings.KEY_SHELF_CURRENT_ONLY, title = "更新当前书架",
+                checked = snapshot.shelfCurrentOnly,
+                visibleProvider = { settings.snapshot().shelfBatchUpdate },
+                onChanged = { enabled, _ -> settings.setShelfCurrentOnly(enabled); enabled },
+            ),
+            ToggleRow(
+                key = ModuleSettings.KEY_SHELF_SKIP_COMPLETED, title = "跳过完结图书",
+                checked = snapshot.shelfSkipCompleted,
+                visibleProvider = { settings.snapshot().shelfBatchUpdate },
+                onChanged = { enabled, _ -> settings.setShelfSkipCompleted(enabled); enabled },
+            ),
             )
             renderHostSettingsCard(rows, inner)
         }

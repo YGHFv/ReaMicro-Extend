@@ -18,7 +18,13 @@ class OnlineCompletionNotificationReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         ModuleLogState.applyFromIntent(intent)
         when (intent.action) {
-            ACTION_ONLINE_COMPLETION_NOTIFICATION -> postProgressNotification(context, intent)
+            ACTION_ONLINE_COMPLETION_NOTIFICATION -> {
+                if (intent.getBooleanExtra(BookshelfUpdateNotifications.EXTRA_REPORT, false)) {
+                    runCatching { BookshelfUpdateNotifications.receive(context, intent) }.onFailure {
+                        ModuleAndroidLog.legacy(LOG_TAG, "bookshelf report notification failed", it)
+                    }
+                } else postProgressNotification(context, intent)
+            }
             ACTION_ONLINE_COMPLETION_CANCEL -> handleCancel(context, intent)
         }
     }

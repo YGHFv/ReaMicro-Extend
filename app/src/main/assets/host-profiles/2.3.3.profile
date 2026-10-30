@@ -8,6 +8,7 @@ typeAlias=ReaMicroShelf233.Scale=nw8
 typeAlias=ReaMicroShelf233.Circle=x59
 typeAlias=ReaMicroShelf233.Clip=s3e
 typeAlias=ReaMicroShelf233.SelectionIcon=wrd
+typeAlias=ReaMicroShelf233.PagerFactory=oi7
 package=app.zhendong.reamicro
 sizeHint=44894945
 requiredClass=app.zhendong.reamicro.MainActivity
