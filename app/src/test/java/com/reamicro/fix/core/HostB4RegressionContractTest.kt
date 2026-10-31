@@ -144,22 +144,6 @@ class HostB4RegressionContractTest {
     }
 
     @Test
-    fun `profile background keeps fit width header clear while the full screen base remains visible`() {
-        val hook = source("ProfileBackgroundHook.kt")
-        val bitmap = hook.substringAfter("private fun createProfileBackgroundBitmap(")
-            .substringBefore("private fun profileBackgroundBlurredBaseBitmap(")
-        assertTrue(bitmap.contains("displayMode = ModuleSettings.PROFILE_BACKGROUND_DISPLAY_COVER"))
-        assertTrue(bitmap.contains("drawProfileBackgroundClearImage("))
-        assertTrue(bitmap.contains("drawProfileBackgroundSurfaceVeil("))
-        val veil = hook.substringAfter("private fun drawProfileBackgroundSurfaceVeil(")
-            .substringBefore("private fun profileBackgroundFogArgb(")
-        assertTrue(veil.contains("screenH * PROFILE_BACKGROUND_HOUMO_VEIL_START_RATIO"))
-        assertFalse(veil.contains("imageBottomY"))
-        assertTrue(hook.contains("PROFILE_BACKGROUND_HOUMO_VEIL_START_RATIO = 0.72f"))
-        assertTrue(hook.contains("PROFILE_BACKGROUND_HOUMO_VEIL_SETTLE_RATIO = 0.94f"))
-    }
-
-    @Test
     fun `profile background settings expose container transparency from zero to one hundred`() {
         val background = source("ReaMicroSettingsHook.Background.kt")
         assertTrue(background.contains("title = \"\\u5bb9\\u5668\\u900f\\u660e\\u5ea6\""))

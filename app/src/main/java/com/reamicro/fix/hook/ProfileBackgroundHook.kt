@@ -732,7 +732,7 @@ class ProfileBackgroundHook(
         snapshot: ModuleSettingsSnapshot,
         pageArgb: Int,
     ): String = listOf(
-        "deepink3",
+        "deepink2",
         path,
         screenW,
         screenH,
@@ -791,13 +791,7 @@ class ProfileBackgroundHook(
             screenW = screenW,
             screenH = screenH,
             pageArgb = pageArgb,
-            destination = destinationRect(
-                bitmap = bitmap,
-                screenW = screenW,
-                screenH = screenH,
-                displayMode = ModuleSettings.PROFILE_BACKGROUND_DISPLAY_COVER,
-                cropPosition = snapshot.profileBackgroundCropPosition,
-            ),
+            destination = imageRect,
             imageAlpha = imageAlpha,
             blurRadius = PROFILE_BACKGROUND_HOUMO_BLUR_RADIUS,
         )
@@ -827,6 +821,7 @@ class ProfileBackgroundHook(
             canvas = canvas,
             screenW = screenW,
             screenH = screenH,
+            imageBottomY = imageRect.bottom.coerceIn(1f, screenH.toFloat()),
             fogArgb = profileBackgroundFogArgb(
                 bitmap = bitmap,
                 pageArgb = pageArgb,
@@ -881,15 +876,10 @@ class ProfileBackgroundHook(
         headerHeight: Float,
         imageAlpha: Int,
     ): Float {
-        val clearImageBottom = destination.bottom.coerceIn(2f, screenH.toFloat())
-        val fadeEnd = minOf(
-            headerHeight * PROFILE_BACKGROUND_HOUMO_CLEAR_FADE_END_RATIO,
-            clearImageBottom,
-        ).coerceIn(2f, screenH.toFloat())
-        val fadeStart = minOf(
-            headerHeight * PROFILE_BACKGROUND_HOUMO_CLEAR_FADE_START_RATIO,
-            fadeEnd * PROFILE_BACKGROUND_HOUMO_CLEAR_VISIBLE_RATIO,
-        ).coerceIn(1f, fadeEnd - 1f)
+        val fadeStart = (headerHeight * PROFILE_BACKGROUND_HOUMO_CLEAR_FADE_START_RATIO)
+            .coerceIn(1f, screenH.toFloat())
+        val fadeEnd = (headerHeight * PROFILE_BACKGROUND_HOUMO_CLEAR_FADE_END_RATIO)
+            .coerceIn(fadeStart + 1f, screenH.toFloat())
         val paint = android.graphics.Paint(
             android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG,
         ).apply {
@@ -945,16 +935,18 @@ class ProfileBackgroundHook(
         canvas: android.graphics.Canvas,
         screenW: Int,
         screenH: Int,
+        imageBottomY: Float,
         fogArgb: Int,
         pageArgb: Int,
     ) {
-        val startY = (screenH * PROFILE_BACKGROUND_HOUMO_VEIL_START_RATIO)
-            .coerceIn(0f, screenH - 1f)
-        val settleY = (screenH * PROFILE_BACKGROUND_HOUMO_VEIL_SETTLE_RATIO)
+        val startY = (imageBottomY - screenH * PROFILE_BACKGROUND_HOUMO_VEIL_LEAD_RATIO)
+            .coerceIn(0f, screenH.toFloat())
+        val settleY = (imageBottomY + screenH * PROFILE_BACKGROUND_HOUMO_VEIL_SETTLE_RATIO)
             .coerceIn(startY + 1f, screenH.toFloat())
+        val imageStop = ((imageBottomY - startY) / (screenH - startY).coerceAtLeast(1f))
+            .coerceIn(0.08f, 0.68f)
         val settleStop = ((settleY - startY) / (screenH - startY).coerceAtLeast(1f))
-            .coerceIn(0.12f, 0.92f)
-        val blendStop = (settleStop * 0.52f).coerceIn(0.08f, settleStop - 0.04f)
+            .coerceIn(imageStop + 0.04f, 0.92f)
         val dark = isDarkArgb(pageArgb)
         val edgeAlpha = if (dark) 0xC8 else 0xE8
         val settleAlpha = if (dark) 0xF0 else 0xFA
@@ -971,7 +963,7 @@ class ProfileBackgroundHook(
                     argbWithAlpha(pageArgb, settleAlpha),
                     argbWithAlpha(pageArgb, bottomAlpha),
                 ),
-                floatArrayOf(0f, blendStop, settleStop, 1f),
+                floatArrayOf(0f, imageStop, settleStop, 1f),
                 Shader.TileMode.CLAMP,
             )
         }
@@ -1527,11 +1519,10 @@ class ProfileBackgroundHook(
         const val PROFILE_BACKGROUND_HOUMO_SURFACE_ARGB = 0x00FFFFFF
         const val PROFILE_BACKGROUND_HOUMO_IMAGE_ALPHA = 248
         const val PROFILE_BACKGROUND_HOUMO_BLUR_RADIUS = 24
-        const val PROFILE_BACKGROUND_HOUMO_CLEAR_FADE_START_RATIO = 0.62f
-        const val PROFILE_BACKGROUND_HOUMO_CLEAR_FADE_END_RATIO = 1.86f
-        const val PROFILE_BACKGROUND_HOUMO_CLEAR_VISIBLE_RATIO = 0.78f
-        const val PROFILE_BACKGROUND_HOUMO_VEIL_START_RATIO = 0.72f
-        const val PROFILE_BACKGROUND_HOUMO_VEIL_SETTLE_RATIO = 0.94f
+        const val PROFILE_BACKGROUND_HOUMO_CLEAR_FADE_START_RATIO = 0.34f
+        const val PROFILE_BACKGROUND_HOUMO_CLEAR_FADE_END_RATIO = 1.46f
+        const val PROFILE_BACKGROUND_HOUMO_VEIL_LEAD_RATIO = 0.24f
+        const val PROFILE_BACKGROUND_HOUMO_VEIL_SETTLE_RATIO = 0.28f
         const val PROFILE_BACKGROUND_HOUMO_SAMPLE_BAND_RATIO = 0.035f
         const val PROFILE_BACKGROUND_HOUMO_SAMPLE_COLUMNS = 28
         const val PROFILE_BACKGROUND_HOUMO_SAMPLE_ROWS = 6
