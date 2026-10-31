@@ -209,12 +209,14 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                     if (communityRowOpened.get() != true) return
                     val rowScope = communityRowScope.get() ?: return
                     val composer = param.args?.getOrNull(ICON_ARG_COMPOSER) ?: return
+                    val nativeArrowColor = param.args?.getOrNull(ICON_ARG_TINT) as? Long ?: return
                     communityInjected.set(true)
 
                     renderDiscoverButton(
                         classLoader = classLoader,
                         rowScope = rowScope,
                         composer = composer,
+                        nativeArrowColor = nativeArrowColor,
                         onHostRowClick = hostRowClickInvoker(),
                         onDiscoverClick = ::openDiscoverPage,
                     )
@@ -451,7 +453,8 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
         )
         XposedBridge.hookMethod(target, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                if (!inCommunity() || communityInjected.get() != true) return
+                if (!inCommunity()) return
+                if (communityInjected.get() != true) return
                 // 宿主仍按单行书院缩进 52dp；双栏注入后应与下方原生双栏分割线贯通。
                 val hook = ReaMicroSettingsHook.activeInstanceOrNull() ?: return
                 param.args[0] = hook.modifierInstance()
@@ -513,6 +516,7 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
         const val SPACER_PARAMETER_COUNT = 3
 
         const val ICON_ARG_COMPOSER = 4
+        const val ICON_ARG_TINT = 3
 
         const val ICON_ARG_MODIFIER = 2
 

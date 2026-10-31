@@ -2,6 +2,7 @@ package com.reamicro.fix.hook
 
 import com.reamicro.fix.core.hostNameMatches
 import com.reamicro.fix.core.hostAbiMethod
+import com.reamicro.fix.core.hostAbiField
 import com.reamicro.fix.core.typeMatches
 
 
@@ -16,6 +17,7 @@ internal fun renderDiscoverButton(
     classLoader: ClassLoader,
     rowScope: Any,
     composer: Any,
+    nativeArrowColor: Long,
     onHostRowClick: () -> Unit,
     onDiscoverClick: () -> Unit,
 ) {
@@ -25,7 +27,15 @@ internal fun renderDiscoverButton(
         return
     }
     runCatching {
-        with(hook) { renderCommunityRow(rowScope, composer, onHostRowClick, onDiscoverClick) }
+        with(hook) {
+            renderCommunityRow(
+                rowScope,
+                composer,
+                nativeArrowColor,
+                onHostRowClick,
+                onDiscoverClick,
+            )
+        }
     }.onFailure {
         XposedBridge.logAlways("$LOG_PREFIX discover button failed: ${it.stackTraceToString()}")
     }
@@ -34,6 +44,7 @@ internal fun renderDiscoverButton(
 internal fun ReaMicroSettingsHook.renderCommunityRow(
     rowScope: Any,
     composer: Any,
+    nativeArrowColor: Long,
     onHostRowClick: () -> Unit,
     onDiscoverClick: () -> Unit,
 ) {
@@ -42,9 +53,16 @@ internal fun ReaMicroSettingsHook.renderCommunityRow(
     val leftSource = sharedInteractionSource(CELL_LEFT)
     val rightSource = sharedInteractionSource(CELL_RIGHT)
 
-    renderCellArrow(composer, leftSource, "ReaMicroLeftCellArrow", CELL_LEFT_ARROW_END_PADDING_DP, onHostRowClick)
+    renderCellArrow(
+        composer,
+        nativeArrowColor,
+        leftSource,
+        "ReaMicroLeftCellArrow",
+        CELL_LEFT_ARROW_END_PADDING_DP,
+        onHostRowClick,
+    )
 
-    renderVerticalDivider(composer)
+    renderVerticalDivider(composer, nativeCommunityDividerColor())
 
     if (icon != null) renderDiscoverIcon(icon, composer, rightSource, onDiscoverClick)
     renderDiscoverLabel(
@@ -62,11 +80,19 @@ internal fun ReaMicroSettingsHook.renderCommunityRow(
     )
     renderDiscoverFiller(rowScope, composer, rightSource, onDiscoverClick)
 
-    renderCellArrow(composer, rightSource, "ReaMicroDiscoverArrow", CELL_RIGHT_ARROW_END_PADDING_DP, onDiscoverClick)
+    renderCellArrow(
+        composer,
+        nativeArrowColor,
+        rightSource,
+        "ReaMicroDiscoverArrow",
+        CELL_RIGHT_ARROW_END_PADDING_DP,
+        onDiscoverClick,
+    )
 }
 
 private fun ReaMicroSettingsHook.renderCellArrow(
     composer: Any,
+    nativeArrowColor: Long,
     interactionSource: Any?,
     clickName: String,
     trailingPaddingDp: Int,
@@ -85,15 +111,12 @@ private fun ReaMicroSettingsHook.renderCellArrow(
         arrow,
         null,
         modifier,
-        discoverArrowColor(composer),
+        nativeArrowColor,
         composer,
         ICON_CHANGED_MASK,
         ICON_TINT_ONLY_DEFAULT_MASK,
     )
 }
-
-private fun ReaMicroSettingsHook.discoverArrowColor(composer: Any): Long =
-    colorScheme(composer).longMethod("getSurfaceContainerHighest")
 
 private fun ReaMicroSettingsHook.navigateNextImageVector(): Any? =
     runCatching {
@@ -119,10 +142,10 @@ private fun ReaMicroSettingsHook.iconVectorMethod(): Method =
             ?: error("$ICON_KT_CLASS.$ICON_METHOD ImageVector overload not found")
     }
 
-private fun ReaMicroSettingsHook.renderVerticalDivider(composer: Any) {
+private fun ReaMicroSettingsHook.renderVerticalDivider(composer: Any, nativeArrowColor: Long) {
     if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         val sized = b2Ui.height(b2Ui.width(modifierInstance(), udp(DIVIDER_WIDTH_DP)), udp(DIVIDER_HEIGHT_DP))
-        b2Ui.emptyBox(b2Ui.background(sized, borderVariant(composer)), composer)
+        b2Ui.emptyBox(nativeColorBackground(sized, nativeArrowColor), composer)
         return
     }
     val width = method(SIZE_KT_CLASS, WIDTH_METHOD, SIZE_PARAMETER_COUNT)
@@ -132,7 +155,7 @@ private fun ReaMicroSettingsHook.renderVerticalDivider(composer: Any) {
     val colored = method(BACKGROUND_KT_CLASS, BACKGROUND_DEFAULT_METHOD, BACKGROUND_PARAMETER_COUNT).invoke(
         null,
         height,
-        borderVariant(composer),
+        nativeArrowColor,
         null,
         BACKGROUND_SHAPE_DEFAULT_MASK,
         null,
@@ -140,8 +163,16 @@ private fun ReaMicroSettingsHook.renderVerticalDivider(composer: Any) {
     method(BOX_KT_CLASS, BOX_METHOD, BOX_PARAMETER_COUNT).invoke(null, colored, composer, 0)
 }
 
-private fun ReaMicroSettingsHook.borderVariant(composer: Any): Long =
-    method(THEME_KT_CLASS, BORDER_VARIANT_METHOD, 1).invoke(null, colorScheme(composer)) as Long
+private fun ReaMicroSettingsHook.nativeColorBackground(base: Any, color: Long): Any =
+    method(BACKGROUND_KT_CLASS, BACKGROUND_METHOD, BACKGROUND_COLOR_PARAMETER_COUNT).invoke(
+        null,
+        base,
+        color,
+        cls("ReaMicroHost.RectangleShape").hostAbiField(RECTANGLE_SHAPE_FIELD).get(null),
+    )
+
+private fun ReaMicroSettingsHook.nativeCommunityDividerColor(): Long =
+    method(COLOR_KT_CLASS, COLOR_FACTORY_METHOD, 1).invoke(null, COMMUNITY_DIVIDER_ARGB) as Long
 
 internal fun ReaMicroSettingsHook.leftCellIconModifier(composer: Any, onClick: () -> Unit): Any =
     sizedSquare(
@@ -506,7 +537,17 @@ private const val BOX_PARAMETER_COUNT = 3
 
 private const val BACKGROUND_PARAMETER_COUNT = 5
 
+private const val BACKGROUND_COLOR_PARAMETER_COUNT = 3
+
+private const val BACKGROUND_METHOD = "background-bw27NRU"
+
 private const val BACKGROUND_SHAPE_DEFAULT_MASK = 2
+
+private const val COLOR_FACTORY_METHOD = "Color"
+
+private const val COMMUNITY_DIVIDER_ARGB = 0x30FFFFFF
+
+private const val RECTANGLE_SHAPE_FIELD = "a"
 
 private const val CLICKABLE_DEFAULT_PARAMETER_COUNT = 9
 
