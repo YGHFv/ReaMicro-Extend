@@ -70,7 +70,7 @@ class HostB4RegressionContractTest {
             .substringAfter("private fun ReaderHook.selectionMenuCellWidthDp")
             .substringBefore("private fun ReaderHook.selectionMenuCellModifier")
         assertTrue(menu.contains("HostSymbols.abiProfileId == \"2.3.3-b4\" && !settingsProvider().canUseCompactReaderSelectionMenu"))
-        assertTrue(menu.contains("(maxTitleWidth + 15).coerceIn(43, 100)"))
+        assertTrue(menu.contains("(maxTitleWidth + 12).coerceIn(40, 100)"))
         assertTrue(menu.contains("(maxTitleWidth + 42).coerceIn(72, 112)"))
     }
 

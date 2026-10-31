@@ -255,9 +255,9 @@ private fun ReaderHook.selectionMenuCellWidthDp(actions: List<Any>): Int {
     } ?: 0
     // 普通 B4 菜单收紧横向留白，长标题仍按内容扩宽，紧凑模式和旧版保持原样。
     if (HostSymbols.abiProfileId == "2.3.3-b4" && !settingsProvider().canUseCompactReaderSelectionMenu) {
-        // 阅微的 udp 会随显示缩放放大，浮窗边缘实测四列需把逻辑宽度压到 43dp。
+        // 阅微的 udp 会随显示缩放放大，浮窗边缘实测四列需把逻辑宽度压到 40dp。
         // 双字标题仍由居中列完整显示，避免七个动作被挤成 3 + 3 + 1。
-        return (maxTitleWidth + 15).coerceIn(43, 100)
+        return (maxTitleWidth + 12).coerceIn(40, 100)
     }
     return (maxTitleWidth + 42).coerceIn(72, 112)
 }
