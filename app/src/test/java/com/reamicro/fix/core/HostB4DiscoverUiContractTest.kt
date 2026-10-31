@@ -45,8 +45,10 @@ class HostB4DiscoverUiContractTest {
         assertTrue(entry.contains("b2Ui.weight(rowScope, modifierInstance())"))
         assertTrue(entry.contains("b2Ui.spacer(b2Ui.height(padded"))
         assertTrue(entry.contains("discoverArrowColor(composer)"))
-        assertTrue(entry.contains("longMethod(\"getOnSurfaceVariant\")"))
-        assertFalse(entry.contains("longMethod(SURFACE_CONTAINER_HIGHEST_METHOD)"))
+        assertTrue(entry.contains("longMethod(\"getSurfaceContainerHighest\")"))
+        assertFalse(entry.contains("longMethod(\"getOnSurfaceVariant\")"))
+        assertTrue(entry.contains("ICON_TINT_ONLY_DEFAULT_MASK"))
+        assertTrue(entry.contains("ICON_TINT_ONLY_DEFAULT_MASK = 0x4"))
     }
 
     @Test

@@ -144,6 +144,25 @@ class HostB4RegressionContractTest {
     }
 
     @Test
+    fun `profile background preserves the original image geometry and only softens the top scrim`() {
+        val hook = source("ProfileBackgroundHook.kt")
+        assertTrue(hook.contains("PROFILE_BACKGROUND_HEADER_HEIGHT_DP = 253f"))
+        assertTrue(hook.contains(".coerceIn(screenH * 0.24f, screenH * 0.40f)"))
+        assertTrue(hook.contains("PROFILE_BACKGROUND_TOP_SCRIM_END_RATIO = 0.34f"))
+        assertTrue(hook.contains("intArrayOf(0x12000000, 0x00000000)"))
+        assertTrue(hook.contains("destination = imageRect"))
+        assertTrue(hook.contains("imageBottomY = imageRect.bottom.coerceIn(1f, screenH.toFloat())"))
+    }
+
+    @Test
+    fun `b4 card transparency does not weaken the root image surface contract`() {
+        val hook = source("ProfileBackgroundHook.kt")
+        assertTrue(hook.contains("if (inB4ProfileCard()) {"))
+        assertTrue(hook.contains("transparentProfileContainerColor(param.args[1] as Long, snapshot)"))
+        assertTrue(hook.contains("if (snapshot.profileBackgroundUseImage) PROFILE_BACKGROUND_HOUMO_SURFACE_ARGB"))
+    }
+
+    @Test
     fun `profile background settings expose container transparency from zero to one hundred`() {
         val background = source("ReaMicroSettingsHook.Background.kt")
         assertTrue(background.contains("title = \"\\u5bb9\\u5668\\u900f\\u660e\\u5ea6\""))

@@ -88,15 +88,12 @@ private fun ReaMicroSettingsHook.renderCellArrow(
         discoverArrowColor(composer),
         composer,
         ICON_CHANGED_MASK,
-        ICON_DEFAULT_MASK,
+        ICON_TINT_ONLY_DEFAULT_MASK,
     )
 }
 
 private fun ReaMicroSettingsHook.discoverArrowColor(composer: Any): Long =
-    runCatching { colorScheme(composer).longMethod("getOnSurfaceVariant") }
-        .getOrElse {
-            method(THEME_KT_CLASS, "getOnBackgroundVariant", 1).invoke(null, colorScheme(composer)) as Long
-        }
+    colorScheme(composer).longMethod("getSurfaceContainerHighest")
 
 private fun ReaMicroSettingsHook.navigateNextImageVector(): Any? =
     runCatching {
@@ -492,7 +489,7 @@ private const val IMAGE_CHANGED2_MASK = 0x78
 
 private const val ICON_CHANGED_MASK = 0x30
 
-private const val ICON_DEFAULT_MASK = 0x0
+private const val ICON_TINT_ONLY_DEFAULT_MASK = 0x4
 
 private const val ROW_WEIGHT_PARAMETER_COUNT = 3
 

@@ -115,7 +115,14 @@ class ProfileBackgroundHook(
                 if (inProfileLambda.get() != true && !inB4ProfileCard()) return
                 val snapshot = settingsProvider()
                 if (!canHandleProfileBackground(snapshot)) return
-                param.args[1] = transparentProfileContainerColor(param.args[1] as Long, snapshot)
+                param.args[1] = if (inB4ProfileCard()) {
+                    transparentProfileContainerColor(param.args[1] as Long, snapshot)
+                } else {
+                    colorLongFromArgb(
+                        if (snapshot.profileBackgroundUseImage) PROFILE_BACKGROUND_HOUMO_SURFACE_ARGB
+                        else parseArgb(snapshot.profileBackgroundColor),
+                    )
+                }
             }
         })
         listOf(root, content).forEach(XposedBridge::deoptimize)
@@ -864,7 +871,7 @@ class ProfileBackgroundHook(
     private fun profileBackgroundHeaderHeightPx(activity: Activity, screenH: Int): Float {
         val density = activity.resources.displayMetrics.density.coerceAtLeast(1f)
         return (PROFILE_BACKGROUND_HEADER_HEIGHT_DP * density)
-            .coerceIn(screenH * 0.36f, screenH * 0.56f)
+            .coerceIn(screenH * 0.24f, screenH * 0.40f)
     }
 
     private fun drawProfileBackgroundClearImage(
@@ -916,14 +923,14 @@ class ProfileBackgroundHook(
         screenW: Int,
         headerHeight: Float,
     ) {
-        val endY = (headerHeight * 0.58f).coerceAtLeast(1f)
+        val endY = (headerHeight * PROFILE_BACKGROUND_TOP_SCRIM_END_RATIO).coerceAtLeast(1f)
         val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
             shader = android.graphics.LinearGradient(
                 0f,
                 0f,
                 0f,
                 endY,
-                intArrayOf(0x26000000, 0x00000000),
+                intArrayOf(0x12000000, 0x00000000),
                 floatArrayOf(0f, 1f),
                 Shader.TileMode.CLAMP,
             )
@@ -1511,7 +1518,8 @@ class ProfileBackgroundHook(
         const val BACKGROUND_ARGB_FALLBACK = 0x80000000.toInt()
         const val PROFILE_BACKGROUND_DARK_PAGE_ARGB_FALLBACK = 0xFF000000.toInt()
         const val PROFILE_BACKGROUND_LIGHT_PAGE_ARGB_FALLBACK = -1
-        const val PROFILE_BACKGROUND_HEADER_HEIGHT_DP = 360f
+        const val PROFILE_BACKGROUND_HEADER_HEIGHT_DP = 253f
+        const val PROFILE_BACKGROUND_TOP_SCRIM_END_RATIO = 0.34f
         const val PROFILE_BACKGROUND_BANNER_FADE_WIDTH_RATIO = 0.78f
         const val PROFILE_BACKGROUND_BANNER_FADE_MIN_DP = 220f
         const val PROFILE_BACKGROUND_BANNER_FADE_MAX_DP = 360f
