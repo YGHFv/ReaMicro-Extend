@@ -2,7 +2,6 @@ package com.reamicro.fix.hook
 
 import com.reamicro.fix.cloud.webdav.hasWebDavLogin
 import com.reamicro.fix.core.B2NativeUi
-import com.reamicro.fix.core.HostCoroutines
 import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.core.hostAbiField
 import com.reamicro.fix.core.hostAbiMethod
@@ -17,6 +16,7 @@ import com.reamicro.fix.hook.webdav.BOOK_LIBRARY_SHEET_CLASS
 import com.reamicro.fix.hook.webdav.CLOUD_AUTHORIZED_ROW_METHOD
 import com.reamicro.fix.hook.webdav.CLOUD_UNAUTH_ROW_METHOD
 import com.reamicro.fix.hook.webdav.FUNCTION0_CLASS
+import com.reamicro.fix.hook.webdav.FUNCTION1_CLASS
 import com.reamicro.fix.hook.webdav.MATERIAL3_TEXT_CLASS
 import com.reamicro.fix.hook.webdav.WEBDAV_TITLE
 import com.reamicro.fix.xposed.XC_MethodHook
@@ -138,26 +138,38 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
             drive.navigateStorage(scope, kind)
             return
         }
-        Thread({
-            runCatching {
-                val hide = sheetState.javaClass.hostMethod(
-                    "hide",
-                    drive.classLoader.hostClass("kotlin.coroutines.Continuation"),
-                )
-                HostCoroutines.runBlocking(drive.classLoader) { continuation ->
-                    hide.invoke(sheetState, continuation)
+        runCatching {
+            val hide = sheetState.javaClass.hostMethod(
+                "hide",
+                drive.classLoader.hostClass("kotlin.coroutines.Continuation"),
+            )
+            val suspendHide = drive.functionProxy("B4ImportSheetHide", "kotlin.jvm.functions.Function2") { args ->
+                hide.invoke(sheetState, args?.getOrNull(1))
+            }
+            val builders = drive.cls("wvd")
+            val context = drive.cls("kotlin.coroutines.CoroutineContext")
+            val starter = builders.declaredMethods.single {
+                it.name == "j" && it.parameterCount == 5 &&
+                    it.parameterTypes[0].isInstance(scope) &&
+                    it.parameterTypes[1] == context
+            }.apply { isAccessible = true }
+            val job = starter.invoke(null, scope, null, null, suspendHide, 3)
+            val completion = drive.functionProxy("B4AfterImportSheetHidden", FUNCTION1_CLASS) { args ->
+                val error = args?.firstOrNull() as? Throwable
+                if (error != null) {
+                    XposedBridge.log("ReaMicro B4 import sheet hide failed: ${error.stackTraceToString()}")
                 }
-            }.onFailure {
-                XposedBridge.log("ReaMicro B4 import sheet hide failed: ${it.stackTraceToString()}")
-            }
-            drive.activityProvider()?.runOnUiThread {
                 dismissImportMenu(receiver)
                 drive.navigateStorage(scope, kind)
-            } ?: run {
-                dismissImportMenu(receiver)
-                drive.navigateStorage(scope, kind)
+                drive.targetUnit()
             }
-        }, "ReaMicroImportSheetHide").start()
+            job.javaClass.hostMethod("invokeOnCompletion", drive.cls(FUNCTION1_CLASS))
+                .invoke(job, completion)
+        }.onFailure {
+            XposedBridge.log("ReaMicro B4 import sheet launch failed: ${it.stackTraceToString()}")
+            dismissImportMenu(receiver)
+            drive.navigateStorage(scope, kind)
+        }
     }
 
     private fun dismissImportMenu(receiver: Any?) {
