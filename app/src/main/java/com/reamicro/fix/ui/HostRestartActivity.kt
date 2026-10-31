@@ -8,15 +8,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.ResultReceiver
 import android.view.Gravity
-import android.view.ViewGroup
-import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
-import android.graphics.drawable.GradientDrawable
-import android.content.res.ColorStateList
-import android.content.res.Configuration
-import android.widget.LinearLayout
-import android.widget.ProgressBar
-import android.widget.TextView
+import android.view.WindowManager
 import android.widget.Toast
 import com.reamicro.fix.core.HostRestartContract
 
@@ -45,33 +37,15 @@ class HostRestartActivity : Activity() {
             fail("无法准备阅微重启")
             return
         }
-        val dark = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
-        val foreground = if (dark) 0xffe2e3e5.toInt() else 0xff35373b.toInt()
-        fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
-        setContentView(LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(24), dp(22), dp(24), dp(22))
-            background = GradientDrawable().apply {
-                cornerRadius = dp(24).toFloat()
-                setColor(if (dark) 0xff202328.toInt() else 0xfff5f5f7.toInt())
-            }
-            addView(ProgressBar(this@HostRestartActivity).apply {
-                isIndeterminate = true
-                indeterminateTintList = ColorStateList.valueOf(foreground)
-                importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            }, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginEnd = dp(18) })
-            addView(TextView(this@HostRestartActivity).apply {
-                text = "正在重新打开阅微"
-                textSize = 15f
-                includeFontPadding = false
-                setTextColor(foreground)
-                accessibilityLiveRegion = android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE
-            })
-        })
-        window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        window.setLayout(minOf(dp(320), (resources.displayMetrics.widthPixels * .84f).toInt()),
-            ViewGroup.LayoutParams.WRAP_CONTENT)
+        // 保留异步接力所需的前台生命周期，不绘制提示卡片，也不遮暗或拦截触摸。
+        window.apply {
+            setLayout(1, 1)
+            setGravity(Gravity.TOP or Gravity.START)
+            setDimAmount(0f)
+            clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
+            setWindowAnimations(0)
+        }
         runCatching { token!!.linkToDeath(death, 0) }
             .onFailure { fail("阅微进程已变化，请重新打开阅微") }
         if (!completed) main.postDelayed(timeout, 5_000)

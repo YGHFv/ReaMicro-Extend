@@ -102,7 +102,7 @@
             android:excludeFromRecents="true"
             android:taskAffinity="com.reamicro.fix.restart"
             android:configChanges="orientation|screenSize|screenLayout|uiMode"
-            android:theme="@android:style/Theme.Material.Light.Dialog.NoActionBar" />
+            android:theme="@style/NoDisplayTheme" />
 
         <activity
             android:name=".ui.ModuleMainActivity"

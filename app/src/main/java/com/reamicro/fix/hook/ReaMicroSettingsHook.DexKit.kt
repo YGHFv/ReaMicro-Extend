@@ -59,7 +59,10 @@ private fun ReaMicroSettingsHook.showDexKitDialog(
     val card = settingsDialogCard(activity, colors)
     card.addView(settingsDialogTitle(activity, if (scanning) "DexKit 自动扫描" else "DexKit 扫描结果", colors))
     if (scanning) {
-        card.addView(ProgressBar(activity).apply { isIndeterminate = true },
+        card.addView(ProgressBar(activity).apply {
+            isIndeterminate = true
+            ModuleDialogTheme.tintProgress(this, colors.primary)
+        },
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 .apply { gravity = Gravity.CENTER_HORIZONTAL })
     }
