@@ -221,7 +221,11 @@ internal fun WebDavDriveHook.enqueueWebDavDownload(workerManager: Any, book: Any
             setTrackedWorkState(tracker, id, "Running", 78, null, null, name)
             val platformFile = platformFile(localFile)
 
-            ModuleImportPrecheck.precheck(localFile, sourceUrl)
+            if (!ModuleImportPrecheck.precheck(localFile, sourceUrl)) {
+                cancelTrackedWork(tracker, id)
+                logWebDav("download import cancelled before native queue path=$path")
+                return@runCatching
+            }
             rememberPendingWebDavImport(platformFile, localFile, sourceUrl, sourceSize?.toLong())
             setTrackedWorkState(tracker, id, "Running", 90, null, null, name)
             enqueueNativeImport(workerManager, platformFile)

@@ -23,8 +23,15 @@ internal data class BookMetadataPatch(
     val author: String? = null,
     val cover: String? = null,
     val size: Long? = null,
+    val cloudId: Long? = null,
     val publisher: String? = null,
 )
+
+internal fun BookMetadataPatch.withPreservedAssociation(cloudId: Long?, publisher: String?): BookMetadataPatch =
+    if (cloudId == null || cloudId <= 0L) this else copy(
+        cloudId = cloudId,
+        publisher = publisher?.takeIf { it.isNotBlank() } ?: this.publisher,
+    )
 
 internal object ReaMicroBookMetadataSync {
     private const val LOG_PREFIX = "ReaMicro LSP"
@@ -123,7 +130,8 @@ internal object ReaMicroBookMetadataSync {
             "getSubtitle" to patch.subtitle, "getAuthor" to patch.author,
             "getCover" to patch.cover, "getPublisher" to patch.publisher)
         values.all { (getter, expected) -> expected == null || value(stored, getter) == expected } &&
-            (patch.size == null || (value(stored, "getSize") as Number).toLong() == patch.size)
+            (patch.size == null || (value(stored, "getSize") as Number).toLong() == patch.size) &&
+            (patch.cloudId == null || (value(stored, "getCloudId") as Number).toLong() == patch.cloudId)
     }.getOrDefault(false)
 
     private fun copyBookWithMetadata(book: Any, patch: BookMetadataPatch): Any? =
@@ -137,6 +145,7 @@ internal object ReaMicroBookMetadataSync {
                     cover = patch.cover,
                     size = patch.size,
                     updated = System.currentTimeMillis(),
+                    cloudId = patch.cloudId,
                     publisher = patch.publisher,
                 ),
             )

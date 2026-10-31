@@ -180,6 +180,7 @@ class ReaderImportOverwriteHook(
                                 repository = param.thisObject,
                                 book = conflict.oldBook,
                                 patch = ReaMicroBookMetadataSync.metadataFromOpf(param.args?.getOrNull(2), param.args?.getOrNull(1))
+                                    .preserveAssociationOf(conflict.oldBook)
                                     .withSize(importBookSize(param.args)),
                                 delayMs = POST_IMPORT_METADATA_SYNC_DELAY_MS,
                             )
@@ -392,6 +393,7 @@ class ReaderImportOverwriteHook(
                     book = preDecision.oldBook,
                     patch = ReaMicroBookMetadataSync.metadataFromOpf(param.args?.getOrNull(2), param.args?.getOrNull(1))
                         .mergeWith(preDecision.metadataPatch)
+                        .preserveAssociationOf(preDecision.oldBook)
                         .withSize(importBookSize(param.args)),
                     delayMs = POST_IMPORT_METADATA_SYNC_DELAY_MS,
                 )
@@ -556,12 +558,12 @@ class ReaderImportOverwriteHook(
 
     private fun showOverwriteConfirm(oldTitle: String, newTitle: String): OverwriteDecision {
         val activity = activityProvider() ?: run {
-            XposedBridge.log("$LOG_PREFIX no activity for overwrite confirmation; passing through to host default")
-            return OverwriteDecision.PASSTHROUGH
+            XposedBridge.log("$LOG_PREFIX no activity for overwrite confirmation; refusing silent overwrite")
+            return OverwriteDecision.CANCEL
         }
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            XposedBridge.log("$LOG_PREFIX overwrite confirmation requested on main thread; passing through to host default")
-            return OverwriteDecision.PASSTHROUGH
+            XposedBridge.log("$LOG_PREFIX overwrite confirmation requested on main thread; refusing silent overwrite")
+            return OverwriteDecision.CANCEL
         }
         val latch = CountDownLatch(1)
         var decision = OverwriteDecision.CANCEL
@@ -887,13 +889,11 @@ class ReaderImportOverwriteHook(
         )
         return when (val decision = showOverwriteConfirm(conflict.oldTitle, title)) {
             OverwriteDecision.CANCEL -> {
-
                 rememberCancelledImport(uuid, title, sourceUri, epubFile)
-                rememberPreImportDecision(uuid, title, preDecisionOf(decision, conflict.oldUuid, conflict.oldBook, opf))
-                XposedBridge.log("$LOG_PREFIX module import precheck cancel -> import copy then delete: title=$title")
-                true
+                XposedBridge.log("$LOG_PREFIX module import precheck cancelled before native queue: title=$title")
+                false
             }
-            OverwriteDecision.PASSTHROUGH -> true
+            OverwriteDecision.PASSTHROUGH -> false
             OverwriteDecision.OVERWRITE, OverwriteDecision.INDEPENDENT -> {
 
                 rememberPreImportDecision(uuid, title, preDecisionOf(decision, conflict.oldUuid, conflict.oldBook, opf))
@@ -1331,6 +1331,14 @@ class ReaderImportOverwriteHook(
             size = size ?: fallback.size,
             publisher = publisher ?: fallback.publisher,
         )
+
+    /** 覆盖文件只刷新书籍内容元数据，已有第三方关联归属继续跟随原书。 */
+    private fun BookMetadataPatch.preserveAssociationOf(book: Any?): BookMetadataPatch {
+        return withPreservedAssociation(
+            cloudId = book.longOrNull("getCloudId"),
+            publisher = book.stringOrNull("getPublisher"),
+        )
+    }
 
     private fun BookMetadataPatch.withSize(size: Long?): BookMetadataPatch =
         if (size != null && size > 0L) copy(size = size) else this
