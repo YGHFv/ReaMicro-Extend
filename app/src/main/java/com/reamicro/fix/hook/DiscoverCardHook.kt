@@ -48,6 +48,8 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
 
     private val communitySpacerWeight = ThreadLocal<Any?>()
 
+    private val communityDividerColor = ThreadLocal<Long?>()
+
     fun install() {
         HookInstallReport.installAll(
             FEATURE_ID,
@@ -89,6 +91,7 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                         communityLabelDecorated.set(false)
                         communityLabelPending.set(false)
                         communitySpacerWeight.remove()
+                        communityDividerColor.remove()
                     }
                 }
 
@@ -107,6 +110,7 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                         communityLabelDecorated.remove()
                         communityLabelPending.remove()
                         communitySpacerWeight.remove()
+                        communityDividerColor.remove()
                     } else {
                         communityDepth.set(depth)
                     }
@@ -210,6 +214,8 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                     val rowScope = communityRowScope.get() ?: return
                     val composer = param.args?.getOrNull(ICON_ARG_COMPOSER) ?: return
                     val nativeArrowColor = param.args?.getOrNull(ICON_ARG_TINT) as? Long ?: return
+                    val nativeArrow = param.args?.getOrNull(0) ?: return
+                    val nativeDividerColor = communityDividerColor.get() ?: return
                     communityInjected.set(true)
 
                     renderDiscoverButton(
@@ -217,6 +223,8 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                         rowScope = rowScope,
                         composer = composer,
                         nativeArrowColor = nativeArrowColor,
+                        nativeArrow = nativeArrow,
+                        nativeDividerColor = nativeDividerColor,
                         onHostRowClick = hostRowClickInvoker(),
                         onDiscoverClick = ::openDiscoverPage,
                     )
@@ -442,7 +450,6 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
     }
 
     private fun hookCommunityDivider() {
-        if (com.reamicro.fix.core.HostSymbols.profileId != "2.3.3") return
         val target = classLoader.hostClass("app.zhendong.reamicro.arch.components.DividerKt").hostMethod(
             "SimpleDivider-iJQMabo",
             classLoader.hostClass("androidx.compose.ui.Modifier"),
@@ -451,9 +458,11 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
             Int::class.javaPrimitiveType,
             Int::class.javaPrimitiveType,
         )
-        XposedBridge.hookMethod(target, object : XC_MethodHook() {
+        // 背景 hook 会提前隐藏横线；先捕获宿主本次组合已算好的颜色，不能按截图反推固定灰色。
+        XposedBridge.hookMethod(target, object : XC_MethodHook(51) {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 if (!inCommunity()) return
+                communityDividerColor.set(param.args[1] as Long)
                 if (communityInjected.get() != true) return
                 // 宿主仍按单行书院缩进 52dp；双栏注入后应与下方原生双栏分割线贯通。
                 val hook = ReaMicroSettingsHook.activeInstanceOrNull() ?: return

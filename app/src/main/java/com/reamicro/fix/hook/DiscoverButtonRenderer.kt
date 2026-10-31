@@ -18,6 +18,8 @@ internal fun renderDiscoverButton(
     rowScope: Any,
     composer: Any,
     nativeArrowColor: Long,
+    nativeArrow: Any,
+    nativeDividerColor: Long,
     onHostRowClick: () -> Unit,
     onDiscoverClick: () -> Unit,
 ) {
@@ -32,6 +34,8 @@ internal fun renderDiscoverButton(
                 rowScope,
                 composer,
                 nativeArrowColor,
+                nativeArrow,
+                nativeDividerColor,
                 onHostRowClick,
                 onDiscoverClick,
             )
@@ -45,6 +49,8 @@ internal fun ReaMicroSettingsHook.renderCommunityRow(
     rowScope: Any,
     composer: Any,
     nativeArrowColor: Long,
+    nativeArrow: Any,
+    nativeDividerColor: Long,
     onHostRowClick: () -> Unit,
     onDiscoverClick: () -> Unit,
 ) {
@@ -56,13 +62,14 @@ internal fun ReaMicroSettingsHook.renderCommunityRow(
     renderCellArrow(
         composer,
         nativeArrowColor,
+        nativeArrow,
         leftSource,
         "ReaMicroLeftCellArrow",
         CELL_LEFT_ARROW_END_PADDING_DP,
         onHostRowClick,
     )
 
-    renderVerticalDivider(composer, nativeCommunityDividerColor())
+    renderVerticalDivider(composer, nativeDividerColor)
 
     if (icon != null) renderDiscoverIcon(icon, composer, rightSource, onDiscoverClick)
     renderDiscoverLabel(
@@ -83,6 +90,7 @@ internal fun ReaMicroSettingsHook.renderCommunityRow(
     renderCellArrow(
         composer,
         nativeArrowColor,
+        nativeArrow,
         rightSource,
         "ReaMicroDiscoverArrow",
         CELL_RIGHT_ARROW_END_PADDING_DP,
@@ -93,12 +101,12 @@ internal fun ReaMicroSettingsHook.renderCommunityRow(
 private fun ReaMicroSettingsHook.renderCellArrow(
     composer: Any,
     nativeArrowColor: Long,
+    nativeArrow: Any,
     interactionSource: Any?,
     clickName: String,
     trailingPaddingDp: Int,
     onClick: () -> Unit,
 ) {
-    val arrow = navigateNextImageVector() ?: return
     val modifier = paddingSides(
         discoverClickable(clickableBase(), clickName, composer, interactionSource, onClick),
         start = 0,
@@ -108,26 +116,15 @@ private fun ReaMicroSettingsHook.renderCellArrow(
     )
     iconVectorMethod().invoke(
         null,
-        arrow,
+        nativeArrow,
         null,
         modifier,
         nativeArrowColor,
         composer,
         ICON_CHANGED_MASK,
-        ICON_TINT_ONLY_DEFAULT_MASK,
+        ICON_EXPLICIT_ARGUMENTS_MASK,
     )
 }
-
-private fun ReaMicroSettingsHook.navigateNextImageVector(): Any? =
-    runCatching {
-        if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-            return@runCatching cls("ReaMicroHost.NavigateNextIcon").hostAbiMethod("i").invoke(null)
-        }
-        method(NAVIGATE_NEXT_ICON_CLASS, NAVIGATE_NEXT_METHOD, NAVIGATE_NEXT_PARAMETER_COUNT).invoke(
-            null,
-            staticObject(ICONS_AUTO_MIRRORED_FILLED_OBJECT, "INSTANCE"),
-        )
-    }.getOrNull()
 
 private var cachedIconVectorMethod: Method? = null
 
@@ -142,10 +139,10 @@ private fun ReaMicroSettingsHook.iconVectorMethod(): Method =
             ?: error("$ICON_KT_CLASS.$ICON_METHOD ImageVector overload not found")
     }
 
-private fun ReaMicroSettingsHook.renderVerticalDivider(composer: Any, nativeArrowColor: Long) {
+private fun ReaMicroSettingsHook.renderVerticalDivider(composer: Any, nativeDividerColor: Long) {
     if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
         val sized = b2Ui.height(b2Ui.width(modifierInstance(), udp(DIVIDER_WIDTH_DP)), udp(DIVIDER_HEIGHT_DP))
-        b2Ui.emptyBox(nativeColorBackground(sized, nativeArrowColor), composer)
+        b2Ui.emptyBox(nativeColorBackground(sized, nativeDividerColor), composer)
         return
     }
     val width = method(SIZE_KT_CLASS, WIDTH_METHOD, SIZE_PARAMETER_COUNT)
@@ -155,7 +152,7 @@ private fun ReaMicroSettingsHook.renderVerticalDivider(composer: Any, nativeArro
     val colored = method(BACKGROUND_KT_CLASS, BACKGROUND_DEFAULT_METHOD, BACKGROUND_PARAMETER_COUNT).invoke(
         null,
         height,
-        nativeArrowColor,
+        nativeDividerColor,
         null,
         BACKGROUND_SHAPE_DEFAULT_MASK,
         null,
@@ -170,9 +167,6 @@ private fun ReaMicroSettingsHook.nativeColorBackground(base: Any, color: Long): 
         color,
         cls("ReaMicroHost.RectangleShape").hostAbiField(RECTANGLE_SHAPE_FIELD).get(null),
     )
-
-private fun ReaMicroSettingsHook.nativeCommunityDividerColor(): Long =
-    method(COLOR_KT_CLASS, COLOR_FACTORY_METHOD, 1).invoke(null, COMMUNITY_DIVIDER_ARGB) as Long
 
 internal fun ReaMicroSettingsHook.leftCellIconModifier(composer: Any, onClick: () -> Unit): Any =
     sizedSquare(
@@ -520,7 +514,8 @@ private const val IMAGE_CHANGED2_MASK = 0x78
 
 private const val ICON_CHANGED_MASK = 0x30
 
-private const val ICON_TINT_ONLY_DEFAULT_MASK = 0x4
+// Modifier 已显式传入，不能置位 0x4，否则 Compose 会丢掉两侧内边距和点击范围。
+private const val ICON_EXPLICIT_ARGUMENTS_MASK = 0
 
 private const val ROW_WEIGHT_PARAMETER_COUNT = 3
 
@@ -543,10 +538,6 @@ private const val BACKGROUND_METHOD = "background-bw27NRU"
 
 private const val BACKGROUND_SHAPE_DEFAULT_MASK = 2
 
-private const val COLOR_FACTORY_METHOD = "Color"
-
-private const val COMMUNITY_DIVIDER_ARGB = 0x30FFFFFF
-
 private const val RECTANGLE_SHAPE_FIELD = "a"
 
 private const val CLICKABLE_DEFAULT_PARAMETER_COUNT = 9
@@ -563,11 +554,6 @@ private const val INTERACTION_SOURCE_FACTORY_METHOD = "MutableInteractionSource"
 private const val INTERACTION_SOURCE_FACTORY_PARAMETER_COUNT = 0
 
 private const val SIZE_PARAMETER_COUNT = 2
-
-private const val NAVIGATE_NEXT_METHOD = "getNavigateNext"
-private const val NAVIGATE_NEXT_PARAMETER_COUNT = 1
-
-private const val ICONS_AUTO_MIRRORED_FILLED_OBJECT = "androidx.compose.material.icons.Icons\$AutoMirrored\$Filled"
 
 private const val IMAGE_KT_CLASS = "androidx.compose.foundation.ImageKt"
 private const val IMAGE_METHOD = "Image"
