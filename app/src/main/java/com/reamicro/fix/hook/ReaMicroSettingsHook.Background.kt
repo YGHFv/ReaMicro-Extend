@@ -17,6 +17,7 @@ import android.text.TextWatcher
 import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.Toast
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.xposed.XposedBridge
@@ -38,6 +39,9 @@ internal fun ReaMicroSettingsHook.profileBackgroundDisplayModeSummary(value: Str
 
 internal fun ReaMicroSettingsHook.profileBackgroundRandomUrlSummary(value: String): String =
     value.trim().ifBlank { "\u672a\u8bbe\u7f6e" }
+
+internal fun ReaMicroSettingsHook.profileBackgroundPercentSummary(value: Int): String =
+    "${value.coerceIn(0, 100)}%"
 
 internal fun ReaMicroSettingsHook.renderProfileBackgroundSettingsContent(innerPaddings: Any, composer: Any) {
     val listContent = functionProxy("ProfileBackgroundSettingsList", FUNCTION1_CLASS) { args ->
@@ -97,6 +101,19 @@ internal fun ReaMicroSettingsHook.renderProfileBackgroundSettingsContent(innerPa
                 singleLineSubtitle = true,
                 onClick = { openProfileBackgroundCropPositionDialog() },
             ),
+            ActionRow(
+                key = "profile_background_card_transparency_entry",
+                title = "\u5bb9\u5668\u900f\u660e\u5ea6",
+                subtitle = profileBackgroundPercentSummary(snapshot.profileBackgroundCardTransparency),
+                singleLineSubtitle = true,
+                onClick = {
+                    openProfileBackgroundPercentDialog(
+                        title = "\u5bb9\u5668\u900f\u660e\u5ea6",
+                        initialValue = settings.snapshot().profileBackgroundCardTransparency,
+                        onApply = settings::setProfileBackgroundCardTransparency,
+                    )
+                },
+            ),
         )
         addLazyItem(lazyListScope, PROFILE_BACKGROUND_ENABLE_ITEM_KEY) { itemComposer ->
             renderHostSettingsCard(switchRows, itemComposer)
@@ -107,6 +124,69 @@ internal fun ReaMicroSettingsHook.renderProfileBackgroundSettingsContent(innerPa
         targetUnit()
     }
     renderHostLazyColumn(innerPaddings, listContent, composer)
+}
+
+internal fun ReaMicroSettingsHook.openProfileBackgroundPercentDialog(
+    title: String,
+    initialValue: Int,
+    onApply: (Int) -> Unit,
+) {
+    val activity = activityProvider() ?: return
+    activity.runOnUiThread {
+        runCatching {
+            val colors = SettingsDialogColors(activity)
+            val dialog = Dialog(activity)
+            val card = settingsDialogCard(activity, colors)
+            card.addView(settingsDialogTitle(activity, title, colors))
+            var pendingValue = initialValue.coerceIn(0, 100)
+            val status = settingsDialogStatus(activity, "$pendingValue%", colors)
+            card.addView(
+                SeekBar(activity).apply {
+                    max = 100
+                    progress = pendingValue
+                    setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                        override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                            pendingValue = progress.coerceIn(0, 100)
+                            status.text = "$pendingValue%"
+                        }
+
+                        override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+
+                        override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+                    })
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    topMargin = settingsDp(activity, 4)
+                    bottomMargin = settingsDp(activity, 4)
+                },
+            )
+            card.addView(status)
+            val actions = settingsDialogActions(activity)
+            actions.addView(
+                settingsDialogButton(activity, "\u53d6\u6d88", colors, SettingsDialogButtonRole.Neutral).apply {
+                    setOnClickListener { dialog.dismiss() }
+                },
+                settingsDialogButtonParams(activity),
+            )
+            actions.addView(
+                settingsDialogButton(activity, "\u5b8c\u6210", colors).apply {
+                    setOnClickListener {
+                        onApply(pendingValue)
+                        dialog.dismiss()
+                        bumpProfileBackgroundVersion()
+                    }
+                },
+                settingsDialogButtonParams(activity),
+            )
+            card.addView(actions)
+            showSettingsDialog(dialog, card, activity)
+        }.onFailure {
+            XposedBridge.log("$LOG_PREFIX profile background percent dialog failed: ${it.stackTraceToString()}")
+        }
+    }
 }
 
 internal fun ReaMicroSettingsHook.openProfileBackgroundColorDialog() {

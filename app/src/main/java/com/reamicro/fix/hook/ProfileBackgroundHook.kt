@@ -115,10 +115,9 @@ class ProfileBackgroundHook(
                 if (inProfileLambda.get() != true) return
                 val snapshot = settingsProvider()
                 if (!canHandleProfileBackground(snapshot)) return
-                // 保留旧图片模式的透明表层；仅限个人页重组作用域，不影响阅读和发现页。
+                val surfaceArgb = colorLongToArgb(param.args[1] as Long)
                 param.args[1] = colorLongFromArgb(
-                    if (snapshot.profileBackgroundUseImage) PROFILE_BACKGROUND_HOUMO_SURFACE_ARGB
-                    else parseArgb(snapshot.profileBackgroundColor),
+                    profileBackgroundContainerArgb(surfaceArgb, snapshot.profileBackgroundCardTransparency),
                 )
             }
         })
@@ -1461,6 +1460,12 @@ class ProfileBackgroundHook(
 
     private fun argbWithAlpha(argb: Int, alpha: Int): Int =
         (alpha.coerceIn(0, 255) shl 24) or (argb and 0x00FFFFFF)
+
+    private fun profileBackgroundContainerArgb(argb: Int, transparency: Int): Int {
+        val sourceAlpha = (argb ushr 24) and 0xff
+        val alpha = sourceAlpha * (100 - transparency.coerceIn(0, 100)) / 100
+        return argbWithAlpha(argb, alpha)
+    }
 
     companion object {
         const val LOG_PREFIX = "ReaMicro LSP profile background"

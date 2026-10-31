@@ -135,6 +135,17 @@ class HostB4RegressionContractTest {
         assertTrue(hook.contains("privilege to (9 to 27)"))
         assertTrue(hook.contains("param.args[index] = true"))
         assertTrue(hook.contains("and (7 shl shift).inv()"))
+        assertTrue(hook.contains("profileBackgroundContainerArgb(surfaceArgb, snapshot.profileBackgroundCardTransparency)"))
         assertTrue(hook.contains("canUseProfileImageBackground(settingsProvider())"))
+    }
+
+    @Test
+    fun `profile background settings expose container transparency from zero to one hundred`() {
+        val background = source("ReaMicroSettingsHook.Background.kt")
+        assertTrue(background.contains("title = \"\\u5bb9\\u5668\\u900f\\u660e\\u5ea6\""))
+        assertTrue(background.contains("initialValue = settings.snapshot().profileBackgroundCardTransparency"))
+        assertTrue(background.contains("onApply = settings::setProfileBackgroundCardTransparency"))
+        assertTrue(background.contains("max = 100"))
+        assertTrue(background.contains("progress = pendingValue"))
     }
 }
