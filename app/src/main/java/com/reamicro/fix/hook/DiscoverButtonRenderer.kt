@@ -93,10 +93,7 @@ private fun ReaMicroSettingsHook.renderCellArrow(
 }
 
 private fun ReaMicroSettingsHook.discoverArrowColor(composer: Any): Long =
-    runCatching { colorScheme(composer).longMethod("getOnSurfaceVariant") }
-        .getOrElse {
-            method(THEME_KT_CLASS, "getOnBackgroundVariant", 1).invoke(null, colorScheme(composer)) as Long
-        }
+    borderVariant(composer)
 
 private fun ReaMicroSettingsHook.navigateNextImageVector(): Any? =
     runCatching {
