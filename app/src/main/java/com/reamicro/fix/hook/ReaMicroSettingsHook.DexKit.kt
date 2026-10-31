@@ -63,7 +63,9 @@ private fun ReaMicroSettingsHook.showDexKitDialog(
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 .apply { gravity = Gravity.CENTER_HORIZONTAL })
     }
-    val notice = dexKitScanNotice(
+    val notice = if (!scanning && error == null && report?.cached == true) {
+        DexKitScanNotice("已读取与当前宿主及扫描规则匹配的记录。扫描缓存不等于功能验收结果。")
+    } else dexKitScanNotice(
         scanning, error, HostSymbols.profileId, report != null, report?.profile != null,
         report?.failures?.isNotEmpty() == true, report?.unchanged == true,
     )

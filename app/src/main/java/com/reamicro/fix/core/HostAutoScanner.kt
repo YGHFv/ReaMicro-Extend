@@ -37,6 +37,31 @@ object HostAutoScanner {
 
     fun snapshot(): Report? = last
 
+    /** 只恢复展示记录，不安装映射、不触发扫描；宿主和规则摘要都匹配才接受缓存。 */
+    fun restoreCachedReport(apk: String, dataDir: String): Report? = synchronized(lock) {
+        last?.let { return@synchronized it }
+        runCatching {
+            val asset = if (HostSymbols.profileId == "2.3.3")
+                "assets/host-profiles/automatic-2.3.3.rules.json" else ASSET
+            val rules = HostSymbols.bundledAsset(asset)
+            val digest = MessageDigest.getInstance("SHA-256")
+            File(apk).inputStream().use { input ->
+                val buffer = ByteArray(65536)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            val key = HostScanRules.cacheKey(digest.digest().hex(),
+                MessageDigest.getInstance("SHA-256").digest(rules).hex())
+            val cache = JSONObject(File(dataDir, "code_cache/reamicro_dexkit/automatic-cache.json").readText(Charsets.UTF_8))
+            if (cache.optString("key") != key) return@synchronized null
+            Report(cache.getInt("total"), cache.getInt("succeeded"), cache.getJSONArray("failures").strings(),
+                true, 0, false, HostProfile.parse(cache.getString("profile"))).also { last = it }
+        }.getOrNull()
+    }
+
     fun scanProfileAvailable(profileId: String): Boolean =
         profileId in setOf("2.3.3-rc3", "2.3.3", "identity", "automatic")
 

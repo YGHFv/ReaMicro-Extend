@@ -59,6 +59,9 @@ internal object DexKitUpdateScan {
                 val previous = HostScanUpdateStamp.decode(
                     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(COMPLETED, null),
                 )
+                if (!installation.stamp.needsScan(previous, attempted)) {
+                    HostAutoScanner.restoreCachedReport(installation.hostPath, installation.dataDir)
+                }
                 installation to previous
             }
             main.post {

@@ -7,6 +7,7 @@ import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.core.AppTopBarArguments
 import com.reamicro.fix.core.ExternalFeatureCompatibility
+import com.reamicro.fix.association.provider.ExternalSourceLoader
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.ai.AiImagePresetTarget
 import com.reamicro.fix.settings.ModuleSettings
@@ -529,7 +530,11 @@ internal fun ReaMicroSettingsHook.renderAssociationCompletionSettingsContent(inn
     val listContent = functionProxy("AssociationCompletionList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
         val snapshot = settings.snapshot()
-        val manualEditDisabledReason = ExternalFeatureCompatibility.manualEditDisabledReason()
+        val manualEditFeature = ExternalSourceLoader.loadFeatures(activityProvider()?.applicationContext)
+            .firstOrNull { it.id == "manual-edit" }
+        val manualEditDisabledReason = if (manualEditFeature != null) {
+            ExternalFeatureCompatibility.disabledReason(manualEditFeature.id, manualEditFeature.capabilities)
+        } else ExternalFeatureCompatibility.manualEditDisabledReason()
         if (manualEditDisabledReason != null && hasManualEditFeature()) {
             addLazyItem(
                 lazyListScope,
@@ -818,7 +823,10 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
             ActionRow(
                 key = "about_completion_dexkit",
                 title = "DexKit 扫描",
-                subtitle = com.reamicro.fix.core.HostAutoScanner.snapshot()?.summary() ?: "尚未扫描",
+                subtitle = when {
+                    DexKitUpdateScan.isBusy() || isManualDexKitScanning() -> "正在扫描宿主，完成后自动更新"
+                    else -> com.reamicro.fix.core.HostAutoScanner.snapshot()?.summary() ?: "等待首次扫描"
+                },
                 onClick = { openDexKitScanDialog() },
             ),
             ActionRow(
