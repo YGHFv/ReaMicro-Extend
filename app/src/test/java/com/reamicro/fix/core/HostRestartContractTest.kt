@@ -25,11 +25,25 @@ class HostRestartContractTest {
     @Test fun scanSpinnerUsesHostPrimaryPalette() {
         val main = listOf(File("src/main"), File("app/src/main")).first { it.isDirectory }
         val dialog = main.resolve("java/com/reamicro/fix/hook/ReaMicroSettingsHook.DexKit.kt").readText(Charsets.UTF_8)
-        val spinner = dialog.substringAfter("card.addView(ProgressBar(activity)").substringBefore("val notice")
+        assertTrue(dialog.contains("header.addView(ProgressBar(activity)"))
+        val spinner = dialog.substringAfter("header.addView(ProgressBar(activity)").substringBefore("val notice")
         assertTrue(spinner.contains("ModuleDialogTheme.tintProgress(this, colors.primary)"))
         val palette = main.resolve("java/com/reamicro/fix/hook/ModuleDialogTheme.kt").readText(Charsets.UTF_8)
         assertTrue(palette.contains("EmbeddedHostUi.snapshot(context)?.let { return fromHost(it) }"))
         assertTrue(palette.contains("primary = native.roles.getValue(\"Primary\")"))
+    }
+
+    @Test fun scanSpinnerSharesTitleRowWithoutTakingBodySpace() {
+        val main = listOf(File("src/main"), File("app/src/main")).first { it.isDirectory }
+        val dialog = main.resolve("java/com/reamicro/fix/hook/ReaMicroSettingsHook.DexKit.kt").readText(Charsets.UTF_8)
+        val header = dialog.substringAfter("val title = settingsDialogTitle").substringBefore("val notice")
+        assertTrue(header.contains("orientation = LinearLayout.HORIZONTAL"))
+        assertTrue(header.contains("header.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))"))
+        assertTrue(header.contains("val spinnerSize = settingsDp(activity, 24)"))
+        assertTrue(header.contains("marginStart = settingsDp(activity, 12)"))
+        assertTrue(header.contains("card.addView(header)"))
+        assertFalse(header.contains("card.addView(ProgressBar"))
+        assertTrue(header.contains("card.addView(title)"))
     }
 
     @Test fun restartHandoffHasNoProgressUiButRetainsFailureFeedback() {

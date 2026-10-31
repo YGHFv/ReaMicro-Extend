@@ -57,14 +57,26 @@ private fun ReaMicroSettingsHook.showDexKitDialog(
     val colors = SettingsDialogColors(activity)
     val dialog = Dialog(activity)
     val card = settingsDialogCard(activity, colors)
-    card.addView(settingsDialogTitle(activity, if (scanning) "DexKit 自动扫描" else "DexKit 扫描结果", colors))
+    val title = settingsDialogTitle(activity, if (scanning) "DexKit 自动扫描" else "DexKit 扫描结果", colors)
     if (scanning) {
-        card.addView(ProgressBar(activity).apply {
+        val header = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = settingsDp(activity, 14) }
+        }
+        header.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val spinnerSize = settingsDp(activity, 24)
+        header.addView(ProgressBar(activity).apply {
             isIndeterminate = true
             ModuleDialogTheme.tintProgress(this, colors.primary)
-        },
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                .apply { gravity = Gravity.CENTER_HORIZONTAL })
+        }, LinearLayout.LayoutParams(spinnerSize, spinnerSize).apply {
+            marginStart = settingsDp(activity, 12)
+        })
+        card.addView(header)
+    } else {
+        card.addView(title)
     }
     val notice = if (!scanning && error == null && report?.cached == true) {
         DexKitScanNotice("已读取与当前宿主及扫描规则匹配的记录。扫描缓存不等于功能验收结果。")
