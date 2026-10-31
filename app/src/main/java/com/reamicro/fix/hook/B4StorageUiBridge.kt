@@ -58,7 +58,7 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
         })
         val sheetStateClass = drive.classLoader.hostClass("androidx.compose.material3.SheetState")
         val modalSheet = drive.cls("fgd").declaredMethods.single {
-            it.name == "b" && it.parameterCount == 20 &&
+            it.name == "b" && it.parameterCount in 17..20 &&
                 sheetStateClass.isAssignableFrom(it.parameterTypes[2])
         }
         XposedBridge.hookMethod(modalSheet, object : XC_MethodHook() {
