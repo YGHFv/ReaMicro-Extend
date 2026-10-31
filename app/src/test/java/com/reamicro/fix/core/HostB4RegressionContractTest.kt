@@ -48,6 +48,10 @@ class HostB4RegressionContractTest {
         assertTrue(menu.contains("bubbleArrowOnTop == false) 10f else 0f"))
         assertTrue(menu.contains("val contentModifier = nativeUi.padding("))
         assertTrue(menu.contains("nativeUi.width(nativeUi.modifier(), nativeUi.dp(contentWidth))"))
+        assertTrue(menu.contains("val rows = actions.chunked(maxPerRow.coerceAtLeast(1))"))
+        assertTrue(menu.contains("nativeUi.row("))
+        assertTrue(menu.contains("nativeUi.column("))
+        assertFalse(menu.contains("FLOW_ROW_METHOD"))
         assertFalse(menu.contains("nativeUi.padding(nativeUi.modifier(), 8f"))
     }
 
@@ -70,7 +74,7 @@ class HostB4RegressionContractTest {
             .substringAfter("private fun ReaderHook.selectionMenuCellWidthDp")
             .substringBefore("private fun ReaderHook.selectionMenuCellModifier")
         assertTrue(menu.contains("HostSymbols.abiProfileId == \"2.3.3-b4\" && !settingsProvider().canUseCompactReaderSelectionMenu"))
-        assertTrue(menu.contains("(maxTitleWidth + 12).coerceIn(40, 100)"))
+        assertTrue(menu.contains("(maxTitleWidth + 18).coerceIn(46, 100)"))
         assertTrue(menu.contains("(maxTitleWidth + 42).coerceIn(72, 112)"))
     }
 

@@ -110,11 +110,7 @@ internal fun ReaderHook.renderWrappedSelectionMenu(
     )
 }
 
-/**
- * B4 已内联删除 Column，并把 Row/FlowRow 合并进 btd。这里直接复用已核实的
- * FlowRow ABI，再以原生 ColumnPolicy 组合图标和完整标题，避免旧 SelectionMenuItem
- * 的固定窄宽度把双字标签裁成单字。
- */
+/** B4 用显式行列固定每行数量，避免 FlowRow 在边缘气泡二次限宽后偶发重新换行。 */
 private fun ReaderHook.renderB4WrappedSelectionMenu(
     actions: List<Any>,
     tint: Long,
@@ -123,6 +119,7 @@ private fun ReaderHook.renderB4WrappedSelectionMenu(
     bubbleArrowOnTop: Boolean?,
 ) {
     val nativeUi = B2NativeUi(classLoader)
+    val rows = actions.chunked(maxPerRow.coerceAtLeast(1))
     val cellWidth = selectionMenuCellWidthDp(actions)
     val contentWidth = (maxPerRow.coerceAtLeast(1) * cellWidth + (maxPerRow - 1) * 2 + 16)
         .coerceAtMost(320)
@@ -135,87 +132,110 @@ private fun ReaderHook.renderB4WrappedSelectionMenu(
     )
     val content = nativeUi.lambda(
         actions.fold(0x524d4234) { key, action -> key * 31 + callString(action, "getTitle").hashCode() },
-        functionProxy("ReaderSelectionB4Flow", "kotlin.jvm.functions.Function3") { args ->
-            val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
-            actions.forEachIndexed { index, action ->
-                val title = callString(action, "getTitle")
-                val icon = callNoArg(action, "getIcon") ?: return@forEachIndexed
-                val callback = selectionMenuActionCallback(action) ?: return@forEachIndexed
-                val itemModifier = nativeUi.clickable(
-                    nativeUi.width(nativeUi.modifier(), nativeUi.dp(cellWidth)),
-                    callback,
+        functionProxy("ReaderSelectionB4Column", "kotlin.jvm.functions.Function3") { args ->
+            val columnComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
+            rows.forEachIndexed { rowIndex, rowActions ->
+                val rowContent = nativeUi.lambda(
+                    0x524d5200 + rowIndex,
+                    functionProxy("ReaderSelectionB4Row$rowIndex", KOTLIN_FUNCTION3_CLASS) { rowArgs ->
+                        val rowComposer = rowArgs?.getOrNull(1) ?: return@functionProxy targetUnit()
+                        rowActions.forEachIndexed { columnIndex, action ->
+                            renderB4SelectionMenuItem(
+                                nativeUi, action, tint, cellWidth, rowIndex * maxPerRow + columnIndex, rowComposer,
+                            )
+                        }
+                        targetUnit()
+                    },
                 )
-                val itemContent = functionProxy(
-                    "ReaderSelectionB4Item${index}_${title.hashCode()}",
-                    KOTLIN_FUNCTION3_CLASS,
-                ) { itemArgs ->
-                    val itemComposer = itemArgs?.getOrNull(1) ?: return@functionProxy targetUnit()
-                    val iconModifier = nativeUi.width(
-                        nativeUi.height(nativeUi.modifier(), nativeUi.dp(20)),
-                        nativeUi.dp(20),
-                    )
-                    composeMethod("androidx.compose.material3.IconKt", "Icon-ww6aTOc", 7).invoke(
-                        null,
-                        icon,
-                        title,
-                        iconModifier,
-                        tint,
-                        itemComposer,
-                        0,
-                        0,
-                    )
-                    val typography = nativeUi.theme(itemComposer, "getTypography")
-                    val style = runCatching { callNoArg(typography, "getLabelSmall") }.getOrNull()
-                        ?: runCatching { callNoArg(typography, "getLabelMedium") }.getOrNull()
-                    nativeUi.text(arrayOf(
-                        title,
-                        null,
-                        tint,
-                        null,
-                        0L,
-                        null,
-                        null,
-                        null,
-                        0L,
-                        null,
-                        null,
-                        0L,
-                        0,
-                        false,
-                        1,
-                        1,
-                        null,
-                        style,
-                        itemComposer,
-                        0,
-                        0,
-                        131066,
-                    ))
-                    targetUnit()
-                }
-                nativeUi.column(
-                    itemModifier,
+                nativeUi.row(
+                    nativeUi.modifier(),
+                    rowContent,
+                    columnComposer,
                     nativeUi.spacedBy(2f),
-                    nativeUi.centerHorizontally(),
-                    itemContent,
-                    innerComposer,
+                    nativeUi.centerVertically(),
                 )
             }
             targetUnit()
         },
     )
-    composeMethod(FLOW_LAYOUT_KT_CLASS, FLOW_ROW_METHOD, 10).invoke(
-        null,
+    nativeUi.column(
         contentModifier,
         nativeUi.spacedBy(2f),
-        nativeUi.spacedBy(2f),
-        null,
-        maxPerRow,
-        Int.MAX_VALUE,
+        nativeUi.start(),
         content,
         composer,
-        0,
-        0,
+    )
+}
+
+private fun ReaderHook.renderB4SelectionMenuItem(
+    nativeUi: B2NativeUi,
+    action: Any,
+    tint: Long,
+    cellWidth: Int,
+    index: Int,
+    composer: Any,
+) {
+    val title = callString(action, "getTitle")
+    val icon = callNoArg(action, "getIcon") ?: return
+    val callback = selectionMenuActionCallback(action) ?: return
+    val itemModifier = nativeUi.clickable(
+        nativeUi.width(nativeUi.modifier(), nativeUi.dp(cellWidth)),
+        callback,
+    )
+    val itemContent = nativeUi.lambda(
+        0x524d4900 + index,
+        functionProxy("ReaderSelectionB4Item${index}_${title.hashCode()}", KOTLIN_FUNCTION3_CLASS) { itemArgs ->
+            val itemComposer = itemArgs?.getOrNull(1) ?: return@functionProxy targetUnit()
+            val iconModifier = nativeUi.width(
+                nativeUi.height(nativeUi.modifier(), nativeUi.dp(20)),
+                nativeUi.dp(20),
+            )
+            composeMethod("androidx.compose.material3.IconKt", "Icon-ww6aTOc", 7).invoke(
+                null,
+                icon,
+                title,
+                iconModifier,
+                tint,
+                itemComposer,
+                0,
+                0,
+            )
+            val typography = nativeUi.theme(itemComposer, "getTypography")
+            val style = runCatching { callNoArg(typography, "getLabelSmall") }.getOrNull()
+                ?: runCatching { callNoArg(typography, "getLabelMedium") }.getOrNull()
+            nativeUi.text(arrayOf(
+                title,
+                null,
+                tint,
+                null,
+                0L,
+                null,
+                null,
+                null,
+                0L,
+                null,
+                null,
+                0L,
+                0,
+                false,
+                1,
+                1,
+                null,
+                style,
+                itemComposer,
+                0,
+                0,
+                131066,
+            ))
+            targetUnit()
+        },
+    )
+    nativeUi.column(
+        itemModifier,
+        nativeUi.spacedBy(2f),
+        nativeUi.centerHorizontally(),
+        itemContent,
+        composer,
     )
 }
 
@@ -255,9 +275,7 @@ private fun ReaderHook.selectionMenuCellWidthDp(actions: List<Any>): Int {
     } ?: 0
     // 普通 B4 菜单收紧横向留白，长标题仍按内容扩宽，紧凑模式和旧版保持原样。
     if (HostSymbols.abiProfileId == "2.3.3-b4" && !settingsProvider().canUseCompactReaderSelectionMenu) {
-        // 阅微的 udp 会随显示缩放放大，浮窗边缘实测四列需把逻辑宽度压到 40dp。
-        // 双字标题仍由居中列完整显示，避免七个动作被挤成 3 + 3 + 1。
-        return (maxTitleWidth + 12).coerceIn(40, 100)
+        return (maxTitleWidth + 18).coerceIn(46, 100)
     }
     return (maxTitleWidth + 42).coerceIn(72, 112)
 }
