@@ -2,7 +2,10 @@ package com.reamicro.fix.hook
 
 import com.reamicro.fix.cloud.webdav.hasWebDavLogin
 import com.reamicro.fix.core.B2NativeUi
+import com.reamicro.fix.core.HostCoroutines
 import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostMethod
 import com.reamicro.fix.core.hostMethodsNamed
 import com.reamicro.fix.hook.webdav.APP_TOP_BAR_CLASS
 import com.reamicro.fix.hook.webdav.BACKUP_TYPE_WEBDAV
@@ -21,6 +24,8 @@ import java.lang.ref.WeakReference
 /** B4 已内联旧列表 lambda；在仍稳定的原生行和顶栏边界补回存储入口。 */
 internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
     @Volatile private var importScope: WeakReference<Any>? = null
+    @Volatile private var importSheetState: WeakReference<Any>? = null
+    private val importSheetCompositionDepth = ThreadLocal<Int>()
     private val ui = B2NativeUi(drive.classLoader)
     private val nativeStorageTitles = setOf("百度网盘", "阿里云盘", "115网盘", "本地存储")
 
@@ -38,6 +43,25 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 // 工作表内容延后组合，外层返回时清 ThreadLocal 会丢失实际导航上下文。
                 importScope = if (param.args[2] == true) WeakReference(param.args[0]) else null
+                importSheetCompositionDepth.set((importSheetCompositionDepth.get() ?: 0) + 1)
+            }
+
+            override fun afterHookedMethod(param: MethodHookParam) {
+                val next = (importSheetCompositionDepth.get() ?: 0) - 1
+                if (next <= 0) importSheetCompositionDepth.remove()
+                else importSheetCompositionDepth.set(next)
+            }
+        })
+        val sheetStateClass = drive.classLoader.hostClass("androidx.compose.material3.SheetState")
+        val modalSheet = drive.cls("fgd").declaredMethods.single {
+            it.name == "b" && it.parameterCount == 20 &&
+                sheetStateClass.isAssignableFrom(it.parameterTypes[2])
+        }
+        XposedBridge.hookMethod(modalSheet, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if ((importSheetCompositionDepth.get() ?: 0) <= 0) return
+                val state = param.args?.getOrNull(2) ?: return
+                importSheetState = WeakReference(state)
             }
         })
         val local = sheet.hostMethodsNamed(BOOK_LIBRARY_LOCAL_METHOD).single { it.parameterCount == 3 }
@@ -53,7 +77,7 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
                         drive.method(BOOK_LIBRARY_SHEET_CLASS, CLOUD_AUTHORIZED_ROW_METHOD, 5).invoke(
                             null, BACKUP_TYPE_LOCAL_LIBRARY, drive.localLibraryAuth(),
                             drive.functionProxy("B4LocalLibraryImportOpen", FUNCTION0_CLASS) {
-                                drive.navigateStorage(scope, BACKUP_TYPE_LOCAL_LIBRARY)
+                                openImport(scope, BACKUP_TYPE_LOCAL_LIBRARY)
                                 drive.targetUnit()
                             }, composer, 0,
                         )
@@ -71,7 +95,7 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
                             BACKUP_TYPE_WEBDAV,
                             drive.webDavAuth(),
                             drive.functionProxy("B4WebDavImportOpen", FUNCTION0_CLASS) {
-                                drive.navigateStorage(scope)
+                                openImport(scope, BACKUP_TYPE_WEBDAV)
                                 drive.targetUnit()
                             },
                             composer,
@@ -85,7 +109,7 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
                         null,
                         BACKUP_TYPE_WEBDAV,
                         drive.functionProxy("B4WebDavImportLogin", FUNCTION0_CLASS) {
-                            drive.navigateStorage(scope)
+                            openImport(scope, BACKUP_TYPE_WEBDAV)
                             drive.targetUnit()
                         },
                         composer,
@@ -96,7 +120,38 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
             }
         })
         XposedBridge.deoptimize(content)
+        XposedBridge.deoptimize(modalSheet)
         XposedBridge.deoptimize(local)
+    }
+
+    private fun openImport(scope: Any, kind: Int) {
+        importScope = null
+        val sheetState = currentImportSheetState()
+        if (sheetState == null) {
+            drive.navigateStorage(scope, kind)
+            return
+        }
+        Thread({
+            runCatching {
+                val hide = sheetState.javaClass.hostMethod(
+                    "hide",
+                    drive.classLoader.hostClass("kotlin.coroutines.Continuation"),
+                )
+                HostCoroutines.runBlocking(drive.classLoader) { continuation ->
+                    hide.invoke(sheetState, continuation)
+                }
+            }.onFailure {
+                XposedBridge.log("ReaMicro B4 import sheet hide failed: ${it.stackTraceToString()}")
+            }
+            drive.activityProvider()?.runOnUiThread {
+                drive.navigateStorage(scope, kind)
+            } ?: drive.navigateStorage(scope, kind)
+        }, "ReaMicroImportSheetHide").start()
+    }
+
+    private fun currentImportSheetState(): Any? {
+        val expected = drive.classLoader.hostClass("androidx.compose.material3.SheetState")
+        return importSheetState?.get()?.takeIf(expected::isInstance)
     }
 
     private fun divider(composer: Any) {
