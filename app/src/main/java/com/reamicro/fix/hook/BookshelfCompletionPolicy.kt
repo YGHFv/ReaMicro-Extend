@@ -6,10 +6,10 @@ import com.reamicro.fix.settings.ModuleSettingsSnapshot
 internal object BookshelfCompletionPolicy {
     enum class Action { SYNC, UPDATE, STYLE }
 
-    fun actions(settings: ModuleSettingsSnapshot): List<Action> = buildList {
-        if (!settings.shelfHideSync) add(Action.SYNC)
+    fun actions(settings: ModuleSettingsSnapshot, shelfVisible: Boolean = true): List<Action> = buildList {
+        if (shelfVisible && !settings.shelfHideSync) add(Action.SYNC)
         if (settings.shelfBatchUpdate) add(Action.UPDATE)
-        if (settings.shelfStyleButton) add(Action.STYLE)
+        if (shelfVisible && settings.shelfStyleButton) add(Action.STYLE)
     }
 
     fun autoUpdate(settings: ModuleSettingsSnapshot): Boolean =

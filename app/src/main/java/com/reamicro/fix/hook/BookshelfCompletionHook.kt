@@ -151,7 +151,10 @@ internal class BookshelfCompletionHook(
                 ) { args ->
                     val inner = args?.getOrNull(1) ?: return@functionProxy drive.targetUnit()
                     val current = XposedHelpers.callMethod(settingsState, "getValue") as ModuleSettingsSnapshot
-                    if (!shelfVisible || !current.shelfHideSync) sync.invoke(null, *nativeArgs.clone().apply { this[6] = inner })
+                    if (BookshelfCompletionPolicy.Action.SYNC in
+                        BookshelfCompletionPolicy.actions(current, shelfVisible)) {
+                        sync.invoke(null, *nativeArgs.clone().apply { this[6] = inner })
+                    }
                     val scale = nativeArgs[4] as Float
                     if (current.shelfBatchUpdate) renderAction("批量更新", updateIcon(), inner, scale) { startBatch("manual") }
                     if (shelfVisible && current.shelfStyleButton) {

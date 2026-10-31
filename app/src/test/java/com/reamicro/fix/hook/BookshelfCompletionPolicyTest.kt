@@ -18,6 +18,19 @@ class BookshelfCompletionPolicyTest {
     }
 
     @Test
+    fun readingHeaderOnlyKeepsTheIndependentUpdateAction() {
+        val settings = ModuleSettingsSnapshot(
+            shelfHideSync = false,
+            shelfStyleButton = true,
+            shelfBatchUpdate = true,
+        )
+        assertEquals(
+            listOf(BookshelfCompletionPolicy.Action.UPDATE),
+            BookshelfCompletionPolicy.actions(settings, shelfVisible = false),
+        )
+    }
+
+    @Test
     fun startupUpdateRequiresBothSwitchesAndModuleEnabled() {
         assertFalse(BookshelfCompletionPolicy.autoUpdate(ModuleSettingsSnapshot(shelfAutoUpdate = true)))
         assertTrue(BookshelfCompletionPolicy.autoUpdate(ModuleSettingsSnapshot(shelfBatchUpdate = true, shelfAutoUpdate = true)))
