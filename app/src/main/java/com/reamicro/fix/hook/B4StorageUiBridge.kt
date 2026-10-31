@@ -147,11 +147,12 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
                 hide.invoke(sheetState, args?.getOrNull(1))
             }
             val builders = drive.cls("wvd")
-            val context = drive.cls("kotlin.coroutines.CoroutineContext")
+            val function2 = drive.cls("kotlin.jvm.functions.Function2")
             val starter = builders.declaredMethods.single {
                 it.name == "j" && it.parameterCount == 5 &&
                     it.parameterTypes[0].isInstance(scope) &&
-                    it.parameterTypes[1] == context
+                    function2.isAssignableFrom(it.parameterTypes[3]) &&
+                    it.parameterTypes[4] == Int::class.javaPrimitiveType
             }.apply { isAccessible = true }
             val job = starter.invoke(null, scope, null, null, suspendHide, 3)
             val completion = drive.functionProxy("B4AfterImportSheetHidden", FUNCTION1_CLASS) { args ->
@@ -163,8 +164,11 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
                 drive.navigateStorage(scope, kind)
                 drive.targetUnit()
             }
-            job.javaClass.hostMethod("invokeOnCompletion", drive.cls(FUNCTION1_CLASS))
-                .invoke(job, completion)
+            val function1 = drive.cls(FUNCTION1_CLASS)
+            val register = job.javaClass.methods.single {
+                it.parameterCount == 1 && function1.isAssignableFrom(it.parameterTypes[0])
+            }.apply { isAccessible = true }
+            register.invoke(job, completion)
         }.onFailure {
             XposedBridge.log("ReaMicro B4 import sheet launch failed: ${it.stackTraceToString()}")
             dismissImportMenu(receiver)
