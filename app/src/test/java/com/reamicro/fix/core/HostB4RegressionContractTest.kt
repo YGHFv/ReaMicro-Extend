@@ -135,7 +135,11 @@ class HostB4RegressionContractTest {
         assertTrue(hook.contains("privilege to (9 to 27)"))
         assertTrue(hook.contains("param.args[index] = true"))
         assertTrue(hook.contains("and (7 shl shift).inv()"))
-        assertTrue(hook.contains("profileBackgroundContainerArgb(surfaceArgb, snapshot.profileBackgroundCardTransparency)"))
+        assertTrue(hook.contains("enterB4ProfileCard(param)"))
+        assertTrue(hook.contains("if (inProfileLambda.get() != true && !inB4ProfileCard()) return"))
+        assertTrue(hook.contains("profileBackgroundCardTransparency.coerceIn(0, 100)"))
+        assertTrue(hook.contains("param.args[0] = ((param.args[0] as Float) * opacity)"))
+        assertTrue(hook.contains("transparentProfileContainerColor(param.args[1] as Long, snapshot)"))
         assertTrue(hook.contains("canUseProfileImageBackground(settingsProvider())"))
     }
 
@@ -147,5 +151,8 @@ class HostB4RegressionContractTest {
         assertTrue(background.contains("onApply = settings::setProfileBackgroundCardTransparency"))
         assertTrue(background.contains("max = 100"))
         assertTrue(background.contains("progress = pendingValue"))
+        assertTrue(background.contains("progressTintList = ColorStateList.valueOf(colors.primary)"))
+        assertTrue(background.contains("thumbTintList = ColorStateList.valueOf(colors.primary)"))
+        assertTrue(background.contains("activity.recreate()"))
     }
 }

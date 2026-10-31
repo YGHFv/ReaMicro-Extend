@@ -7,8 +7,10 @@ import android.app.Activity
 import android.app.Dialog
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Rect
 import android.net.Uri
 import android.text.Editable
@@ -144,6 +146,16 @@ internal fun ReaMicroSettingsHook.openProfileBackgroundPercentDialog(
                 SeekBar(activity).apply {
                     max = 100
                     progress = pendingValue
+                    progressTintList = ColorStateList.valueOf(colors.primary)
+                    thumbTintList = ColorStateList.valueOf(colors.primary)
+                    progressBackgroundTintList = ColorStateList.valueOf(
+                        Color.argb(
+                            96,
+                            Color.red(colors.body),
+                            Color.green(colors.body),
+                            Color.blue(colors.body),
+                        ),
+                    )
                     setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                         override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                             pendingValue = progress.coerceIn(0, 100)
@@ -177,6 +189,7 @@ internal fun ReaMicroSettingsHook.openProfileBackgroundPercentDialog(
                         onApply(pendingValue)
                         dialog.dismiss()
                         bumpProfileBackgroundVersion()
+                        activity.recreate()
                     }
                 },
                 settingsDialogButtonParams(activity),

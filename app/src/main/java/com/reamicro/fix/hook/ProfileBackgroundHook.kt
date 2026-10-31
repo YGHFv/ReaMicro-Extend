@@ -2,7 +2,6 @@ package com.reamicro.fix.hook
 import com.reamicro.fix.core.hostAbiMethodByArity
 import com.reamicro.fix.core.hostAbiMethod
 import com.reamicro.fix.core.hostAbiField
-
 import com.reamicro.fix.core.hostMethod
 import com.reamicro.fix.core.hostNameMatches
 import com.reamicro.fix.core.typeMatches
@@ -42,6 +41,7 @@ class ProfileBackgroundHook(
     private val resolvingHostBackground = ThreadLocal<Boolean>()
     private val backgroundCallCount = ThreadLocal<Int>()
     private val fillMaxSizeCallCount = ThreadLocal<Int>()
+    private val profileCardDepth = ThreadLocal<Int>()
     private val methodCache = HashMap<String, Method>()
     private var cachedBitmap: Bitmap? = null
     private var cachedImagePath: String? = null
@@ -112,13 +112,10 @@ class ProfileBackgroundHook(
         )
         XposedBridge.hookMethod(colorBackground, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                if (inProfileLambda.get() != true) return
+                if (inProfileLambda.get() != true && !inB4ProfileCard()) return
                 val snapshot = settingsProvider()
                 if (!canHandleProfileBackground(snapshot)) return
-                val surfaceArgb = colorLongToArgb(param.args[1] as Long)
-                param.args[1] = colorLongFromArgb(
-                    profileBackgroundContainerArgb(surfaceArgb, snapshot.profileBackgroundCardTransparency),
-                )
+                param.args[1] = transparentProfileContainerColor(param.args[1] as Long, snapshot)
             }
         })
         listOf(root, content).forEach(XposedBridge::deoptimize)
@@ -130,19 +127,51 @@ class ProfileBackgroundHook(
             XposedBridge.hookMethod(target, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (inProfileLambda.get() != true || !canUseProfileImageBackground(settingsProvider())) return
+                    enterB4ProfileCard(param)
                     // B4 的卡片玻璃层由独立开关选择；模块图片不再自动触发宿主会员背景的分支。
                     val (index, shift) = slots
                     param.args[index] = true
                     val flags = param.args.lastIndex
                     param.args[flags] = (param.args[flags] as Int) and (7 shl shift).inv()
                 }
+
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    if (param.getObjectExtra(B4_PROFILE_CARD_SCOPE_EXTRA) == true) {
+                        leaveB4ProfileCard()
+                    }
+                }
             })
             XposedBridge.deoptimize(target)
         }
+        val colorCopyAlpha = classLoader.hostClass(HostClasses.Compose.COLOR).hostAbiMethod(
+            "b", Float::class.javaPrimitiveType, Long::class.javaPrimitiveType,
+        )
+        XposedBridge.hookMethod(colorCopyAlpha, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if (!inB4ProfileCard()) return
+                val snapshot = settingsProvider()
+                if (!canHandleProfileBackground(snapshot)) return
+                val opacity = (100 - snapshot.profileBackgroundCardTransparency.coerceIn(0, 100)) / 100f
+                param.args[0] = ((param.args[0] as Float) * opacity).coerceIn(0f, 1f)
+            }
+        })
+        XposedBridge.deoptimize(colorCopyAlpha)
         // B4 分支提前返回，需补回旧个人页已有的背景分隔线隐藏接线。
         installProfileDividerHook()
         XposedBridge.logAlways("$LOG_PREFIX B4 profile content/materialize background hooks installed")
     }
+
+    private fun enterB4ProfileCard(param: XC_MethodHook.MethodHookParam) {
+        profileCardDepth.set((profileCardDepth.get() ?: 0) + 1)
+        param.setObjectExtra(B4_PROFILE_CARD_SCOPE_EXTRA, true)
+    }
+
+    private fun leaveB4ProfileCard() {
+        val depth = (profileCardDepth.get() ?: 1) - 1
+        if (depth > 0) profileCardDepth.set(depth) else profileCardDepth.remove()
+    }
+
+    private fun inB4ProfileCard(): Boolean = (profileCardDepth.get() ?: 0) > 0
 
     private fun installProfileScreenHook() {
         runCatching {
@@ -835,7 +864,7 @@ class ProfileBackgroundHook(
     private fun profileBackgroundHeaderHeightPx(activity: Activity, screenH: Int): Float {
         val density = activity.resources.displayMetrics.density.coerceAtLeast(1f)
         return (PROFILE_BACKGROUND_HEADER_HEIGHT_DP * density)
-            .coerceIn(screenH * 0.24f, screenH * 0.40f)
+            .coerceIn(screenH * 0.36f, screenH * 0.56f)
     }
 
     private fun drawProfileBackgroundClearImage(
@@ -1467,13 +1496,22 @@ class ProfileBackgroundHook(
         return argbWithAlpha(argb, alpha)
     }
 
+    private fun transparentProfileContainerColor(color: Long, snapshot: ModuleSettingsSnapshot): Long =
+        colorLongFromArgb(
+            profileBackgroundContainerArgb(
+                colorLongToArgb(color),
+                snapshot.profileBackgroundCardTransparency,
+            ),
+        )
+
     companion object {
         const val LOG_PREFIX = "ReaMicro LSP profile background"
+        const val B4_PROFILE_CARD_SCOPE_EXTRA = "reamicro.profileBackgroundCardScope"
 
         const val BACKGROUND_ARGB_FALLBACK = 0x80000000.toInt()
         const val PROFILE_BACKGROUND_DARK_PAGE_ARGB_FALLBACK = 0xFF000000.toInt()
         const val PROFILE_BACKGROUND_LIGHT_PAGE_ARGB_FALLBACK = -1
-        const val PROFILE_BACKGROUND_HEADER_HEIGHT_DP = 253f
+        const val PROFILE_BACKGROUND_HEADER_HEIGHT_DP = 360f
         const val PROFILE_BACKGROUND_BANNER_FADE_WIDTH_RATIO = 0.78f
         const val PROFILE_BACKGROUND_BANNER_FADE_MIN_DP = 220f
         const val PROFILE_BACKGROUND_BANNER_FADE_MAX_DP = 360f

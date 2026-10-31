@@ -85,12 +85,18 @@ private fun ReaMicroSettingsHook.renderCellArrow(
         arrow,
         null,
         modifier,
-        colorScheme(composer).longMethod(SURFACE_CONTAINER_HIGHEST_METHOD),
+        discoverArrowColor(composer),
         composer,
         ICON_CHANGED_MASK,
         ICON_DEFAULT_MASK,
     )
 }
+
+private fun ReaMicroSettingsHook.discoverArrowColor(composer: Any): Long =
+    runCatching { colorScheme(composer).longMethod("getOnSurfaceVariant") }
+        .getOrElse {
+            method(THEME_KT_CLASS, "getOnBackgroundVariant", 1).invoke(null, colorScheme(composer)) as Long
+        }
 
 private fun ReaMicroSettingsHook.navigateNextImageVector(): Any? =
     runCatching {
@@ -524,8 +530,6 @@ private const val NAVIGATE_NEXT_METHOD = "getNavigateNext"
 private const val NAVIGATE_NEXT_PARAMETER_COUNT = 1
 
 private const val ICONS_AUTO_MIRRORED_FILLED_OBJECT = "androidx.compose.material.icons.Icons\$AutoMirrored\$Filled"
-
-private const val SURFACE_CONTAINER_HIGHEST_METHOD = "getSurfaceContainerHighest-0d7_KjU"
 
 private const val IMAGE_KT_CLASS = "androidx.compose.foundation.ImageKt"
 private const val IMAGE_METHOD = "Image"
