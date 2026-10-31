@@ -402,9 +402,6 @@ class ReaMicroHookEntry {
                         UnsupportedOperationException(disabledReason))
                     XposedBridge.logAlways("$LOG_PREFIX external feature disabled: ${feature.id}, " +
                         "profile=${com.reamicro.fix.core.HostSymbols.profileId}, reason=$disabledReason")
-                    if (settingsProvider().canUseManualEdit) {
-                        Toast.makeText(activity, disabledReason, Toast.LENGTH_LONG).show()
-                    }
                 }
                 return@forEach
             }
