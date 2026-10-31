@@ -150,7 +150,6 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
             val function2 = drive.cls("kotlin.jvm.functions.Function2")
             val starter = builders.declaredMethods.single {
                 it.name == "j" && it.parameterCount == 5 &&
-                    it.parameterTypes[0].isInstance(scope) &&
                     function2.isAssignableFrom(it.parameterTypes[3]) &&
                     it.parameterTypes[4] == Int::class.javaPrimitiveType
             }.apply { isAccessible = true }
@@ -165,8 +164,9 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
                 drive.targetUnit()
             }
             val function1 = drive.cls(FUNCTION1_CLASS)
-            val register = job.javaClass.methods.single {
-                it.parameterCount == 1 && function1.isAssignableFrom(it.parameterTypes[0])
+            val register = drive.cls("t35").declaredMethods.single {
+                it.name == "C0" && it.parameterCount == 1 &&
+                    function1.isAssignableFrom(it.parameterTypes[0])
             }.apply { isAccessible = true }
             register.invoke(job, completion)
         }.onFailure {
