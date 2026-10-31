@@ -5,8 +5,6 @@ import com.reamicro.fix.core.B2NativeUi
 import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.core.hostAbiField
 import com.reamicro.fix.core.hostAbiMethod
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostMethod
 import com.reamicro.fix.core.hostMethodsNamed
 import com.reamicro.fix.hook.webdav.APP_TOP_BAR_CLASS
 import com.reamicro.fix.hook.webdav.BACKUP_TYPE_WEBDAV
@@ -16,7 +14,6 @@ import com.reamicro.fix.hook.webdav.BOOK_LIBRARY_SHEET_CLASS
 import com.reamicro.fix.hook.webdav.CLOUD_AUTHORIZED_ROW_METHOD
 import com.reamicro.fix.hook.webdav.CLOUD_UNAUTH_ROW_METHOD
 import com.reamicro.fix.hook.webdav.FUNCTION0_CLASS
-import com.reamicro.fix.hook.webdav.FUNCTION1_CLASS
 import com.reamicro.fix.hook.webdav.MATERIAL3_TEXT_CLASS
 import com.reamicro.fix.hook.webdav.WEBDAV_TITLE
 import com.reamicro.fix.xposed.XC_MethodHook
@@ -27,8 +24,6 @@ import java.lang.ref.WeakReference
 internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
     @Volatile private var importScope: WeakReference<Any>? = null
     @Volatile private var importIntentReceiver: WeakReference<Any>? = null
-    @Volatile private var importSheetState: WeakReference<Any>? = null
-    private val importSheetCompositionDepth = ThreadLocal<Int>()
     private val ui = B2NativeUi(drive.classLoader)
     private val nativeStorageTitles = setOf("百度网盘", "阿里云盘", "115网盘", "本地存储")
 
@@ -47,25 +42,6 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
                 // 工作表内容延后组合，外层返回时清 ThreadLocal 会丢失实际导航上下文。
                 importScope = if (param.args[2] == true) WeakReference(param.args[0]) else null
                 importIntentReceiver = if (param.args[2] == true) WeakReference(param.args[1]) else null
-                importSheetCompositionDepth.set((importSheetCompositionDepth.get() ?: 0) + 1)
-            }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val next = (importSheetCompositionDepth.get() ?: 0) - 1
-                if (next <= 0) importSheetCompositionDepth.remove()
-                else importSheetCompositionDepth.set(next)
-            }
-        })
-        val sheetStateClass = drive.classLoader.hostClass("androidx.compose.material3.SheetState")
-        val modalSheet = drive.cls("fgd").declaredMethods.single {
-            it.name == "b" && it.parameterCount in 17..20 &&
-                sheetStateClass.isAssignableFrom(it.parameterTypes[2])
-        }
-        XposedBridge.hookMethod(modalSheet, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if ((importSheetCompositionDepth.get() ?: 0) <= 0) return
-                val state = param.args?.getOrNull(2) ?: return
-                importSheetState = WeakReference(state)
             }
         })
         val local = sheet.hostMethodsNamed(BOOK_LIBRARY_LOCAL_METHOD).single { it.parameterCount == 3 }
@@ -124,7 +100,6 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
             }
         })
         XposedBridge.deoptimize(content)
-        XposedBridge.deoptimize(modalSheet)
         XposedBridge.deoptimize(local)
     }
 
@@ -132,48 +107,9 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
         importScope = null
         val receiver = importIntentReceiver?.get()
         importIntentReceiver = null
-        val sheetState = currentImportSheetState()
-        if (sheetState == null) {
-            dismissImportMenu(receiver)
-            drive.navigateStorage(scope, kind)
-            return
-        }
-        runCatching {
-            val hide = sheetState.javaClass.hostMethod(
-                "hide",
-                drive.classLoader.hostClass("kotlin.coroutines.Continuation"),
-            )
-            val suspendHide = drive.functionProxy("B4ImportSheetHide", "kotlin.jvm.functions.Function2") { args ->
-                hide.invoke(sheetState, args?.getOrNull(1))
-            }
-            val builders = drive.cls("wvd")
-            val function2 = drive.cls("kotlin.jvm.functions.Function2")
-            val starter = builders.declaredMethods.single {
-                it.name == "j" && it.parameterCount == 5 &&
-                    function2.isAssignableFrom(it.parameterTypes[3]) &&
-                    it.parameterTypes[4] == Int::class.javaPrimitiveType
-            }.apply { isAccessible = true }
-            val job = starter.invoke(null, scope, null, null, suspendHide, 3)
-            val completion = drive.functionProxy("B4AfterImportSheetHidden", FUNCTION1_CLASS) { args ->
-                val error = args?.firstOrNull() as? Throwable
-                if (error != null) {
-                    XposedBridge.log("ReaMicro B4 import sheet hide failed: ${error.stackTraceToString()}")
-                }
-                dismissImportMenu(receiver)
-                drive.navigateStorage(scope, kind)
-                drive.targetUnit()
-            }
-            val function1 = drive.cls(FUNCTION1_CLASS)
-            val register = drive.cls("t35").declaredMethods.single {
-                it.name == "C0" && it.parameterCount == 1 &&
-                    function1.isAssignableFrom(it.parameterTypes[0])
-            }.apply { isAccessible = true }
-            register.invoke(job, completion)
-        }.onFailure {
-            XposedBridge.log("ReaMicro B4 import sheet launch failed: ${it.stackTraceToString()}")
-            dismissImportMenu(receiver)
-            drive.navigateStorage(scope, kind)
-        }
+        // 宿主工作表可见性由 HideLibrary MVI 状态控制；仅跑 SheetState 动画会在返回时重新显示。
+        dismissImportMenu(receiver)
+        drive.navigateStorage(scope, kind)
     }
 
     private fun dismissImportMenu(receiver: Any?) {
@@ -189,11 +125,6 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
         }.onFailure {
             XposedBridge.log("ReaMicro B4 import menu dismiss failed: ${it.stackTraceToString()}")
         }
-    }
-
-    private fun currentImportSheetState(): Any? {
-        val expected = drive.classLoader.hostClass("androidx.compose.material3.SheetState")
-        return importSheetState?.get()?.takeIf(expected::isInstance)
     }
 
     private fun divider(composer: Any) {
