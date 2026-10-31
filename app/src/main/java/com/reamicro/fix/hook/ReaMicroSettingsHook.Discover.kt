@@ -189,7 +189,7 @@ private fun ReaMicroSettingsHook.renderDiscoverKindRow(
         renderDiscoverKindExpandButton(inner)
         targetUnit()
     }
-    val mod = paddingSides(discoverFillMaxWidth(modifierInstance()), 20, 0, 8, 0)
+    val mod = paddingSides(discoverFillMaxWidth(modifierInstance()), 20, 0, 8, -4)
     discoverRow(mod, row, composer)
 }
 
