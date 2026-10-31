@@ -255,9 +255,9 @@ private fun ReaderHook.selectionMenuCellWidthDp(actions: List<Any>): Int {
     } ?: 0
     // 普通 B4 菜单收紧横向留白，长标题仍按内容扩宽，紧凑模式和旧版保持原样。
     if (HostSymbols.abiProfileId == "2.3.3-b4" && !settingsProvider().canUseCompactReaderSelectionMenu) {
-        // 原生浮窗最大宽度为 256dp；四列时 58dp 单元格加间距和内边距刚好可用，
-        // 避免七个动作因 60dp 下限被挤成 3 + 3 + 1。
-        return (maxTitleWidth + 30).coerceIn(58, 100)
+        // 浮窗在屏幕边缘实测只给内容约 234dp；四列时 53dp 单元格加间距和内边距可用，
+        // 避免七个动作因宿主二次限宽被挤成 3 + 3 + 1。
+        return (maxTitleWidth + 25).coerceIn(53, 100)
     }
     return (maxTitleWidth + 42).coerceIn(72, 112)
 }
