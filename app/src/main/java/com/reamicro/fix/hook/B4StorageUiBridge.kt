@@ -4,6 +4,8 @@ import com.reamicro.fix.cloud.webdav.hasWebDavLogin
 import com.reamicro.fix.core.B2NativeUi
 import com.reamicro.fix.core.HostCoroutines
 import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostAbiField
+import com.reamicro.fix.core.hostAbiMethod
 import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.core.hostMethod
 import com.reamicro.fix.core.hostMethodsNamed
@@ -24,6 +26,7 @@ import java.lang.ref.WeakReference
 /** B4 已内联旧列表 lambda；在仍稳定的原生行和顶栏边界补回存储入口。 */
 internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
     @Volatile private var importScope: WeakReference<Any>? = null
+    @Volatile private var importIntentReceiver: WeakReference<Any>? = null
     @Volatile private var importSheetState: WeakReference<Any>? = null
     private val importSheetCompositionDepth = ThreadLocal<Int>()
     private val ui = B2NativeUi(drive.classLoader)
@@ -43,6 +46,7 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 // 工作表内容延后组合，外层返回时清 ThreadLocal 会丢失实际导航上下文。
                 importScope = if (param.args[2] == true) WeakReference(param.args[0]) else null
+                importIntentReceiver = if (param.args[2] == true) WeakReference(param.args[1]) else null
                 importSheetCompositionDepth.set((importSheetCompositionDepth.get() ?: 0) + 1)
             }
 
@@ -126,8 +130,11 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
 
     private fun openImport(scope: Any, kind: Int) {
         importScope = null
+        val receiver = importIntentReceiver?.get()
+        importIntentReceiver = null
         val sheetState = currentImportSheetState()
         if (sheetState == null) {
+            dismissImportMenu(receiver)
             drive.navigateStorage(scope, kind)
             return
         }
@@ -144,9 +151,28 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
                 XposedBridge.log("ReaMicro B4 import sheet hide failed: ${it.stackTraceToString()}")
             }
             drive.activityProvider()?.runOnUiThread {
+                dismissImportMenu(receiver)
                 drive.navigateStorage(scope, kind)
-            } ?: drive.navigateStorage(scope, kind)
+            } ?: run {
+                dismissImportMenu(receiver)
+                drive.navigateStorage(scope, kind)
+            }
         }, "ReaMicroImportSheetHide").start()
+    }
+
+    private fun dismissImportMenu(receiver: Any?) {
+        if (receiver == null) return
+        runCatching {
+            val receiverClass = drive.cls("app.zhendong.reamicro.arch.IntentReceiver")
+            val intentClass = drive.cls("app.zhendong.reamicro.arch.UiIntent")
+            check(receiverClass.isInstance(receiver))
+            val hideIntentClass = drive.cls("sd4")
+            check(intentClass.isAssignableFrom(hideIntentClass))
+            val hideIntent = hideIntentClass.hostAbiField("a").get(null)
+            receiverClass.hostAbiMethod("h", intentClass).invoke(receiver, hideIntent)
+        }.onFailure {
+            XposedBridge.log("ReaMicro B4 import menu dismiss failed: ${it.stackTraceToString()}")
+        }
     }
 
     private fun currentImportSheetState(): Any? {
