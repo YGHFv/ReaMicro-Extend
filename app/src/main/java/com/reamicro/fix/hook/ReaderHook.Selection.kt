@@ -121,7 +121,7 @@ private fun ReaderHook.renderB4WrappedSelectionMenu(
     val nativeUi = B2NativeUi(classLoader)
     val rows = actions.chunked(maxPerRow.coerceAtLeast(1))
     val cellWidth = selectionMenuCellWidthDp(actions)
-    val contentWidth = (maxPerRow.coerceAtLeast(1) * cellWidth + (maxPerRow - 1) * 2 + 16)
+    val contentWidth = (maxPerRow.coerceAtLeast(1) * cellWidth + 16)
         .coerceAtMost(320)
     val contentModifier = nativeUi.padding(
         // 总宽已经包含两侧 8dp，先限宽再内缩，避免 padding 把右侧再撑大 16dp。
@@ -148,10 +148,13 @@ private fun ReaderHook.renderB4WrappedSelectionMenu(
                     },
                 )
                 nativeUi.row(
-                    nativeUi.modifier(),
+                    nativeUi.width(
+                        nativeUi.modifier(),
+                        nativeUi.dp(maxPerRow.coerceAtLeast(1) * cellWidth),
+                    ),
                     rowContent,
                     columnComposer,
-                    nativeUi.spacedBy(2f),
+                    null,
                     nativeUi.centerVertically(),
                 )
             }
@@ -275,7 +278,7 @@ private fun ReaderHook.selectionMenuCellWidthDp(actions: List<Any>): Int {
     } ?: 0
     // 普通 B4 菜单收紧横向留白，长标题仍按内容扩宽，紧凑模式和旧版保持原样。
     if (HostSymbols.abiProfileId == "2.3.3-b4" && !settingsProvider().canUseCompactReaderSelectionMenu) {
-        return (maxTitleWidth + 18).coerceIn(46, 100)
+        return (maxTitleWidth + 18).coerceIn(44, 100)
     }
     return (maxTitleWidth + 42).coerceIn(72, 112)
 }
