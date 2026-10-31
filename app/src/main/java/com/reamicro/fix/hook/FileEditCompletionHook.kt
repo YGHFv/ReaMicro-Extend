@@ -10,6 +10,7 @@ import android.os.Looper
 import android.widget.Toast
 import com.reamicro.fix.core.ComposeInterop
 import com.reamicro.fix.core.HostClasses
+import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.core.hostNameMatches
 import com.reamicro.fix.core.typeMatches
@@ -588,6 +589,11 @@ class FileEditCompletionHook(
         middleEllipsis: Boolean = false,
         nativeTrailingGlyph: String? = null,
     ) {
+        if (HostSymbols.profileId == "2.3.3" &&
+            onClickName in setOf("EditBookTitle", "EditBookAuthor", "CopyBookIdentifier")) {
+            renderReleaseMetadataRow(label, value, composer, onClickName, onClick)
+            return
+        }
         if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4" &&
             (secondaryValue != null || nativeTrailingGlyph == "\u276F")) {
             renderB4SyncActionRow(label, value, secondaryValue, afterValueIcon, composer, onClickName, onClick)
@@ -687,6 +693,41 @@ class FileEditCompletionHook(
             384,
             0,
         )
+    }
+
+    /** 复用宿主矢量图标，取值独占弹性空间，避免字形铅笔挤压左侧标签。 */
+    private fun renderReleaseMetadataRow(
+        label: String, value: String, composer: Any, name: String, onClick: () -> Unit,
+    ) {
+        val callback = functionProxy(name, FUNCTION0_CLASS) { onClick(); targetUnit() }
+        val modifier = nativeUi.padding(
+            nativeUi.clickable(nativeUi.fillWidth(nativeUi.modifier()), callback),
+            nativeUi.dp(16), nativeUi.dp(15), nativeUi.dp(16), nativeUi.dp(15),
+        )
+        val content = functionProxy("${name}NativeRow", FUNCTION3_CLASS) { args ->
+            val scope = requireNotNull(args?.getOrNull(0))
+            val inner = requireNotNull(args?.getOrNull(1))
+            val scheme = nativeUi.theme(inner, "getColorScheme")
+            val grey = nativeThemeOnBackgroundVariant(scheme)
+            nativeText(label, inner, grey, NATIVE_VALUE_STYLE)
+            nativeUi.spacer(nativeUi.width(nativeUi.modifier(), nativeUi.dp(12)), inner)
+            val typography = nativeUi.theme(inner, "getTypography")
+            val endAlign = cls("androidx.compose.ui.text.style.TextAlign")
+                .getDeclaredConstructor(Int::class.javaPrimitiveType).newInstance(6)
+            nativeUi.text(com.reamicro.fix.core.NativeMetadataRowArguments.text(
+                value, nativeUi.weight(scope, nativeUi.modifier()), nativeLong(scheme, "getOnBackground"),
+                endAlign, nativeAny(typography, NATIVE_VALUE_STYLE), inner,
+            ))
+            nativeUi.spacer(nativeUi.width(nativeUi.modifier(), nativeUi.dp(10)), inner)
+            val copy = name == "CopyBookIdentifier"
+            val vector = cls(if (copy) "drc" else "bgd")
+                .getDeclaredMethod(if (copy) "l" else "d").invoke(null)
+            val size = nativeUi.height(nativeUi.width(nativeUi.modifier(), nativeUi.dp(20)), nativeUi.dp(20))
+            method(ICON_KT_CLASS, ICON_METHOD, 7).invoke(null, vector,
+                if (copy) "复制标识" else "编辑$label", size, grey, inner, 0, 0)
+            targetUnit()
+        }
+        nativeUi.row(modifier, content, composer)
     }
 
     private fun renderDetailsDivider(composer: Any) {

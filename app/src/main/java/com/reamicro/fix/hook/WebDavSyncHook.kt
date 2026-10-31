@@ -2,10 +2,16 @@ package com.reamicro.fix.hook
 
 import android.app.Activity
 import android.app.Dialog
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.RippleDrawable
+import android.content.res.ColorStateList
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
 import android.view.WindowManager
+import android.view.Gravity
+import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -319,30 +325,42 @@ internal class WebDavSyncHook(
 
     private fun renderConfiguration(activity: Activity, current: Any, values: Map<String, Any?>) {
         val kit = ModuleUiKit(activity)
-        val dialog = Dialog(activity)
+        val dialog = Dialog(activity).apply { requestWindowFeature(android.view.Window.FEATURE_NO_TITLE) }
         dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         val connected = values["s3_sync_bucket"] == WebDavSyncProtocol.BUCKET
         val fields = LinkedHashMap<String, EditText>()
+        fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
         val form = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            val pad = (18 * resources.displayMetrics.density).toInt()
+            val pad = dp(24)
             setPadding(pad, pad, pad, pad)
-            background = kit.rounded(kit.palette.rowBackground, 18f)
-            addView(kit.textView("WebDAV 同步", 20f, kit.palette.title, true))
-            addView(kit.textView("同步书架、书籍、封面与阅读数据。配置仅保存在本机，不上传到阅微账号；其他设备需分别配置。", 13f, kit.palette.body))
+            background = kit.rounded(kit.palette.rowBackground, 28f)
+            addView(kit.textView("WebDAV 同步", 22f, kit.palette.title, true))
+            addView(kit.textView("同步书架、书籍、封面与阅读数据。", 14f, kit.palette.body).apply {
+                setPadding(0, dp(10), 0, dp(6))
+            })
+            addView(kit.textView("配置仅保存在本机，各设备需单独设置。", 12f, kit.palette.body))
             listOf("地址" to "s3_sync_endpoint", "用户名" to "s3_sync_access_key", "密码" to "s3_sync_secret_key").forEach { (label, key) ->
-                addView(kit.textView(label, 14f, kit.palette.title))
+                addView(kit.textView(label, 13f, kit.palette.body).apply { setPadding(dp(4), dp(18), 0, dp(8)) })
                 val stored = if (connected) values[key] as? String ?: "" else ""
                 val edit = EditText(activity).apply {
                     setSingleLine(true)
                     inputType = if (label == "密码") InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                        else if (label == "地址") InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
                         else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                     setText(stored.takeUnless { it == WebDavSyncProtocol.ANONYMOUS } ?: "")
-                    setTextColor(kit.palette.body)
+                    textSize = 15f
+                    includeFontPadding = false
+                    setPadding(dp(16), dp(14), dp(16), dp(14))
+                    minimumHeight = dp(52)
+                    imeOptions = if (label == "密码") android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+                        else android.view.inputmethod.EditorInfo.IME_ACTION_NEXT
+                    setTextColor(kit.palette.title)
                     setHintTextColor(kit.palette.body)
                     hint = if (label == "地址") "https://example.com/dav/同步目录" else "匿名服务可留空"
                     importantForAutofill = android.view.View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
-                    background = kit.rounded(kit.palette.pageBackground, 8f)
+                    contentDescription = "WebDAV $label"
+                    background = kit.rounded(kit.palette.pageBackground, 14f)
                 }
                 fields[label] = edit
                 addView(edit)
@@ -350,7 +368,8 @@ internal class WebDavSyncHook(
         }
         val busy = AtomicBoolean()
         val dismissed = AtomicBoolean()
-        val save = kit.button("验证并启用") {
+        lateinit var save: android.widget.TextView
+        save = kit.button("验证并启用") {
             if (busy.get()) return@button
             val url = runCatching { WebDavSyncProtocol.baseUrl(fields.getValue("地址").text.toString()) }
                 .getOrElse { toast(it.message ?: "WebDAV 地址无效"); return@button }
@@ -365,6 +384,9 @@ internal class WebDavSyncHook(
                 "s3_sync_prefix" to "reamicro", "s3_sync_cloud_config_enabled" to false,
             )
             busy.set(true)
+            save.text = "正在验证…"
+            save.isEnabled = false
+            fields.values.forEach { it.isEnabled = false }
             worker.execute {
                 runCatching {
                     check(settingsProvider().canRunWebDavSync) { "同步扩展已关闭" }
@@ -384,16 +406,42 @@ internal class WebDavSyncHook(
                     }
                 }.onSuccess { main.post { dialog.dismiss(); toast("WebDAV 已启用，返回书架即可使用原生同步") } }
                     .onFailure { error -> toast(error.message ?: "WebDAV 验证失败，原配置未修改") }
-                busy.set(false)
+                main.post {
+                    busy.set(false)
+                    if (!dismissed.get()) {
+                        save.text = "验证并启用"
+                        save.isEnabled = true
+                        fields.values.forEach { it.isEnabled = true }
+                    }
+                }
             }
         }
-        form.addView(save)
-        form.addView(kit.button("取消", ModuleUiKit.Role.Neutral) { dialog.dismiss() })
-        dialog.setContentView(ScrollView(activity).apply { addView(form) })
+        val actions = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            setPadding(0, dp(24), 0, 0)
+        }
+        val cancel = kit.button("取消", ModuleUiKit.Role.Neutral) { dialog.dismiss() }
+        listOf(cancel, save).forEach { button ->
+            val primary = button === save
+            button.background = RippleDrawable(
+                ColorStateList.valueOf(colorWithAlpha(kit.palette.title, 28)),
+                kit.rounded(if (primary) kit.palette.primarySoft else kit.palette.pageBackground, 24f), null)
+            button.setTextColor(if (primary) kit.palette.primaryText else kit.palette.neutralText)
+            button.isFocusable = true
+            button.minHeight = dp(48)
+            actions.addView(button, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, if (primary) 1.4f else 1f
+            ).apply { if (primary) marginStart = dp(12) })
+        }
+        form.addView(actions)
+        dialog.setContentView(ScrollView(activity).apply { isFillViewport = true; addView(form) })
         dialog.setOnDismissListener { dismissed.set(true); configuring.set(false) }
         dialog.show()
         dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        dialog.window?.setLayout((activity.resources.displayMetrics.widthPixels * .92f).toInt(),
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        dialog.window?.setLayout(minOf(dp(520), (activity.resources.displayMetrics.widthPixels * .9f).toInt()),
             WindowManager.LayoutParams.WRAP_CONTENT)
     }
 
