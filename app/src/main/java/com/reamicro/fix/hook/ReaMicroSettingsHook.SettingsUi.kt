@@ -830,6 +830,12 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
                 onClick = { openDexKitScanDialog() },
             ),
             ActionRow(
+                key = "about_completion_hot_reload",
+                title = "API102 热重载",
+                subtitle = "原地装载模块代码，不退出阅微、不重建 Activity",
+                onClick = { activityProvider()?.let(com.reamicro.fix.reload.HostHotReload::request) },
+            ),
+            ActionRow(
                 key = "about_completion_export_log",
                 title = "\u5bfc\u51fa\u65e5\u5fd7",
                 subtitle = "\u5c06\u6a21\u5757\u8fd0\u884c\u65e5\u5fd7\u5bfc\u51fa\u5230\u4e0b\u8f7d\u76ee\u5f55",

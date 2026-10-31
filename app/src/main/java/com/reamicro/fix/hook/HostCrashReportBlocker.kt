@@ -22,6 +22,10 @@ internal object HostCrashReportBlocker {
 
     internal fun isBlockingEnabled(): Boolean = HostCrashUploadSettings.shouldBlock(preferences)
 
+    internal fun attachExistingApplication(application: Application) {
+        preferences = application.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE)
+    }
+
     internal enum class ResultKind { VOID, PROVIDER_READY, TRANSPORT_SUCCESS }
     internal data class Target(val className: String, val methodName: String, val result: ResultKind)
     internal val targets = listOf(

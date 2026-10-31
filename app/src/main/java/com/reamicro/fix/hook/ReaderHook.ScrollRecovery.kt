@@ -83,15 +83,15 @@ internal fun ReaderHook.isPreviousScrollCrashPending(): Boolean {
 internal fun ReaderHook.restoreTranslateFlipStyleIfScrollCrashed(session: Any, source: String): Boolean {
     if (!isPreviousScrollCrashPending()) return false
     if (!scrollCrashRecoveryInFlight.compareAndSet(false, true)) return true
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         try {
-            if (currentSessionRef?.get() !== session) return@Thread
-            val flow = callNoArg(session, "getFlipStyleFlow") ?: return@Thread
+            if (currentSessionRef?.get() !== session) return@thread
+            val flow = callNoArg(session, "getFlipStyleFlow") ?: return@thread
             val continuation = classLoader.loadClass("kotlin.coroutines.Continuation")
             val first = classLoader.loadClass("kotlinx.coroutines.flow.FlowKt")
                 .hostMethod("first", classLoader.loadClass("kotlinx.coroutines.flow.Flow"), continuation)
             val style = (invokeSelectionHostSuspend { first.invoke(null, flow, it) } as? Number)?.toInt()
-            if (!mayApplyScrollRecovery(style, currentSessionRef?.get() === session)) return@Thread
+            if (!mayApplyScrollRecovery(style, currentSessionRef?.get() === session)) return@thread
             forceTranslateFlipStyle(session)
             val activity = activityProvider()
             activity?.runOnUiThread {

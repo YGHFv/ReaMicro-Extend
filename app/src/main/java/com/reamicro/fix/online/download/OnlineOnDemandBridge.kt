@@ -100,7 +100,7 @@ internal object OnlineOnDemandBridge {
                 }
             }
         }
-        Thread({
+        com.reamicro.fix.reload.ModuleResources.thread({
             val result = runCatching { action(request) }
                 .fold(
                     onSuccess = { OnlineOnDemandChapterResult(request) },

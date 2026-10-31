@@ -21,7 +21,7 @@ internal fun ReaMicroSettingsHook.openDexKitScanDialog() {
     showDexKitDialog(activity, HostAutoScanner.snapshot(), onRescan = {
         if (DexKitUpdateScan.isBusy() || !dexKitRescanning.compareAndSet(false, true)) return@showDexKitDialog
         Toast.makeText(activity, "正在扫描，结果将自动显示", Toast.LENGTH_SHORT).show()
-        Thread({
+        com.reamicro.fix.reload.ModuleResources.thread({
             try {
                 HostAutoScanner.scan(activity.applicationInfo.sourceDir, activity.applicationInfo.dataDir, force = true)
             } finally {
@@ -78,20 +78,18 @@ private fun ReaMicroSettingsHook.showDexKitDialog(
         notice.message,
     )
     lines.forEach { line -> card.addView(settingsDialogStatus(activity, line, colors)) }
-    if (notice.restartRequired) {
-        card.addView(settingsDialogButton(activity, "重启阅微", colors).apply {
-            setOnClickListener {
-                if (HostRestart.request(activity)) {
-                    dialog.dismiss()
-                    onClose?.invoke()
-                }
-            }
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = settingsDp(activity, 8)
-        })
-    }
     if (!scanning) {
         val actions = settingsDialogActions(activity)
+        if (notice.restartRequired) {
+            actions.addView(settingsDialogButton(activity, "重启阅微", colors).apply {
+                setOnClickListener {
+                    if (HostRestart.request(activity)) {
+                        dialog.dismiss()
+                        onClose?.invoke()
+                    }
+                }
+            }, settingsDialogButtonParams(activity))
+        }
         if (onRescan != null) actions.addView(
             settingsDialogButton(activity, "重新扫描", colors, SettingsDialogButtonRole.Neutral).apply {
                 setOnClickListener {

@@ -23,7 +23,7 @@ class OnlineCompletionNotificationService : Service() {
     private val activeNotifications = linkedMapOf<Int, Notification>()
     private val activeNotificationKeys = linkedMapOf<Int, String>()
     private var wakeLock: PowerManager.WakeLock? = null
-    private val wakeLockHandler = Handler(Looper.getMainLooper())
+    private val wakeLockHandler = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
     private val wakeLockRenewal = object : Runnable {
         override fun run() {
             if (foregroundId == 0) return

@@ -18,7 +18,7 @@ internal object LocalTaskBridgeRuntime {
     const val ERROR = "bridge_error"
     const val LEGACY_READY = 1
     const val PROVIDER_EXCHANGE = "local-task-exchange"
-    private val worker = ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS,
+    private val worker = com.reamicro.fix.reload.ModuleResources.pool(1, 1, 30, TimeUnit.SECONDS,
         LinkedBlockingQueue<Runnable>(8), { runnable -> Thread(runnable, "ReaMicroLocalTaskBridge").apply { isDaemon = true } })
         .apply { allowCoreThreadTimeOut(true) }
 

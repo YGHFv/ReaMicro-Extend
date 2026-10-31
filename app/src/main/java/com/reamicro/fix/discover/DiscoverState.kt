@@ -8,7 +8,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 internal object DiscoverState {
 
-    private val executor = Executors.newSingleThreadExecutor { runnable ->
+    private val executor = com.reamicro.fix.reload.ModuleResources.pool(1) { runnable ->
         Thread(runnable, "ReaMicroDiscover").apply { isDaemon = true }
     }
 

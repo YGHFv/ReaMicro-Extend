@@ -53,7 +53,7 @@ internal class B4BookImageSheetUi(private val loader: ClassLoader) {
 
     fun hide(scope: Any, sheetState: Any, finished: (Boolean, Throwable?) -> Unit) {
         // 挂起隐藏必须在宿主主调度器执行；等待放在工作线程，不阻塞 Compose 主线程。
-        Thread {
+        com.reamicro.fix.reload.ModuleResources.thread {
             val result = runCatching {
                 val hide = sheetState.javaClass.hostMethod("hide", loader.hostClass("kotlin.coroutines.Continuation"))
                 val context = XposedHelpers.callMethod(scope, "getCoroutineContext")

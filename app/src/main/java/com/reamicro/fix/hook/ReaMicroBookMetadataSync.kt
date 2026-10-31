@@ -75,7 +75,7 @@ internal object ReaMicroBookMetadataSync {
     fun syncBookMetadataAsync(repository: Any?, book: Any?, patch: BookMetadataPatch, delayMs: Long = 0L) {
         if (book == null) return
         val targetRepository = repository ?: currentBookshelfRepository() ?: return
-        Thread {
+        com.reamicro.fix.reload.ModuleResources.thread {
             if (delayMs > 0L) runCatching { Thread.sleep(delayMs) }
             syncBookMetadata(targetRepository, book, patch)
         }.apply { name = "ReaMicro-BookMetadataSync" }.start()

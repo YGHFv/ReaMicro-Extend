@@ -22,7 +22,7 @@ object ModuleLogBuffer {
 
     private val lock = Any()
     private val entries = ArrayDeque<ModuleLogEntry>()
-    private val io = Executors.newSingleThreadExecutor { runnable ->
+    private val io = com.reamicro.fix.reload.ModuleResources.pool(1) { runnable ->
         Thread(runnable, "ReaMicroLogWriter").apply { isDaemon = true }
     }
 

@@ -1413,7 +1413,7 @@ internal fun WebDavDriveHook.hookHomeWebDavSearch() {
                     param.thisObject,
                     onlineCompletionPendingSearchGroups(query),
                 )
-                Thread({
+                com.reamicro.fix.reload.ModuleResources.thread({
                     runCatching {
                         if (query.isNotBlank()) {
                             Thread.sleep(HOME_SEARCH_DEBOUNCE_MS)
@@ -1421,7 +1421,7 @@ internal fun WebDavDriveHook.hookHomeWebDavSearch() {
                         }
                         if (query.isBlank()) {
                             if (onlineCompletionHomeSearchSeq.get() != onlineSeq) return@runCatching
-                            Handler(Looper.getMainLooper()).post {
+                            com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                                 if (onlineCompletionHomeSearchSeq.get() == onlineSeq) {
                                     updateHomeOnlineCompletionSearchResults(param.thisObject, emptyList())
                                 }
@@ -1430,7 +1430,7 @@ internal fun WebDavDriveHook.hookHomeWebDavSearch() {
                         }
                         val onlineResults = searchOnlineCompletionSourcesProgressively(query) { snapshot ->
                             if (onlineCompletionHomeSearchSeq.get() != onlineSeq) return@searchOnlineCompletionSourcesProgressively
-                            Handler(Looper.getMainLooper()).post {
+                            com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                                 if (onlineCompletionHomeSearchSeq.get() == onlineSeq) {
                                     updateHomeOnlineCompletionSearchResults(param.thisObject, snapshot)
                                 }
@@ -1441,7 +1441,7 @@ internal fun WebDavDriveHook.hookHomeWebDavSearch() {
                         XposedBridge.log("$LOG_PREFIX online completion home search failed: ${it.stackTraceToString()}")
                     }
                 }, "ReaMicroOnlineCompletionHomeSearch").start()
-                Thread({
+                com.reamicro.fix.reload.ModuleResources.thread({
                     runCatching {
                         if (query.isNotBlank()) {
                             Thread.sleep(HOME_SEARCH_DEBOUNCE_MS)
@@ -1455,7 +1455,7 @@ internal fun WebDavDriveHook.hookHomeWebDavSearch() {
                         if (webDavHomeSearchSeq.get() != seq) return@runCatching
                         val localSnapshot = lastHomeSearchLocalResults
                         rememberHomeSearchSnapshot(webDavResults, localSnapshot)
-                        Handler(Looper.getMainLooper()).post {
+                        com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                             if (webDavHomeSearchSeq.get() == seq) {
                                 updateHomeWebDavSearchResults(param.thisObject, webDavResults, localSnapshot, null)
                             }
@@ -1467,7 +1467,7 @@ internal fun WebDavDriveHook.hookHomeWebDavSearch() {
                         XposedBridge.log("$LOG_PREFIX WebDAV home search failed: ${it.stackTraceToString()}")
                     }
                 }, "ReaMicroWebDavHomeSearch").start()
-                Thread({
+                com.reamicro.fix.reload.ModuleResources.thread({
                     runCatching {
                         if (query.isNotBlank()) {
                             Thread.sleep(HOME_SEARCH_DEBOUNCE_MS)
@@ -1481,7 +1481,7 @@ internal fun WebDavDriveHook.hookHomeWebDavSearch() {
                         if (localLibraryHomeSearchSeq.get() != localSeq) return@runCatching
                         val webDavSnapshot = lastHomeSearchWebDavResults
                         rememberHomeSearchSnapshot(webDavSnapshot, localResults)
-                        Handler(Looper.getMainLooper()).post {
+                        com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                             if (
                                 webDavHomeSearchSeq.get() == seq &&
                                 localLibraryHomeSearchSeq.get() == localSeq
@@ -2080,7 +2080,7 @@ internal fun WebDavDriveHook.hookWebDavCloudTap() {
                 }
                 if (typeInt != BACKUP_TYPE_WEBDAV) return
 
-                Thread({
+                com.reamicro.fix.reload.ModuleResources.thread({
                     runCatching {
                         val workerManager = viewModel.javaClass.methods.first {
                             it.hostNameMatches("getWorkerManager") && it.parameterTypes.isEmpty()

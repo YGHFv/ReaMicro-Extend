@@ -65,7 +65,8 @@ object XposedBridge {
 
             .setExceptionMode(XposedInterface.ExceptionMode.PASSTHROUGH)
             .intercept { chain ->
-                interceptHook(
+                if (!com.reamicro.fix.reload.ModuleResources.enterHook()) return@intercept chain.proceed()
+                try { interceptHook(
                     callback,
                     HookChain(
                         executable = chain.executable,
@@ -73,7 +74,7 @@ object XposedBridge {
                         args = chain.args.toTypedArray(),
                         proceed = { args -> chain.proceed(args) },
                     ),
-                )
+                ) } finally { com.reamicro.fix.reload.ModuleResources.leaveHook() }
             }
     }
 

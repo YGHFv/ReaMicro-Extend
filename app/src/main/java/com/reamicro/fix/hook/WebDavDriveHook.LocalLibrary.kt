@@ -110,8 +110,8 @@ internal fun WebDavDriveHook.scheduleLocalLibrarySearchRefresh(
     localSeq: Long,
     delayMs: Long,
 ) {
-    Handler(Looper.getMainLooper()).postDelayed({
-        Thread({
+    com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).postDelayed({
+        com.reamicro.fix.reload.ModuleResources.thread({
             runCatching {
                 if (
                     webDavHomeSearchSeq.get() != webDavSeq ||
@@ -126,7 +126,7 @@ internal fun WebDavDriveHook.scheduleLocalLibrarySearchRefresh(
                     webDavHomeSearchSeq.get() != webDavSeq ||
                     localLibraryHomeSearchSeq.get() != localSeq
                 ) return@runCatching
-                Handler(Looper.getMainLooper()).post {
+                com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                     if (
                         webDavHomeSearchSeq.get() == webDavSeq &&
                         localLibraryHomeSearchSeq.get() == localSeq
@@ -163,7 +163,7 @@ internal fun WebDavDriveHook.enqueueLocalLibraryImport(workerManager: Any, book:
     )
     val handle = newNativeWorkHandle(id, requireNotNull(stateFlow))
 
-    Thread({
+    com.reamicro.fix.reload.ModuleResources.thread({
         runCatching {
             val entry = localLibraryEntry(path) ?: error("本地书库文件不存在")
             val context = currentContext() ?: error("Android context not available")
@@ -394,7 +394,7 @@ internal fun WebDavDriveHook.refreshLocalLibrary(path: String = currentLocalLibr
 }
 
 internal fun WebDavDriveHook.refreshLocalLibraryAsync(path: String = currentLocalLibraryBrowseDir(), force: Boolean = false) {
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         refreshLocalLibrary(path, force)
     }.start()
 }
@@ -475,7 +475,7 @@ internal fun WebDavDriveHook.ensureLocalLibrarySearchIndexAsync(rootsKey: String
         if (localLibrarySearchIndexBuilding) return
         localLibrarySearchIndexBuilding = true
     }
-    Thread({
+    com.reamicro.fix.reload.ModuleResources.thread({
         runCatching {
             buildLocalLibrarySearchIndex(
                 rootsKey = rootsKey,

@@ -263,7 +263,7 @@ class BookDetailsAssociationActionHook(
     private fun fixAssociationCover(details: DetailContext) {
         val bookId = details.bookId
         val activity = activityProvider()
-        Thread {
+        com.reamicro.fix.reload.ModuleResources.thread {
             val result = runCatching {
 
                 val repository = details.repositoryRef.get() ?: error("BookRepository unavailable")

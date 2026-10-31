@@ -18,7 +18,7 @@ object HostCoroutines {
     private val carriers = HashMap<Pair<ClassLoader, String>, Constructor<*>>()
     private val deadlines = ScheduledThreadPoolExecutor(1) { task ->
         Thread(task, "ReaMicroHostCoroutineDeadline").apply { isDaemon = true }
-    }.apply { removeOnCancelPolicy = true }
+    }.apply { removeOnCancelPolicy = true }.also { com.reamicro.fix.reload.ModuleResources.executor(it) }
 
     fun runBlocking(
         loader: ClassLoader,

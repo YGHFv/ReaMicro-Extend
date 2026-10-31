@@ -127,7 +127,7 @@ object YouShuWebSearchBridge {
         val completed = AtomicBoolean(false)
         val webViewRef = AtomicReference<WebView?>()
         val pageFinishedVersion = AtomicInteger(0)
-        val handler = Handler(Looper.getMainLooper())
+        val handler = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
 
         fun finish(webView: WebView?, html: String? = null) {
             if (!completed.compareAndSet(false, true)) return

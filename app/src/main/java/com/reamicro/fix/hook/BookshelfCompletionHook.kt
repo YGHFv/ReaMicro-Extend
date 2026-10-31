@@ -39,7 +39,7 @@ internal class BookshelfCompletionHook(
         const val KEY_LAST_AUTO_UPDATE_COMPLETED_AT = "last_auto_update_completed_at"
     }
 
-    private val main = Handler(Looper.getMainLooper())
+    private val main = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
     private var home = WeakReference<Any>(null)
     @Volatile private var bookshelfGroups: List<String> = emptyList()
     private var bookshelfPager = WeakReference<Any>(null)
@@ -88,6 +88,12 @@ internal class BookshelfCompletionHook(
         scheduleStartup()
     }
 
+    fun closeForReload() {
+        observedPreferences?.unregisterOnSharedPreferenceChangeListener(preferenceListener)
+        observedPreferences = null
+        main.removeCallbacksAndMessages(null)
+    }
+
     fun install() {
         check(HostSymbols.profileId == "2.3.3") { "书架动作尚未适配该宿主" }
         val homeType = loader.hostClass("app.zhendong.reamicro.ui.home.HomeViewModel")
@@ -96,6 +102,19 @@ internal class BookshelfCompletionHook(
                 home = WeakReference(param.thisObject)
                 refreshStyle()
                 scheduleStartup()
+            }
+        })
+        val homeScreen = loader.hostClass("app.zhendong.reamicro.ui.home.HomeScreenKt")
+            .hostMethod("HomeScreen", loader.hostClass("app.zhendong.reamicro.NavGraphScope"),
+                homeType, loader.hostClass("androidx.compose.runtime.Composer"), Int::class.javaPrimitiveType)
+        XposedBridge.hookMethod(homeScreen, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                val model = param.args[1] ?: return
+                if (home.get() !== model) {
+                    home = WeakReference(model)
+                    refreshStyle()
+                    drive.rememberHomeViewModelDependencies(model)
+                }
             }
         })
         val tabs = loader.hostClass("ReaMicroShelf233.Header")
@@ -264,7 +283,7 @@ internal class BookshelfCompletionHook(
 
     private fun refreshStyle() {
         val session = session() ?: return
-        Thread({
+        com.reamicro.fix.reload.ModuleResources.thread({
             runCatching { readStyle(session) }.onSuccess { value ->
                 main.post { XposedHelpers.callMethod(styleState, "setValue", value) }
             }.onFailure { XposedBridge.logError("ReaMicro shelf style read failed: $it", it) }
@@ -274,7 +293,7 @@ internal class BookshelfCompletionHook(
     private fun toggleStyle() {
         val session = session() ?: return toast("书架设置暂未就绪")
         if (!styleChanging.compareAndSet(false, true)) return
-        Thread({
+        com.reamicro.fix.reload.ModuleResources.thread({
             runCatching {
                 val current = readStyle(session)
                 val next = if (current == 1) 0 else 1
@@ -315,7 +334,7 @@ internal class BookshelfCompletionHook(
         if (!settings.moduleEnabled || !settings.shelfBatchUpdate) return false
         if (reason == "startup" && !canStartAutomaticUpdate()) return false
         if (!running.compareAndSet(false, true)) return false
-        Thread({
+        com.reamicro.fix.reload.ModuleResources.thread({
             val results = ArrayList<OnlineChapterUpdateOutcome>()
             var total = 0
             var errorMessage: String? = null

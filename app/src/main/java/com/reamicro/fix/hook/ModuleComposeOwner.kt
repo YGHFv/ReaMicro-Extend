@@ -19,6 +19,7 @@ internal class ModuleComposeOwner(private val activity: Activity, private val on
     private var started = false
 
     fun start() {
+        com.reamicro.fix.reload.ModuleUiReloadGuard.markUsed()
         check(!closed) { "Compose owner is already closed" }
         if (started) return
         started = true

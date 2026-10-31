@@ -13,7 +13,7 @@ class RootTaskSyncReceiver : BroadcastReceiver() {
         if (intent?.action != RootTaskRepository.SYNC_ACTION || !RootTaskBridge.isEnabled(context)) return
         val pending = goAsync()
         val done = AtomicBoolean(false)
-        val main = Handler(Looper.getMainLooper())
+        val main = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
         val finish = Runnable { if (done.compareAndSet(false, true)) pending.finish() }
         main.postDelayed(finish, 25_000L)
         try {

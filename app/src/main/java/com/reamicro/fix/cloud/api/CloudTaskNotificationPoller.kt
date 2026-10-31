@@ -26,7 +26,7 @@ object CloudTaskNotificationPoller {
         val now = System.currentTimeMillis()
         if ((!force && now - lastPollAt < MIN_POLL_INTERVAL_MS) || !running.compareAndSet(false, true)) return
         lastPollAt = now
-        Thread {
+        com.reamicro.fix.reload.ModuleResources.thread {
             perform(appContext, store, source)
         }.start()
     }
@@ -94,7 +94,7 @@ object CloudTaskNotificationPoller {
 
         startModuleActivity(context, intent, id)
 
-        Handler(Looper.getMainLooper()).post {
+        com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
             runCatching { Toast.makeText(context, "$title：$message", Toast.LENGTH_LONG).show() }
         }
         XposedBridge.log("ReaMicro API task notification unconfirmed (module not reachable) id=$id")

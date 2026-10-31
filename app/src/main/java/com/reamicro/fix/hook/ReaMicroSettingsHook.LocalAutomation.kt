@@ -631,7 +631,7 @@ internal fun ReaMicroSettingsHook.disableCloudAutomationTask(accountId: String, 
     val store = ApiServerSettingsStore { activity.applicationContext }
     if (!store.get().enabled || store.get().baseUrl.isBlank()) return
     val appContext = activity.applicationContext
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         runCatching {
             val manager = CloudTaskManager(ApiServerClient(store))
             manager.list()

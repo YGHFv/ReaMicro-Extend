@@ -11,7 +11,7 @@ internal class LatestSearchWorker(name: String) {
         fun isCurrent(): Boolean = current.get() == sequence
     }
     private val sequence = AtomicLong()
-    private val executor = ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS,
+    private val executor = com.reamicro.fix.reload.ModuleResources.pool(1, 1, 30, TimeUnit.SECONDS,
         LinkedBlockingQueue<Runnable>(1), { task -> Thread(task, name).apply { isDaemon = true } })
         .apply { allowCoreThreadTimeOut(true) }
     private var pending: FutureTask<Unit>? = null

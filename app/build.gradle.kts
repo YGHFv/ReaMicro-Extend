@@ -193,6 +193,7 @@ dependencies {
     implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
 
     compileOnly("io.github.libxposed:api:102.0.0")
+    implementation("io.github.libxposed:service:102.0.0")
 
     // 运行期 dex 结构校验（宿主重新混淆后用于判定 profile 是否仍然适用）。
     implementation("org.luckypray:dexkit:2.0.6")

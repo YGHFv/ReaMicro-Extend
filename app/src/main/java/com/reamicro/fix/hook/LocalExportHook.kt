@@ -210,7 +210,7 @@ class LocalExportHook(
 
     private fun exportAsync(activity: Activity?, book: Any, targetLog: String, block: () -> String) {
         activity?.toast("已开始导出到本地存储")
-        Thread {
+        com.reamicro.fix.reload.ModuleResources.thread {
             runCatching {
                 val output = block()
                 activity?.toast("已导出到本地存储")

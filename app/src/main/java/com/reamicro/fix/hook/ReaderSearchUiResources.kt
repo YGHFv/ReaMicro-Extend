@@ -36,7 +36,7 @@ internal object ReaderSearchUiResources {
     fun warm(context: Context) {
         if (!started.compareAndSet(false, true)) return
         val app = context.applicationContext
-        Thread({
+        com.reamicro.fix.reload.ModuleResources.thread({
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
             runCatching { fonts(app) }.onFailure { started.set(false) }
         }, "ReaMicroSearchUiWarmup").apply { isDaemon = true; start() }

@@ -539,7 +539,7 @@ internal class ModuleUiKit(private val context: Context) {
         }
 
     fun <T> background(work: () -> T, then: (T) -> Unit) {
-        Thread {
+        com.reamicro.fix.reload.ModuleResources.thread {
             runCatching(work)
                 .onSuccess { value -> onMain { then(value) } }
                 .onFailure { error -> onMain { toast(error.message ?: error.javaClass.simpleName) } }

@@ -406,7 +406,7 @@ internal fun ReaderHook.returnToSearchOrigin(
 
 /** 跳转只代表意图已派发；缓存必须在真实页面确认到达后才释放。 */
 private fun ReaderHook.scheduleSearchOriginClear(target: ReadingTarget, viewModel: Any) {
-    val handler = Handler(Looper.getMainLooper())
+    val handler = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
     var attempts = 0
     var scrollRequested = false
     val epub = currentEpubStrong ?: currentEpubRef?.get()
@@ -420,7 +420,7 @@ private fun ReaderHook.scheduleSearchOriginClear(target: ReadingTarget, viewMode
                 searchScrollBridge?.originCommand(viewModel, target)?.let { command ->
                     scrollRequested = true
                     val bridge = searchScrollBridge
-                    Thread({
+                    com.reamicro.fix.reload.ModuleResources.thread({
                         runCatching {
                             bridge?.execute(command) {
                                 currentViewModelRef?.get() === viewModel &&

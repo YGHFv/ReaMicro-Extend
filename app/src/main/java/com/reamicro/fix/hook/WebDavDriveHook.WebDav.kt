@@ -204,7 +204,7 @@ internal fun WebDavDriveHook.enqueueWebDavDownload(workerManager: Any, book: Any
     )
     runningWebDavDownloads[downloadKey] = token
 
-    val thread = Thread({
+    val thread = com.reamicro.fix.reload.ModuleResources.thread({
         runCatching {
             throwIfWebDavDownloadCancelled(token)
             setTrackedWorkState(tracker, id, "Running", 2, null, null, name)
@@ -271,7 +271,7 @@ internal fun WebDavDriveHook.enqueueWebDavBackup(workerManager: Any, bookId: Lon
     val handle = newNativeWorkHandle(id, requireNotNull(stateFlow))
 
     webDavRunningBackupBookIds[bookId] = true
-    Thread({
+    com.reamicro.fix.reload.ModuleResources.thread({
         try {
             runCatching {
                 val book = findLocalBookById(bookId) ?: error("Book $bookId not found")
@@ -347,7 +347,7 @@ internal fun WebDavDriveHook.tryHandleRunningWebDavDownloadTap(book: Any): Boole
 
 internal fun WebDavDriveHook.updateWebDavBackupViewModels(bookId: Long, book: Any, backup: Any) {
     if (Looper.myLooper() != Looper.getMainLooper()) {
-        Handler(Looper.getMainLooper()).post {
+        com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
             updateWebDavBackupViewModels(bookId, book, backup)
         }
         return
@@ -394,7 +394,7 @@ internal fun WebDavDriveHook.updateWebDavBackupViewModels(bookId: Long, book: An
 }
 
 internal fun WebDavDriveHook.refreshWebDavBackupViewModelsLater(bookId: Long, book: Any, backup: Any) {
-    Handler(Looper.getMainLooper()).postDelayed({
+    com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).postDelayed({
         val current = webDavRecentBackups[bookId]
         if (current?.book !== book || current.backup !== backup) return@postDelayed
         updateWebDavBackupViewModels(bookId, book, backup)
@@ -471,7 +471,7 @@ internal fun WebDavDriveHook.createWebDavLoginRouteView(context: Context, navGra
         onBack = { popBackStack(navGraphScope) },
         onSaved = {
             popBackStack(navGraphScope)
-            Handler(Looper.getMainLooper()).post {
+            com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                 refreshWebDavLibraryAsync(currentWebDavBrowseDir())
                 navigateStorage(navGraphScope)
             }
@@ -593,7 +593,7 @@ internal fun WebDavDriveHook.refreshWebDavLibrary(path: String = currentWebDavBr
 }
 
 internal fun WebDavDriveHook.refreshWebDavLibraryAsync(path: String = currentWebDavBrowseDir()) {
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         refreshWebDavLibrary(path)
     }.start()
 }

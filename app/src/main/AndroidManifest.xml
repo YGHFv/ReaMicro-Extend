@@ -89,6 +89,13 @@
             </intent-filter>
         </receiver>
 
+        <provider
+            android:name=".reload.HotReloadProvider"
+            android:authorities="com.reamicro.fix.hot-reload"
+            android:grantUriPermissions="true"
+            android:exported="true" />
+        <receiver android:name=".reload.HotReloadWakeReceiver" android:exported="true" />
+
         <activity
             android:name=".ui.HostRestartActivity"
             android:exported="true"

@@ -16,7 +16,7 @@ object ApiPackageAutoUpdater {
         val now = System.currentTimeMillis()
         if (now - prefs.getLong(KEY_LAST_CHECK, 0L) < CHECK_INTERVAL_MS) return
         if (!running.compareAndSet(false, true)) return
-        Thread {
+        com.reamicro.fix.reload.ModuleResources.thread {
             try {
                 val manager = ApiPackageManager(context.applicationContext, ApiServerClient(store), settings)
                 val results = listOf(

@@ -37,7 +37,7 @@ class AssociationSearchService(
         val resultsByProvider = AtomicReferenceArray<List<BookSearchResult>>(activeProviders.size)
         val latch = CountDownLatch(activeProviders.size)
         activeProviders.forEachIndexed { index, provider ->
-            Thread {
+            com.reamicro.fix.reload.ModuleResources.thread {
                 try {
                     runCatching {
                         provider.search(keyword, providerFetchLimit(limitPerSource))
@@ -80,7 +80,7 @@ class AssociationSearchService(
         val resultsByProvider = AtomicReferenceArray<List<BookSearchResult>>(activeProviders.size)
         val latch = CountDownLatch(activeProviders.size)
         activeProviders.forEachIndexed { index, provider ->
-            Thread {
+            com.reamicro.fix.reload.ModuleResources.thread {
                 val providerStartedAt = System.currentTimeMillis()
                 try {
                     runCatching {
@@ -113,7 +113,7 @@ class AssociationSearchService(
                 start()
             }
         }
-        Thread {
+        com.reamicro.fix.reload.ModuleResources.thread {
             latch.await(maxWaitMs, TimeUnit.MILLISECONDS)
             runCatching {
                 onComplete(

@@ -61,6 +61,8 @@ object HostDexKit {
     @Volatile private var libraryLoaded = false
     @Volatile private var libraryAttempts = 0
     private const val LIB_MAX_ATTEMPTS = 3
+    private val nativeGeneration = java.util.UUID.randomUUID().toString()
+    private val generationShapes by lazy { readBundledShapes() }
 
     /**
      * 校验一个候选 profile 是否仍然匹配当前宿主 dex。
@@ -189,7 +191,9 @@ object HostDexKit {
     }
 
     /** 内置指纹资产：assets/host-profiles/<profileId>.shapes。 */
-    fun bundledShapes(): Map<String, Map<String, String>> {
+    fun bundledShapes(): Map<String, Map<String, String>> = generationShapes
+
+    private fun readBundledShapes(): Map<String, Map<String, String>> {
         val apk = moduleApkFile() ?: return emptyMap()
         return runCatching {
             ZipFile(apk).use { zip ->
@@ -282,9 +286,12 @@ object HostDexKit {
             val attempt = libraryAttempts
             val loaded = runCatching {
                 val apk = moduleApkFile() ?: error("module apk unavailable")
-                val target = File(libraryDir(hostDataDir), LIB_NAME)
+                // ART 不允许不同 ClassLoader 加载同一路径的 so；各代际独立映射且不覆盖正在使用的文件。
+                val target = File(libraryDir(hostDataDir), "$nativeGeneration/$LIB_NAME")
                 extractLibrary(apk, target)
                 System.load(target.absolutePath)
+                target.delete()
+                target.parentFile?.delete()
                 target
             }
             return loaded.fold(

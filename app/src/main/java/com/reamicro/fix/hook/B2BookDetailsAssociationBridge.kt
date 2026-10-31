@@ -264,7 +264,7 @@ internal class B2BookDetailsAssociationBridge(
     private fun open(context: Context) {
         if (!current(context)) return
         val activity = activityProvider() ?: return
-        Thread({
+        com.reamicro.fix.reload.ModuleResources.thread({
             val result = runCatching {
                 val (_, book) = load(context)
                 context.verifiedBook = book
@@ -333,7 +333,7 @@ internal class B2BookDetailsAssociationBridge(
 
     private fun unlink(context: Context, again: Boolean) {
         if (!current(context) || !writing.compareAndSet(false, true)) return
-        Thread({
+        com.reamicro.fix.reload.ModuleResources.thread({
             val result = runCatching {
                 val (repository, original) = load(context)
                 val replacement = copier.withoutAssociation(original)

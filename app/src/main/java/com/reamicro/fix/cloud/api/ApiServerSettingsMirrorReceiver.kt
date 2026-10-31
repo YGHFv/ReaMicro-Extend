@@ -20,7 +20,7 @@ class ApiServerSettingsMirrorReceiver : BroadcastReceiver() {
                 "baseUrl=${settings.baseUrl.isNotBlank()} hostAccountId=${settings.hostAccountId.isNotBlank()}",
         )
         val pending = goAsync()
-        Thread {
+        com.reamicro.fix.reload.ModuleResources.thread {
             try {
                 CloudTaskNotificationPoller.pollBlocking(appContext, source = "settings-mirror")
             } finally {

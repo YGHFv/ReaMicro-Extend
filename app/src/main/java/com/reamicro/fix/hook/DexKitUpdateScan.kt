@@ -20,8 +20,8 @@ import java.util.concurrent.Executors
 internal object DexKitUpdateScan {
     private const val PREFS = "reamicro_fix_dexkit_updates"
     private const val COMPLETED = "completed_update_v1"
-    private val main = Handler(Looper.getMainLooper())
-    private val worker = Executors.newSingleThreadExecutor { task ->
+    private val main = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
+    private val worker = com.reamicro.fix.reload.ModuleResources.pool(1) { task ->
         Thread(task, "ReaMicro-DexKit-Update").apply { isDaemon = true }
     }
     private var resumed = WeakReference<Activity>(null)
@@ -30,6 +30,18 @@ internal object DexKitUpdateScan {
     private var attempted: HostScanUpdateStamp? = null
     private var checking = false
     private val stateListeners = LinkedHashSet<() -> Unit>()
+
+    init {
+        com.reamicro.fix.reload.ModuleResources.blockWhile {
+            if (checking || isBusy() || isManualDexKitScanning()) "DexKit 扫描尚未结束" else null
+        }
+        com.reamicro.fix.reload.ModuleResources.cleanup {
+            dismissDialog()
+            resumed.clear()
+            session = null
+            stateListeners.clear()
+        }
+    }
 
     private data class Installation(
         val stamp: HostScanUpdateStamp,
@@ -196,7 +208,8 @@ internal object DexKitUpdateScan {
         return Installation(
             HostScanUpdateStamp(
                 host.lastUpdateTime.takeIf { it > 0 } ?: hostFile.lastModified(),
-                module?.lastUpdateTime?.takeIf { it > 0 } ?: moduleFile.lastModified(),
+                // 包可见性会在桥接唤醒后变化；统一使用已加载 APK 时间，避免热重载误报更新。
+                moduleFile.lastModified(),
                 fileStamp(hostFile), fileStamp(moduleFile),
             ),
             hostPath,

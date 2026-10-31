@@ -202,7 +202,7 @@ internal fun WebDavDriveHook.applyOnlineCompletionSearchTypeface(textContainer: 
 internal fun WebDavDriveHook.updateOnlineCompletionSearchTarget(path: String, target: OnlineDownloadTarget) {
     onlineCompletionSearchTargets[path] = target
     val rowRef = onlineCompletionSearchRowViews[path] ?: return
-    Handler(Looper.getMainLooper()).post {
+    com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
         val row = rowRef.get()
         if (row == null) {
             onlineCompletionSearchRowViews.remove(path, rowRef)
@@ -218,7 +218,7 @@ internal fun WebDavDriveHook.loadOnlineCompletionSearchCover(imageView: ImageVie
     if (url.isBlank()) return
     if (imageView.tag == url) return
     imageView.tag = url
-    Thread({
+    com.reamicro.fix.reload.ModuleResources.thread({
         runCatching {
             decodeOnlineDataImage(url)?.let { return@runCatching it }
             val connection = withOnlineCleartextAllowed(url) {
@@ -243,7 +243,7 @@ internal fun WebDavDriveHook.loadOnlineCompletionSearchCover(imageView: ImageVie
             }
         }.onSuccess { bitmap ->
             if (bitmap != null) {
-                Handler(Looper.getMainLooper()).post {
+                com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                     if (imageView.tag == url) imageView.setImageBitmap(bitmap)
                 }
             }
@@ -308,7 +308,7 @@ internal fun WebDavDriveHook.searchOnlineCompletionSourcesProgressively(
     }
 
     sources.forEachIndexed { index, source ->
-        Thread({
+        com.reamicro.fix.reload.ModuleResources.thread({
             try {
                 val finalGroup = searchOnlineCompletionSource(source, needle) { parsedGroup ->
                     publish(index, parsedGroup)
@@ -357,7 +357,7 @@ internal fun WebDavDriveHook.searchOnlineCompletionSourcesConcurrent(
     val latch = CountDownLatch(sources.size)
     val groups = arrayOfNulls<OnlineSearchGroup>(sources.size)
     sources.forEachIndexed { index, source ->
-        Thread({
+        com.reamicro.fix.reload.ModuleResources.thread({
             try {
                 groups[index] = searchOnlineCompletionSource(source, query)
             } finally {
@@ -415,7 +415,7 @@ internal fun WebDavDriveHook.enrichOnlineSearchResultsMetadata(
     val enriched = arrayOfNulls<OnlineBookSearchResult>(selected.size)
     val latch = CountDownLatch(selected.size)
     selected.forEachIndexed { index, result ->
-        Thread({
+        com.reamicro.fix.reload.ModuleResources.thread({
             try {
                 enriched[index] = enrichOnlineSearchResultMetadata(source, result)
             } finally {

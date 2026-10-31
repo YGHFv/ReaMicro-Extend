@@ -201,7 +201,7 @@ internal fun ReaMicroSettingsHook.openAiApiConfigDialog(existing: AiApiConfig?) 
                 status.text = "\u6b63\u5728\u83b7\u53d6\u6a21\u578b\u5217\u8868..."
                 progress.visibility = View.VISIBLE
                 refreshButtons()
-                Thread({
+                com.reamicro.fix.reload.ModuleResources.thread({
                     val result = AiApiStore.fetchModels(values.baseUrl, values.apiKey)
                     activity.runOnUiThread {
                         fetchingModels = false
@@ -230,7 +230,7 @@ internal fun ReaMicroSettingsHook.openAiApiConfigDialog(existing: AiApiConfig?) 
                 status.text = "\u6b63\u5728\u6d4b\u8bd5\u8fde\u63a5..."
                 progress.visibility = View.VISIBLE
                 refreshButtons()
-                Thread({
+                com.reamicro.fix.reload.ModuleResources.thread({
                     val result = AiApiStore.test(values.baseUrl, values.apiKey, values.model)
                     activity.runOnUiThread {
                         testing = false

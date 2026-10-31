@@ -88,7 +88,7 @@ internal fun ReaderHook.openAnchoredSelectionEditor() {
         Toast.makeText(activity, "无法编辑：${it.message}", Toast.LENGTH_LONG).show()
         return
     }
-    Thread({
+    com.reamicro.fix.reload.ModuleResources.thread({
         var posted = false
         try {
             checkSelectionEditSession(captured.viewModel, captured.epub)
@@ -122,7 +122,7 @@ internal fun ReaderHook.openAnchoredSelectionEditor() {
                             Toast.makeText(activity, "未保存：${error.message}（编辑内容已保留）", Toast.LENGTH_LONG).show()
                             return@showSelectionEditDialog
                         }
-                        Thread({
+                        com.reamicro.fix.reload.ModuleResources.thread({
                             var completionPosted = false
                             try {
                                 checkSelectionEditSession(captured.viewModel, captured.epub)

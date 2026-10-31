@@ -36,9 +36,14 @@ class ReaMicroHookEntry {
     private val installedFeatureIds = linkedSetOf<String>()
     private val disabledFeatureIds = linkedSetOf<String>()
     private var bookshelfCompletion: BookshelfCompletionHook? = null
+    private var attachReloadedActivity: ((Activity) -> Unit)? = null
+
+    internal fun attachAfterHotReload(activity: Activity) {
+        requireNotNull(attachReloadedActivity).invoke(activity)
+    }
     @Volatile private var memoryCallbacksInstalled: Boolean = false
     @Volatile private var apiSettingsMirrored: Boolean = false
-    private val heartbeatHandler = Handler(Looper.getMainLooper())
+    private val heartbeatHandler = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
     private val heartbeatRunnable = object : Runnable {
         override fun run() {
             val activity = currentActivityRef?.get()
@@ -239,6 +244,16 @@ class ReaMicroHookEntry {
         readerDialogueHighlightHook: ReaderDialogueHighlightHook,
         bookDetailsAssociationActionHook: BookDetailsAssociationActionHook,
     ) {
+        attachReloadedActivity = { activity ->
+            currentActivityRef = WeakReference(activity)
+            currentActivityResumed = true
+            moduleSettings.attachContext(activity)
+            installExternalFeatures(classLoader)
+            installMemoryCallbacks(activity.application, readerHook, readerDialogueHighlightHook,
+                profileBackgroundHook, bookDetailsAssociationActionHook)
+            bookshelfCompletion?.onHostStarted()
+            startForegroundHeartbeat()
+        }
         HookInstallReport.install(ENTRY_FEATURE_ID, "mainActivityCreate") {
             val mainActivityClass = XposedHelpers.findClass("app.zhendong.reamicro.MainActivity", classLoader)
 
@@ -250,6 +265,7 @@ class ReaMicroHookEntry {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         if (!mainActivityClass.isInstance(param.thisObject)) return
                         val activity = param.thisObject as? Activity ?: return
+                        com.reamicro.fix.reload.HostGeneration.attach(activity.application)
                         currentActivityRef = WeakReference(activity)
                         currentActivityResumed = false
                         moduleSettings.attachContext(activity)
@@ -279,6 +295,7 @@ class ReaMicroHookEntry {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (!mainActivityClass.isInstance(param.thisObject)) return
                         val activity = param.thisObject as? Activity ?: return
+                        com.reamicro.fix.reload.HostGeneration.attach(activity.application)
                         currentActivityRef = WeakReference(activity)
                         currentActivityResumed = false
                         moduleSettings.attachContext(activity)
@@ -322,7 +339,7 @@ class ReaMicroHookEntry {
         if (memoryCallbacksInstalled) return
         synchronized(this) {
             if (memoryCallbacksInstalled) return
-            application.registerComponentCallbacks(object : ComponentCallbacks2 {
+            val memoryCallback = object : ComponentCallbacks2 {
                 override fun onConfigurationChanged(newConfig: Configuration) = Unit
 
                 override fun onTrimMemory(level: Int) {
@@ -340,8 +357,9 @@ class ReaMicroHookEntry {
                     profileBackgroundHook.releaseMemory("system low memory")
                     bookDetailsAssociationActionHook.releaseMemory("system low memory")
                 }
-            })
-            application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+            }
+            application.registerComponentCallbacks(memoryCallback)
+            val lifecycleCallback = object : Application.ActivityLifecycleCallbacks {
                 override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
                 override fun onActivityStarted(activity: Activity) = Unit
                 override fun onActivityResumed(activity: Activity) = Unit
@@ -368,7 +386,20 @@ class ReaMicroHookEntry {
                         heartbeatHandler.removeCallbacks(heartbeatRunnable)
                     }
                 }
-            })
+            }
+            application.registerActivityLifecycleCallbacks(lifecycleCallback)
+            com.reamicro.fix.reload.ModuleResources.cleanup {
+                application.unregisterComponentCallbacks(memoryCallback)
+                application.unregisterActivityLifecycleCallbacks(lifecycleCallback)
+                heartbeatHandler.removeCallbacksAndMessages(null)
+                moduleSettings.closeForReload()
+                bookshelfCompletion?.closeForReload()
+                readerHook.onHostActivityDestroyed("API102 hot reload")
+                readerDialogueHighlightHook.releaseMemory("API102 hot reload")
+                profileBackgroundHook.releaseMemory("API102 hot reload")
+                bookDetailsAssociationActionHook.releaseMemory("API102 hot reload")
+                currentActivityRef = null
+            }
             memoryCallbacksInstalled = true
             XposedBridge.log("$LOG_PREFIX memory callbacks installed")
         }
@@ -411,6 +442,14 @@ class ReaMicroHookEntry {
             if (!installedFeatureIds.add(feature.id)) return@forEach
             runCatching {
                 feature.install(api)
+                if (feature is com.reamicro.fix.association.provider.ReloadableFeatureProvider) {
+                    com.reamicro.fix.reload.ModuleResources.blockWhile {
+                        if (feature.canHotReload()) null else "扩展源尚未就绪：${feature.id}"
+                    }
+                    com.reamicro.fix.reload.ModuleResources.cleanup { feature.releaseForHotReload() }
+                } else {
+                    com.reamicro.fix.reload.HostGeneration.unsupportedExtension(feature.id)
+                }
                 XposedBridge.log("$LOG_PREFIX external feature installed: ${feature.id} ${feature.displayName}")
             }.onFailure {
                 installedFeatureIds.remove(feature.id)

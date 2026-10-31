@@ -23,7 +23,7 @@ class XposedModuleSettings(
     @Volatile private var cachedHighlightSettingsAtMs: Long = 0L
     private val highlightConfigCache = HighlightConfigCache<ReaderHighlightSettingsSnapshot>()
     @Volatile private var observedPrefs: SharedPreferences? = null
-    private val preferenceHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val preferenceHandler = com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper())
     private val notifyPreferenceChange = Runnable { ReaderHighlightBookContext.refreshRequester?.invoke("highlight-preferences") }
     private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         cachedSnapshot = null
@@ -35,6 +35,13 @@ class XposedModuleSettings(
         }
     }
     @Volatile private var lastLogKey: String = ""
+
+    fun closeForReload() {
+        observedPrefs?.unregisterOnSharedPreferenceChangeListener(preferenceListener)
+        observedPrefs = null
+        preferenceHandler.removeCallbacksAndMessages(null)
+        attachedContext = null
+    }
 
     fun attachContext(context: Context) {
         highlightConfigCache.clear()

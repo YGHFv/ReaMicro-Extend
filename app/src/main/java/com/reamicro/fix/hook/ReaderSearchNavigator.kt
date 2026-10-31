@@ -13,7 +13,7 @@ import java.util.concurrent.TimeUnit
 internal class ReaderSearchNavigator(private val reader: ReaderHook) {
     private data class Request(val result: FullTextSearchResult, val index: Int, val book: String,
         val generation: Long, val vm: Any, val epub: Any, val mode: Int)
-    private val main = Handler(Looper.getMainLooper())
+    private val main = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
     private data class Work(val value: Request, val ticket: LatestSearchWorker.Ticket) {
         val sequence: Long get() = ticket.sequence
     }

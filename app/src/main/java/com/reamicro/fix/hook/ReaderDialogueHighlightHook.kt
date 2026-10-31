@@ -54,8 +54,8 @@ class ReaderDialogueHighlightHook(
     private val fontFamilyCache = HashMap<String, Any>()
     private val failedFontFamilyLogKeys = HashSet<String>()
     private val onlineParagraphCommentDebugKeys = HashSet<String>()
-    private val imageHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private val imageWorker = java.util.concurrent.ThreadPoolExecutor(
+    private val imageHandler = com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper())
+    private val imageWorker = com.reamicro.fix.reload.ModuleResources.pool(
         1, 1, 30L, java.util.concurrent.TimeUnit.SECONDS,
         java.util.concurrent.LinkedBlockingQueue<Runnable>(32),
         { task -> Thread(task, "ReaMicroHighlightImage").apply { isDaemon = true } },

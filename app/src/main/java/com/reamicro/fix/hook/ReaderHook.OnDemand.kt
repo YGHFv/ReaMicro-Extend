@@ -118,7 +118,7 @@ internal fun ReaderHook.scheduleOnDemandPrefetchRetry(
     onDemandPrefetchRetryCount[prefetchKey] = retry
     val delayMs = ON_DEMAND_PREFETCH_429_RETRY_MS * retry
     val generation = onDemandRefreshCoordinator.generation()
-    Handler(Looper.getMainLooper()).postDelayed(
+    com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).postDelayed(
         {
             if (!onDemandRefreshCoordinator.isGeneration(generation)) return@postDelayed
             prefetchOnlineOnDemandChapter(
@@ -218,7 +218,7 @@ internal fun ReaderHook.interceptOnDemandRequest(
         ?: return false
     onDemandJumpLease = lease
     val accepted = OnlineOnDemandBridge.request(request) { result ->
-        Handler(Looper.getMainLooper()).post {
+        com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
             if (!isRefreshSessionCurrent(session) || !onDemandRefreshCoordinator.isCurrent(lease)) return@post
             if (result.isSuccess) {
                 if (replayLabel == "OnDemandJumpChapter") prefetchOnlineOnDemandNeighborhood(result.request)
@@ -273,7 +273,7 @@ internal fun ReaderHook.replayOnDemandJumpWhenSpineCacheReady(
                 XposedBridge.log("$LOG_PREFIX on-demand jump cancelled: session/target changed")
             } else {
                 XposedBridge.logError("$LOG_PREFIX on-demand jump refresh failed", error)
-                Handler(Looper.getMainLooper()).post {
+                com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                     if (isRefreshSessionCurrent(session) && onDemandJumpLease === lease) activityProvider()?.let {
                         Toast.makeText(it, "章节已下载，但分页未就绪，请重新点击目录", Toast.LENGTH_LONG).show()
                     }
@@ -289,7 +289,7 @@ internal fun ReaderHook.onDemandRefreshKey(bookDir: File, href: String): String 
 internal fun ReaderHook.scheduleOnDemandVisiblePageRefresh(viewModel: Any, page: Any) {
     if (Looper.myLooper() != Looper.getMainLooper()) {
         val generation = onDemandRefreshCoordinator.generation()
-        Handler(Looper.getMainLooper()).post {
+        com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
             if (onDemandRefreshCoordinator.isGeneration(generation)) scheduleOnDemandVisiblePageRefresh(viewModel, page)
         }
         return
@@ -322,7 +322,7 @@ internal fun ReaderHook.scheduleOnDemandVisiblePageRefresh(viewModel: Any, page:
         return
     }
     val accepted = OnlineOnDemandBridge.request(request) { result ->
-        Handler(Looper.getMainLooper()).post {
+        com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
             if (!isRefreshSessionCurrent(session) || !onDemandRefreshCoordinator.isCurrent(lease)) return@post
             if (result.isSuccess) {
                 onDemandRefreshPending += refreshKey
@@ -374,11 +374,11 @@ internal fun ReaderHook.refreshOnDemandVisiblePageWhenSpineCacheReady(
             when {
                 !current() || error is InterruptedException || error is java.util.concurrent.CancellationException ->
                     XposedBridge.log("$LOG_PREFIX on-demand visible refresh cancelled: session/viewport changed")
-                error is ReaderRefreshLockBusy -> Handler(Looper.getMainLooper()).post {
+                error is ReaderRefreshLockBusy -> com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                     if (isVisibleSession()) {
                         onDemandVisibleBusyRetries++
                         XposedBridge.log("$LOG_PREFIX on-demand visible refresh deferred: host loading retry=$onDemandVisibleBusyRetries")
-                        if (onDemandVisibleBusyRetries < 3) Handler(Looper.getMainLooper()).postDelayed({
+                        if (onDemandVisibleBusyRetries < 3) com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).postDelayed({
                             if (isVisibleSession()) currentReaderPage()?.let { scheduleOnDemandVisiblePageRefresh(session.viewModel, it) }
                         }, 500L)
                         else XposedBridge.logError("$LOG_PREFIX on-demand visible refresh waiting exhausted; turn away/back to retry")

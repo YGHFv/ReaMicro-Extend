@@ -38,7 +38,7 @@ class ReaderAutoPageHook(
         logPrefix = LOG_PREFIX,
     )
 
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainHandler = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
     private val methodCache = HashMap<String, Method>()
     private val readerSettingsBuildDepth = ThreadLocal.withInitial { 0 }
     private val autoPageItemInjected = ThreadLocal.withInitial { false }
@@ -141,7 +141,7 @@ class ReaderAutoPageHook(
                 override fun afterHookedMethod(param: MethodHookParam) {
                     log("ReaderMoreSettingScreen after depth=${readerSettingsBuildDepth.get()} injected=${autoPageItemInjected.get()}")
 
-                    Handler(Looper.getMainLooper()).post {
+                    com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                         readerSettingsBuildDepth.set(0)
                         readerSettingsComposer.set(null)
                     }

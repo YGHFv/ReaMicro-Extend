@@ -55,7 +55,7 @@ internal class ExportProgress {
     @Volatile private var pendingMessage: String? = null
     @Volatile private var canceled: Boolean = false
     @Volatile private var backWarnedAtMs: Long = 0L
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainHandler = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
     val isCancelled: Boolean
         get() = canceled
 

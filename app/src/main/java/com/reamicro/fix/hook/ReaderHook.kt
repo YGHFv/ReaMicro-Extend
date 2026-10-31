@@ -132,7 +132,7 @@ class ReaderHook(
     internal val scrollCrashRecoveryInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile internal var catalogDumpLoggedForKey: String? = null
     @Volatile internal var lastReaderHighlightBookIdentity: String = ""
-    private val highlightRefreshHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val highlightRefreshHandler = com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper())
     private val highlightRefreshQueue = ReaderHighlightRefreshQueue(
         post = { task -> highlightRefreshHandler.post { task() } },
         context = { ReaderHighlightBookContext.bookKey to currentViewModelRef?.get() },

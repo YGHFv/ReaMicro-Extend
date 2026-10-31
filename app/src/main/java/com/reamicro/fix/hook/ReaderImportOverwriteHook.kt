@@ -1181,7 +1181,7 @@ class ReaderImportOverwriteHook(
         if (uuid.isBlank() || cancelledImportCopies.remove(uuid) == null) return
         val repository = repositoryRef?.get()
         val bookDir = param.args?.getOrNull(1)
-        Thread {
+        com.reamicro.fix.reload.ModuleResources.thread {
             var deleted = false
             repeat(CANCELLED_COPY_DELETE_ATTEMPTS) {
                 val book = repository?.let { findExistingBookByUuid(it, uuid) }
@@ -1192,7 +1192,7 @@ class ReaderImportOverwriteHook(
                             "error=${result.exceptionOrNull()?.message.orEmpty().take(80)}",
                     )
                     deleted = result.isSuccess
-                    return@Thread
+                    return@thread
                 }
                 runCatching { Thread.sleep(CANCELLED_COPY_DELETE_RETRY_MS) }
             }

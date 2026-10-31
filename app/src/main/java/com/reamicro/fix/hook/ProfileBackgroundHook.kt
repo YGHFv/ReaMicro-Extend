@@ -531,7 +531,7 @@ class ProfileBackgroundHook(
         if (!force) autoRandomRefreshAttempted = true
         if (randomRefreshRunning) return
         randomRefreshRunning = true
-        Thread {
+        com.reamicro.fix.reload.ModuleResources.thread {
             runCatching {
                 val target = downloadRandomProfileBackground(activity, url)
                 settings.setProfileBackgroundImage(target.absolutePath)

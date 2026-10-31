@@ -14,7 +14,7 @@ internal class ReaderSelectionPagerTarget(
 ) {
     var discarded = 0
     var poll: Runnable? = null
-    val handler = Handler(Looper.getMainLooper())
+    val handler = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
 }
 
 internal fun ReaderHook.cancelSelectionPagerConfirmation() {

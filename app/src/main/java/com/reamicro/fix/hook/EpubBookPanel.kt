@@ -72,6 +72,7 @@ internal class EpubBookPanel(
     private val globalUiFontFile: File? by lazy { resolveGlobalUiFontFile() }
 
     fun show() {
+        com.reamicro.fix.reload.ModuleUiReloadGuard.markUsed()
         synchronized(activePanels) {
             if (activePanels[activity]?.dialog?.isShowing == true) return
         }

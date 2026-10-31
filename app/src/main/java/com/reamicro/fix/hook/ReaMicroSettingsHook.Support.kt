@@ -398,7 +398,7 @@ internal fun ReaMicroSettingsHook.safeDownloadName(value: String): String =
 
 internal fun ReaMicroSettingsHook.exportCurrentAccountCredential() {
     val activity = activityProvider() ?: return
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         runCatching { accountController.exportCurrentCredential() }
             .onSuccess { exported ->
                 activity.runOnUiThread {
@@ -426,7 +426,7 @@ internal fun ReaMicroSettingsHook.exportAccountData(accountId: Long) {
         title = "\u6b63\u5728\u5bfc\u51fa\u5168\u90e8\u6570\u636e",
         message = "\u6b63\u5728\u6574\u7406\u8d26\u53f7\u6570\u636e\uff0c\u8bf7\u7a0d\u5019",
     )
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         var exportedFile: File? = null
         runCatching {
             if (progress.isCancelled) error("export canceled")
@@ -464,7 +464,7 @@ internal fun ReaMicroSettingsHook.exportAllAccountData() {
         title = "\u6b63\u5728\u5bfc\u51fa\u6240\u6709\u8d26\u53f7\u6570\u636e",
         message = "\u6b63\u5728\u9010\u4e2a\u6574\u7406\u8d26\u53f7\u6570\u636e\uff0c\u8bf7\u7a0d\u5019",
     )
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         val exportedFiles = mutableListOf<File>()
         runCatching {
             if (progress.isCancelled) error("export canceled")
@@ -502,7 +502,7 @@ internal fun ReaMicroSettingsHook.exportAccountBooks(accountId: Long) {
         title = "\u6b63\u5728\u5bfc\u51fa\u5168\u90e8\u56fe\u4e66",
         message = "\u6b63\u5728\u91cd\u65b0\u6253\u5305 EPUB\uff0c\u8bf7\u7a0d\u5019",
     )
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         var exportedFile: File? = null
         runCatching {
             if (progress.isCancelled) error("export canceled")
@@ -538,7 +538,7 @@ internal fun ReaMicroSettingsHook.importAccountDataFromUri(activity: Activity, u
         title = "\u6b63\u5728\u8bfb\u53d6\u6570\u636e\u5305",
         message = "\u6b63\u5728\u590d\u5236\u6570\u636e\u5305\uff0c\u8bf7\u7a0d\u5019",
     )
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         var spooled: File? = null
         runCatching {
             val target = File(activity.cacheDir, "reamicro_import_${System.currentTimeMillis()}.zip")
@@ -661,7 +661,7 @@ internal fun ReaMicroSettingsHook.startAccountDataImport(activity: Activity, fil
         title = "\u6b63\u5728\u5bfc\u5165\u8d26\u53f7\u6570\u636e",
         message = "\u6b63\u5728\u6062\u590d\u6570\u636e\uff0c\u8bf7\u7a0d\u5019",
     )
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         runCatching {
             accountController.importAccountDataBundle(file) { message -> progress.update(message) }
         }.onSuccess { imported ->
@@ -700,7 +700,7 @@ internal fun formatDataBundleSize(bytes: Long): String {
 
 internal fun ReaMicroSettingsHook.exportAllAccountCredentials() {
     val activity = activityProvider() ?: return
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         runCatching {
             val exported = accountController.exportAllCredentialsBundle()
             val fileName = buildAccountCredentialBundleFileName()
@@ -725,7 +725,7 @@ internal fun ReaMicroSettingsHook.importCredentialFromClipboard() {
         showToast("\u526a\u8d34\u677f\u4e2d\u6ca1\u6709\u8d26\u53f7\u51ed\u8bc1")
         return
     }
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         runCatching { accountController.importCredentials(raw) }
             .onSuccess { result ->
                 activity.runOnUiThread {
@@ -746,7 +746,7 @@ internal fun ReaMicroSettingsHook.importCredentialFromClipboard() {
 }
 
 internal fun ReaMicroSettingsHook.importCredentialFromUri(activity: Activity, uri: Uri) {
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         runCatching {
             val raw = activity.contentResolver.openInputStream(uri)
                 ?.bufferedReader(Charsets.UTF_8)
@@ -781,7 +781,7 @@ internal fun ReaMicroSettingsHook.importCredentialFromUri(activity: Activity, ur
 
 internal fun ReaMicroSettingsHook.switchToStoredAccount(accountId: Long) {
     val activity = activityProvider() ?: return
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         runCatching { accountController.switchToAccount(accountId) }
             .onSuccess { account ->
                 activity.runOnUiThread {
@@ -1197,7 +1197,7 @@ internal fun ReaMicroSettingsHook.verifyYouShuLoginAsync(
     onResult: (Boolean) -> Unit,
 ) {
     val activity = activityProvider()
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         var loggedIn = false
         var cookieNames = ""
         runCatching {
@@ -1239,7 +1239,7 @@ internal fun ReaMicroSettingsHook.openYouShuLoginPage(onLoginStateResolved: (Boo
     activity.runOnUiThread {
         runCatching {
             CookieManager.getInstance().setAcceptCookie(true)
-            val mainHandler = Handler(Looper.getMainLooper())
+            val mainHandler = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
             var destroyed = false
             var resolved = false
             val webView = WebView(activity).apply {

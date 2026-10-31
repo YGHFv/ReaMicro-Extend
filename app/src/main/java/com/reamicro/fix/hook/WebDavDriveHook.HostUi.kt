@@ -467,7 +467,7 @@ internal fun WebDavDriveHook.showToast(message: String) {
         }
         return
     }
-    Handler(Looper.getMainLooper()).post {
+    com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
         currentContext()?.let { Toast.makeText(it, message, Toast.LENGTH_SHORT).show() }
     }
 }

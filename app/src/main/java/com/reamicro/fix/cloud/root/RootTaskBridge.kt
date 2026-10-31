@@ -40,7 +40,7 @@ internal object RootTaskBridge {
     private var syncQueued = false
     private var syncDirty = false
     private val syncCallbacks = mutableListOf<() -> Unit>()
-    private val worker = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "ReaMicroRootBridge").apply { isDaemon = true } }
+    private val worker = com.reamicro.fix.reload.ModuleResources.pool(1) { runnable -> Thread(runnable, "ReaMicroRootBridge").apply { isDaemon = true } }
 
     fun isEnabled(context: Context): Boolean = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("enabled", false)
 

@@ -171,7 +171,7 @@ private fun ReaMicroSettingsHook.ensureCloudAutomationLoaded() {
         }
     }
     cloudAutomationLoading = true
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         val result = runCatching {
             val manager = CloudTaskManager(ApiServerClient(store))
             manager.credentials() to manager.list()
@@ -302,7 +302,7 @@ private fun ReaMicroSettingsHook.setCloudAutomationTaskEnabled(
     val activity = activityProvider() ?: return task.enabled
     val accountId = cloudAutomationAccountId
     cloudAutomationUpdatingTaskTypes = cloudAutomationUpdatingTaskTypes + spec.taskType
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         val result = runCatching {
             val manager = CloudTaskManager(ApiServerClient(ApiServerSettingsStore { activity.applicationContext }))
             val updated = if (enabled) manager.resume(task.id) else manager.pause(task.id)
@@ -484,7 +484,7 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
             }
             saveButton.isEnabled = false
             status.text = "正在验证账号并保存任务……"
-            Thread {
+            com.reamicro.fix.reload.ModuleResources.thread {
                 val result = runCatching {
                     val manager = CloudTaskManager(ApiServerClient(store))
                     val credentialId = manager.uploadCredential(

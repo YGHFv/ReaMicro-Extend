@@ -569,7 +569,7 @@ private val discoverCoverCache = object : android.util.LruCache<String, Bitmap>(
     override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
 }
 
-private val discoverCoverPool = java.util.concurrent.Executors.newFixedThreadPool(DISCOVER_COVER_THREADS) { runnable ->
+private val discoverCoverPool = com.reamicro.fix.reload.ModuleResources.pool(DISCOVER_COVER_THREADS) { runnable ->
     Thread(runnable, "ReaMicroDiscoverCover").apply { isDaemon = true }
 }
 
@@ -619,7 +619,7 @@ internal fun loadDiscoverCover(imageView: ImageView, source: OnlineSourceEntry, 
             }
             ?: return@execute
         discoverCoverCache.put(cacheKey, bitmap)
-        Handler(Looper.getMainLooper()).post {
+        com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
 
             if (imageView.tag == url) imageView.setImageBitmap(bitmap)
         }

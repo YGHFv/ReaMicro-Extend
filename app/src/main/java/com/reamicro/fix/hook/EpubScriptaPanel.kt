@@ -129,6 +129,7 @@ internal class EpubScriptaPanel(
     }
 
     fun show() {
+        com.reamicro.fix.reload.ModuleUiReloadGuard.markUsed()
         require(canEditEpubSource(initialPath)) { "该文件不是可编辑的文本资源" }
         check(!activity.isFinishing && !activity.isDestroyed) { "页面已关闭" }
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)

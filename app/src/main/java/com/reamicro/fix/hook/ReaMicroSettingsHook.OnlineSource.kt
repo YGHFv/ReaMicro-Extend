@@ -238,7 +238,7 @@ internal fun ReaMicroSettingsHook.importOnlineSourceFromUrl(activity: Activity, 
     }
     lastOnlineSourceImportToken = token
     lastOnlineSourceImportAtMs = now
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         runCatching { OnlineSourceStore.importFromUrl(activity.applicationContext, url) }
             .onSuccess { source ->
                 activity.runOnUiThread {
@@ -318,7 +318,7 @@ internal fun ReaMicroSettingsHook.importOnlineSourceAsync(
     }
     lastOnlineSourceImportToken = token
     lastOnlineSourceImportAtMs = now
-    Thread {
+    com.reamicro.fix.reload.ModuleResources.thread {
         runCatching { importer() }
             .onSuccess { source ->
                 activity.runOnUiThread {
@@ -499,7 +499,7 @@ internal fun ReaMicroSettingsHook.openTrxsOnlineSourceLoginDialog(
             }
             fun runAuthTask(button: TextView, task: () -> com.reamicro.fix.online.OnlineSourceAuthResult, onSuccess: (() -> Unit)? = null) {
                 button.isEnabled = false
-                Thread({
+                com.reamicro.fix.reload.ModuleResources.thread({
                     val result = task()
                     activity.runOnUiThread {
                         button.isEnabled = true
@@ -759,7 +759,7 @@ internal fun ReaMicroSettingsHook.openOnlineSourceCredentialDialog(
                 }
                 loginButton.isEnabled = false
                 Toast.makeText(activity, "正在登录 ${source.name}", Toast.LENGTH_SHORT).show()
-                Thread({
+                com.reamicro.fix.reload.ModuleResources.thread({
                     val result = OnlineSourceAuth.login(
                         activity.applicationContext,
                         source,
@@ -985,7 +985,7 @@ internal fun ReaMicroSettingsHook.discoverVersionValue(): Int {
 
     if (!discoverRefreshRegistered) {
         discoverRefreshRegistered = true
-        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        val mainHandler = com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper())
         com.reamicro.fix.discover.DiscoverState.onChanged = {
             mainHandler.post { runCatching { signalDiscoverRefresh() } }
         }

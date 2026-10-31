@@ -43,8 +43,8 @@ internal class WebDavSyncHook(
     private val settingsProvider: () -> ModuleSettingsSnapshot,
     private val drive: WebDavDriveHook,
 ) {
-    private val main = Handler(Looper.getMainLooper())
-    private val worker = Executors.newSingleThreadExecutor { Thread(it, "ReaMicroWebDavSync").apply { isDaemon = true } }
+    private val main = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
+    private val worker = com.reamicro.fix.reload.ModuleResources.pool(1) { Thread(it, "ReaMicroWebDavSync").apply { isDaemon = true } }
     private val configuring = AtomicBoolean()
     private var session = WeakReference<Any>(null)
     private val extraRow = ThreadLocal<Boolean>()

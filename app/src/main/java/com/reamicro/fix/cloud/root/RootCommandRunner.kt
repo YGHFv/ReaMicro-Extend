@@ -4,7 +4,7 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.concurrent.thread
+import com.reamicro.fix.reload.ModuleResources.backgroundThread as thread
 
 internal data class RootCommandResult(
     val exitCode: Int,

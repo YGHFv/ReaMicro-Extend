@@ -29,7 +29,7 @@ fun onlineCompletionDownloadBigText(bookName: String, status: String, progress: 
 
 fun cancelOnlineCompletionNotificationIfDone(manager: NotificationManager, id: Int, done: Boolean) {
     if (!done) return
-    Handler(Looper.getMainLooper()).postDelayed({ manager.cancel(id) }, DONE_NOTIFICATION_VISIBLE_MS)
+    com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).postDelayed({ manager.cancel(id) }, DONE_NOTIFICATION_VISIBLE_MS)
 }
 
 private fun onlineCompletionProgressLabel(progress: Int, status: String): String {

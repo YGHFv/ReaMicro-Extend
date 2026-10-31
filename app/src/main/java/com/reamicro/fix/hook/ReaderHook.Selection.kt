@@ -491,7 +491,7 @@ internal fun ReaderHook.requestDictionaryPreset(
     handle.footerLabel.text = preset.name
     handle.body.text = "\u6b63\u5728\u89e3\u6790..."
     handle.body.setTextColor(handle.colors.primaryText)
-    Thread({
+    com.reamicro.fix.reload.ModuleResources.thread({
         val result = runCatching { AiApiStore.dictionary(activity.applicationContext, config, quote, preset) }
             .onFailure { XposedBridge.log("$LOG_PREFIX dictionary request failed: ${it.stackTraceToString()}") }
             .getOrElse { error -> AiApiTestResult(false, error.message ?: error.javaClass.simpleName) }

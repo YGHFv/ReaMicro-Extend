@@ -113,8 +113,8 @@ internal fun WebDavDriveHook.cleanupStartupCacheIfNeeded(context: Context) {
     ensureOnlineCompletionCancelReceiver(context)
     if (!settingsProvider().canRunStartupCacheCleanup) return
     if (!startupCacheCleanupStarted.compareAndSet(false, true)) return
-    Handler(Looper.getMainLooper()).postDelayed({
-        Thread({
+    com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).postDelayed({
+        com.reamicro.fix.reload.ModuleResources.thread({
             runCatching {
                 val appContext = context.applicationContext ?: context
                 val cacheDir = appContext.cacheDir
@@ -352,7 +352,7 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(
     )
     progressNotifier.running(0, "准备更新", force = true)
     if (!silent) showToast("开始检查更新：$title")
-    Thread({
+    com.reamicro.fix.reload.ModuleResources.thread({
         val outcome = runCatching {
             val latest = findLocalBookByUuid(book.callLong("getUid"), book.callString("getUuid")) ?: book
             val target = OnlineDownloadTarget(
@@ -377,14 +377,14 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(
             )
             val message = onlineChapterUpdateMessage(result.added, result.failed, result.retried, result.styled)
             progressNotifier.finish(message, detailUrl, success = true)
-            if (!silent) Handler(Looper.getMainLooper()).post {
+            if (!silent) com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                 Toast.makeText(appContext, "$message：$title", Toast.LENGTH_SHORT).show()
             }
             OnlineChapterUpdateOutcome(title, result.added, result.failed, result.retried, skipped = result.skipped)
         }.onFailure {
             XposedBridge.log("$LOG_PREFIX online completion update failed: ${it.stackTraceToString()}")
             progressNotifier.finish(it.message ?: "章节更新失败", null, success = false)
-            if (!silent) Handler(Looper.getMainLooper()).post {
+            if (!silent) com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                 Toast.makeText(appContext, "章节更新失败：${it.message ?: title}", Toast.LENGTH_SHORT).show()
             }
         }.also {
@@ -635,7 +635,7 @@ internal fun WebDavDriveHook.startOnlineCompletionDownload(
     if (!notificationReady) {
         showToast("阅微通知权限未开启，下载继续在后台进行")
     }
-    val thread = Thread({
+    val thread = com.reamicro.fix.reload.ModuleResources.thread({
         var partialImportThread: Thread? = null
         runCatching {
             throwIfOnlineCompletionDownloadCancelled(task)
@@ -658,7 +658,7 @@ internal fun WebDavDriveHook.startOnlineCompletionDownload(
                     "online completion on-demand ready file=${localFile.absolutePath} " +
                         "size=${localFile.length()} importedDir=${importResult.bookDir}",
                 )
-                Handler(Looper.getMainLooper()).post {
+                com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                     Toast.makeText(appContext, "已导入逐章加载：${target.result.name}", Toast.LENGTH_SHORT).show()
                 }
                 cleanupOnlineCompletionDownloadTask(task)
@@ -676,8 +676,8 @@ internal fun WebDavDriveHook.startOnlineCompletionDownload(
                 onPartialReady = { partialFile, count ->
                     throwIfOnlineCompletionDownloadCancelled(task)
                     progressNotifier.running(48, "正在导入前 $count 章", force = true)
-                    partialImportThread = Thread({
-                        if (task.cancelRequested) return@Thread
+                    partialImportThread = com.reamicro.fix.reload.ModuleResources.thread({
+                        if (task.cancelRequested) return@thread
                         val partialImported = runCatching {
                             throwIfOnlineCompletionDownloadCancelled(task)
                             val importResult = importOnlineCompletionBook(
@@ -704,7 +704,7 @@ internal fun WebDavDriveHook.startOnlineCompletionDownload(
                             importResult.imported
                         }.onFailure { error ->
                             if (error is OnlineCompletionDownloadCancelledException || task.cancelRequested) {
-                                return@Thread
+                                return@thread
                             }
                             logWebDav(
                                 "online completion partial import failed but download continues: " +
@@ -756,7 +756,7 @@ internal fun WebDavDriveHook.startOnlineCompletionDownload(
                 "online completion download complete file=${localFile.absolutePath} " +
                     "size=${localFile.length()} importedDir=${task.importedBookDir}",
             )
-            Handler(Looper.getMainLooper()).post {
+            com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                 Toast.makeText(appContext, "已导入：${target.result.name}", Toast.LENGTH_SHORT).show()
             }
             cleanupOnlineCompletionDownloadTask(task)
@@ -770,7 +770,7 @@ internal fun WebDavDriveHook.startOnlineCompletionDownload(
                 XposedBridge.log("$LOG_PREFIX online completion download failed: ${it.stackTraceToString()}")
                 cleanupOnlineCompletionDownloadTask(task)
                 progressNotifier.finish(it.message ?: "下载失败", null, success = false)
-                Handler(Looper.getMainLooper()).post {
+                com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                     Toast.makeText(appContext, "在线补全下载失败：${it.message ?: target.result.name}", Toast.LENGTH_SHORT).show()
                 }
             }

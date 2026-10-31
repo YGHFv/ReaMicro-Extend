@@ -78,7 +78,7 @@ internal class B4HomeSearchEvents(private val drive: WebDavDriveHook) {
             val url = book.javaClass.hostField("url").get(book) as String
             val path = cloudPathOf(book)
             // 不在主线程阻塞 Room；命中后复用 pv(byte=11) 的原生阅读路由。
-            Thread({
+            com.reamicro.fix.reload.ModuleResources.thread({
                 runCatching {
                     val repository = receiver.javaClass.hostField("repository").get(receiver)
                     val query = drive.cls(BOOKSHELF_REPOSITORY_CLASS).hostAbiMethod(
@@ -89,7 +89,7 @@ internal class B4HomeSearchEvents(private val drive: WebDavDriveHook) {
                         "$LOG_PREFIX B4 home search lookup receiver=${receiver.javaClass.name} url=$url " +
                             "path=$path local=${local?.javaClass?.name}",
                     )
-                    Handler(Looper.getMainLooper()).post {
+                    com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
                         runCatching {
                             if (local == null) {
                                 tap(drive, receiver, book)

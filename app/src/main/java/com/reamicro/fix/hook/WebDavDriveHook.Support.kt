@@ -199,6 +199,11 @@ internal fun WebDavDriveHook.ensureOnlineCompletionCancelReceiver(context: Conte
             @Suppress("DEPRECATION")
             appContext.registerReceiver(receiver, filter)
         }
+        com.reamicro.fix.reload.ModuleResources.cleanup {
+            appContext.unregisterReceiver(receiver)
+            onlineCompletionCancelReceiverRegistered.set(false)
+            OnlineOnDemandBridge.detach()
+        }
         logWebDav("online completion cancel receiver registered package=${appContext.packageName}")
     }.onFailure {
         onlineCompletionCancelReceiverRegistered.set(false)
@@ -1812,7 +1817,7 @@ internal fun WebDavDriveHook.repairOnlineCompletionBookMetadataSoon(repository: 
     val last = onlineCompletionMetadataRepairAt.get()
     if (last > 0L && now - last < ONLINE_COMPLETION_METADATA_REPAIR_INTERVAL_MS) return
     if (!onlineCompletionMetadataRepairAt.compareAndSet(last, now)) return
-    Thread({
+    com.reamicro.fix.reload.ModuleResources.thread({
         runCatching {
             repairOnlineCompletionBookMetadata(repository)
         }.onFailure {

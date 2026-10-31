@@ -32,8 +32,9 @@ object LocalTaskMirror {
 
     private fun exchange(context: Context, operation: String, accountId: String?,
                          onResult: (LocalTaskMirrorResult) -> Unit): Boolean {
+        val lease = com.reamicro.fix.reload.ModuleResources.lease() ?: return false
         val app = context.applicationContext
-        val main = Handler(Looper.getMainLooper())
+        val main = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
         val completion = LocalTaskBridgeCompletion()
         val timerToken = Any()
         val id = UUID.randomUUID().toString()
@@ -42,7 +43,11 @@ object LocalTaskMirror {
         fun deliver(result: LocalTaskMirrorResult) {
             if (result.success) XposedBridge.logAlways("ReaMicro local task bridge $operation acknowledged transport=$transport ms=${SystemClock.elapsedRealtime() - started}")
             else XposedBridge.logError("ReaMicro local task bridge $operation unconfirmed transport=$transport code=${result.error}")
-            main.post { runCatching { onResult(result) }.onFailure { XposedBridge.logError("ReaMicro local task bridge UI callback failed") } }
+            main.post {
+                try {
+                    runCatching { onResult(result) }.onFailure { XposedBridge.logError("ReaMicro local task bridge UI callback failed") }
+                } finally { lease.close() }
+            }
         }
         fun fail(code: String) {
             if (!completion.claim()) return

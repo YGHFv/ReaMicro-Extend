@@ -675,7 +675,7 @@ class BookOverviewImageSelectionHook(
     private fun saveCurrentImageToGallery(context: BookImageContext, target: ImageTarget) {
         val activity = activityProvider() ?: return
         activity.toast("正在保存${target.label}到相册")
-        Thread {
+        com.reamicro.fix.reload.ModuleResources.thread {
             val result = runCatching {
                 val bytes = loadCurrentImageBytes(activity, context.book, target)
                     ?: error("未找到${target.label}图片")
