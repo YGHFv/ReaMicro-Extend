@@ -7,6 +7,7 @@ import com.reamicro.fix.core.hostNameMatches
 import com.reamicro.fix.core.typeMatches
 import com.reamicro.fix.core.B2NativeUi
 import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.ProfileContainerOpacity
 
 
 import android.app.Activity
@@ -42,6 +43,7 @@ class ProfileBackgroundHook(
     private val backgroundCallCount = ThreadLocal<Int>()
     private val fillMaxSizeCallCount = ThreadLocal<Int>()
     private val profileCardDepth = ThreadLocal<Int>()
+    private val profileCommunityDepth = ThreadLocal<Int>()
     private val profileSurfaceDepth = ThreadLocal<Int>()
     private val privilegeSurfaceScope = ThreadLocal<XC_MethodHook.MethodHookParam>()
     private val methodCache = HashMap<String, Method>()
@@ -123,7 +125,13 @@ class ProfileBackgroundHook(
                 if (inProfileLambda.get() != true && !inB4ProfileCard()) return
                 val snapshot = settingsProvider()
                 if (!canHandleProfileBackground(snapshot)) return
-                if (inB4ProfileCard() && !inB4ProfileSurface()) return
+                if (inB4ProfileCard() && !inB4ProfileSurface()) {
+                    // 社区内容的纯色背景调用只画分割线；统一处理原生与注入线，不动 Icon tint。
+                    if ((profileCommunityDepth.get() ?: 0) > 0) {
+                        param.args[1] = transparentProfileContainerColor(param.args[1] as Long, snapshot)
+                    }
+                    return
+                }
                 param.args[1] = if (inB4ProfileSurface()) {
                     transparentProfileContainerColor(param.args[1] as Long, snapshot)
                 } else {
@@ -158,6 +166,9 @@ class ProfileBackgroundHook(
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (inProfileLambda.get() != true || !canUseProfileImageBackground(settingsProvider())) return
                     enterB4ProfileCard(param)
+                    if (target == community) {
+                        profileCommunityDepth.set((profileCommunityDepth.get() ?: 0) + 1)
+                    }
                     if (target == privilege) {
                         enterB4ProfileSurface(param)
                         privilegeSurfaceScope.set(param)
@@ -173,6 +184,10 @@ class ProfileBackgroundHook(
                     if (privilegeSurfaceScope.get() === param) privilegeSurfaceScope.remove()
                     leaveB4ProfileSurface(param)
                     if (param.getObjectExtra(B4_PROFILE_CARD_SCOPE_EXTRA) == true) {
+                        if (target == community) {
+                            val depth = (profileCommunityDepth.get() ?: 1) - 1
+                            if (depth > 0) profileCommunityDepth.set(depth) else profileCommunityDepth.remove()
+                        }
                         leaveB4ProfileCard()
                     }
                 }
@@ -1540,15 +1555,9 @@ class ProfileBackgroundHook(
     private fun argbWithAlpha(argb: Int, alpha: Int): Int =
         (alpha.coerceIn(0, 255) shl 24) or (argb and 0x00FFFFFF)
 
-    private fun profileBackgroundContainerArgb(argb: Int, transparency: Int): Int {
-        val sourceAlpha = (argb ushr 24) and 0xff
-        val alpha = sourceAlpha * (100 - transparency.coerceIn(0, 100)) / 100
-        return argbWithAlpha(argb, alpha)
-    }
-
     private fun transparentProfileContainerColor(color: Long, snapshot: ModuleSettingsSnapshot): Long =
         colorLongFromArgb(
-            profileBackgroundContainerArgb(
+            ProfileContainerOpacity.applyToArgb(
                 colorLongToArgb(color),
                 snapshot.profileBackgroundCardTransparency,
             ),

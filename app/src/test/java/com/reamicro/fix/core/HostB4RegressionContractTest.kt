@@ -142,7 +142,9 @@ class HostB4RegressionContractTest {
         assertTrue(hook.contains("if (!inB4ProfileSurface()) return"))
         assertTrue(hook.contains("privilegeSurfaceScope.get()?.let(::leaveB4ProfileSurface)"))
         assertTrue(hook.contains("XposedBridge.hookMethod(communitySurface"))
-        assertTrue(hook.contains("if (inB4ProfileCard() && !inB4ProfileSurface()) return"))
+        assertTrue(hook.contains("if (inB4ProfileCard() && !inB4ProfileSurface()) {"))
+        assertTrue(hook.contains("if ((profileCommunityDepth.get() ?: 0) > 0)"))
+        assertTrue(hook.contains("if (depth > 0) profileCommunityDepth.set(depth) else profileCommunityDepth.remove()"))
         assertTrue(hook.contains("transparentProfileContainerColor(param.args[1] as Long, snapshot)"))
         assertTrue(hook.contains("canUseProfileImageBackground(settingsProvider())"))
     }
