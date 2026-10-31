@@ -58,6 +58,20 @@ class HotReloadSourceContractTest {
         assertTrue(source("reload/HostCompositionReload.kt").contains("container.removeView(root)"))
     }
 
+    @Test fun restartRequiredShowsOnlyRestartAction() {
+        val actions = source("hook/ReaMicroSettingsHook.DexKit.kt")
+            .substringAfter("if (notice.restartRequired) {").substringBefore("card.addView(actions)")
+        assertTrue(actions.contains("} else {"))
+        val restart = actions.substringBefore("} else {")
+        val normal = actions.substringAfter("} else {")
+        assertTrue(restart.contains("\"重启阅微\""))
+        assertFalse(restart.contains("\"关闭\""))
+        assertFalse(restart.contains("\"重新扫描\""))
+        assertTrue(normal.contains("\"关闭\""))
+        assertTrue(normal.contains("\"重新扫描\""))
+        assertFalse(normal.contains("\"重启阅微\""))
+    }
+
     @Test fun unknownExtensionsAndUnretirableUiCannotSilentlyOptIn() {
         assertTrue(source("hook/ReaMicroHookEntry.kt").contains("feature is com.reamicro.fix.association.provider.ReloadableFeatureProvider"))
         assertTrue(source("hook/ReaMicroHookEntry.kt").contains("HostGeneration.unsupportedExtension(feature.id)"))

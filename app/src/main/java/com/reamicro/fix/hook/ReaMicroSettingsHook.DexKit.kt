@@ -89,21 +89,22 @@ private fun ReaMicroSettingsHook.showDexKitDialog(
                     }
                 }
             }, settingsDialogButtonParams(activity))
-        }
-        if (onRescan != null) actions.addView(
-            settingsDialogButton(activity, "重新扫描", colors, SettingsDialogButtonRole.Neutral).apply {
+        } else {
+            if (onRescan != null) actions.addView(
+                settingsDialogButton(activity, "重新扫描", colors, SettingsDialogButtonRole.Neutral).apply {
+                    setOnClickListener {
+                        dialog.dismiss()
+                        onRescan()
+                    }
+                }, settingsDialogButtonParams(activity),
+            )
+            actions.addView(settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply {
                 setOnClickListener {
                     dialog.dismiss()
-                    onRescan()
+                    onClose?.invoke()
                 }
-            }, settingsDialogButtonParams(activity),
-        )
-        actions.addView(settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply {
-            setOnClickListener {
-                dialog.dismiss()
-                onClose?.invoke()
-            }
-        }, settingsDialogButtonParams(activity))
+            }, settingsDialogButtonParams(activity))
+        }
         card.addView(actions)
         dialog.setOnCancelListener { onClose?.invoke() }
     } else {
