@@ -189,7 +189,8 @@ private fun ReaMicroSettingsHook.renderDiscoverKindRow(
         renderDiscoverKindExpandButton(inner)
         targetUnit()
     }
-    val mod = paddingSides(discoverFillMaxWidth(modifierInstance()), 20, 0, 8, -4)
+    // Compose 的 PaddingModifier 不接受负值；压缩间距不能以让整行组合失败为代价。
+    val mod = paddingSides(discoverFillMaxWidth(modifierInstance()), 20, 0, 8, 0)
     discoverRow(mod, row, composer)
 }
 

@@ -70,8 +70,17 @@ class HostB4RegressionContractTest {
             .substringAfter("private fun ReaderHook.selectionMenuCellWidthDp")
             .substringBefore("private fun ReaderHook.selectionMenuCellModifier")
         assertTrue(menu.contains("HostSymbols.abiProfileId == \"2.3.3-b4\" && !settingsProvider().canUseCompactReaderSelectionMenu"))
-        assertTrue(menu.contains("(maxTitleWidth + 32).coerceIn(60, 100)"))
+        assertTrue(menu.contains("(maxTitleWidth + 30).coerceIn(58, 100)"))
         assertTrue(menu.contains("(maxTitleWidth + 42).coerceIn(72, 112)"))
+    }
+
+    @Test
+    fun `discover category row never uses unsupported negative padding`() {
+        val discover = source("ReaMicroSettingsHook.Discover.kt")
+            .substringAfter("private fun ReaMicroSettingsHook.renderDiscoverKindRow")
+            .substringBefore("private fun ReaMicroSettingsHook.renderDiscoverKindExpandButton")
+        assertTrue(discover.contains("paddingSides(discoverFillMaxWidth(modifierInstance()), 20, 0, 8, 0)"))
+        assertFalse(discover.contains(", -4)"))
     }
 
     @Test
