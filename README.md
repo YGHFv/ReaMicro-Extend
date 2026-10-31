@@ -156,10 +156,24 @@ sdk.dir=C:/Users/<name>/AppData/Local/Android/Sdk
 
 改动前值得知道的两条：
 
-- 宿主类名只在 `app/src/main/java/com/reamicro/fix/core/HostClasses.kt` 里出现，
-  宿主升级时改这一个文件。
+- 宿主逻辑类名、混淆映射、原生 ABI 和扫描规则分别由 `HostClasses.kt`、
+  `app/src/main/assets/host-profiles/` 及相应兼容代码维护；宿主升级并非只改一个类名文件。
 - 模块启动会打印 `hook installed N/M, failed: [...]`，设置页「关于 → 模块自检」
   能看到明细。宿主升级后先看这一行定位掉线的 hook。
+
+### API102 热重载
+
+- 入口为阅微「设置 → 补全计划 → 关于补全 → API102 热重载」，需要框架服务支持 API102。
+- 当前原地界面恢复只验证了阅微正式版 2.3.3：保留进程、Activity 和窗口，刷新根界面并返回首页，不保持深层页面。
+- 任务或扫描未结束、外部功能源缺少退出协议，或者本进程使用过尚不能安全卸载的模块编辑器/独立 Compose 面板时，会拒绝热重载。此时使用原“重启阅微”。
+- “重启阅微”仍是真正的进程重启，和热重载不是同一个操作；正常重启不显示等待卡片，失败时保留提示。
+- 本地忽略的外部源码和 `.rmsource` 不随 Git 提交发布。手动功能源需另行适配退出协议并重建；`tools/enable-manual-hot-reload.py` 仅适用于匹配的本地源码，不能把独立发布的旧源视为自动兼容。
+
+### 本地文件清理
+
+- `build/`、`app/build/`、编辑器子项目的 `build/`、项目 Gradle/Kotlin 缓存和 Python 字节码可以重新生成；删除前应停止对应构建并保留需要的 APK/测试报告。
+- `signing/`、`local.properties`、`external-sources/src/`、`source-files/` 和 `tools/host-mappings/` 不是临时缓存，不应批量清除。
+- 一次性排查脚本、截图、设备导出数据及旧审计报告不属于公开发布内容；清理时先归档到项目外，不使用无差别的 `git clean -xfd`。
 
 ## 注意事项
 

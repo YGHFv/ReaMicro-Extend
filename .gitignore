@@ -1,4 +1,5 @@
 .alma-snapshots
+/.claude/
 .tmp_*
 tmp/
 AGENTS.md
