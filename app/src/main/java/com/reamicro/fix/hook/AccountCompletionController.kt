@@ -20,6 +20,7 @@ import android.util.Base64
 import android.util.JsonReader
 import android.util.JsonToken
 import com.reamicro.fix.core.HostClasses
+import com.reamicro.fix.reader.ReaderTypographyPolicy
 import com.reamicro.fix.xposed.XposedBridge
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
@@ -501,7 +502,7 @@ class AccountCompletionController(
         )
     }
 
-    private fun restoreAccount(activity: Activity, account: StoredAccount) {
+    private fun restoreAccount(activity: Activity, account: StoredAccount, restoreDevicePreferences: Boolean = false) {
         // 写回前先以宿主当前行为准做字段合并，避免旧快照覆盖掉实时资料（如第三方绑定）。
         val guarded = guardUserDataAgainstHost(activity, account)
         upsertUserRow(activity, guarded)
@@ -514,7 +515,8 @@ class AccountCompletionController(
         updatePreference(session, key(THIRD_PARTY_KEYS_CLASS, "getALIYUN_AUTH"), account.session.aliyunAuth)
         updatePreference(session, key(THIRD_PARTY_KEYS_CLASS, "getYUN115_AUTH"), account.session.yun115Auth)
         if (account.hasFullState) {
-            restoreFullSessionPreferences(session, account.session)
+            // 普通切号只切身份和账号云盘；阅读排版、默认首页等本机偏好不能被旧快照覆盖。
+            if (restoreDevicePreferences) restoreFullSessionPreferences(session, account.session)
             restoreSharedPrefs(activity, WEBDAV_PREFS, account.webDavPrefs)
             restoreSharedPrefs(activity, LOCAL_LIBRARY_PREFS, account.localLibraryPrefs)
         } else {
@@ -533,8 +535,8 @@ class AccountCompletionController(
         updatePreference(session, key(PREF_KEYS_CLASS, "getTHEME"), snapshot.theme)
         updatePreference(session, key(PREF_KEYS_CLASS, "getMIPMAP"), snapshot.mipmap)
         updatePreference(session, key(PREF_KEYS_CLASS, "getBACKGROUND"), snapshot.background)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getTEXT_SIZE"), snapshot.textSize)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getLINE_HEIGHT"), snapshot.lineHeight)
+        updatePreference(session, key(PREF_KEYS_CLASS, "getTEXT_SIZE"), ReaderTypographyPolicy.textSize(snapshot.textSize))
+        updatePreference(session, key(PREF_KEYS_CLASS, "getLINE_HEIGHT"), ReaderTypographyPolicy.lineHeight(snapshot.lineHeight))
         updatePreference(session, key(PREF_KEYS_CLASS, "getFAMILY"), snapshot.family)
         updatePreference(session, key(PREF_KEYS_CLASS, "getEMBEDDED_FONTS"), snapshot.embeddedFonts)
         updatePreference(session, key(PREF_KEYS_CLASS, "getBUILD_IN_FONTS"), snapshot.builtInFonts)
@@ -565,8 +567,8 @@ class AccountCompletionController(
             theme = readPreference(prefs, key(PREF_KEYS_CLASS, "getTHEME")) as? String ?: "",
             mipmap = readPreference(prefs, key(PREF_KEYS_CLASS, "getMIPMAP")) as? String ?: "",
             background = readPreference(prefs, key(PREF_KEYS_CLASS, "getBACKGROUND")) as? String ?: "",
-            textSize = (readPreference(prefs, key(PREF_KEYS_CLASS, "getTEXT_SIZE")) as? Number)?.toFloat() ?: 0f,
-            lineHeight = (readPreference(prefs, key(PREF_KEYS_CLASS, "getLINE_HEIGHT")) as? Number)?.toFloat() ?: 0f,
+            textSize = ReaderTypographyPolicy.textSize((readPreference(prefs, key(PREF_KEYS_CLASS, "getTEXT_SIZE")) as? Number)?.toFloat()),
+            lineHeight = ReaderTypographyPolicy.lineHeight((readPreference(prefs, key(PREF_KEYS_CLASS, "getLINE_HEIGHT")) as? Number)?.toFloat()),
             family = readPreference(prefs, key(PREF_KEYS_CLASS, "getFAMILY")) as? String ?: "",
             embeddedFonts = readPreference(prefs, key(PREF_KEYS_CLASS, "getEMBEDDED_FONTS")) as? Boolean ?: true,
             builtInFonts = readPreference(prefs, key(PREF_KEYS_CLASS, "getBUILD_IN_FONTS")) as? Boolean ?: false,
@@ -805,7 +807,7 @@ class AccountCompletionController(
             onProgress("\u6b63\u5728\u6062\u590d\u6a21\u5757\u8bbe\u7f6e")
             restoreModuleGlobalEntriesStreaming(zip)
             val normalized = account.copy(lastUsedAt = System.currentTimeMillis())
-            restoreAccount(activity, normalized)
+            restoreAccount(activity, normalized, restoreDevicePreferences = true)
             val stored = loadStoredAccounts(activity)
                 .associateByTo(linkedMapOf()) { it.accountId }
             val existing = stored[normalized.accountId]

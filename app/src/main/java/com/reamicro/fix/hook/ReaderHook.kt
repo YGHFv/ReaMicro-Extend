@@ -150,6 +150,7 @@ class ReaderHook(
         HookInstallReport.installAll(
             FEATURE_ID,
             listOf(
+                "readerTypographyGuard" to ::hookReaderTypographyGuard,
                 "contentDomRenderTextWidthFallback" to ::hookContentDomRenderTextWidthFallback,
                 "scrollPagerCrashGuard" to ::hookScrollPagerCrashGuard,
                 "nativeSelection" to ::installNativeSelectionHooks,
