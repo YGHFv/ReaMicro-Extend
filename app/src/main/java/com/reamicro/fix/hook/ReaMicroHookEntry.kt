@@ -165,6 +165,9 @@ class ReaMicroHookEntry {
         )
         installFeature("WebDavDriveHook", webDavDriveHook::install)
         if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3") {
+            installFeature("HomeDefaultPageHook") {
+                HomeDefaultPageHook(classLoader, settingsProvider).install()
+            }
             installFeature("WebDavSyncHook") {
                 WebDavSyncHook(classLoader, activityProvider, settingsProvider, webDavDriveHook).install()
             }

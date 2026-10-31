@@ -139,6 +139,10 @@ class HostB4RegressionContractTest {
         assertTrue(hook.contains("if (inProfileLambda.get() != true && !inB4ProfileCard()) return"))
         assertTrue(hook.contains("profileBackgroundCardTransparency.coerceIn(0, 100)"))
         assertTrue(hook.contains("param.args[0] = ((param.args[0] as Float) * opacity)"))
+        assertTrue(hook.contains("if (!inB4ProfileSurface()) return"))
+        assertTrue(hook.contains("privilegeSurfaceScope.get()?.let(::leaveB4ProfileSurface)"))
+        assertTrue(hook.contains("XposedBridge.hookMethod(communitySurface"))
+        assertTrue(hook.contains("if (inB4ProfileCard() && !inB4ProfileSurface()) return"))
         assertTrue(hook.contains("transparentProfileContainerColor(param.args[1] as Long, snapshot)"))
         assertTrue(hook.contains("canUseProfileImageBackground(settingsProvider())"))
     }
@@ -157,7 +161,7 @@ class HostB4RegressionContractTest {
     @Test
     fun `b4 card transparency does not weaken the root image surface contract`() {
         val hook = source("ProfileBackgroundHook.kt")
-        assertTrue(hook.contains("if (inB4ProfileCard()) {"))
+        assertTrue(hook.contains("if (inB4ProfileSurface()) {"))
         assertTrue(hook.contains("transparentProfileContainerColor(param.args[1] as Long, snapshot)"))
         assertTrue(hook.contains("if (snapshot.profileBackgroundUseImage) PROFILE_BACKGROUND_HOUMO_SURFACE_ARGB"))
     }

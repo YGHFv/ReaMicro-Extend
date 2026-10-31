@@ -42,6 +42,8 @@ class ProfileBackgroundHook(
     private val backgroundCallCount = ThreadLocal<Int>()
     private val fillMaxSizeCallCount = ThreadLocal<Int>()
     private val profileCardDepth = ThreadLocal<Int>()
+    private val profileSurfaceDepth = ThreadLocal<Int>()
+    private val privilegeSurfaceScope = ThreadLocal<XC_MethodHook.MethodHookParam>()
     private val methodCache = HashMap<String, Method>()
     private var cachedBitmap: Bitmap? = null
     private var cachedImagePath: String? = null
@@ -92,6 +94,12 @@ class ProfileBackgroundHook(
             "h", classLoader.hostClass(COMPOSER_CLASS), classLoader.hostClass(HostClasses.Compose.MODIFIER),
         )
         XposedBridge.hookMethod(materialize, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                // 特权卡片首个节点之前只有玻璃背景；节点创建后必须保留文字、箭头和分隔线。
+                privilegeSurfaceScope.get()?.let(::leaveB4ProfileSurface)
+                privilegeSurfaceScope.remove()
+            }
+
             override fun afterHookedMethod(param: MethodHookParam) {
                 if (inProfileLambda.get() != true) return
                 val count = (fillMaxSizeCallCount.get() ?: 0) + 1
@@ -115,7 +123,8 @@ class ProfileBackgroundHook(
                 if (inProfileLambda.get() != true && !inB4ProfileCard()) return
                 val snapshot = settingsProvider()
                 if (!canHandleProfileBackground(snapshot)) return
-                param.args[1] = if (inB4ProfileCard()) {
+                if (inB4ProfileCard() && !inB4ProfileSurface()) return
+                param.args[1] = if (inB4ProfileSurface()) {
                     transparentProfileContainerColor(param.args[1] as Long, snapshot)
                 } else {
                     colorLongFromArgb(
@@ -130,11 +139,29 @@ class ProfileBackgroundHook(
             .declaredMethods.single { it.hostNameMatches("Community") }
         val privilege = classLoader.hostClass("ReaMicroHost.ProfilePrivilegeCard")
             .hostAbiMethodByArity("g", 12)
+        val communitySurface = community.declaringClass.hostAbiMethod(
+            "b", Boolean::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+            classLoader.hostClass(COMPOSER_CLASS),
+        )
+        XposedBridge.hookMethod(communitySurface, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if (inB4ProfileCard()) enterB4ProfileSurface(param)
+            }
+
+            override fun afterHookedMethod(param: MethodHookParam) {
+                leaveB4ProfileSurface(param)
+            }
+        })
+        XposedBridge.deoptimize(communitySurface)
         listOf(community to (2 to 6), privilege to (9 to 27)).forEach { (target, slots) ->
             XposedBridge.hookMethod(target, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (inProfileLambda.get() != true || !canUseProfileImageBackground(settingsProvider())) return
                     enterB4ProfileCard(param)
+                    if (target == privilege) {
+                        enterB4ProfileSurface(param)
+                        privilegeSurfaceScope.set(param)
+                    }
                     // B4 的卡片玻璃层由独立开关选择；模块图片不再自动触发宿主会员背景的分支。
                     val (index, shift) = slots
                     param.args[index] = true
@@ -143,6 +170,8 @@ class ProfileBackgroundHook(
                 }
 
                 override fun afterHookedMethod(param: MethodHookParam) {
+                    if (privilegeSurfaceScope.get() === param) privilegeSurfaceScope.remove()
+                    leaveB4ProfileSurface(param)
                     if (param.getObjectExtra(B4_PROFILE_CARD_SCOPE_EXTRA) == true) {
                         leaveB4ProfileCard()
                     }
@@ -155,7 +184,7 @@ class ProfileBackgroundHook(
         )
         XposedBridge.hookMethod(colorCopyAlpha, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                if (!inB4ProfileCard()) return
+                if (!inB4ProfileSurface()) return
                 val snapshot = settingsProvider()
                 if (!canHandleProfileBackground(snapshot)) return
                 val opacity = (100 - snapshot.profileBackgroundCardTransparency.coerceIn(0, 100)) / 100f
@@ -179,6 +208,20 @@ class ProfileBackgroundHook(
     }
 
     private fun inB4ProfileCard(): Boolean = (profileCardDepth.get() ?: 0) > 0
+
+    private fun enterB4ProfileSurface(param: XC_MethodHook.MethodHookParam) {
+        profileSurfaceDepth.set((profileSurfaceDepth.get() ?: 0) + 1)
+        param.setObjectExtra(B4_PROFILE_SURFACE_SCOPE_EXTRA, true)
+    }
+
+    private fun leaveB4ProfileSurface(param: XC_MethodHook.MethodHookParam) {
+        if (param.getObjectExtra(B4_PROFILE_SURFACE_SCOPE_EXTRA) != true) return
+        param.setObjectExtra(B4_PROFILE_SURFACE_SCOPE_EXTRA, false)
+        val depth = (profileSurfaceDepth.get() ?: 1) - 1
+        if (depth > 0) profileSurfaceDepth.set(depth) else profileSurfaceDepth.remove()
+    }
+
+    private fun inB4ProfileSurface(): Boolean = (profileSurfaceDepth.get() ?: 0) > 0
 
     private fun installProfileScreenHook() {
         runCatching {
@@ -1514,6 +1557,7 @@ class ProfileBackgroundHook(
     companion object {
         const val LOG_PREFIX = "ReaMicro LSP profile background"
         const val B4_PROFILE_CARD_SCOPE_EXTRA = "reamicro.profileBackgroundCardScope"
+        const val B4_PROFILE_SURFACE_SCOPE_EXTRA = "reamicro.profileBackgroundSurfaceScope"
 
         const val BACKGROUND_ARGB_FALLBACK = 0x80000000.toInt()
         const val PROFILE_BACKGROUND_DARK_PAGE_ARGB_FALLBACK = 0xFF000000.toInt()
