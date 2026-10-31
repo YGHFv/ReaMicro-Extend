@@ -22,6 +22,13 @@ internal data class BookshelfUpdateReport(
         return buildString {
             append("$updated 本新增 $chapters 章，已检查 ${books.size}/$total 本")
             if (unfinished > 0) append("，$unfinished 本未完成")
+            val changed = books.filter { it.added > 0 }
+            if (changed.isNotEmpty()) {
+                append("；")
+                append(changed.joinToString("，") { book ->
+                    "${clean(book.title).ifBlank { "未命名图书" }} +${book.added}章"
+                })
+            }
         }
     }
 

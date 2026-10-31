@@ -29,6 +29,7 @@ internal object DexKitUpdateScan {
     private var session: Session? = null
     private var attempted: HostScanUpdateStamp? = null
     private var checking = false
+    private val stateListeners = LinkedHashSet<() -> Unit>()
 
     private data class Installation(
         val stamp: HostScanUpdateStamp,
@@ -45,6 +46,7 @@ internal object DexKitUpdateScan {
     )
 
     fun onResume(activity: Activity) {
+        val wasBusy = isBusy()
         resumed = WeakReference(activity)
         if (session != null) {
             showSession()
@@ -74,6 +76,7 @@ internal object DexKitUpdateScan {
                     if (showSession()) {
                         attempted = installation.stamp
                         start(context, next)
+                        notifyBusyChanged(wasBusy)
                     } else {
                         session = null
                     }
@@ -94,6 +97,19 @@ internal object DexKitUpdateScan {
     fun onDestroyed(activity: Activity) = onPause(activity)
 
     fun isBusy(): Boolean = session?.finished == false
+
+    fun addStateListener(listener: () -> Unit) {
+        stateListeners += listener
+    }
+
+    private fun notifyBusyChanged(previous: Boolean) {
+        if (previous == isBusy()) return
+        stateListeners.toList().forEach { listener ->
+            runCatching(listener).onFailure {
+                XposedBridge.logError("ReaMicro DexKit state listener failed", it)
+            }
+        }
+    }
 
     private fun start(context: Context, current: Session) {
         XposedBridge.logAlways("ReaMicro DexKit update scan started: ${current.reason} " +
@@ -116,6 +132,7 @@ internal object DexKitUpdateScan {
             }
             main.post {
                 if (session !== current) return@post
+                val wasBusy = isBusy()
                 current.report = report
                 current.error = result.exceptionOrNull()?.let { it.message ?: it.javaClass.simpleName }
                 current.finished = true
@@ -123,6 +140,7 @@ internal object DexKitUpdateScan {
                 result.exceptionOrNull()?.let {
                     XposedBridge.logError("ReaMicro DexKit update scan incomplete", it)
                 }
+                notifyBusyChanged(wasBusy)
                 showSession()
             }
         }

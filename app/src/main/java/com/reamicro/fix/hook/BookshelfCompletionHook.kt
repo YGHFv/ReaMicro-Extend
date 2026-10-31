@@ -34,6 +34,11 @@ internal class BookshelfCompletionHook(
     private val settingsProvider: () -> ModuleSettingsSnapshot,
     private val drive: WebDavDriveHook,
 ) {
+    private companion object {
+        const val RUNTIME_PREFS = "reamicro_fix_shelf_runtime"
+        const val KEY_LAST_AUTO_UPDATE_COMPLETED_AT = "last_auto_update_completed_at"
+    }
+
     private val main = Handler(Looper.getMainLooper())
     private var home = WeakReference<Any>(null)
     @Volatile private var bookshelfGroups: List<String> = emptyList()
@@ -47,6 +52,8 @@ internal class BookshelfCompletionHook(
     private val ui = B2NativeUi(loader)
     private val icons = HashMap<String, Any>()
     private val styleChanging = AtomicBoolean()
+    private val dexKitListenerRegistered = AtomicBoolean()
+    @Volatile private var cancelAutomaticForDexKit = false
     private val styleState by lazy { ui.mutableState(1) }
     private val settingsState by lazy { ui.mutableState(settingsProvider()) }
     private var observedPreferences: SharedPreferences? = null
@@ -63,6 +70,18 @@ internal class BookshelfCompletionHook(
                 observedPreferences?.unregisterOnSharedPreferenceChangeListener(preferenceListener)
                 prefs.registerOnSharedPreferenceChangeListener(preferenceListener)
                 observedPreferences = prefs
+            }
+        }
+        if (dexKitListenerRegistered.compareAndSet(false, true)) {
+            DexKitUpdateScan.addStateListener {
+                main.post {
+                    if (DexKitUpdateScan.isBusy()) {
+                        cancelAutomaticForDexKit = true
+                        startupClaimed.set(false)
+                    } else {
+                        scheduleStartup()
+                    }
+                }
             }
         }
         XposedHelpers.callMethod(settingsState, "setValue", settingsProvider())
@@ -272,20 +291,35 @@ internal class BookshelfCompletionHook(
     }
 
     private fun scheduleStartup() {
-        if (!BookshelfCompletionPolicy.autoUpdate(settingsProvider())) return
+        if (!canStartAutomaticUpdate()) return
         if (!startupClaimed.compareAndSet(false, true)) return
-        main.postDelayed({ startBatch("startup") }, 2000)
+        main.postDelayed({
+            if (!startBatch("startup")) startupClaimed.set(false)
+        }, 2000)
     }
 
-    private fun startBatch(reason: String) {
+    private fun canStartAutomaticUpdate(): Boolean {
+        val context = activityProvider()?.applicationContext ?: return false
+        val lastCompletedAt = context.getSharedPreferences(RUNTIME_PREFS, Context.MODE_PRIVATE)
+            .getLong(KEY_LAST_AUTO_UPDATE_COMPLETED_AT, 0L)
+        return BookshelfCompletionPolicy.canStartAutomatic(
+            settingsProvider(),
+            System.currentTimeMillis(),
+            lastCompletedAt,
+            DexKitUpdateScan.isBusy() || isManualDexKitScanning() || cancelAutomaticForDexKit,
+        )
+    }
+
+    private fun startBatch(reason: String): Boolean {
         val settings = settingsProvider()
-        if (!settings.moduleEnabled || !settings.shelfBatchUpdate) return
-        if (reason == "startup" && !BookshelfCompletionPolicy.autoUpdate(settings)) return
-        if (!running.compareAndSet(false, true)) return
+        if (!settings.moduleEnabled || !settings.shelfBatchUpdate) return false
+        if (reason == "startup" && !canStartAutomaticUpdate()) return false
+        if (!running.compareAndSet(false, true)) return false
         Thread({
             val results = ArrayList<OnlineChapterUpdateOutcome>()
             var total = 0
             var errorMessage: String? = null
+            var completed = false
             try {
                 val repository = home.get()?.let { it.javaClass.hostField("repository").get(it) }
                     ?: drive.awaitBookshelfRepository() ?: error("书架服务未就绪")
@@ -330,7 +364,9 @@ internal class BookshelfCompletionHook(
                 for ((book, info) in online) {
                     // 切换账号或关闭开关后停止下一本，已启动的单书操作沿用原锁与校验。
                     if (!settingsProvider().shelfBatchUpdate || !settingsProvider().moduleEnabled ||
-                        drive.currentUserId(repository) != uid) break
+                        drive.currentUserId(repository) != uid ||
+                        (reason == "startup" && (DexKitUpdateScan.isBusy() ||
+                            isManualDexKitScanning() || cancelAutomaticForDexKit))) break
                     val finished = CountDownLatch(1)
                     val title = XposedHelpers.callMethod(book, "getTitle")?.toString().orEmpty()
                     var outcome = OnlineChapterUpdateOutcome(title, error = "章节更新未完成")
@@ -350,10 +386,16 @@ internal class BookshelfCompletionHook(
                     results += outcome
                     XposedBridge.logAlways("ReaMicro shelf batch book=${number(book, "getId")} success=${outcome.success} added=${outcome.added} source=$reason")
                 }
+                completed = results.size == total
             } catch (error: Throwable) {
                 XposedBridge.logError("ReaMicro shelf batch failed", error)
                 errorMessage = error.message ?: "书架更新失败"
             } finally {
+                if (reason == "startup" && completed && errorMessage == null) {
+                    drive.currentContext()?.applicationContext
+                        ?.getSharedPreferences(RUNTIME_PREFS, Context.MODE_PRIVATE)
+                        ?.edit()?.putLong(KEY_LAST_AUTO_UPDATE_COMPLETED_AT, System.currentTimeMillis())?.apply()
+                }
                 runCatching {
                     val context = drive.currentContext()?.applicationContext ?: error("书架更新通知缺少 Context")
                     BookshelfUpdateNotifications.send(
@@ -364,6 +406,7 @@ internal class BookshelfCompletionHook(
                 running.set(false)
             }
         }, "ReaMicroShelfBatch").start()
+        return true
     }
 
     private fun number(book: Any, name: String): Long = (XposedHelpers.callMethod(book, name) as Number).toLong()

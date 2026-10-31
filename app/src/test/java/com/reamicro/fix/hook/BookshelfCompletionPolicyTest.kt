@@ -37,4 +37,15 @@ class BookshelfCompletionPolicyTest {
         assertFalse(BookshelfCompletionPolicy.autoUpdate(ModuleSettingsSnapshot(
             moduleEnabled = false, shelfBatchUpdate = true, shelfAutoUpdate = true)))
     }
+
+    @Test
+    fun automaticUpdateWaitsOneHourAfterLastCompletionAndSkipsDexKitScan() {
+        val settings = ModuleSettingsSnapshot(shelfBatchUpdate = true, shelfAutoUpdate = true)
+        val hour = BookshelfCompletionPolicy.AUTO_UPDATE_INTERVAL_MS
+
+        assertTrue(BookshelfCompletionPolicy.canStartAutomatic(settings, hour, 0L, false))
+        assertFalse(BookshelfCompletionPolicy.canStartAutomatic(settings, hour - 1, 1L, false))
+        assertTrue(BookshelfCompletionPolicy.canStartAutomatic(settings, hour + 1, 1L, false))
+        assertFalse(BookshelfCompletionPolicy.canStartAutomatic(settings, hour + 1, 1L, true))
+    }
 }

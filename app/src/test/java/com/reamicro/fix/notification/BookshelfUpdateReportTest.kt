@@ -14,6 +14,8 @@ class BookshelfUpdateReportTest {
         ), 4, false)
         assertEquals("书架批量更新完成", report.title)
         assertTrue(report.summary.contains("2 本新增 5 章"))
+        assertTrue(report.summary.contains("甲书 +3章"))
+        assertTrue(report.summary.contains("乙书 +2章"))
         assertTrue(report.summary.contains("2 本未完成"))
         assertTrue(report.details.contains("甲书：新增 3 章"))
         assertTrue(report.details.contains("乙书：新增 2 章，1 章失败"))
