@@ -2,7 +2,6 @@ package com.reamicro.fix.reload
 
 import android.os.Handler
 import android.os.Looper
-import java.lang.ref.WeakReference
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.ThreadPoolExecutor
@@ -15,7 +14,7 @@ import java.util.concurrent.RejectedExecutionException
 object ModuleResources {
     internal val gate = ReloadGate()
     @Volatile private var injected = false
-    private val handlers = ArrayList<WeakReference<Handler>>()
+    private val handlers = WeakResourceRegistry<Handler>()
     private val executors = ArrayList<ExecutorService>()
     private val cleanups = ArrayList<() -> Unit>()
     private val blockers = ArrayList<() -> String?>()
@@ -33,7 +32,7 @@ object ModuleResources {
     }
 
     fun handler(looper: Looper): Handler = GenerationHandler(looper).also {
-        synchronized(handlers) { handlers += WeakReference(it) }
+        handlers.add(it)
     }
 
     fun <T : ExecutorService> executor(value: T): T = value.also {
@@ -111,10 +110,7 @@ object ModuleResources {
     internal fun retire() {
         check(gate.state == ReloadGate.State.CHECKING)
         synchronized(cleanups) { cleanups.asReversed().forEach { it() }; cleanups.clear() }
-        synchronized(handlers) {
-            handlers.forEach { it.get()?.removeCallbacksAndMessages(null) }
-            handlers.clear()
-        }
+        handlers.drain().forEach { it.removeCallbacksAndMessages(null) }
         synchronized(executors) {
             executors.forEach { it.shutdown() }
             executors.forEach { check(it.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS)) }

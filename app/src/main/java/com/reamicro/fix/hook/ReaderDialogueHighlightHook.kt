@@ -69,7 +69,7 @@ class ReaderDialogueHighlightHook(
         changed = ::invalidateImageNodes,
         isInUse = ::isImageInUse,
     )
-    private val textNodeDrawStates = java.util.WeakHashMap<Any, NinePatchDrawState>()
+    private val textNodeDrawStates = ReaderTextDrawCache<NinePatchDrawState>()
     private val highlightStyleCache = object : LinkedHashMap<Triple<ReaderHighlightStyle, Boolean, String>, Any>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Triple<ReaderHighlightStyle, Boolean, String>, Any>?): Boolean = size > 64
     }
@@ -135,7 +135,6 @@ class ReaderDialogueHighlightHook(
         clearHighlightRuntimeCaches()
         imageCache.clear()
         imageWorker.queue.clear()
-        synchronized(textNodeDrawStates) { textNodeDrawStates.clear() }
         synchronized(fontFamilyCache) { fontFamilyCache.clear() }
         synchronized(failedFontFamilyLogKeys) { failedFontFamilyLogKeys.clear() }
         synchronized(onlineParagraphCommentDebugKeys) { onlineParagraphCommentDebugKeys.clear() }
@@ -1209,6 +1208,7 @@ class ReaderDialogueHighlightHook(
 
     private fun clearHighlightRuntimeCaches() {
         // 图片按资源路径和修改时间失效，切书或规则版本变化不必重复解码。
+        textNodeDrawStates.clear()
         synchronized(reedenBoxStyleCache) { reedenBoxStyleCache.clear() }
         synchronized(nineSliceCache) { nineSliceCache.clear() }
         synchronized(rememberedNinePatchRanges) { rememberedNinePatchRanges.clear() }
@@ -1257,30 +1257,33 @@ class ReaderDialogueHighlightHook(
                     runCatching {
                         val node = param.thisObject ?: return
                         val scope = param.args[0] ?: return
-                        if (ReaderHighlightBookContext.bookKey.isBlank()) return
-                        if (!isTextNodeAttached(node)) return
+                        // 只跳过附加背景绘制，BasicText 的旧标记清理仍正常执行。
+                        if (ReaderHighlightBookContext.bookKey.isBlank() ||
+                            !settings.snapshot().canHighlightReaderDialogue || !isTextNodeAttached(node)
+                        ) {
+                            textNodeDrawStates.remove(node)
+                            return
+                        }
                         checkHighlightRuntimeVersion()
                         val cache = layoutCache.invoke(node, scope)
                         val layout = callNoArg(cache, "getTextLayoutResult")
                             ?: accessorOrField(cache, "layoutCache")
                             ?: return
                         val token = currentHighlightRuntimeKey()
-                        var state = synchronized(textNodeDrawStates) { textNodeDrawStates[node] }
-                        if (state?.textLayoutResult !== layout || state.token != token) {
+                        val state = textNodeDrawStates.getOrBuild(node, layout, token) {
                             val layoutInput = callNoArg(layout, "getLayoutInput")
                                 ?: accessorOrField(layout, "layoutInput")
-                                ?: return
+                                ?: return@getOrBuild null
                             val text = callNoArg(layoutInput, "getText")
                                 ?: accessorOrField(layoutInput, "text")
-                                ?: return
+                                ?: return@getOrBuild null
                             val ranges = currentNinePatchRanges(text).ifEmpty { rememberedNinePatchRanges(text) }
-                            state = NinePatchDrawState(ranges, token).apply { textLayoutResult = layout }
-                            synchronized(textNodeDrawStates) { textNodeDrawStates[node] = state }
                             logHighlightPerformance {
                                 "text-node layout ranges=${ranges.size} text=${annotatedStringLength(text)}"
                             }
-                        }
-                        drawNinePatchBackgrounds(scope, state)
+                            if (ranges.isEmpty()) null else NinePatchDrawState(ranges, token)
+                        } ?: return
+                        drawNinePatchBackgrounds(scope, layout, state)
                     }.onFailure { logNinePatchDrawFailure("text-node", it) }
                 }
             })
@@ -1438,10 +1441,9 @@ class ReaderDialogueHighlightHook(
         }
     }
 
-    private fun drawNinePatchBackgrounds(drawScope: Any?, state: NinePatchDrawState) {
+    private fun drawNinePatchBackgrounds(drawScope: Any?, layout: Any, state: NinePatchDrawState) {
         if (state.ranges.isEmpty()) return
         if (state.token != currentHighlightRuntimeKey()) return
-        val layout = state.textLayoutResult ?: return
         val canvas = nativeCanvas(drawScope) ?: return
         val density = activityProvider()?.resources?.displayMetrics?.density ?: 1f
         val rectsByRange = cachedLineRects(layout, density, state)
@@ -1481,7 +1483,8 @@ class ReaderDialogueHighlightHook(
         val densityBits = density.toBits()
         synchronized(state) {
             val cached = state.cachedLineRects
-            if (state.cachedLayoutResult === layout && state.cachedDensityBits == densityBits && cached != null) {
+            // state 随布局身份变化重建，只需再检查密度，不额外持有 TextLayoutResult。
+            if (state.cachedDensityBits == densityBits && cached != null) {
                 state.rectCacheHits += 1
                 logHighlightPerformance {
                     "draw ninePatch=${state.ranges.size} rectCache=hit hits=${state.rectCacheHits} builds=${state.rectCacheBuilds} rects=${state.rectLineCalculations}"
@@ -1491,7 +1494,6 @@ class ReaderDialogueHighlightHook(
             val next = state.ranges.map { range ->
                 lineRects(layout, range.start, range.end, reedenBoxStyle(range.css, density))
             }
-            state.cachedLayoutResult = layout
             state.cachedDensityBits = densityBits
             state.cachedLineRects = next
             state.rectCacheBuilds += 1
@@ -1575,11 +1577,9 @@ class ReaderDialogueHighlightHook(
         val activity = activityProvider() ?: return
         if (activity.isFinishing || activity.isDestroyed || ReaderHighlightBookContext.bookKey.isBlank()) return
         val token = highlightMarkerToken()
-        val nodes = synchronized(textNodeDrawStates) {
-            textNodeDrawStates.entries.filter { (_, state) ->
-                state.token == token && state.ranges.any { it.path == path }
-            }.map { it.key }
-        }
+        val nodes = textNodeDrawStates.snapshot().filter { (_, state) ->
+            state.token == token && state.ranges.any { it.path == path }
+        }.map { it.first }
         nodes.forEach { node ->
             runCatching {
                 if (isTextNodeAttached(node)) {
@@ -1592,10 +1592,8 @@ class ReaderDialogueHighlightHook(
     private fun isImageInUse(path: String): Boolean {
         if (ReaderHighlightBookContext.bookKey.isBlank()) return false
         val token = highlightMarkerToken()
-        return synchronized(textNodeDrawStates) {
-            textNodeDrawStates.any { (node, state) ->
-                state.token == token && state.ranges.any { it.path == path } && isTextNodeAttached(node)
-            }
+        return textNodeDrawStates.snapshot().any { (node, state) ->
+            state.token == token && state.ranges.any { it.path == path } && isTextNodeAttached(node)
         }
     }
 
@@ -2170,8 +2168,6 @@ class ReaderDialogueHighlightHook(
         val ranges: List<NinePatchRange>,
         val token: String,
     ) {
-        @Volatile var textLayoutResult: Any? = null
-        @Volatile var cachedLayoutResult: Any? = null
         @Volatile var cachedDensityBits: Int = 0
         @Volatile var cachedLineRects: List<List<Rect>>? = null
         var rectCacheHits: Int = 0

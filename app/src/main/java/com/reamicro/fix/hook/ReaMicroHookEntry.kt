@@ -89,13 +89,12 @@ class ReaMicroHookEntry {
             settings = moduleSettings,
         )
         installFeature("ReaMicroGlobalFontHook", globalFontHook::install)
-        installFeature("ReaderFontCompletionHook") {
-            ReaderFontCompletionHook(
-                classLoader = classLoader,
-                activityProvider = activityProvider,
-                settings = moduleSettings,
-            ).install()
-        }
+        val readerFontCompletionHook = ReaderFontCompletionHook(
+            classLoader = classLoader,
+            activityProvider = activityProvider,
+            settings = moduleSettings,
+        )
+        installFeature("ReaderFontCompletionHook", readerFontCompletionHook::install)
         val readerDialogueHighlightHook = ReaderDialogueHighlightHook(
             classLoader = classLoader,
             activityProvider = activityProvider,
@@ -191,6 +190,7 @@ class ReaMicroHookEntry {
                 webDavDriveHook = webDavDriveHook,
                 profileBackgroundHook = profileBackgroundHook,
                 readerHook = readerHook,
+                readerFontCompletionHook = readerFontCompletionHook,
                 readerDialogueHighlightHook = readerDialogueHighlightHook,
                 bookDetailsAssociationActionHook = bookDetailsAssociationActionHook,
             )
@@ -241,6 +241,7 @@ class ReaMicroHookEntry {
         webDavDriveHook: WebDavDriveHook,
         profileBackgroundHook: ProfileBackgroundHook,
         readerHook: ReaderHook,
+        readerFontCompletionHook: ReaderFontCompletionHook,
         readerDialogueHighlightHook: ReaderDialogueHighlightHook,
         bookDetailsAssociationActionHook: BookDetailsAssociationActionHook,
     ) {
@@ -249,7 +250,7 @@ class ReaMicroHookEntry {
             currentActivityResumed = true
             moduleSettings.attachContext(activity)
             installExternalFeatures(classLoader)
-            installMemoryCallbacks(activity.application, readerHook, readerDialogueHighlightHook,
+            installMemoryCallbacks(activity.application, readerHook, readerFontCompletionHook, readerDialogueHighlightHook,
                 profileBackgroundHook, bookDetailsAssociationActionHook)
             bookshelfCompletion?.onHostStarted()
             startForegroundHeartbeat()
@@ -274,6 +275,7 @@ class ReaMicroHookEntry {
                         installMemoryCallbacks(
                             application = activity.application,
                             readerHook = readerHook,
+                            readerFontCompletionHook = readerFontCompletionHook,
                             readerDialogueHighlightHook = readerDialogueHighlightHook,
                             profileBackgroundHook = profileBackgroundHook,
                             bookDetailsAssociationActionHook = bookDetailsAssociationActionHook,
@@ -332,6 +334,7 @@ class ReaMicroHookEntry {
     private fun installMemoryCallbacks(
         application: Application,
         readerHook: ReaderHook,
+        readerFontCompletionHook: ReaderFontCompletionHook,
         readerDialogueHighlightHook: ReaderDialogueHighlightHook,
         profileBackgroundHook: ProfileBackgroundHook,
         bookDetailsAssociationActionHook: BookDetailsAssociationActionHook,
@@ -344,6 +347,11 @@ class ReaMicroHookEntry {
 
                 override fun onTrimMemory(level: Int) {
                     readerHook.onTrimMemory(level)
+                    if (level in ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW..ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+                        level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND
+                    ) {
+                        readerFontCompletionHook.releaseMemory("trim memory level=$level")
+                    }
                     if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
                         readerDialogueHighlightHook.releaseMemory("trim memory level=$level")
                         profileBackgroundHook.releaseMemory("trim memory level=$level")
@@ -353,6 +361,7 @@ class ReaMicroHookEntry {
 
                 override fun onLowMemory() {
                     readerHook.onLowMemory()
+                    readerFontCompletionHook.releaseMemory("system low memory")
                     readerDialogueHighlightHook.releaseMemory("system low memory")
                     profileBackgroundHook.releaseMemory("system low memory")
                     bookDetailsAssociationActionHook.releaseMemory("system low memory")
@@ -377,6 +386,7 @@ class ReaMicroHookEntry {
                     if (activity.javaClass.name != "app.zhendong.reamicro.MainActivity") return
                     if (activity.isChangingConfigurations) return
                     readerHook.onHostActivityDestroyed("MainActivity lifecycle destroyed")
+                    readerFontCompletionHook.releaseMemory("MainActivity lifecycle destroyed")
                     readerDialogueHighlightHook.releaseMemory("MainActivity lifecycle destroyed")
                     profileBackgroundHook.releaseMemory("MainActivity lifecycle destroyed")
                     bookDetailsAssociationActionHook.releaseMemory("MainActivity lifecycle destroyed")
@@ -395,6 +405,7 @@ class ReaMicroHookEntry {
                 moduleSettings.closeForReload()
                 bookshelfCompletion?.closeForReload()
                 readerHook.onHostActivityDestroyed("API102 hot reload")
+                readerFontCompletionHook.releaseMemory("API102 hot reload")
                 readerDialogueHighlightHook.releaseMemory("API102 hot reload")
                 profileBackgroundHook.releaseMemory("API102 hot reload")
                 bookDetailsAssociationActionHook.releaseMemory("API102 hot reload")

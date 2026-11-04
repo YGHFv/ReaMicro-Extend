@@ -24,14 +24,22 @@ class ReaderFontCompletionHook(
 ) {
     private val methodCache = HashMap<String, Method>()
     private val fieldCache = HashMap<String, Field>()
-    private val fontFamilyCache = HashMap<String, Any>()
-    private val failedFontFamilyLogKeys = HashSet<String>()
-    private val appliedMappingLogKeys = HashSet<String>()
+    private val fontFamilyCache = ReaderFontFamilyCache<Any>()
+    private val failedFontFamilyLogKeys = LinkedHashSet<String>()
+    private val appliedMappingLogKeys = LinkedHashSet<String>()
     @Volatile private var lastMappingNamesLogKey: String = ""
 
     fun install() {
         // 字体映射只依赖 FontProvider，不重建宿主配置，保留新版边距及后续新增字段。
         hookFontProvider()
+    }
+
+    fun releaseMemory(reason: String) {
+        fontFamilyCache.clear()
+        synchronized(failedFontFamilyLogKeys) { failedFontFamilyLogKeys.clear() }
+        synchronized(appliedMappingLogKeys) { appliedMappingLogKeys.clear() }
+        lastMappingNamesLogKey = ""
+        XposedBridge.log("$LOG_PREFIX font completion memory released: $reason")
     }
 
     private fun hookFontProvider() {
@@ -171,6 +179,9 @@ class ReaderFontCompletionHook(
         val key = "$target|$selection"
         synchronized(appliedMappingLogKeys) {
             if (!appliedMappingLogKeys.add(key)) return
+            while (appliedMappingLogKeys.size > MAX_FONT_LOG_KEYS) {
+                appliedMappingLogKeys.iterator().run { next(); remove() }
+            }
         }
         XposedBridge.log("$LOG_PREFIX font mapping applied: $target -> ${displayFontName(selection)}")
     }
@@ -179,24 +190,16 @@ class ReaderFontCompletionHook(
         if (selection.isBlank()) return null
         val resolvedFile = if (isBuiltinFontSelection(selection)) null else resolveFontFile(selection) ?: return null
         val cacheKey = com.reamicro.fix.epub.editor.FontSelectionResolution.cacheKey(selection, resolvedFile)
-        synchronized(fontFamilyCache) {
-            fontFamilyCache[cacheKey]?.let { return it }
-        }
-        if (isBuiltinFontSelection(selection)) {
-            return resolveBuiltinFontFamily(selection)?.also { family ->
-                synchronized(fontFamilyCache) {
-                    fontFamilyCache[cacheKey] = family
-                }
+        return fontFamilyCache.getOrLoad(cacheKey) {
+            if (isBuiltinFontSelection(selection)) {
+                resolveBuiltinFontFamily(selection)
+            } else {
+                val file = resolvedFile ?: return@getOrLoad null
+                runCatching {
+                    com.reamicro.fix.core.HostFontFamilies.fromFile(classLoader, file)
+                }.onFailure { logResolveFontFamilyFailure(selection, it) }.getOrNull()
             }
         }
-        val file = resolvedFile ?: return null
-        return runCatching {
-            val family = com.reamicro.fix.core.HostFontFamilies.fromFile(classLoader, file) ?: return null
-            synchronized(fontFamilyCache) {
-                fontFamilyCache[cacheKey] = family
-            }
-            family
-        }.onFailure { logResolveFontFamilyFailure(selection, it) }.getOrNull()
     }
 
     private fun resolveBuiltinFontFamily(selection: String): Any? =
@@ -250,6 +253,9 @@ class ReaderFontCompletionHook(
         val key = "$selection|${error.javaClass.name}|${error.message}"
         synchronized(failedFontFamilyLogKeys) {
             if (!failedFontFamilyLogKeys.add(key)) return
+            while (failedFontFamilyLogKeys.size > MAX_FONT_LOG_KEYS) {
+                failedFontFamilyLogKeys.iterator().run { next(); remove() }
+            }
         }
         XposedBridge.log(
             "$LOG_PREFIX resolve font family failed: " +
@@ -349,6 +355,7 @@ class ReaderFontCompletionHook(
         }
 
     private companion object {
+        const val MAX_FONT_LOG_KEYS = 64
         const val LOG_PREFIX = "ReaMicro LSP"
         const val FONT_PROVIDER_CLASS = HostClasses.Epub.FONT_PROVIDER
         const val FONT_FAMILY_CLASS = HostClasses.Compose.FONT_FAMILY
