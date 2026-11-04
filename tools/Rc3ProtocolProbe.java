@@ -193,6 +193,29 @@ public final class Rc3ProtocolProbe {
         }
         System.out.println("STORAGE_REFLECTION_CONTRACTS_PASS");
     }
+    static void profileSurfaceContracts() throws Exception {
+        Class<?> reflection = module.loadClass("com.reamicro.fix.core.HostReflectionKt");
+        Class<?> facade = nativeClass("app.zhendong.reamicro.ui.profile.components.CommunityKt");
+        List<?> community = (List<?>) reflection.getMethod("hostMethodsNamed", Class.class, String.class)
+            .invoke(null, facade, "Community");
+        check(community.size() == 1 && ((Method) community.get(0)).getParameterCount() == 5,
+            "Profile community scope mismatch");
+        Class<?> raw = module.loadClass("com.reamicro.fix.core.HostRawAbi");
+        Method surface = (Method) raw.getMethod("method", Class.class, String.class, Class[].class, boolean.class)
+            .invoke(singleton(raw), facade, "b", new Class<?>[]{boolean.class, float.class,
+                nativeClass("androidx.compose.runtime.Composer")}, false);
+        check(surface.getReturnType() == nativeClass("androidx.compose.ui.Modifier"), "Profile glass return mismatch");
+        List<?> dividers = (List<?>) reflection.getMethod("hostMethodsNamed", Class.class, String.class)
+            .invoke(null, nativeClass("app.zhendong.reamicro.arch.components.DividerKt"), "SimpleDivider-iJQMabo");
+        check(dividers.size() == 1 && ((Method) dividers.get(0)).getParameterCount() == 5,
+            "Profile divider scope mismatch");
+        if (PROFILE.equals("2.3.4-b1")) {
+            check(surface.getDeclaringClass().getName().equals("uce"), "Profile glass owner not relocated");
+            check(((Method) community.get(0)).getDeclaringClass().getName().equals("uce"), "Profile content owner not relocated");
+            check(((Method) dividers.get(0)).getDeclaringClass().getName().equals("rt0"), "Profile divider owner not relocated");
+        }
+        System.out.println("PROFILE_SURFACE_CONTRACTS_PASS");
+    }
     static void svg() throws Exception {
         if (android.graphics.Typeface.DEFAULT == null) {
             Method loadFonts = android.graphics.Typeface.class.getDeclaredMethod("loadPreinstalledSystemFontMap");
@@ -221,6 +244,7 @@ public final class Rc3ProtocolProbe {
             try {storageContracts();}catch(Throwable error){failures++;error.printStackTrace();}
             try {uiPrimitives();}catch(Throwable error){failures++;error.printStackTrace();}
             try {searchAndDiscoverContracts();}catch(Throwable error){failures++;error.printStackTrace();}
+            try {profileSurfaceContracts();}catch(Throwable error){failures++;error.printStackTrace();}
         }
         System.out.println("PROTOCOL_FAILURES="+failures);
         System.exit(failures==0?0:1);

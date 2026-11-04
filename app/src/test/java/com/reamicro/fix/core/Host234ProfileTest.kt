@@ -49,6 +49,19 @@ class Host234ProfileTest {
     }
 
     @Test
+    fun profileDecorationsFollowMethodOwnersRatherThanMergedClassNames() {
+        val community = "app.zhendong.reamicro.ui.profile.components.CommunityKt"
+        val divider = "app.zhendong.reamicro.arch.components.DividerKt"
+        assertEquals("uhe", profile.classOf(community))
+        assertEquals("uce", profile.methodOwners["$community#Community"])
+        assertEquals("u5d", profile.classOf(divider))
+        assertEquals("rt0", profile.methodOwners["$divider#SimpleDivider-iJQMabo"])
+        val abi = assets.resolve("host-profiles/2.3.4-b1.abi.json").readText(Charsets.UTF_8)
+        assertTrue(Regex(Regex.escape("\"uhe#b(ZFLtx3;)\"") + "\\s*:\\s*" + Regex.escape("\"uce#b\""))
+            .containsMatchIn(abi))
+    }
+
+    @Test
     fun legacyManualEditCannotBypassTheNewHostCompatibilityGate() {
         assertNotNull(ExternalFeatureCompatibility.disabledReason(
             "manual-edit", setOf("manual_edit", "manual_edit_host_233"), "2.3.4-b1",

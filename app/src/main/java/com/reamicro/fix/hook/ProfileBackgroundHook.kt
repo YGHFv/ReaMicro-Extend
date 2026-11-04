@@ -3,6 +3,7 @@ import com.reamicro.fix.core.hostAbiMethodByArity
 import com.reamicro.fix.core.hostAbiMethod
 import com.reamicro.fix.core.hostAbiField
 import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostMethodsNamed
 import com.reamicro.fix.core.hostNameMatches
 import com.reamicro.fix.core.typeMatches
 import com.reamicro.fix.core.B2NativeUi
@@ -143,11 +144,12 @@ class ProfileBackgroundHook(
             }
         })
         listOf(root, content).forEach(XposedBridge::deoptimize)
-        val community = classLoader.hostClass("app.zhendong.reamicro.ui.profile.components.CommunityKt")
-            .declaredMethods.single { it.hostNameMatches("Community") }
+        val communityFacade = classLoader.hostClass("app.zhendong.reamicro.ui.profile.components.CommunityKt")
+        val community = communityFacade.hostMethodsNamed("Community").single { it.parameterCount == 5 }
         val privilege = classLoader.hostClass("ReaMicroHost.ProfilePrivilegeCard")
             .hostAbiMethodByArity("g", 12)
-        val communitySurface = community.declaringClass.hostAbiMethod(
+        // 原始 ABI 键属于逻辑门面，不能改用已迁移的 Community 持有类作二次映射。
+        val communitySurface = communityFacade.hostAbiMethod(
             "b", Boolean::class.javaPrimitiveType, Float::class.javaPrimitiveType,
             classLoader.hostClass(COMPOSER_CLASS),
         )
@@ -273,8 +275,8 @@ class ProfileBackgroundHook(
     private fun installProfileDividerHook() {
         runCatching {
             val dividerClass = XposedHelpers.findClass(DIVIDER_KT_CLASS, classLoader)
-            val target = dividerClass.declaredMethods.firstOrNull { m ->
-                m.hostNameMatches(SIMPLE_DIVIDER_METHOD) && m.parameterTypes.size == 5
+            val target = dividerClass.hostMethodsNamed(SIMPLE_DIVIDER_METHOD).singleOrNull { m ->
+                m.parameterTypes.size == 5
             } ?: run {
                 XposedBridge.log("$LOG_PREFIX SimpleDivider not found")
                 return

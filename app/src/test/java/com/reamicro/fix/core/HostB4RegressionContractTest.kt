@@ -115,7 +115,8 @@ class HostB4RegressionContractTest {
         assertTrue(b4.contains("installProfileDividerHook()"))
         val divider = source.substringAfter("private fun installProfileDividerHook()")
             .substringBefore("private fun installProfileScreenLambdaHook()")
-        assertTrue(divider.contains("m.hostNameMatches(SIMPLE_DIVIDER_METHOD) && m.parameterTypes.size == 5"))
+        assertTrue(divider.contains("dividerClass.hostMethodsNamed(SIMPLE_DIVIDER_METHOD)"))
+        assertTrue(divider.contains("m.parameterTypes.size == 5"))
         assertTrue(divider.contains("if (inProfileLambda.get() != true) return"))
         assertTrue(divider.contains("if (!settingsProvider().canShowProfileBackground) return"))
         assertTrue(divider.contains("param.result = null"))
@@ -147,6 +148,9 @@ class HostB4RegressionContractTest {
         assertTrue(hook.contains("if (depth > 0) profileCommunityDepth.set(depth) else profileCommunityDepth.remove()"))
         assertTrue(hook.contains("transparentProfileContainerColor(param.args[1] as Long, snapshot)"))
         assertTrue(hook.contains("canUseProfileImageBackground(settingsProvider())"))
+        assertTrue(hook.contains("communityFacade.hostMethodsNamed(\"Community\")"))
+        assertTrue(hook.contains("communityFacade.hostAbiMethod("))
+        assertFalse(hook.contains("community.declaringClass.hostAbiMethod("))
     }
 
     @Test
