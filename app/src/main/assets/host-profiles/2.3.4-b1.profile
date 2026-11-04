@@ -1596,8 +1596,8 @@ method=org.epub.ui.EpubSelectionController#resolvePosition=q
 method=org.epub.ui.EpubSelectionController#selectSyntheticRange=u
 method=org.epub.ui.EpubSelectionController#selectedPayload=v
 method=org.epub.ui.EpubSelectionController#selectionFor-VqIyPBM=y
-method=org.epub.ui.EpubSelectionController#setDragHandleVisual=B
-method=org.epub.ui.EpubSelectionController#setDraggingHandle=C
+method=org.epub.ui.EpubSelectionController#setDragHandleVisual=C
+method=org.epub.ui.EpubSelectionController#setDraggingHandle=D
 method=org.epub.ui.EpubSelectionController#setSelectionGestureInProgress=F
 method=org.epub.ui.EpubSelectionController#startHandleDrag=H
 method=org.epub.ui.EpubSelectionController#visibleSelectionSegments=o

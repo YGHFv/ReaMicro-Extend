@@ -151,16 +151,16 @@ object HostAutoScanner {
                         val index = relation.getInt("index")
                         var hits = bridge.getClassData(owner)?.methods.orEmpty().filter { matches(it, relation) }
                         if (hits.isEmpty()) {
-                            val opcodes = relation.getJSONArray("opcodes").let { array ->
-                                (0 until array.length()).map(array::getInt)
-                            }
+                            val opcodes = ruleOpCodes(relation)
                             hits = bridge.findMethod(FindMethod.create().matcher(
                                 MethodMatcher.create().opCodes(opcodes, OpCodeMatchType.Equals),
                             )).filter { matches(it, relation) }
                         }
                         val values = hits.mapNotNull { method ->
                             if (index < 0) method.returnTypeName else method.paramTypeNames.getOrNull(index)
-                        }.distinct()
+                        }.distinct().filter { name ->
+                            !rule.has("methodShapes") || bridge.getClassData(name)?.let { matchesClass(it, rule) } == true
+                        }
                         val actual = HostScanRules.unique(values)
                         if (actual != null) resolved[rule.getString("id")] = actual
                     }
@@ -176,14 +176,18 @@ object HostAutoScanner {
                         ))
                     } else if (owner != null) bridge.getClassData(owner)?.methods.orEmpty()
                     else {
-                        val opcodes = rule.getJSONArray("opcodes").let { array ->
-                            (0 until array.length()).map(array::getInt)
-                        }
+                        val opcodes = ruleOpCodes(rule)
                         bridge.findMethod(FindMethod.create().matcher(
                             MethodMatcher.create().opCodes(opcodes, OpCodeMatchType.Equals),
                         ))
                     }
                     var candidates = pool.filter { matches(it, rule) }
+                    // R8 可把同一 facade 的静态方法拆到不同工具类；原类零匹配时仍须按完整特征全局唯一定位。
+                    if (candidates.isEmpty() && anchors.isEmpty() && owner != null && rule.has("opcodes")) {
+                        candidates = bridge.findMethod(FindMethod.create().matcher(
+                            MethodMatcher.create().opCodes(ruleOpCodes(rule), OpCodeMatchType.Equals),
+                        )).filter { matches(it, rule) }
+                    }
                     val types = rule.optJSONArray("types")?.strings()
                     if (types != null) candidates = candidates.filter { candidate ->
                         val actual = candidate.paramTypeNames + candidate.returnTypeName
@@ -195,6 +199,15 @@ object HostAutoScanner {
                     val calls = rule.optJSONArray("stableCalls")?.strings().orEmpty().toSet()
                     if (candidates.size > 1 && calls.isNotEmpty()) {
                         candidates = candidates.filter { stableCalls(it, 2) == calls }
+                    }
+                    val calledBy = rule.optJSONObject("calledBy")
+                    if (calledBy != null) {
+                        val callerOwner = resolved[calledBy.getString("owner")]
+                        candidates = candidates.filter { candidate ->
+                            callerOwner != null && candidate.callers.any { caller ->
+                                caller.declaredClassName == callerOwner && matches(caller, calledBy)
+                            }
+                        }
                     }
                     val returnShape = rule.optJSONArray("returnShape")?.strings()
                     if (returnShape != null) candidates = candidates.filter { candidate ->
@@ -285,7 +298,7 @@ object HostAutoScanner {
         if (Modifier.isStatic(method.modifiers) != rule.getBoolean("static")) return false
         val stable = rule.optString("stable")
         if (stable.isNotEmpty() && method.name != stable) return false
-        val opcodes = rule.optJSONArray("opcodes")?.let { array -> (0 until array.length()).map(array::getInt) }
+        val opcodes = rule.optJSONArray("opcodes")?.let { ruleOpCodes(rule) }
         if (opcodes != null && method.opCodes != opcodes) return false
         val strings = rule.optJSONArray("strings")?.strings().orEmpty()
         return method.usingStrings.containsAll(strings)
@@ -300,6 +313,9 @@ object HostAutoScanner {
     }
 
     private fun JSONArray.objects(): List<JSONObject> = (0 until length()).map(::getJSONObject)
+    private fun ruleOpCodes(rule: JSONObject): List<Int> = rule.getJSONArray("opcodes").let { array ->
+        HostScanRules.dexKitOpCodes((0 until array.length()).map(array::getInt))
+    }
     private fun JSONArray.strings(): List<String> = (0 until length()).map(::getString)
     private fun ByteArray.hex(): String = joinToString("") { "%02x".format(it) }
 }

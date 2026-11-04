@@ -62,6 +62,15 @@ class Host234ProfileTest {
     }
 
     @Test
+    fun selectionSettersKeepDraggingAndVisualStateSeparate() {
+        val owner = "org.epub.ui.EpubSelectionController"
+        assertEquals("j", profile.methodOf(owner, "getDraggingHandle"))
+        assertEquals("D", profile.methodOf(owner, "setDraggingHandle"))
+        assertEquals("C", profile.methodOf(owner, "setDragHandleVisual"))
+        assertEquals("p5a", profile.classOf("org.epub.ui.SelectionHandleVisual"))
+    }
+
+    @Test
     fun legacyManualEditCannotBypassTheNewHostCompatibilityGate() {
         assertNotNull(ExternalFeatureCompatibility.disabledReason(
             "manual-edit", setOf("manual_edit", "manual_edit_host_233"), "2.3.4-b1",
