@@ -1,4 +1,6 @@
 profile=2.3.3
+typeAlias=ReaMicroManual233.PublishScreen=utd
+typeAlias=ReaMicroManual233.PublishTopBar=vo1
 typeAlias=ReaMicroShelf233.Header=jc4
 typeAlias=ReaMicroShelf233.SyncState=kc4
 typeAlias=ReaMicroShelf233.LanState=e07
