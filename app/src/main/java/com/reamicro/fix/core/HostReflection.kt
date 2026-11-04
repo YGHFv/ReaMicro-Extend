@@ -112,6 +112,8 @@ fun Class<*>.hostMethodsNamed(name: String): List<Method> {
         target.declaredMethods.filter { it.name == actualName && java.lang.reflect.Modifier.isStatic(it.modifiers) }
             .forEach { result.putIfAbsent(it.parameterTypes.toList(), it) }
     }
+    // 已迁移的方法不再混入旧门面上的同短名函数，避免误选无关重载。
+    if (result.isNotEmpty()) return result.values.onEach { it.isAccessible = true }.toList()
     var current: Class<*>? = this
     while (current != null) {
         for (method in current.declaredMethods) {

@@ -3,6 +3,7 @@ import com.reamicro.fix.core.hostAbiMethod
 import com.reamicro.fix.core.hostAbiField
 
 import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.hostMethodsNamed
 import com.reamicro.fix.core.hostNameMatches
 import com.reamicro.fix.core.typeMatches
 import com.reamicro.fix.core.hostClass
@@ -125,8 +126,7 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
     private fun findCommunityMethod(): Method? {
         val clazz = classLoader.hostClass(HOST_COMMUNITY)
 
-        return clazz.declaredMethods
-            .filter { it.hostNameMatches(COMMUNITY_METHOD) }
+        return clazz.hostMethodsNamed(COMMUNITY_METHOD)
             .maxByOrNull { it.parameterTypes.size }
     }
 

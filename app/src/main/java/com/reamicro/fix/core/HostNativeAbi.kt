@@ -55,4 +55,10 @@ object HostNativeAbi {
         "2.3.4-b1" -> 11
         else -> null
     }
+
+    fun homeSearchListBranch(profileId: String): Byte? = when (profileId) {
+        "2.3.3-b4", "2.3.3-rc3", "2.3.3" -> 10
+        "2.3.4-b1" -> 9
+        else -> null
+    }
 }

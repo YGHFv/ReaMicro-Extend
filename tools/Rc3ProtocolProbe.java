@@ -136,6 +136,43 @@ public final class Rc3ProtocolProbe {
         call(instance, "background", new Class<?>[]{Object.class, long.class}, modifier, 0xFFFFFFFF00000000L);
         System.out.println("UI_PRIMITIVES_PASS");
     }
+    static void searchAndDiscoverContracts() throws Exception {
+        Class<?> abi = module.loadClass("com.reamicro.fix.core.HostNativeAbi");
+        byte branch = (Byte) abi.getMethod("homeSearchListBranch", String.class)
+            .invoke(singleton(abi), PROFILE);
+        Class<?> callbackType = nativeClass("ReaMicroHost.HomeSearchList");
+        Map<Integer, Object> results = new LinkedHashMap<>();
+        results.put(1, Collections.singletonList("native"));
+        results.put(8, Collections.singletonList("cloud"));
+        results.put(9, Collections.singletonList("local"));
+        results.put(10, Collections.singletonList("source"));
+        Object callback = callbackType.getDeclaredConstructor(Object.class, Object.class, Object.class, Object.class, byte.class)
+            .newInstance(Collections.emptyList(), new Object(), results, new Object(), branch);
+        Class<?> copier = module.loadClass("com.reamicro.fix.core.HostHomeSearchList");
+        Object copy = copier.getConstructor(Class.class, byte.class).newInstance(callbackType, branch);
+        Object filtered = call(copy, "nativeOnly", new Class<?>[]{Object.class, Set.class}, callback,
+            new HashSet<>(Arrays.asList(8, 9, 10)));
+        check(get(callback, "d") == results && results.size() == 4, "Search restart snapshot mutated");
+        check(((Map<?, ?>) get(filtered, "d")).keySet().equals(Collections.singleton(1)), "Extension results not filtered");
+        check(get(filtered, "a").equals(branch), "Search callback branch mismatch");
+        Class<?> androidViews = module.loadClass("com.reamicro.fix.core.HostAndroidViews");
+        Method render = (Method) call(androidViews.getConstructor(ClassLoader.class).newInstance(host), "getRender", new Class<?>[0]);
+        check(render.getParameterCount() == 8, "AndroidView reusable signature mismatch");
+        Class<?> reflection = module.loadClass("com.reamicro.fix.core.HostReflectionKt");
+        List<?> community = (List<?>) reflection.getMethod("hostMethodsNamed", Class.class, String.class)
+            .invoke(null, nativeClass("app.zhendong.reamicro.ui.profile.components.CommunityKt"), "Community");
+        check(community.size() == 1, "Community method ambiguous");
+        List<?> backgrounds = (List<?>) reflection.getMethod("hostMethodsNamed", Class.class, String.class)
+            .invoke(null, nativeClass("androidx.compose.foundation.BackgroundKt"), "background-bw27NRU");
+        check(backgrounds.size() == 1 && ((Method) backgrounds.get(0)).getParameterCount() == 3,
+            "Discover divider background method ambiguous");
+        if (PROFILE.equals("2.3.4-b1")) {
+            check(branch == 9, "Search branch must match oyd.i construction");
+            check(render.getDeclaringClass().getName().equals("ii5"), "AndroidView owner not relocated");
+            check(((Method) community.get(0)).getDeclaringClass().getName().equals("uce"), "Community owner not relocated");
+        }
+        System.out.println("SEARCH_DISCOVER_CONTRACTS_PASS");
+    }
     static void storageContracts() throws Exception {
         Class<?> raw = module.loadClass("com.reamicro.fix.core.HostRawAbi");
         Method resolve = raw.getMethod("method", Class.class, String.class, Class[].class, boolean.class);
@@ -183,6 +220,7 @@ public final class Rc3ProtocolProbe {
             try {svg();}catch(Throwable error){failures++;error.printStackTrace();}
             try {storageContracts();}catch(Throwable error){failures++;error.printStackTrace();}
             try {uiPrimitives();}catch(Throwable error){failures++;error.printStackTrace();}
+            try {searchAndDiscoverContracts();}catch(Throwable error){failures++;error.printStackTrace();}
         }
         System.out.println("PROTOCOL_FAILURES="+failures);
         System.exit(failures==0?0:1);

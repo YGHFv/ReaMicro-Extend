@@ -15,6 +15,7 @@ class HostReflectionTest {
         @JvmField var b = 0
         fun r(value: Int) = value
         fun s(callback: NarrowedCallback) = callback
+        fun z(value: String, unrelated: Boolean) = if (unrelated) value else ""
     }
     class Child : Parent()
     class Relocated {
@@ -50,6 +51,14 @@ class HostReflectionTest {
 
     @After
     fun clearFixture() = HostSymbols.reset()
+
+    @Test
+    fun `relocated methods exclude unrelated short name overloads on old facade`() {
+        val methods = Parent::class.java.hostMethodsNamed("staticValue")
+        assertEquals(1, methods.size)
+        assertEquals(Relocated::class.java, methods.single().declaringClass)
+        assertEquals(4, methods.single().invoke(null, 2))
+    }
 
     @Test
     fun `inherited members resolve on declaring owner`() {

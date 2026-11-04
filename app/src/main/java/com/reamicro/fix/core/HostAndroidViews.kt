@@ -18,7 +18,7 @@ class HostAndroidViews(private val loader: ClassLoader) {
     }
     private val render by lazy {
         if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            type.getDeclaredMethod("b", loader.hostClass("kotlin.jvm.functions.Function1"),
+            type.hostAbiMethod("b", loader.hostClass("kotlin.jvm.functions.Function1"),
                 loader.hostClass("androidx.compose.ui.Modifier"),
                 loader.hostClass("kotlin.jvm.functions.Function1"),
                 loader.hostClass("kotlin.jvm.functions.Function1"),

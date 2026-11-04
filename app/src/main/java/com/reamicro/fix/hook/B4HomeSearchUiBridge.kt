@@ -5,6 +5,7 @@ import com.reamicro.fix.core.hostAbiMethod
 import com.reamicro.fix.core.hostAbiField
 
 import com.reamicro.fix.core.HostNativeUiAbi
+import com.reamicro.fix.core.HostNativeAbi
 import com.reamicro.fix.core.HostHomeSearchList
 import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.core.hostMethodsNamed
@@ -19,7 +20,10 @@ internal class B4HomeSearchUiBridge(private val drive: WebDavDriveHook) {
 
     fun install() {
         check(HostSymbols.abiProfileId == "2.3.3-b4")
-        val callbackCopy = HostHomeSearchList(drive.cls("ReaMicroHost.HomeSearchList"))
+        val callbackCopy = HostHomeSearchList(
+            drive.cls("ReaMicroHost.HomeSearchList"),
+            requireNotNull(HostNativeAbi.homeSearchListBranch(HostSymbols.profileId)),
+        )
         val function = drive.cls(FUNCTION1_CLASS)
         val invoke = function.hostAbiMethod("invoke", Any::class.java)
         val name = HostNativeUiAbi.method(HostSymbols.profileId, "LazyDsl", "a")

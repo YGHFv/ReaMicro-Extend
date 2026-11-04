@@ -3,6 +3,7 @@ package com.reamicro.fix.hook
 import com.reamicro.fix.core.hostField
 
 import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.hostMethodsNamed
 import com.reamicro.fix.core.hostNameStartsWith
 
 
@@ -1859,8 +1860,8 @@ internal fun ReaMicroSettingsHook.method(className: String, methodName: String, 
     val cacheKey = "$className#$methodName/$parameterCount"
     return synchronized(methodCache) {
         methodCache.getOrPut(cacheKey) {
-            cls(className).declaredMethods.firstOrNull {
-                it.hostNameMatches(methodName) && it.parameterTypes.size == parameterCount
+            cls(className).hostMethodsNamed(methodName).firstOrNull {
+                it.parameterTypes.size == parameterCount
             }?.apply { isAccessible = true }
                 ?: error("$className.$methodName/$parameterCount not found")
         }

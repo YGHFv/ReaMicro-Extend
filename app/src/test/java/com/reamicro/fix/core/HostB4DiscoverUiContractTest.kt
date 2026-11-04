@@ -15,6 +15,19 @@ class HostB4DiscoverUiContractTest {
         .readText(Charsets.UTF_8)
 
     @Test
+    fun `discover lifecycle and renderer follow relocated facade methods`() {
+        val lifecycle = source("hook/DiscoverCardHook.kt")
+            .substringAfter("private fun findCommunityMethod()")
+            .substringBefore("private fun hookCommunityText()")
+        assertTrue(lifecycle.contains("hostMethodsNamed(COMMUNITY_METHOD)"))
+        val renderer = source("hook/ReaMicroSettingsHook.Support.kt")
+            .substringAfter("internal fun ReaMicroSettingsHook.method(")
+            .substringBefore("internal fun ReaMicroSettingsHook.staticObject(")
+        assertTrue(renderer.contains("hostMethodsNamed(methodName)"))
+        assertTrue(source("core/HostAndroidViews.kt").contains("type.hostAbiMethod(\"b\""))
+    }
+
+    @Test
     fun `b4 discover retains native header actions and shared book layouts`() {
         val page = source("hook/ReaMicroSettingsHook.Discover.kt")
         assertFalse(page.contains("renderB4DiscoverContent(innerPaddings, composer)"))
