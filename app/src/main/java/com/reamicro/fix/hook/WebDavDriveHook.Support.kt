@@ -1170,19 +1170,7 @@ internal fun WebDavDriveHook.updateOnlineCompletionBookIncrementally(
         // 上次更新可能已写完 EPUB 却在目录表刷新时报错；无新增章也必须补齐数据库目录。
         refreshOnlineCompletionCatalogTables(book, bookDir)
         if (styleChanged || structureChanged || retryResult.changed) {
-            val latest = findLocalBookByUuid(book.callLong("getUid"), book.callString("getUuid")) ?: book
-            updateLocalBook(
-                copyBookWithBackupAndPublisher(
-                    book = latest,
-                    backupType = BACKUP_TYPE_ONLINE_COMPLETION,
-                    backupId = bookBackupIdOf(latest).ifBlank { onlineImportedBookBackupId(target) },
-                    backupCode = latest.callString("getBackupCode").ifBlank { target.source.id },
-                    publisher = latest.callString("getPublisher"),
-                    cover = latest.callString("getCover").ifBlank { target.result.coverUrl },
-                    size = bookDirectorySize(bookDir),
-                    updated = System.currentTimeMillis(),
-                ),
-            )
+            updateOnlineContentMetadata(book, target, bookDirectorySize(bookDir))
         }
         logWebDav(
             "online completion update no new chapters title=${target.result.name} " +
@@ -1369,17 +1357,7 @@ internal fun WebDavDriveHook.updateOnlineCompletionBookIncrementally(
     val newSize = bookDirectorySize(bookDir)
     val latest = findLocalBookByUuid(book.callLong("getUid"), book.callString("getUuid")) ?: book
     refreshOnlineCompletionCatalogTables(latest, bookDir)
-    val updated = copyBookWithBackupAndPublisher(
-        book = latest,
-        backupType = BACKUP_TYPE_ONLINE_COMPLETION,
-        backupId = bookBackupIdOf(latest).ifBlank { onlineImportedBookBackupId(target) },
-        backupCode = latest.callString("getBackupCode").ifBlank { target.source.id },
-        publisher = latest.callString("getPublisher"),
-        cover = latest.callString("getCover").ifBlank { target.result.coverUrl },
-        size = newSize,
-        updated = System.currentTimeMillis(),
-    )
-    updateLocalBook(updated)
+    updateOnlineContentMetadata(latest, target, newSize)
     logWebDav(
         "online completion update complete title=${target.result.name} " +
             "added=$successCount retried=${retryResult.retried} " +
@@ -1455,8 +1433,12 @@ internal fun WebDavDriveHook.refreshOnlineCompletionCatalogTables(book: Any, boo
     if (chapters.isEmpty()) {
         error("阅微章节目录解析为空，已阻止刷新目录表")
     }
-    replaceOnlineCompletionDaoRows(itemRefDao, bookId, itemRefs, "BookItemRef")
-    replaceOnlineCompletionDaoRows(chapterDao, bookId, chapters, "BookChapter")
+    if (com.reamicro.fix.core.Host234CatalogRuntime.supported()) {
+        syncOnlineCatalogAtomically(itemRefDao, chapterDao, bookId, itemRefs, chapters)
+    } else {
+        replaceOnlineCompletionDaoRows(itemRefDao, bookId, itemRefs, "BookItemRef")
+        replaceOnlineCompletionDaoRows(chapterDao, bookId, chapters, "BookChapter")
+    }
     logWebDav(
         "online completion catalog tables refreshed bookId=$bookId " +
             "itemRefs=${itemRefs.size} chapters=${chapters.size}",
