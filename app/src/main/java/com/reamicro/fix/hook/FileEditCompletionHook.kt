@@ -720,8 +720,8 @@ class FileEditCompletionHook(
             ))
             nativeUi.spacer(nativeUi.width(nativeUi.modifier(), nativeUi.dp(10)), inner)
             val copy = name == "CopyBookIdentifier"
-            val vector = cls(if (copy) "drc" else "bgd")
-                .getDeclaredMethod(if (copy) "l" else "d").invoke(null)
+            val (iconOwner, iconMethod) = com.reamicro.fix.core.HostNativeUiAbi.metadataIcon(HostSymbols.profileId, copy)
+            val vector = cls(iconOwner).getDeclaredMethod(iconMethod).invoke(null)
             val size = nativeUi.height(nativeUi.width(nativeUi.modifier(), nativeUi.dp(20)), nativeUi.dp(20))
             method(ICON_KT_CLASS, ICON_METHOD, 7).invoke(null, vector,
                 if (copy) "复制标识" else "编辑$label", size, grey, inner, 0, 0)

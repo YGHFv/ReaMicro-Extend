@@ -4,6 +4,12 @@ package com.reamicro.fix.core
 object HostNativeUiAbi {
     fun supports(profileId: String): Boolean = profileId == "2.3.3-b2" || profileId in setOf("2.3.3-b4", "2.3.3-rc3", "2.3.3", "2.3.4-b1")
 
+    fun metadataIcon(profileId: String, copy: Boolean): Pair<String, String> = when (profileId) {
+        "2.3.3" -> if (copy) "drc" to "l" else "bgd" to "d"
+        "2.3.4-b1" -> if (copy) "cee" to "d" else "yke" to "e"
+        else -> error("Unverified metadata icon host: $profileId")
+    }
+
     private val b4Methods = mapOf(
         "AboutEntry#a" to "a",
         "BackHandler#a" to "a",
