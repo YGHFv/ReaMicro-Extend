@@ -18,7 +18,7 @@ object HostNativeAbi {
 
     fun navigation(profileId: String): Navigation? = when (profileId) {
         "2.3.3-b2" -> Navigation("a", "b", "a", "a")
-        "2.3.3-b4", "2.3.3-rc3", "2.3.3" -> Navigation("b", "a", "a", "c")
+        "2.3.3-b4", "2.3.3-rc3", "2.3.3", "2.3.4-b1" -> Navigation("b", "a", "a", "c")
         else -> null
     }
 
@@ -26,18 +26,33 @@ object HostNativeAbi {
         "2.3.3-b2" -> Http(12, "z", "s", "w")
         "2.3.3-b4" -> Http(13, "A", "t", "x")
         "2.3.3-rc3", "2.3.3" -> Http(12, "x", "n", "t")
+        "2.3.4-b1" -> Http(5, "p", "g", "h")
         else -> null
     }
 
     fun hasNativeHttp(profileId: String): Boolean = http(profileId) != null
 
     fun hasNativePaging(profileId: String): Boolean =
-        profileId in setOf("2.3.3-b2", "2.3.3-b4", "2.3.3-rc3", "2.3.3")
+        profileId in setOf("2.3.3-b2", "2.3.3-b4", "2.3.3-rc3", "2.3.3", "2.3.4-b1")
+
+    fun singleFlowBranch(profileId: String): Byte? = when (profileId) {
+        "2.3.3-b2", "2.3.3-b4" -> 5
+        "2.3.3-rc3", "2.3.3" -> 6
+        "2.3.4-b1" -> 2
+        else -> null
+    }
 
     fun fileWrapperField(profileId: String): String? = when (profileId) {
         "2.3.3-b2" -> "b"
         "2.3.3-b4" -> "d"
         "2.3.3-rc3", "2.3.3" -> "b"
+        "2.3.4-b1" -> "b"
+        else -> null
+    }
+
+    fun settingsListBranch(profileId: String): Byte? = when (profileId) {
+        "2.3.3-b4", "2.3.3-rc3", "2.3.3" -> 15
+        "2.3.4-b1" -> 11
         else -> null
     }
 }

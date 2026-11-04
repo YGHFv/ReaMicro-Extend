@@ -589,7 +589,7 @@ class FileEditCompletionHook(
         middleEllipsis: Boolean = false,
         nativeTrailingGlyph: String? = null,
     ) {
-        if (HostSymbols.profileId == "2.3.3" &&
+        if (HostSymbols.usesReleaseLayout &&
             onClickName in setOf("EditBookTitle", "EditBookAuthor", "CopyBookIdentifier")) {
             renderReleaseMetadataRow(label, value, composer, onClickName, onClick)
             return

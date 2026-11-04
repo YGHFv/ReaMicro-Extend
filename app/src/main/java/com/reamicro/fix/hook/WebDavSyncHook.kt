@@ -23,6 +23,9 @@ import com.reamicro.fix.cloud.webdav.WebDavSyncTransport
 import com.reamicro.fix.core.B2NativeUi
 import com.reamicro.fix.core.HostCoroutines
 import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostReleaseClass
+import com.reamicro.fix.core.hostReleaseField
+import com.reamicro.fix.core.hostReleaseMethodByArity
 import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.core.hostMethod
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
@@ -58,16 +61,14 @@ internal class WebDavSyncHook(
     private val transportType by lazy { raw("uk6") }
     private val unit by lazy { drive.targetUnit() }
 
-    private fun raw(name: String) = Class.forName(name, false, loader)
+    private fun raw(name: String) = loader.hostReleaseClass(name)
     private fun method(owner: String, name: String, count: Int): Method =
-        raw(owner).declaredMethods.filter { it.name == name && it.parameterCount == count }
-            .singleOrNull()?.apply { isAccessible = true }
-            ?: error("WebDAV sync ABI missing: $owner.$name/$count")
+        raw(owner).hostReleaseMethodByArity(name, count).apply { isAccessible = true }
     private fun field(value: Any, name: String): Any? =
-        value.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(value)
+        value.javaClass.hostReleaseField(name).apply { isAccessible = true }.get(value)
 
     fun install() {
-        check(HostSymbols.profileId == "2.3.3")
+        check(HostSymbols.usesReleaseLayout)
         check(raw("bf9").declaredMethods.count { !java.lang.reflect.Modifier.isStatic(it.modifiers) } == 8)
         check(configType.declaredConstructors.any { it.parameterCount == 7 && it.parameterTypes[0] == raw("he9") })
         XposedBridge.hookAllConstructors(raw("w1a"), object : XC_MethodHook() {

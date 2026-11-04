@@ -14,29 +14,41 @@ object HostRawAbi {
         }
     }
 
-    fun method(type: Class<*>, name: String, types: Array<out Class<*>?>): Method {
+    @JvmOverloads
+    fun method(type: Class<*>, name: String, types: Array<out Class<*>?>, release: Boolean = false): Method {
+        if (release && HostSymbols.profileId != "2.3.4-b1") return type.getDeclaredMethod(name, *types)
         if (!HostSymbols.usesRc3Abi) return type.getDeclaredMethod(name, *types)
         val descriptor = types.joinToString("") { descriptor(requireNotNull(it)) }
-        val entry = mapping().getJSONObject("methods").optString("${type.name}#$name($descriptor)")
+        val entry = mapping().getJSONObject(if (release) "releaseMethods" else "methods")
+            .optString("${type.name}#$name($descriptor)")
         if (entry.isEmpty()) return type.getDeclaredMethod(name, *types)
         val owner = Class.forName(entry.substringBefore('#'), false, type.classLoader)
         return owner.getDeclaredMethod(entry.substringAfter('#'), *types)
     }
 
-    fun methodName(type: Class<*>, name: String, arity: Int): Pair<Class<*>, String> {
+    @JvmOverloads
+    fun methodName(type: Class<*>, name: String, arity: Int, release: Boolean = false): Pair<Class<*>, String> {
+        if (release && HostSymbols.profileId != "2.3.4-b1") return type to name
         if (!HostSymbols.usesRc3Abi) return type to name
-        val entry = mapping().getJSONObject("arity").optString("${type.name}#$name/$arity")
+        val entry = mapping().getJSONObject(if (release) "releaseArity" else "arity")
+            .optString("${type.name}#$name/$arity")
         if (entry.isEmpty()) return type to name
         return Class.forName(entry.substringBefore('#'), false, type.classLoader) to entry.substringAfter('#')
     }
 
-    fun field(type: Class<*>, name: String): Field {
+    @JvmOverloads
+    fun field(type: Class<*>, name: String, release: Boolean = false): Field {
+        if (release && HostSymbols.profileId != "2.3.4-b1") return type.getDeclaredField(name)
         if (!HostSymbols.usesRc3Abi) return type.getDeclaredField(name)
-        val entry = mapping().getJSONObject("fields").optString("${type.name}#$name")
+        val entry = mapping().getJSONObject(if (release) "releaseFields" else "fields")
+            .optString("${type.name}#$name")
         if (entry.isEmpty()) return type.getDeclaredField(name)
         return Class.forName(entry.substringBefore('#'), false, type.classLoader)
             .getDeclaredField(entry.substringAfter('#'))
     }
+
+    fun releaseClassName(name: String): String =
+        if (HostSymbols.profileId == "2.3.4-b1") mapping().getJSONObject("classes").getString(name) else name
 
     private fun descriptor(type: Class<*>): String = when (type) {
         java.lang.Boolean.TYPE -> "Z"
@@ -59,5 +71,17 @@ fun Class<*>.hostAbiField(name: String): Field = HostRawAbi.field(this, name)
 
 fun Class<*>.hostAbiMethodByArity(name: String, arity: Int): Method {
     val (owner, actual) = HostRawAbi.methodName(this, name, arity)
+    return owner.declaredMethods.single { it.name == actual && it.parameterCount == arity }
+}
+
+fun ClassLoader.hostReleaseClass(name: String): Class<*> = loadClass(HostRawAbi.releaseClassName(name))
+
+fun Class<*>.hostReleaseMethod(name: String, vararg types: Class<*>?): Method =
+    HostRawAbi.method(this, name, types, release = true)
+
+fun Class<*>.hostReleaseField(name: String): Field = HostRawAbi.field(this, name, release = true)
+
+fun Class<*>.hostReleaseMethodByArity(name: String, arity: Int): Method {
+    val (owner, actual) = HostRawAbi.methodName(this, name, arity, release = true)
     return owner.declaredMethods.single { it.name == actual && it.parameterCount == arity }
 }

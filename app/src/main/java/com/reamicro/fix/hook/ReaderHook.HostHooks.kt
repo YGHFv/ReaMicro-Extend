@@ -1029,7 +1029,8 @@ internal fun ReaderHook.hookSearchHighlightRenderInputs() {
     )
     hookSearchHighlightMarksArgument(
         className = "app.zhendong.reamicro.ui.reader.components.ScrollPagerKt",
-        methodName = "ScrollPagerElement", marksIndex = 1, label = "ScrollElement",
+        methodName = "ScrollPagerElement",
+        marksIndex = if (HostSymbols.profileId == "2.3.4-b1") 2 else 1, label = "ScrollElement",
     )
     ReaderSearchContentBridge(this).install()
     hookSearchHighlightContentOverlays()

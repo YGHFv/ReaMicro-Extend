@@ -2,6 +2,7 @@
 """按完整指令及引用图迁移 RC3；有歧义的映射只记报告，不按短名猜测。"""
 
 from collections import Counter, defaultdict
+import argparse
 import gzip
 import hashlib
 import json
@@ -35,13 +36,16 @@ def normalized(output):
     return rp.stable(output).replace(" ", "")
 
 
-def load_code(label):
-    cached = OUT / (label + "-code.pkl.gz")
+def load_code(label, apk=None, output=None):
+    apk = apk or CACHE / ("RM2.3.3." + label.upper() + ".APK")
+    output = output or OUT
+    output.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+    cached = output / (label + "-" + digest + "-code.pkl.gz")
     if cached.exists():
         with gzip.open(cached, "rb") as handle:
             return pickle.load(handle)
     result = {}
-    apk = CACHE / ("RM2.3.3." + label.upper() + ".APK")
     with ZipFile(apk) as archive:
         for name in archive.namelist():
             if not re.fullmatch(r"classes\d*\.dex", name):
@@ -81,10 +85,20 @@ def index_methods(code):
 
 
 def main():
-    source, target = load_code("b4"), load_code("rc3")
-    src_raw = hostsym.load(CACHE / "b4-features.pkl.gz")
-    dst_raw = hostsym.load(CACHE / "rc3-features.pkl.gz")
-    profile = rp.parse_profile(ROOT / "app/src/main/assets/host-profiles/2.3.3-b4.profile")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source-apk", type=Path, default=CACHE / "RM2.3.3.B4.APK")
+    parser.add_argument("--target-apk", type=Path, default=CACHE / "RM2.3.3.RC3.APK")
+    parser.add_argument("--source-features", type=Path, default=CACHE / "b4-features.pkl.gz")
+    parser.add_argument("--target-features", type=Path, default=CACHE / "rc3-features.pkl.gz")
+    parser.add_argument("--profile", type=Path,
+                        default=ROOT / "app/src/main/assets/host-profiles/2.3.3-b4.profile")
+    parser.add_argument("--output-dir", type=Path, default=OUT)
+    args = parser.parse_args()
+    source = load_code("source", args.source_apk, args.output_dir)
+    target = load_code("target", args.target_apk, args.output_dir)
+    src_raw = hostsym.load(args.source_features)
+    dst_raw = hostsym.load(args.target_features)
+    profile = rp.parse_profile(args.profile)
     left_index, right_index = index_methods(source), index_methods(target)
     mapping = {}
     evidence = {}
@@ -245,7 +259,10 @@ def main():
               "pending": pending, "conflicts": conflicts,
               "methodPairs": [[a, list(ak), b, list(bk)] for (a, ak), (b, bk) in pairs.items()],
               "fieldPairs": [[a, af, b, bf] for (a, af), (b, bf) in fields.items()]}
-    (OUT / "graph-retarget.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    report["sourceSha256"] = hashlib.sha256(args.source_apk.read_bytes()).hexdigest()
+    report["targetSha256"] = hashlib.sha256(args.target_apk.read_bytes()).hexdigest()
+    (args.output_dir / "graph-retarget.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print("pending", {k: len(v) for k, v in pending.items()}, "conflicts", len(conflicts))
     for key, rows in pending.items():
         for row in rows[:35]:

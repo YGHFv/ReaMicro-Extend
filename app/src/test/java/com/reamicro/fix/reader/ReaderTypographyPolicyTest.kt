@@ -50,7 +50,7 @@ class ReaderTypographyPolicyTest {
     @Test
     fun runtimeGuardRunsBeforeLayoutAndDoesNotWritePreferencesOrCss() {
         val hook = main.resolve("java/com/reamicro/fix/hook/ReaderHook.Typography.kt").readText(Charsets.UTF_8)
-        assertTrue(hook.contains("HostSymbols.profileId != \"2.3.3\""))
+        assertTrue(hook.contains("!HostSymbols.usesReleaseLayout"))
         assertTrue(hook.contains("override fun beforeHookedMethod"))
         assertTrue(hook.contains("XposedBridge.deoptimize(caller)"))
         assertFalse(hook.contains("updatePreference("))

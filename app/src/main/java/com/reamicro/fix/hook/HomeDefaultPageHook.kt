@@ -1,5 +1,10 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostReleaseClass
+import com.reamicro.fix.core.hostReleaseMethod
+import com.reamicro.fix.core.hostReleaseField
+import com.reamicro.fix.core.hostReleaseMethodByArity
+
 import com.reamicro.fix.core.HomeDefaultPagePolicy
 import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.core.HostCoroutines
@@ -28,7 +33,7 @@ internal class HomeDefaultPageHook(
         )
         val key = loader.hostClass("ReaMicroHost.PreferenceKey").getConstructor(String::class.java)
             .newInstance("reading_enabled")
-        val first = loader.hostClass("ReaMicroShelf233.FlowFirst").getDeclaredMethod(
+        val first = loader.hostClass("ReaMicroShelf233.FlowFirst").hostReleaseMethod(
             "c", loader.hostClass("kotlinx.coroutines.flow.Flow"),
             loader.hostClass("kotlin.coroutines.Continuation"),
         )
@@ -63,6 +68,6 @@ internal class HomeDefaultPageHook(
                 home, loader.hostClass(HostClasses.Compose.COMPOSER), Int::class.javaPrimitiveType)
         XposedBridge.deoptimize(screen)
         // 第二个调用方是首屏选页的挂起函数，必须解除内联，才能与首帧使用同一个偏好。
-        XposedBridge.deoptimize(loader.loadClass("uc4").getDeclaredMethod("v", Any::class.java))
+        XposedBridge.deoptimize(loader.hostReleaseClass("uc4").hostReleaseMethod("v", Any::class.java))
     }
 }

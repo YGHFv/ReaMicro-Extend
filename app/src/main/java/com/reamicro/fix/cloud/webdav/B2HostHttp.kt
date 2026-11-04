@@ -2,6 +2,7 @@ package com.reamicro.fix.cloud.webdav
 
 import com.reamicro.fix.core.hostAbiMethod
 import com.reamicro.fix.core.hostAbiField
+import com.reamicro.fix.core.hostReleaseMethod
 
 import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.core.HostNativeAbi
@@ -100,7 +101,7 @@ internal class B2HostHttp(private val loader: ClassLoader, private val cleartext
         try {
             val code = type("Response").hostAbiField("d").getInt(response)
             val responseHeaders = if (!captureHeaders) emptyMap() else listOf("ETag", "Content-Length", "Content-Type").mapNotNull { name ->
-                (type("Response").getDeclaredMethod("g", type("Response"), String::class.java).invoke(null, response, name) as? String)
+                (type("Response").hostReleaseMethod("g", type("Response"), String::class.java).invoke(null, response, name) as? String)
                     ?.let { name to it }
             }.toMap()
             val responseBody = type("Response").hostAbiField("g").get(response)

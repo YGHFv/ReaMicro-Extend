@@ -4,6 +4,8 @@ import com.reamicro.fix.core.hostAbiMethod
 import com.reamicro.fix.core.hostAbiField
 
 import com.reamicro.fix.core.HostNavigation
+import com.reamicro.fix.core.HostNativeAbi
+import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.xposed.XC_MethodHook
@@ -20,10 +22,11 @@ internal class B4SettingsListBridge(private val hook: ReaMicroSettingsHook) {
         val branch = type.hostAbiField("a")
         val scopeField = type.hostAbiField("b")
         val vmField = type.hostAbiField("c")
+        val settingsBranch = requireNotNull(HostNativeAbi.settingsListBranch(HostSymbols.profileId))
         XposedBridge.hookMethod(invoke, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 val callback = param.thisObject ?: return
-                if (branch.getByte(callback).toInt() != 15 || !vmType.isInstance(vmField.get(callback))) return
+                if (branch.getByte(callback) != settingsBranch || !vmType.isInstance(vmField.get(callback))) return
                 val scope = scopeField.get(callback)?.takeIf(scopeType::isInstance) ?: return
                 hook.currentSettingsNavGraphScope = scope
                 hook.currentSettingsNavController = HostNavigation.controller(scope)

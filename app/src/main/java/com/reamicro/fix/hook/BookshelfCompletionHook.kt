@@ -1,5 +1,10 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.core.hostReleaseClass
+import com.reamicro.fix.core.hostReleaseMethod
+import com.reamicro.fix.core.hostReleaseField
+import com.reamicro.fix.core.hostReleaseMethodByArity
+
 import android.app.Activity
 import android.content.Context
 import android.content.SharedPreferences
@@ -95,7 +100,7 @@ internal class BookshelfCompletionHook(
     }
 
     fun install() {
-        check(HostSymbols.profileId == "2.3.3") { "书架动作尚未适配该宿主" }
+        check(HostSymbols.usesReleaseLayout) { "书架动作尚未适配该宿主" }
         val homeType = loader.hostClass("app.zhendong.reamicro.ui.home.HomeViewModel")
         XposedBridge.hookAllConstructors(homeType, object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
@@ -127,21 +132,20 @@ internal class BookshelfCompletionHook(
             }
             override fun afterHookedMethod(param: MethodHookParam) { bookshelfContent.remove() }
         })
-        val pagerFactory = loader.hostClass("ReaMicroShelf233.PagerFactory").declaredMethods
-            .single { it.name == "b" && it.parameterCount == 5 }
+        val pagerFactory = loader.hostClass("ReaMicroShelf233.PagerFactory").hostReleaseMethodByArity("b", 5)
         XposedBridge.hookMethod(pagerFactory, object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
                 if (bookshelfContent.get() == true) bookshelfPager = WeakReference(param.result)
             }
         })
         XposedBridge.deoptimize(shelfPage)
-        val sync = tabs.getDeclaredMethod(
+        val sync = tabs.hostReleaseMethod(
             "c", loader.hostClass("ReaMicroShelf233.SyncState"), loader.hostClass("ReaMicroShelf233.LanState"),
             Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType, Float::class.javaPrimitiveType,
             loader.hostClass("kotlin.jvm.functions.Function0"),
             loader.hostClass("androidx.compose.runtime.Composer"), Int::class.javaPrimitiveType,
         )
-        val parent = tabs.declaredMethods.single { it.name == "b" && it.parameterCount == 15 }
+        val parent = tabs.hostReleaseMethodByArity("b", 15)
         XposedBridge.hookMethod(parent, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 // 第3号逻辑参数是“书架”标签，不能处理正在阅读或多选工具条。
@@ -155,7 +159,7 @@ internal class BookshelfCompletionHook(
                 normalHeader.remove()
             }
         })
-        val selectionVector = loader.hostClass("ReaMicroShelf233.SelectionIcon").getDeclaredField("b")
+        val selectionVector = loader.hostClass("ReaMicroShelf233.SelectionIcon").hostReleaseField("b")
         val vectorIcon = loader.hostClass("androidx.compose.material3.IconKt").hostMethodsNamed("Icon-ww6aTOc")
             .single { it.parameterCount == 7 && it.parameterTypes[0] ==
                 loader.hostClass("androidx.compose.ui.graphics.vector.ImageVector") }
@@ -219,7 +223,7 @@ internal class BookshelfCompletionHook(
     }
 
     private fun udp(value: Int): Float = loader.hostClass("ReaMicroShelf233.Unit")
-        .getDeclaredMethod("e", Int::class.javaPrimitiveType).invoke(null, value) as Float
+        .hostReleaseMethod("e", Int::class.javaPrimitiveType).invoke(null, value) as Float
 
     private fun size(modifier: Any, value: Float): Any =
         requireNotNull(loader.hostClass("ReaMicroHost.Size").hostAbiMethod(
@@ -233,12 +237,12 @@ internal class BookshelfCompletionHook(
         val callback = drive.functionProxy(label, "kotlin.jvm.functions.Function0") { action(); drive.targetUnit() }
         val modifierType = loader.hostClass("androidx.compose.ui.Modifier")
         val scaled = loader.hostClass("ReaMicroShelf233.Scale")
-            .getDeclaredMethod("b", modifierType, Float::class.javaPrimitiveType).invoke(null, ui.modifier(), scale)
+            .hostReleaseMethod("b", modifierType, Float::class.javaPrimitiveType).invoke(null, ui.modifier(), scale)
         // 与原生同步保持同一 UDP 尺寸、末端留白和圆形涟漪，内层图标不扩大点击边界。
         val padded = ui.padding(requireNotNull(scaled), 0f, 0f, udp(8), 0f)
-        val circle = loader.hostClass("ReaMicroShelf233.Circle").getDeclaredField("a").get(null)
+        val circle = loader.hostClass("ReaMicroShelf233.Circle").hostReleaseField("a").get(null)
         val clipped = loader.hostClass("ReaMicroShelf233.Clip")
-            .getDeclaredMethod("a", modifierType, loader.hostClass("androidx.compose.ui.graphics.Shape"))
+            .hostReleaseMethod("a", modifierType, loader.hostClass("androidx.compose.ui.graphics.Shape"))
             .invoke(null, size(padded, udp(36)), circle)
         val clickable = ui.clickable(requireNotNull(clipped), callback)
         val iconModifier = size(ui.padding(clickable, udp(8), udp(8), udp(8), udp(8)), udp(20))
@@ -267,14 +271,14 @@ internal class BookshelfCompletionHook(
             .newInstance("bookshelf_type")
 
     private fun firstValue(flow: Any): Any? {
-        val first = loader.hostClass("ReaMicroShelf233.FlowFirst").getDeclaredMethod(
+        val first = loader.hostClass("ReaMicroShelf233.FlowFirst").hostReleaseMethod(
             "c", loader.hostClass("kotlinx.coroutines.flow.Flow"),
             loader.hostClass("kotlin.coroutines.Continuation"))
         return HostCoroutines.invokeTimed(loader, first, null, 15_000L, flow)
     }
 
     private fun readStyle(session: Any): Int {
-        val store = session.javaClass.getDeclaredField("a").apply { isAccessible = true }.get(session)
+        val store = session.javaClass.hostReleaseField("a").apply { isAccessible = true }.get(session)
         val flow = XposedHelpers.callMethod(store, "getData")
         val prefs = firstValue(requireNotNull(flow)) ?: error("阅读设置未就绪")
         val key = preferenceKey()
@@ -347,7 +351,7 @@ internal class BookshelfCompletionHook(
                     val viewModel = home.get() ?: error("当前书架尚未就绪")
                     if (showingShelf == false) {
                         // 首页的当前阅读流跟随用户当前书籍，不能使用上次书架分页位置代替。
-                        val readingFlow = viewModel.javaClass.getDeclaredField("y").apply { isAccessible = true }.get(viewModel)
+                        val readingFlow = viewModel.javaClass.hostReleaseField("y").apply { isAccessible = true }.get(viewModel)
                         val readingBook = firstValue(requireNotNull(readingFlow)) ?: error("当前没有正在阅读的图书")
                         XposedHelpers.callMethod(readingBook, "getGroup")?.toString().orEmpty().trim().ifBlank { "默认" }
                     } else {

@@ -6,6 +6,7 @@ import com.reamicro.fix.core.hostAbiField
 
 import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.hostMethodsNamed
 import com.reamicro.fix.xposed.XC_MethodHook
 import com.reamicro.fix.xposed.XposedBridge
 
@@ -32,7 +33,7 @@ internal class B4ReaderSearchEntryBridge(private val reader: ReaderHook) {
             }
         })
         val clickable = loader.hostClass("androidx.compose.foundation.ClickableKt")
-            .hostAbiMethodByArity("g", 6)
+            .hostMethodsNamed("clickable-oSLSa3U\$default").single { it.parameterCount == 6 }
         XposedBridge.hookMethod(clickable, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 if (!reader.readerBottomBarComposeScope.active) return

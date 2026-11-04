@@ -3,6 +3,9 @@ package com.reamicro.fix.hook
 import android.view.KeyEvent
 import android.view.View
 import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.hostReleaseClass
+import com.reamicro.fix.core.hostReleaseMethod
+import com.reamicro.fix.core.hostReleaseField
 import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.core.hostField
 import com.reamicro.fix.core.hostMethod
@@ -13,14 +16,14 @@ internal fun ReaderHook.hookReaderBackKey() {
     if (!HostSymbols.usesRc3Abi) return
     // RC3 根焦点节点把 BACK 按下解释为 FocusDirection.Exit，松开却不消费。
     // 正文及普通底栏放行按下事件，让 Activity 接收完整按键并执行原有返回链。
-    val rootKeyNode = classLoader.loadClass("tf")
-    val ownerField = rootKeyNode.getDeclaredField("p").apply { isAccessible = true }
-    val handler = rootKeyNode.getDeclaredMethod("F", KeyEvent::class.java)
+    val rootKeyNode = classLoader.hostReleaseClass("tf")
+    val ownerField = rootKeyNode.hostReleaseField("p").apply { isAccessible = true }
+    val handler = rootKeyNode.hostReleaseMethod("F", KeyEvent::class.java)
     val stateField = classLoader.hostClass("app.zhendong.reamicro.arch.MVIViewModel").hostField("uiState")
     val stateClass = classLoader.hostClass("app.zhendong.reamicro.ui.reader.ReaderUiState")
     val statusField = stateClass.hostField("status")
     val sheetField = stateClass.hostField("sheetStatus")
-    val hiddenClass = classLoader.loadClass(if (HostSymbols.profileId == "2.3.3") "lrb" else "mrb")
+    val hiddenClass = if (HostSymbols.usesReleaseLayout) classLoader.hostReleaseClass("lrb") else classLoader.loadClass("mrb")
     val selectionClass = classLoader.hostClass("org.epub.ui.EpubSelectionController")
     val selectionMethod = selectionClass.hostMethod("getSelection")
     XposedBridge.hookMethod(handler, object : XC_MethodHook() {

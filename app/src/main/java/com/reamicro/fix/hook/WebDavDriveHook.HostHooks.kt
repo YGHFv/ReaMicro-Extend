@@ -170,7 +170,7 @@ internal fun WebDavDriveHook.hookOnlineCompletionBookLocalSheet() {
 internal fun WebDavDriveHook.hookOnlineCompletionBookSourceLabel() {
     if (onlineCompletionSourceLabelHooked) return
     runCatching {
-        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3") {
+        if (com.reamicro.fix.core.HostSymbols.usesReleaseLayout) {
             val sheet = cls(BOOK_LOCAL_SHEET_CLASS)
             val context = ThreadLocal<Any>()
             val info = sheet.declaredMethods.single { it.hostNameMatches("BookInfo") && it.parameterCount == 3 }

@@ -133,7 +133,8 @@ internal fun ReaderHook.isReaderBottomBarDarkLightToggleClick(onClick: Any): Boo
             val expected = classLoader.hostClass("ReaMicroHost.ReaderMenuThemeClick")
             val session = expected.takeIf { cls == it }?.getDeclaredField("e")?.get(onClick)
             return@runCatching cls == expected &&
-                expected.getDeclaredField("a").getByte(onClick) == 2.toByte() &&
+                expected.getDeclaredField("a").getByte(onClick) ==
+                    (if (HostSymbols.profileId == "2.3.4-b1") 1 else 2).toByte() &&
                 session != null && classLoader.hostClass(SESSION_CLASS).isInstance(session) &&
                 (currentSessionRef?.get()?.let { it === session } != false)
         }

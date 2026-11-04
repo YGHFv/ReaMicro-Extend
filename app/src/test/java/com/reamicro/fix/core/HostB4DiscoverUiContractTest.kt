@@ -124,7 +124,8 @@ class HostB4DiscoverUiContractTest {
         val binding = source("hook/ReaderHook.Support.kt")
             .substringAfter("internal fun ReaderHook.isReaderBottomBarDarkLightToggleClick")
             .substringBefore("internal fun ReaderHook.isReaderBottomBarBackClick")
-        assertTrue(binding.contains("getByte(onClick) == 2.toByte()"))
+        assertTrue(binding.contains("getByte(onClick) =="))
+        assertTrue(binding.contains("if (HostSymbols.profileId == \"2.3.4-b1\") 1 else 2"))
         assertTrue(binding.contains("currentSessionRef?.get()"))
     }
 

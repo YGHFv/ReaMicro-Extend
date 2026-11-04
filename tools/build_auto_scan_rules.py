@@ -2,7 +2,9 @@
 """生成真实 DexKit 定位规则；不把人工 profile 的短名写入扫描目标。"""
 
 from collections import defaultdict
+import argparse
 import json
+from pathlib import Path
 import re
 from zipfile import ZipFile
 
@@ -17,10 +19,17 @@ logger.remove()
 
 
 def main():
-    profile = rp.parse_profile(ROOT / "app/src/main/assets/host-profiles/2.3.3-rc3.profile")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", type=Path, default=ROOT / "app/src/main/assets/host-profiles/2.3.3-rc3.profile")
+    parser.add_argument("--apk", type=Path, default=CACHE / "RM2.3.3.RC3.APK")
+    parser.add_argument("--output", type=Path, default=ROOT / "app/src/main/assets/host-profiles/automatic.rules.json")
+    parser.add_argument("--report-dir", type=Path, default=OUT)
+    args = parser.parse_args()
+    profile = rp.parse_profile(args.profile)
+    profile_id = next(line.partition("=")[2] for line in profile["header"] if line.startswith("profile="))
     raw = {}
     strings_index = defaultdict(set)
-    with ZipFile(CACHE / "RM2.3.3.RC3.APK") as archive:
+    with ZipFile(args.apk) as archive:
         for entry in archive.namelist():
             if not re.fullmatch(r"classes\d*\.dex", entry):
                 continue
@@ -96,11 +105,12 @@ def main():
             "id": key, "owner": logical, "signature": method["signature"],
             "static": method["static"], "strings": anchors, "opcodes": method["opcodes"],
         })
-    result = {"version": 1, "reference": "2.3.3-rc3", "classes": class_rules,
+    result = {"version": 1, "reference": profile_id, "classes": class_rules,
               "methods": method_rules, "fields": []}
-    path = ROOT / "app/src/main/assets/host-profiles/automatic.rules.json"
+    path = args.output
     path.write_text(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
-    (OUT / "automatic-rule-coverage.json").write_text(json.dumps({
+    args.report_dir.mkdir(parents=True, exist_ok=True)
+    (args.report_dir / "automatic-rule-coverage.json").write_text(json.dumps({
         "classes": len(class_rules), "methods": len(method_rules),
         "notYetCoveredClasses": sorted(set(all_classes) - known), "notYetCoveredMethods": skipped,
     }, ensure_ascii=False, indent=2), encoding="utf-8")

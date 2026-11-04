@@ -31,11 +31,14 @@ class HostReflectionTest {
             profile=fixture
             requiredClass=fixture.Marker
             class=logical.Parent=${Parent::class.java.name}
+            class=logical.MergedFacade=${Parent::class.java.name}
             class=logical.Child=${Child::class.java.name}
             class=logical.Callback=${Callback::class.java.name}
             method=logical.Parent#updateUiState=r
             method=logical.Parent#staticValue=z
             methodOwner=logical.Parent#staticValue=${Relocated::class.java.name}
+            method=logical.MergedFacade#otherStaticValue=z
+            methodOwner=logical.MergedFacade#otherStaticValue=${Relocated::class.java.name}
             field=logical.Parent#isReady=a
             field=logical.Parent#tag=a
             field=logical.Parent#FLIP_STYLE=b
@@ -90,5 +93,16 @@ class HostReflectionTest {
             .method("logical.Parent", "staticValue", 1)
         assertEquals(Relocated::class.java, reflected.declaringClass)
         assertEquals(10, reflected.invoke(null, 5))
+    }
+
+    @Test
+    fun `merged facade retains relocated exact and named overloads`() {
+        assertTrue("logical.MergedFacade" in HostSymbols.logicalClassesOf(Parent::class.java.name))
+        val exact = Parent::class.java.hostMethod("otherStaticValue", Int::class.javaPrimitiveType)
+        assertEquals(12, exact.invoke(null, 6))
+        val collected = Parent::class.java.hostMethodsNamed("otherStaticValue").single()
+        assertEquals(Relocated::class.java, collected.declaringClass)
+        assertEquals(14, collected.invoke(null, 7))
+        assertTrue(Parent::class.java.hostMethodsNamed("missingStaticValue").isEmpty())
     }
 }

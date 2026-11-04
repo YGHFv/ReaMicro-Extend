@@ -65,7 +65,11 @@ class B2NativeUi(private val loader: ClassLoader) {
         requireNotNull(static("Background", "e", base, color, field("RectangleShape", "a")))
 
     fun spacedBy(value: Float): Any {
-        val aligner = type("SpacingAlignment").getDeclaredConstructor(Byte::class.javaPrimitiveType).newInstance(16.toByte())
+        val aligner = if (HostSymbols.profileId == "2.3.4-b1") {
+            type("SpacingAlignment").getDeclaredConstructor(Boolean::class.javaPrimitiveType).newInstance(false)
+        } else {
+            type("SpacingAlignment").getDeclaredConstructor(Byte::class.javaPrimitiveType).newInstance(16.toByte())
+        }
         return type("SpacedArrangement").declaredConstructors.single { it.parameterCount == 3 }
             .newInstance(value, true, aligner)
     }

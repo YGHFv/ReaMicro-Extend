@@ -118,7 +118,9 @@ internal class B4StorageUiBridge(private val drive: WebDavDriveHook) {
             val receiverClass = drive.cls("app.zhendong.reamicro.arch.IntentReceiver")
             val intentClass = drive.cls("app.zhendong.reamicro.arch.UiIntent")
             check(receiverClass.isInstance(receiver))
-            val hideIntentClass = drive.cls("sd4")
+            val hideIntentClass = drive.cls(
+                if (HostSymbols.profileId == "2.3.4-b1") "ReaMicroHost.HideLibrary" else "sd4",
+            )
             check(intentClass.isAssignableFrom(hideIntentClass))
             val hideIntent = hideIntentClass.hostAbiField("a").get(null)
             receiverClass.hostAbiMethod("h", intentClass).invoke(receiver, hideIntent)

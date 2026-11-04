@@ -25,8 +25,12 @@ object HostSymbols {
 
     val profileId: String get() = active?.fingerprint?.id ?: "identity"
     val abiProfileId: String get() = if (usesRc3Abi) "2.3.3-b4" else profileId
-    val usesRc3Abi: Boolean get() = profileId in setOf("2.3.3-rc3", "2.3.3")
+    val usesRc3Abi: Boolean get() = profileId in setOf("2.3.3-rc3", "2.3.3", "2.3.4-b1")
+    val usesReleaseLayout: Boolean get() = profileId in setOf("2.3.3", "2.3.4-b1")
     val isIdentity: Boolean get() = active == null
+
+    fun logicalClassesOf(actual: String): Set<String> =
+        active?.aliasesOf(actual)?.takeIf { it.isNotEmpty() } ?: setOf(actual)
 
     /**
      * 在安装任何 hook 之前调用。
@@ -66,7 +70,7 @@ object HostSymbols {
             val matched = selection.profile
             active = matched
             if (!hostApkPath.isNullOrBlank() && !hostDataDir.isNullOrBlank() &&
-                HostAutoScanner.scanProfileAvailable(profileId) && profileId != "2.3.3") {
+                HostAutoScanner.scanProfileAvailable(profileId) && !usesReleaseLayout) {
                 val scan = HostAutoScanner.scan(hostApkPath, hostDataDir)
                 HookInstallReport.record("HostSymbols", "automaticScan", scan != null && scan.failures.isEmpty(),
                     scan?.failures?.takeIf { it.isNotEmpty() }?.let { IllegalStateException(it.take(8).joinToString()) })

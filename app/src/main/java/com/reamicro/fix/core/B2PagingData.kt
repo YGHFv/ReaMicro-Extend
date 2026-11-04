@@ -14,7 +14,7 @@ class B2PagingData(private val loader: ClassLoader) {
 
     fun singleFlow(value: Any): Any =
         type("SingleFlow").getDeclaredConstructor(Any::class.java, Byte::class.javaPrimitiveType)
-            .newInstance(value, (if (HostSymbols.usesRc3Abi) 6 else 5).toByte())
+            .newInstance(value, requireNotNull(HostNativeAbi.singleFlowBranch(HostSymbols.profileId)))
 
     fun from(items: List<Any>): Any {
         val snapshot = items.toList()

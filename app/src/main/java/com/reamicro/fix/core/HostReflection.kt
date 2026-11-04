@@ -70,14 +70,15 @@ fun Method.isSuspendingContinuationParameter(index: Int, logicalName: String): B
 /** 声明方法优先，其次公开方法，与 getDeclaredMethod/getMethod 的并集语义一致。 */
 fun Class<*>.hostMethod(name: String, vararg types: Class<*>?): Method {
     val parameters = types.map { requireNotNull(it) { "Missing parameter type for ${this.name}#$name" } }.toTypedArray()
-    val logicalOwner = HostSymbols.logicalClass(this.name)
-    val owner = HostSymbols.resolveMethodOwner(logicalOwner, name)
-    if (owner != this.name && owner != logicalOwner) {
-        val redirected = Class.forName(owner, false, classLoader)
-        val actualName = HostSymbols.resolveMethodName(logicalOwner, name)
-        redirected.findMethodExact(actualName, parameters)?.let {
-            require(java.lang.reflect.Modifier.isStatic(it.modifiers)) { "Relocated method must be static: $it" }
-            return it
+    for (logicalOwner in HostSymbols.logicalClassesOf(this.name)) {
+        val owner = HostSymbols.resolveMethodOwner(logicalOwner, name)
+        if (owner != this.name && owner != logicalOwner) {
+            val redirected = Class.forName(owner, false, classLoader)
+            val actualName = HostSymbols.resolveMethodName(logicalOwner, name)
+            redirected.findMethodExact(actualName, parameters)?.let {
+                require(java.lang.reflect.Modifier.isStatic(it.modifiers)) { "Relocated method must be static: $it" }
+                return it
+            }
         }
     }
     val resolved = HostSymbols.resolveMethodName(this, name)
@@ -103,6 +104,14 @@ fun Class<*>.hostMethodsNamed(name: String): List<Method> {
     val resolved = HostSymbols.resolveMethodName(this, name)
     val wanted = listOf(resolved, name).distinct()
     val result = LinkedHashMap<List<Class<*>>, Method>()
+    for (logicalOwner in HostSymbols.logicalClassesOf(this.name)) {
+        val owner = HostSymbols.resolveMethodOwner(logicalOwner, name)
+        if (owner == this.name || owner == logicalOwner) continue
+        val target = Class.forName(owner, false, classLoader)
+        val actualName = HostSymbols.resolveMethodName(logicalOwner, name)
+        target.declaredMethods.filter { it.name == actualName && java.lang.reflect.Modifier.isStatic(it.modifiers) }
+            .forEach { result.putIfAbsent(it.parameterTypes.toList(), it) }
+    }
     var current: Class<*>? = this
     while (current != null) {
         for (method in current.declaredMethods) {

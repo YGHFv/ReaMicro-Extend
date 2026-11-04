@@ -16,7 +16,7 @@ class HostHighlightMeasurementContractTest {
     fun releaseUsesVerifiedPreMeasurementStageOnlyForInitialContent() {
         val hook = source.substringAfter("private fun hookContentDom(")
             .substringBefore("private fun applyDialogueHighlight(")
-        assertTrue(hook.contains("HostSymbols.profileId == \"2.3.3\""))
+        assertTrue(hook.contains("HostSymbols.usesReleaseLayout"))
         assertTrue(hook.contains("AtomicReference::class.java"))
         assertTrue(hook.contains("Int::class.javaPrimitiveType, ArrayList::class.java"))
         assertTrue(hook.contains("override fun beforeHookedMethod"))

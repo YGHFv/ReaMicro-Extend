@@ -32,7 +32,7 @@ object HostProfile {
             }
         }
         private val aliasesByActual: Map<String, Set<String>> by lazy {
-            typeAliases.entries.groupBy({ it.value }, { it.key })
+            (classes.entries + typeAliases.entries).groupBy({ it.value }, { it.key })
                 .mapValues { (_, names) -> names.toSet() }
         }
 

@@ -169,7 +169,7 @@ class ReaMicroHookEntry {
             globalTypefaceProvider = globalFontHook::globalAndroidTypeface,
         )
         installFeature("WebDavDriveHook", webDavDriveHook::install)
-        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3") {
+        if (com.reamicro.fix.core.HostSymbols.usesReleaseLayout) {
             installFeature("HomeDefaultPageHook") {
                 HomeDefaultPageHook(classLoader, settingsProvider).install()
             }

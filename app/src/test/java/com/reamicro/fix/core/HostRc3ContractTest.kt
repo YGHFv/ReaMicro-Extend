@@ -31,7 +31,8 @@ class HostRc3ContractTest {
         assertTrue(main.resolve("assets/host-profiles/automatic.rules.json").length() > 1000)
         assertTrue(main.resolve("assets/host-bridges/http-2.3.3-rc3.dex").isFile)
         assertTrue(main.resolve("assets/host-bridges/2.3.3-rc3.dex").isFile)
-        val paging = main.resolve("java/com/reamicro/fix/core/B2PagingData.kt").readText()
-        assertTrue(paging.contains("HostSymbols.usesRc3Abi) 6 else 5"))
+        assertEquals(6.toByte(), HostNativeAbi.singleFlowBranch("2.3.3-rc3"))
+        assertEquals(5.toByte(), HostNativeAbi.singleFlowBranch("2.3.3-b4"))
+        assertNull(HostNativeAbi.singleFlowBranch("2.3.4"))
     }
 }

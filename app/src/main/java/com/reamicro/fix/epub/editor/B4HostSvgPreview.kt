@@ -19,7 +19,7 @@ internal class B4HostSvgPreview(private val loader: ClassLoader) {
         val input = ByteArrayInputStream(text.toByteArray(StandardCharsets.UTF_8))
         val proxy = Proxy.newProxyInstance(loader, arrayOf(source)) { instance, method, args ->
             when (method.name) {
-                "i1" -> input
+                "i1", "h1" -> input
                 "toString" -> "ReaMicroSvgPreviewSource"
                 "hashCode" -> System.identityHashCode(instance)
                 "equals" -> instance === args?.firstOrNull()

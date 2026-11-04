@@ -146,7 +146,7 @@ class ReaderDialogueHighlightHook(
         runCatching {
             val methods = hostCompat.contentDomOnContentMethods(className)
             if (methods.isEmpty()) return
-            val highlightBeforeMeasure = HostSymbols.profileId == "2.3.3"
+            val highlightBeforeMeasure = HostSymbols.usesReleaseLayout
             if (highlightBeforeMeasure) {
                 val measure = cls(className).getDeclaredMethod(
                     "G", java.util.concurrent.atomic.AtomicReference::class.java,
@@ -1026,18 +1026,7 @@ class ReaderDialogueHighlightHook(
 
     private fun composeColor(value: String): Long {
         val argb = parseAndroidColor(value) ?: Color.parseColor(DEFAULT_DIALOGUE_COLOR)
-        val packedArgb = argb.toLong() and 0xFFFFFFFFL
-        return runCatching {
-            val factory = cls(COLOR_KT_CLASS).declaredMethods.firstOrNull { method ->
-                method.hostNameMatches("Color") && method.parameterTypes.size == 1
-            } ?: return@runCatching packedArgb
-            factory.isAccessible = true
-            when (factory.parameterTypes[0]) {
-                Int::class.javaPrimitiveType -> factory.invoke(null, argb) as? Long
-                Long::class.javaPrimitiveType -> factory.invoke(null, packedArgb) as? Long
-                else -> null
-            }
-        }.getOrNull() ?: packedArgb
+        return com.reamicro.fix.reader.ReaderColorPacking.srgb(argb)
     }
 
     private fun parseAndroidColor(value: String): Int? {

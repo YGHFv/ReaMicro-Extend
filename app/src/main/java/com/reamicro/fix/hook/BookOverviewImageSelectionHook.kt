@@ -87,7 +87,7 @@ class BookOverviewImageSelectionHook(
     }
 
     private fun hookBottomSheet(methodName: String, target: ImageTarget) {
-        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3") {
+        if (com.reamicro.fix.core.HostSymbols.usesReleaseLayout) {
             hookMergedBottomSheet(methodName, target)
             return
         }

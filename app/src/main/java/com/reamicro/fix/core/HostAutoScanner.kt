@@ -41,8 +41,8 @@ object HostAutoScanner {
     fun restoreCachedReport(apk: String, dataDir: String): Report? = synchronized(lock) {
         last?.let { return@synchronized it }
         runCatching {
-            val asset = if (HostSymbols.profileId == "2.3.3")
-                "assets/host-profiles/automatic-2.3.3.rules.json" else ASSET
+            val asset = if (HostSymbols.usesReleaseLayout)
+                "assets/host-profiles/automatic-${HostSymbols.profileId}.rules.json" else ASSET
             val rules = HostSymbols.bundledAsset(asset)
             val digest = MessageDigest.getInstance("SHA-256")
             File(apk).inputStream().use { input ->
@@ -63,15 +63,15 @@ object HostAutoScanner {
     }
 
     fun scanProfileAvailable(profileId: String): Boolean =
-        profileId in setOf("2.3.3-rc3", "2.3.3", "identity", "automatic")
+        profileId in setOf("2.3.3-rc3", "2.3.3", "2.3.4-b1", "identity", "automatic")
 
     fun scan(apk: String, dataDir: String, force: Boolean = false): Report? = synchronized(lock) {
         if (running) return@synchronized null
         running = true
         val started = System.nanoTime()
         try {
-            val asset = if (HostSymbols.profileId == "2.3.3")
-                "assets/host-profiles/automatic-2.3.3.rules.json" else ASSET
+            val asset = if (HostSymbols.usesReleaseLayout)
+                "assets/host-profiles/automatic-${HostSymbols.profileId}.rules.json" else ASSET
             val bytes = HostSymbols.bundledAsset(asset)
             val rules = JSONObject(bytes.toString(Charsets.UTF_8))
             val apkDigest = File(apk).inputStream().use { input ->
