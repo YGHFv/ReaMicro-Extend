@@ -5,10 +5,15 @@ reamicro_pids() {
   for cmdline in /proc/[0-9]*/cmdline; do
     [ -r "$cmdline" ] || continue
     IFS= read -r comm <"${cmdline%/cmdline}/comm" 2>/dev/null || continue
-    case "$comm" in sh|ash|bash|busybox|timeout|app_process|app_process32|app_process64) ;; *) continue ;; esac
+    case "$comm" in sh|ash|bash|busybox|timeout|app_process|app_process32|app_process64|wake-timer) ;; *) continue ;; esac
     args=$(tr '\000' '\n' <"$cmdline" 2>/dev/null)
     case "$target" in
       daemon) printf '%s\n' "$args" | grep -Fxq "$MODDIR/watchdog.sh" || continue ;;
+      wake)
+        # Match the exact module helper and private-state argument, not just comm.
+        printf '%s\n' "$args" | grep -Fxq "$MODDIR/bin/wake-timer" || continue
+        printf '%s\n' "$args" | grep -Fxq "$STATE" || continue
+        ;;
       executor)
         if ! printf '%s\n' "$args" | grep -Fxq 'com.reamicro.fix.cloud.root.RootTaskMain'; then
           printf '%s\n' "$args" | grep -Fxq "$MODDIR/runner.sh" || continue

@@ -139,6 +139,9 @@ private fun moduleSummary(status: RootModuleStatus?): String = when {
     status == null -> stringResource(R.string.root_module_hint)
     status.rootAvailable && status.inspectionComplete && status.stagedVersion in 1 until BuildConfig.ROOT_MODULE_VERSION_CODE ->
         stringResource(R.string.root_staged_older)
+    status.moduleResource() == R.string.root_module_ready &&
+        status.installedVersion < BuildConfig.ROOT_MODULE_VERSION_CODE ->
+        stringResource(R.string.root_module_upgrade_for_wake)
     else -> stringResource(status.moduleResource())
 }
 
@@ -148,5 +151,14 @@ private fun taskSummary(status: RootModuleStatus?, enabled: Boolean): String = w
     status == null -> stringResource(R.string.root_task_unknown)
     status.moduleResource() != R.string.root_module_ready -> stringResource(R.string.root_task_unavailable)
 
-    else -> stringResource(status.stateResource(enabled, status.checkedAt))
+    else -> {
+        val state = status.stateResource(enabled, status.checkedAt)
+        when {
+            state == R.string.root_wake_scheduled -> stringResource(R.string.root_wake_at, formatRootTime(status.wakeAt))
+            (state == R.string.execution_status_running || state == R.string.execution_status_no_heartbeat) &&
+                (status.wakeMode == "unavailable" || status.installedVersion < 10) ->
+                stringResource(state) + "\n" + stringResource(R.string.root_wake_polling)
+            else -> stringResource(state)
+        }
+    }
 }

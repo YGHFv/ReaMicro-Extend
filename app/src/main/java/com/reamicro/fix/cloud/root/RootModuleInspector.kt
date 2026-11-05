@@ -43,6 +43,12 @@ internal object RootModuleInspector {
             taskRunning = fields["running"] == "1",
             heartbeatAt = (fields["heartbeat"]?.toLongOrNull() ?: 0L)
                 .coerceIn(0L, Long.MAX_VALUE / 1000L) * 1000L,
+            wakeMode = fields["wakeMode"]?.takeIf {
+                it in setOf("realtime_alarm", "boottime_alarm", "unavailable")
+            } ?: "unknown",
+            wakeAt = (fields["wakeAt"]?.toLongOrNull() ?: 0L)
+                .coerceIn(0L, Long.MAX_VALUE / 1000L) * 1000L,
+            wakeHelperRunning = fields["wakeHelper"] == "1",
             legacyWakeInstalled = fields["legacy"] == "1",
         )
     }
@@ -62,26 +68,56 @@ internal object RootModuleInspector {
         [ -f "${'$'}module/remove" ] && echo remove=1
         [ -f "${'$'}module/update" ] && echo update=1
         [ -f "${'$'}state/stop" ] && echo stopped=1
+        module_version() {
+            version=${'$'}(sed -n 's/^REAMICRO_MODULE_VERSION=//p' "${'$'}1/common.sh" 2>/dev/null | head -n 1)
+            [ -n "${'$'}version" ] || version=${'$'}(sed -n 's/^versionCode=//p' "${'$'}1/module.prop" 2>/dev/null | head -n 1)
+            case "${'$'}version" in ''|*[!0-9]*) version=0 ;; esac
+            printf '%s' "${'$'}version"
+        }
         complete_module() {
             [ "${'$'}(sed -n 's/^id=//p' "${'$'}1/module.prop" 2>/dev/null)" = reamicro_automation ] || return 1
             for part in module.prop common.sh action.sh runner.sh service.sh watchdog.sh lifecycle.sh stop.sh uninstall.sh; do
                 [ -s "${'$'}1/${'$'}part" ] || return 1
             done
+            if [ "${'$'}(module_version "${'$'}1")" -ge 10 ]; then
+                [ -f "${'$'}1/bin/wake-timer" ] && [ -s "${'$'}1/bin/wake-timer" ] &&
+                    [ -x "${'$'}1/bin/wake-timer" ] && [ ! -L "${'$'}1/bin/wake-timer" ] || return 1
+            fi
         }
         complete_module "${'$'}staged" && echo stagedReady=1
         complete_module "${'$'}module" && [ -x "${'$'}module/runner.sh" ] && [ -x "${'$'}module/action.sh" ] && echo ready=1
-        version=${'$'}(sed -n 's/^REAMICRO_MODULE_VERSION=//p' "${'$'}module/common.sh" 2>/dev/null | head -n 1)
-        [ -n "${'$'}version" ] || version=${'$'}(sed -n 's/^versionCode=//p' "${'$'}module/module.prop" 2>/dev/null | head -n 1)
+        version=${'$'}(module_version "${'$'}module")
         printf 'version=%s\n' "${'$'}version"
         printf 'staged='; sed -n 's/^versionCode=//p' "${'$'}staged/module.prop" 2>/dev/null | head -n 1; echo
         printf 'heartbeat='; cat "${'$'}state/heartbeat" 2>/dev/null; echo
+        wake_mode=${'$'}(head -n 1 "${'$'}state/wake-mode" 2>/dev/null)
+        case "${'$'}wake_mode" in realtime_alarm|boottime_alarm|unavailable) ;; *) wake_mode=unknown ;; esac
+        wake_at=${'$'}(head -n 1 "${'$'}state/wake-at" 2>/dev/null)
+        case "${'$'}wake_at" in ''|*[!0-9]*) wake_at=0 ;; esac
+        printf 'wakeMode=%s\nwakeAt=%s\n' "${'$'}wake_mode" "${'$'}wake_at"
         matching_pid() {
             pid=${'$'}(cat "${'$'}1" 2>/dev/null)
             case "${'$'}pid" in ''|*[!0-9]*) return 1 ;; esac
             [ -r "/proc/${'$'}pid/cmdline" ] || return 1
+            [ -r "/proc/${'$'}pid/status" ] || return 1
+            grep -Eq '^State:[[:space:]]+[XZ]' "/proc/${'$'}pid/status" && return 1
             tr '\000' '\n' <"/proc/${'$'}pid/cmdline" 2>/dev/null | grep -Fxq "${'$'}2"
         }
-        matching_pid "${'$'}state/daemon.pid" "${'$'}module/watchdog.sh" && echo daemon=1
+        if matching_pid "${'$'}state/daemon.pid" "${'$'}module/watchdog.sh"; then
+            echo daemon=1
+            daemon_pid=${'$'}pid
+            wake_pid=${'$'}(cat "${'$'}state/wake.pid" 2>/dev/null)
+            case "${'$'}wake_pid" in ''|*[!0-9]*) wake_pid=0 ;; esac
+            if [ "${'$'}wake_pid" -gt 0 ] &&
+                [ -r "/proc/${'$'}wake_pid/cmdline" ] && [ -r "/proc/${'$'}wake_pid/status" ] &&
+                ! grep -Eq '^State:[[:space:]]+[XZ]' "/proc/${'$'}wake_pid/status" &&
+                [ "${'$'}(tr '\000' '\n' <"/proc/${'$'}wake_pid/cmdline" | head -n 1)" = "${'$'}module/bin/wake-timer" ] &&
+                [ "${'$'}(tr '\000' '\n' <"/proc/${'$'}wake_pid/cmdline" | sed -n '3p')" = "${'$'}state" ] &&
+                [ "${'$'}(tr '\000' '\n' <"/proc/${'$'}wake_pid/cmdline" | sed -n '4p')" = "${'$'}module" ] &&
+                [ "${'$'}(sed -n 's/^PPid:[[:space:]]*//p' "/proc/${'$'}wake_pid/status")" = "${'$'}daemon_pid" ]; then
+                echo wakeHelper=1
+            fi
+        fi
 
         if matching_pid "${'$'}state/runner.pid" "${'$'}module/runner.sh"; then
             echo running=1

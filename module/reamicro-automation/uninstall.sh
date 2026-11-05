@@ -18,9 +18,13 @@ if [ -d "$STATE" ]; then
     reamicro_lock_lifecycle || exit 1
   fi
 fi
-reamicro_stop daemon || exit 1
-reamicro_stop executor || exit 1
-reamicro_cleanup_legacy || exit 1
+stop_result=0
+reamicro_stop daemon || stop_result=1
+reamicro_stop wake || stop_result=1
+reamicro_stop executor || stop_result=1
+reamicro_cleanup_legacy || stop_result=1
+reamicro_release_wake_lock
 
+[ "$stop_result" -eq 0 ] || exit "$stop_result"
 rm -rf "$STATE" || exit 1
 echo "ReaMicro: scheduler, legacy wake script and private credentials removed"

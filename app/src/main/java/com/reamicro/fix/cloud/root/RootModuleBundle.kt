@@ -11,7 +11,8 @@ internal object RootModuleBundle {
             check(names.size == names.toSet().size) { "Duplicate module ZIP entries" }
             check(names.none { it.startsWith("/") || ".." in it.split("/") }) { "Invalid module ZIP path" }
             val required = setOf("module.prop", "customize.sh", "common.sh", "service.sh",
-                "lifecycle.sh", "stop.sh", "watchdog.sh", "runner.sh", "uninstall.sh", "action.sh")
+                "lifecycle.sh", "stop.sh", "watchdog.sh", "runner.sh", "uninstall.sh", "action.sh",
+                "bin/wake-timer")
             check(required.all { zip.getEntry(it)?.let { entry -> !entry.isDirectory && entry.size > 0 } == true }) {
                 "Incomplete bundled Root module"
             }

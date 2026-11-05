@@ -27,6 +27,10 @@ if [ "$1" = start ]; then rm -f "$STATE/stop" || exit 1; fi
 
 reamicro_daemon_alive && exit 0
 
+# Remove any orphaned helper left by a killed/replaced daemon before restarting.
+reamicro_stop wake || exit 1
+rm -f "$STATE/wake.pid" "$STATE/wake-at" "$STATE/wake-mode"
+
 "$BUSYBOX" nohup "$BUSYBOX" sh "$MODDIR/watchdog.sh" 9>&- </dev/null >>"$STATE/daemon.log" 2>&1 &
 tries=0
 while [ "$tries" -lt 30 ]; do

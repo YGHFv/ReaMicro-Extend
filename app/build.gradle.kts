@@ -65,6 +65,9 @@ val bundleModule by tasks.registering(Zip::class) {
     destinationDirectory.set(generatedRootModuleDir.map { it.dir("module") })
 
     doFirst {
+        check(rootModuleSourceDir.file("bin/wake-timer").asFile.let { it.isFile && it.length() > 0 }) {
+            "Root wake helper missing; run python3 tools/build-wake-timer.py before bundling"
+        }
         destinationDirectory.get().asFile.listFiles()?.filter {
             it.name.startsWith("ReaMicro-Automation-Root-") && it.extension == "zip" &&
                 it.name != archiveFileName.get()
@@ -75,6 +78,10 @@ val bundleModule by tasks.registering(Zip::class) {
 
     from(rootModuleSourceDir) {
         include("*.sh")
+        filePermissions { unix("755") }
+    }
+    from(rootModuleSourceDir) {
+        include("bin/wake-timer")
         filePermissions { unix("755") }
     }
     from(rootModuleSourceDir) {

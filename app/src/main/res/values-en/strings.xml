@@ -299,7 +299,7 @@
     <string name="root_enable_switch">Enable Root enhancement</string>
     <string name="root_enhancement_on">Automatic tasks are enabled. Check the status below to see whether the background service is running.</string>
     <string name="root_enhancement_off">Enhancement disabled</string>
-    <string name="root_enhancement_on_summary">Run local tasks automatically in the background through the companion Root module</string>
+    <string name="root_enhancement_on_summary">Wake and run local tasks through the companion Root module, requesting OPPO / Xiaomi network restoration and checking DNS before execution</string>
     <string name="root_enhancement_off_summary">Local tasks run only when started manually</string>
     <string name="root_manual_only">Root enhancement is off; tasks are manual-only</string>
     <string name="root_access_title">Root authorization</string>
@@ -347,7 +347,7 @@
     <string name="root_module_help_title">Installation and activation</string>
     <string name="root_module_help">The companion module appears on the Modules page in your current Root manager with the ID reamicro_automation. Completing installation or an update does not always mean it is active. If prompted, reboot the device and check again. It only handles background tasks and does not modify system mounts; no mounting metamodule is required.</string>
     <string name="root_scheduler_help_title">About background tasks</string>
-    <string name="root_scheduler_help">This service only handles automatic tasks for this app, not system tasks or tasks for other apps. The page shows the state at the last check. Tap Check Root for the latest status. Activity records are stored on this device and do not prove network success or task completion. See Records for results. Updates may pause during deep sleep.</string>
+    <string name="root_scheduler_help">The companion module uses a system timer to wake this app’s automatic tasks. Unsupported devices use compatible polling, which may be delayed with the screen off. Before execution, it requests OPPO / Xiaomi to restore their saved network state when needed and checks DNS. Power-saving preferences remain as configured. The page shows the last checked state; heartbeats pause while waiting for the next wake. Tap Check Root for the latest status and see Records for task results.</string>
     <string name="root_module_ready">The companion module is installed and ready.</string>
     <string name="root_module_busy">Processing the module operation…</string>
     <string name="root_sync_running">Sending task settings and retrieving progress and results…</string>
@@ -358,5 +358,9 @@
     <string name="root_tasks_disabled">Automatic tasks disabled</string>
     <string name="root_task_unknown">Not checked</string>
     <string name="root_task_unavailable">Unavailable; check permission or module</string>
+    <string name="root_wake_scheduled">Next wake scheduled</string>
+    <string name="root_wake_at">Next wake scheduled: %1$s</string>
+    <string name="root_wake_polling">Using compatible polling; tasks may be delayed with the screen off</string>
+    <string name="root_module_upgrade_for_wake">The current module is ready. Install / Update module to enable scheduled wake.</string>
     <string name="about_qiji_font_credit">Splash screen font</string>
 </resources>

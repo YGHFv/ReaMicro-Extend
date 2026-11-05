@@ -51,17 +51,30 @@ object RootTaskMain {
                 }
                 "run" -> repository.withExecutionLock {
                     if (repository.executionEnabled()) {
+                        RootNightDiagnostics.begin()
                         val request = repository.takeRequest()
                         val accountId = request?.optString("accountId").orEmpty()
                         val taskType = request?.optString("taskType").orEmpty()
                         val key = if (accountId.isNotBlank() && taskType.isNotBlank()) LocalTaskKey(accountId, taskType) else null
-                        LocalTaskEngine(repository).runDue(force = request?.optBoolean("force") == true, requested = key)
-                        repository.snapshot().optJSONArray("notifications")?.takeIf { it.length() > 0 }?.let(::notifyModule)
+                        val network = RootTaskNetwork.preparation { !repository.executionEnabled() }
+                        val completed = try {
+                            LocalTaskEngine(repository, beforeExecute = network::ensureReady)
+                                .runDue(force = request?.optBoolean("force") == true, requested = key)
+                        } catch (error: Throwable) {
+                            RootNightDiagnostics.abort(error)
+                            throw error
+                        }
+                        RootNightDiagnostics.finish(completed)
+                        if (!Thread.currentThread().isInterrupted) {
+                            repository.snapshot().optJSONArray("notifications")?.takeIf { it.length() > 0 }?.let(::notifyModule)
+                        }
                     }
                 }
                 else -> error("不支持的 Root 指令")
             }
-            respond(repository.snapshot())
+            if (Thread.currentThread().isInterrupted) {
+                respond(JSONObject().put("schema", RootTaskRepository.SCHEMA).put("cancelled", true))
+            } else respond(repository.snapshot())
         } catch (error: Throwable) {
             val detail = error.message?.take(500).orEmpty()
             respond(JSONObject().put("schema", RootTaskRepository.SCHEMA)

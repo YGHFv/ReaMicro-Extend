@@ -649,14 +649,25 @@ object CloudTaskLocalRunner {
 
     private fun postReaMicro(baseUrl: String, token: String, body: JSONObject, endpoint: String): JSONObject {
         if (Thread.currentThread().isInterrupted) throw InterruptedException("任务已中断，保留进度等待下次执行")
-        val raw = HttpClient.postBytes(
-            baseUrl.trimEnd('/') + "/" + endpoint.trimStart('/'),
-            body.toString().toByteArray(Charsets.UTF_8),
-            "application/json",
-            mapOf("Authorization" to "Bearer $token", "platform" to "android", "Accept" to "application/json"),
-            45_000,
-            45_000,
-        )
+        val url = baseUrl.trimEnd('/') + "/" + endpoint.trimStart('/')
+        val started = System.nanoTime()
+        val raw = try {
+            HttpClient.postBytes(
+                url,
+                body.toString().toByteArray(Charsets.UTF_8),
+                "application/json",
+                mapOf("Authorization" to "Bearer $token", "platform" to "android", "Accept" to "application/json"),
+                45_000,
+                45_000,
+            )
+        } catch (error: Exception) {
+            runCatching {
+                com.reamicro.fix.cloud.root.RootNightDiagnostics.requestFailure(
+                    url, error, (System.nanoTime() - started) / 1_000_000L,
+                )
+            }
+            throw error
+        }
         return JSONObject(raw)
     }
 

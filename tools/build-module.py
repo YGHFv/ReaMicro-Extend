@@ -5,6 +5,7 @@ import zipfile
 
 MODULE_FILES = (
     "module.prop",
+    "bin/wake-timer",
     "common.sh",
     "lifecycle.sh",
     "stop.sh",
@@ -24,7 +25,8 @@ def build_module(source: Path | None = None, output_directory: Path | None = Non
     source = source if source is not None else root / "module" / "reamicro-automation"
     output_directory = output_directory if output_directory is not None else root / "outputs"
     entries = {
-        name: (source / name).read_text(encoding="utf-8-sig").replace("\r\n", "\n").encode("utf-8")
+        name: (source / name).read_bytes() if name.startswith("bin/") else
+        (source / name).read_text(encoding="utf-8-sig").replace("\r\n", "\n").encode("utf-8")
         for name in MODULE_FILES
     }
     properties = {}
@@ -43,7 +45,7 @@ def build_module(source: Path | None = None, output_directory: Path | None = Non
         for name, data in sorted(entries.items()):
             info = zipfile.ZipInfo(name)
             info.create_system = 3
-            executable = name.endswith(".sh") or name.endswith("/update-binary")
+            executable = name.startswith("bin/") or name.endswith(".sh") or name.endswith("/update-binary")
             info.external_attr = (0o100755 if executable else 0o100644) << 16
             info.compress_type = zipfile.ZIP_DEFLATED
             archive.writestr(info, data)

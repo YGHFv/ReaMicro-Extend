@@ -14,6 +14,8 @@ fi
 for required in lifecycle.sh stop.sh common.sh service.sh watchdog.sh runner.sh uninstall.sh action.sh; do
   [ -f "$MODPATH/$required" ] || abort "模块包不完整：$required"
 done
+[ -s "$MODPATH/bin/wake-timer" ] || abort "模块包不完整：bin/wake-timer"
+[ "$(getprop ro.product.cpu.abi)" = arm64-v8a ] || abort "此模块的内核唤醒组件需要 arm64 设备"
 [ "$(sed -n 's/^id=//p' "$MODPATH/module.prop")" = reamicro_automation ] || abort "模块 ID 不匹配"
 . "$MODPATH/common.sh"
 [ "$(sed -n 's/^versionCode=//p' "$MODPATH/module.prop")" = "$REAMICRO_MODULE_VERSION" ] || abort "脚本与模块版本不匹配"
@@ -23,8 +25,9 @@ set_perm_recursive "$MODPATH" 0 0 0755 0644
 for script in "$MODPATH"/*.sh; do
   set_perm "$script" 0 0 0755
 done
+set_perm "$MODPATH/bin/wake-timer" 0 0 0755
 touch "$MODPATH/skip_mount" || abort "无法设置纯脚本模块标记"
-ui_print "- 纯脚本模块，不挂载 system，不需要 Metamodule"
+ui_print "- 独立执行器和内核唤醒组件，不挂载 system，不需要 Metamodule"
 ui_print "- 安装/更新由管理器替换同 ID 文件，不卸载旧版或清空任务配置"
 ui_print "- 请按管理器提示重启；重启后在应用中选择 Root 独立执行"
 ui_print "- 首次安装默认不接管任务；已启用的任务更新后保留"

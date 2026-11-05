@@ -24,6 +24,9 @@ internal data class RootModuleStatus(
     val pendingRemoval: Boolean = false,
     val daemonRunning: Boolean = false,
     val heartbeatAt: Long = 0L,
+    val wakeMode: String = "unknown",
+    val wakeAt: Long = 0L,
+    val wakeHelperRunning: Boolean = false,
     val legacyWakeInstalled: Boolean = false,
     val error: String = "",
 ) {
@@ -59,9 +62,20 @@ internal data class RootModuleStatus(
         !ready -> R.string.execution_module_incomplete
         !rootSelected -> R.string.execution_module_idle
         stopRequested -> R.string.execution_daemon_stopped
-        !daemonRunning -> R.string.execution_daemon_stopped
         taskRunning && heartbeatAt > 0L && now - heartbeatAt in 0L..120_000L -> R.string.execution_task_running
+        !daemonRunning -> R.string.execution_daemon_stopped
+        wakeScheduled(now) -> R.string.root_wake_scheduled
         heartbeatAt > 0L && now - heartbeatAt in 0L..120_000L -> R.string.execution_status_running
         else -> R.string.execution_status_no_heartbeat
     }
+
+    /** 等待 alarm 时不会持续写心跳，必须同时确认定时器进程和有效的截止时间。 */
+    fun wakeScheduled(now: Long): Boolean =
+        rootAvailable && inspectionComplete && installed && ready && installedVersion >= 10 &&
+            !disabled && !pendingRemoval && !stagedRemoval && !pendingUpdate && !stagedPresent &&
+            stagedVersion == 0 && !stopRequested && !taskRunning && daemonRunning && wakeHelperRunning &&
+            (wakeMode == "realtime_alarm" || wakeMode == "boottime_alarm") && heartbeatAt > 0L &&
+            now >= heartbeatAt && wakeAt >= heartbeatAt && wakeAt > 0L &&
+            wakeAt - now <= 900_000L &&
+            (wakeAt >= now || now - wakeAt <= 30_000L)
 }
