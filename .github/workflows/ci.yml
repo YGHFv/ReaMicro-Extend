@@ -54,7 +54,12 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-          cache: gradle
+
+      - name: Set up Gradle (enhanced caching)
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: enhanced
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
       - name: Set up Android command-line tools
         run: |
