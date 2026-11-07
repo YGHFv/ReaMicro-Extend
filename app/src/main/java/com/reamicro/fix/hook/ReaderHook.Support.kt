@@ -1164,31 +1164,10 @@ internal fun ReaderHook.targetUnit(): Any? = runCatching {
 
 internal fun ReaderHook.callNoArg(target: Any?, name: String): Any? {
     target ?: return null
-    val method = noArgMethod(target, name)
-        ?: return runCatching { XposedHelpers.callMethod(target, name) }.getOrNull()
-    return runCatching { method.invoke(target) }.getOrNull()
-}
-
-private fun ReaderHook.noArgMethod(target: Any, name: String): Method? {
-    val logicalClass = HostSymbols.logicalClass(target.javaClass.name)
-    val resolvedName = HostSymbols.resolveMethodName(target.javaClass, name)
-    val cacheKey = "$logicalClass#$name"
-    synchronized(noArgMethodCache) {
-        if (noArgMethodCache.containsKey(cacheKey)) return noArgMethodCache[cacheKey]
-    }
-    val found = runCatching {
-        sequenceOf(resolvedName, name)
-            .distinct()
-            .flatMap { candidate ->
-                target.javaClass.methods.asSequence().filter { it.name == candidate }
-            }
-            .firstOrNull { it.parameterTypes.isEmpty() }
-            ?.apply { isAccessible = true }
+    return runCatching {
+        if (target is Class<*>) XposedHelpers.callMethod(target, name)
+        else noArgAccessors.accessor(target, name)
     }.getOrNull()
-    synchronized(noArgMethodCache) {
-        noArgMethodCache[cacheKey] = found
-    }
-    return found
 }
 
 internal fun ReaderHook.callString(target: Any?, name: String): String =

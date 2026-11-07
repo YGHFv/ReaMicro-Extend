@@ -13,16 +13,28 @@ class HostAccessor private constructor(
     companion object {
         fun bind(type: Class<*>, getter: String): HostAccessor? {
             val resolved = HostSymbols.resolveMethodName(type, getter)
-            val method = type.methods.firstOrNull {
-                it.parameterCount == 0 && (it.name == resolved || it.name == getter)
-            }?.apply { isAccessible = true }
+            val publicMethods = type.methods
+            val method = sequenceOf(resolved, getter).distinct().firstNotNullOfOrNull { name ->
+                publicMethods.firstOrNull { it.parameterCount == 0 && it.name == name }
+            }?.apply { isAccessible = true } ?: declaredMethod(type, resolved)
             if (method != null) return HostAccessor(method, null)
-            val name = HostSymbols.resolveAccessorFieldName(type, getter) ?: return null
+            val name = HostSymbols.resolveAccessorFieldName(type, getter)
+            if (name != null) {
+                var owner: Class<*>? = type
+                while (owner != null) {
+                    val field = owner.declaredFields.firstOrNull { it.name == name }
+                        ?.apply { isAccessible = true }
+                    if (field != null) return HostAccessor(null, field)
+                    owner = owner.superclass
+                }
+            }
+            return if (resolved != getter) declaredMethod(type, getter)?.let { HostAccessor(it, null) } else null
+        }
+        private fun declaredMethod(type: Class<*>, name: String): Method? {
             var owner: Class<*>? = type
             while (owner != null) {
-                val field = owner.declaredFields.firstOrNull { it.name == name }
-                    ?.apply { isAccessible = true }
-                if (field != null) return HostAccessor(null, field)
+                owner.declaredMethods.firstOrNull { it.name == name && it.parameterCount == 0 }
+                    ?.let { return it.apply { isAccessible = true } }
                 owner = owner.superclass
             }
             return null

@@ -70,6 +70,8 @@ class ReaderDialogueHighlightHook(
         isInUse = ::isImageInUse,
     )
     private val textNodeDrawStates = ReaderTextDrawCache<NinePatchDrawState>()
+    private val annotationRangesCache = ReaderIdentityCache<Map<String, List<Any>>>()
+    private val refreshedTextCache = ReaderIdentityCache<Any>()
     private val highlightStyleCache = object : LinkedHashMap<Triple<ReaderHighlightStyle, Boolean, String>, Any>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Triple<ReaderHighlightStyle, Boolean, String>, Any>?): Boolean = size > 64
     }
@@ -356,10 +358,12 @@ class ReaderDialogueHighlightHook(
     }.getOrNull()
 
     private fun allAnnotatedRanges(content: Any): List<Any> {
-        val ranges = (
-            callNoArg(content, "getAnnotations\$ui_text") as? List<*>
-                ?: accessorOrField(content, "annotations") as? List<*>
-            ) ?: error("宿主 AnnotatedString 缺少统一 annotations getter")
+        val accessor = hostCompat.boundAccessor(content, "getAnnotations\$ui_text")
+            ?: hostCompat.boundAccessor(content, "getAnnotations")
+        val annotations = if (accessor != null) accessor.get(content)
+            else field(content.javaClass.name, "annotations").get(content)
+        val ranges = (annotations as? List<*>)
+            ?: if (annotations == null) emptyList<Any>() else error("宿主 AnnotatedString annotations 不是 List")
         return ranges.map { it ?: error("宿主 AnnotatedString annotations 含 null range") }
     }
 
@@ -545,11 +549,17 @@ class ReaderDialogueHighlightHook(
     private fun refreshAnnotatedStringForCurrentTheme(annotatedString: Any?): Any? {
         checkHighlightRuntimeVersion()
         annotatedString ?: return null
-        if (hasCurrentReaderHighlightMarker(annotatedString) && settings.snapshot().canHighlightReaderDialogue) return null
-        val markerCount = highlightMarkerRanges(annotatedString).size
-        val rawNineRanges = ninePatchRanges(annotatedString)
-        if (markerCount == 0 && rawNineRanges.isEmpty() && !hasOwnedHighlightStyle(annotatedString)) return null
-        return highlightedAnnotatedString(annotatedString, contentDom = null)
+        return refreshedTextCache.getOrBuild(annotatedString) {
+            if (hasCurrentReaderHighlightMarker(annotatedString) && settings.snapshot().canHighlightReaderDialogue) {
+                return@getOrBuild null
+            }
+            val markerCount = highlightMarkerRanges(annotatedString).size
+            val rawNineRanges = ninePatchRanges(annotatedString)
+            if (markerCount == 0 && rawNineRanges.isEmpty() && !hasOwnedHighlightStyle(annotatedString)) {
+                return@getOrBuild null
+            }
+            highlightedAnnotatedString(annotatedString, contentDom = null)
+        }
     }
 
     private fun highlightedAnnotatedString(original: Any, contentDom: Any?): Any? {
@@ -1209,6 +1219,8 @@ class ReaderDialogueHighlightHook(
     private fun clearHighlightRuntimeCaches() {
         // 图片按资源路径和修改时间失效，切书或规则版本变化不必重复解码。
         textNodeDrawStates.clear()
+        annotationRangesCache.clear()
+        refreshedTextCache.clear()
         synchronized(reedenBoxStyleCache) { reedenBoxStyleCache.clear() }
         synchronized(nineSliceCache) { nineSliceCache.clear() }
         synchronized(rememberedNinePatchRanges) { rememberedNinePatchRanges.clear() }
@@ -1359,12 +1371,30 @@ class ReaderDialogueHighlightHook(
         lastHighlightRuntimeKey.ifBlank { highlightMarkerToken() }
 
     private fun stringAnnotations(annotatedString: Any, tag: String): List<Any> {
-        val length = annotatedStringLength(annotatedString)
-        val fromHost = instanceMethod(annotatedString, "getStringAnnotations", 3)
-            ?.let { runCatching { it.invoke(annotatedString, tag, 0, length) }.getOrNull() as? List<*> }
-        return (fromHost ?: allAnnotatedRanges(annotatedString))
-            .filterNotNull()
-            .filter { annotatedRangeTag(it) == tag }
+        val ranges = annotationRangesCache.getOrBuild(annotatedString) {
+            val getter = instanceMethod(annotatedString, "getStringAnnotations", 3)
+            if (getter != null) {
+                val length = annotatedStringLength(annotatedString)
+                runCatching {
+                    listOf(HIGHLIGHT_ANNOTATION_TAG, NINE_PATCH_ANNOTATION_TAG, INLINE_CONTENT_ANNOTATION_TAG)
+                        .associateWith { rangeTag ->
+                            (getter.invoke(annotatedString, rangeTag, 0, length) as List<*>)
+                                .filterNotNull().filter { annotatedRangeTag(it) == rangeTag }
+                        }
+                }.getOrNull()?.let { return@getOrBuild it }
+            }
+            val tagged = HashMap<String, MutableList<Any>>()
+            allAnnotatedRanges(annotatedString).forEach { range ->
+                val rangeTag = annotatedRangeTag(range)
+                if (rangeTag == HIGHLIGHT_ANNOTATION_TAG || rangeTag == NINE_PATCH_ANNOTATION_TAG ||
+                    rangeTag == INLINE_CONTENT_ANNOTATION_TAG
+                ) {
+                    tagged.getOrPut(rangeTag) { ArrayList() }.add(range)
+                }
+            }
+            tagged
+        }
+        return ranges?.get(tag).orEmpty()
     }
 
     private fun deriveRememberedNinePatchRanges(currentText: String): List<NinePatchRange> {

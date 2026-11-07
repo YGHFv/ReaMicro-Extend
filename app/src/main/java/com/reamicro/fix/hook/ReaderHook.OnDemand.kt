@@ -296,8 +296,8 @@ internal fun ReaderHook.scheduleOnDemandVisiblePageRefresh(viewModel: Any, page:
     }
     val root = currentEpubRoot() ?: return
     val session = captureRefreshSession(viewModel, root) ?: return
-    val location = onDemandPageLocation(root, page) ?: return
     val metadata = runCatching { OnlineOnDemandMetadataStore.read(root) }.getOrNull() ?: return
+    val location = onDemandPageLocation(root, page, metadata) ?: return
     val chapter = metadata.chapter(location.metadataIndex) ?: return
     val refreshKey = onDemandRefreshKey(root, chapter.href)
     if (onDemandVisibleRefreshKey != refreshKey) {
@@ -395,9 +395,8 @@ internal fun ReaderHook.onDemandPageLocation(
     page: Any,
     knownMetadata: com.reamicro.fix.online.download.OnlineOnDemandMetadata? = null,
 ): OnDemandPageLocation? {
-    val metadata = knownMetadata ?: runCatching {
-        com.reamicro.fix.online.download.OnlineOnDemandMetadataStore.read(bookDir)
-    }.getOrNull() ?: return null
+    val metadata = knownMetadata ?: runCatching { OnlineOnDemandMetadataStore.read(bookDir) }.getOrNull()
+        ?: return null
     val epub = currentEpubStrong ?: currentEpubRef?.get() ?: return null
     val table = onDemandSpineTable(epub) ?: return null
     val cfi = callString(page, "getAnchor")

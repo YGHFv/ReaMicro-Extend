@@ -13,15 +13,16 @@ class HostReflect(
     private val instanceMethodCache = HashMap<String, Method?>()
     private val accessorCache = HashMap<Pair<Class<*>, String>, HostAccessor?>()
 
-    fun accessor(target: Any, getter: String): Any? {
+    fun accessor(target: Any, getter: String): Any? = boundAccessor(target, getter)?.get(target)
+
+    fun boundAccessor(target: Any, getter: String): HostAccessor? {
         val key = target.javaClass to getter
-        val bound = synchronized(accessorCache) {
+        return synchronized(accessorCache) {
             if (!accessorCache.containsKey(key)) {
                 accessorCache[key] = HostAccessor.bind(target.javaClass, getter)
             }
             accessorCache[key]
         }
-        return bound?.get(target)
     }
 
     fun cls(className: String): Class<*> =
@@ -30,11 +31,11 @@ class HostReflect(
         }
 
     fun method(className: String, methodName: String, parameterCount: Int): Method {
-        val resolvedName = HostSymbols.resolveMethodName(className, methodName)
-        val owner = HostSymbols.resolveMethodOwner(className, methodName)
         val cacheKey = "$className#$methodName/$parameterCount"
         return synchronized(methodCache) {
             methodCache.getOrPut(cacheKey) {
+                val resolvedName = HostSymbols.resolveMethodName(className, methodName)
+                val owner = HostSymbols.resolveMethodOwner(className, methodName)
                 cls(owner).declaredMethods.firstOrNull {
                     it.name == resolvedName && it.parameterTypes.size == parameterCount
                 }?.apply { isAccessible = true }
@@ -48,11 +49,11 @@ class HostReflect(
 
     fun field(className: String, fieldName: String): Field {
         // 调用方可能传入运行时实际类名（例如 ContentDom 的 hv1），先反查逻辑名再解析字段。
-        val logicalClass = HostSymbols.logicalClass(className)
-        val resolvedName = HostSymbols.resolveFieldName(logicalClass, fieldName)
         val cacheKey = "$className#$fieldName"
         return synchronized(fieldCache) {
             fieldCache.getOrPut(cacheKey) {
+                val logicalClass = HostSymbols.logicalClass(className)
+                val resolvedName = HostSymbols.resolveFieldName(logicalClass, fieldName)
                 cls(className).run {
                     runCatching { getDeclaredField(resolvedName) }
                         .recoverCatching { getField(resolvedName) }
@@ -64,11 +65,11 @@ class HostReflect(
     }
 
     fun instanceMethod(target: Any, methodName: String, parameterCount: Int): Method? {
-        val resolvedName = HostSymbols.resolveMethodName(target.javaClass, methodName)
         val cacheKey = "${target.javaClass.name}#$methodName/$parameterCount"
         synchronized(instanceMethodCache) {
             if (instanceMethodCache.containsKey(cacheKey)) return instanceMethodCache[cacheKey]
         }
+        val resolvedName = HostSymbols.resolveMethodName(target.javaClass, methodName)
         val found = target.javaClass.methods.firstOrNull {
             it.name == resolvedName && it.parameterTypes.size == parameterCount
         }?.apply { isAccessible = true }

@@ -10,6 +10,7 @@ import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.core.ComposeInterop
 import com.reamicro.fix.core.HostObject
 import com.reamicro.fix.core.HostObjects
+import com.reamicro.fix.core.HostReflect
 import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.settings.ReaderHighlightBookContext
@@ -88,7 +89,7 @@ class ReaderHook(
 
     internal val udpValueCache = HashMap<Int, Float>()
 
-    internal val noArgMethodCache = HashMap<String, Method?>()
+    internal val noArgAccessors = HostReflect(classLoader)
     /**
      * 宿主 `org.epub.UIEpubWindow` 访问器。
      *

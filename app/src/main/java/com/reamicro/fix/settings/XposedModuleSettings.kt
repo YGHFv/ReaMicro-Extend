@@ -13,10 +13,8 @@ class XposedModuleSettings(
     private val contextProvider: () -> Context? = { null },
 ) {
     @Volatile private var attachedContext: Context? = null
-    @Volatile private var cachedSnapshot: ModuleSettingsSnapshot? = null
-    @Volatile private var cachedAtMs: Long = 0L
-    @Volatile private var cachedFontSettings: FontSettingsSnapshot? = null
-    @Volatile private var cachedFontSettingsAtMs: Long = 0L
+    private val snapshotCache = PreferenceSnapshotCache<ModuleSettingsSnapshot>()
+    private val fontSettingsCache = PreferenceSnapshotCache<FontSettingsSnapshot>()
     @Volatile private var cachedDialogueHighlightSettings: ReaderDialogueHighlightSettingsSnapshot? = null
     @Volatile private var cachedDialogueHighlightSettingsAtMs: Long = 0L
     @Volatile private var cachedHighlightSettings: ReaderHighlightSettingsSnapshot? = null
@@ -26,8 +24,8 @@ class XposedModuleSettings(
     private val preferenceHandler = com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper())
     private val notifyPreferenceChange = Runnable { ReaderHighlightBookContext.refreshRequester?.invoke("highlight-preferences") }
     private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        cachedSnapshot = null
-        cachedFontSettings = null
+        snapshotCache.clear()
+        fontSettingsCache.clear()
         if (HighlightPreferencePolicy.affectsReader(key)) {
             ReaderHighlightBookContext.bumpVersion("highlight-preferences", requestRefresh = false)
             preferenceHandler.removeCallbacks(notifyPreferenceChange)
@@ -41,15 +39,15 @@ class XposedModuleSettings(
         observedPrefs = null
         preferenceHandler.removeCallbacksAndMessages(null)
         attachedContext = null
+        snapshotCache.clear()
+        fontSettingsCache.clear()
     }
 
     fun attachContext(context: Context) {
         highlightConfigCache.clear()
         attachedContext = context.applicationContext ?: context
-        cachedSnapshot = null
-        cachedAtMs = 0L
-        cachedFontSettings = null
-        cachedFontSettingsAtMs = 0L
+        snapshotCache.clear()
+        fontSettingsCache.clear()
         cachedDialogueHighlightSettings = null
         cachedDialogueHighlightSettingsAtMs = 0L
         cachedHighlightSettings = null
@@ -57,14 +55,12 @@ class XposedModuleSettings(
     }
 
     fun snapshot(): ModuleSettingsSnapshot {
-        val now = System.currentTimeMillis()
-        cachedSnapshot?.takeIf { now - cachedAtMs < CACHE_WINDOW_MS }?.let { return it }
-        val snapshot = prefs()?.let(::readSnapshot) ?: ModuleSettingsSnapshot()
-        ModuleLogState.conciseLogEnabled = snapshot.conciseLogEnabled
-        cachedSnapshot = snapshot
-        cachedAtMs = now
-        logSnapshot(snapshot)
-        return snapshot
+        return snapshotCache.getOrBuild {
+            prefs()?.let(::readSnapshot)?.also { snapshot ->
+                ModuleLogState.conciseLogEnabled = snapshot.conciseLogEnabled
+                logSnapshot(snapshot)
+            }
+        } ?: ModuleSettingsSnapshot()
     }
 
     fun setModuleEnabled(enabled: Boolean) {
@@ -134,8 +130,7 @@ class XposedModuleSettings(
 
     fun setHostCrashUploadEnabled(enabled: Boolean): Boolean {
         val saved = HostCrashUploadSettings.save(prefs(), enabled)
-        cachedSnapshot = null
-        cachedAtMs = 0L
+        snapshotCache.clear()
         if (!saved) XposedBridge.logError("ReaMicro privacy: failed to persist crash-upload switch")
         return saved
     }
@@ -287,17 +282,14 @@ class XposedModuleSettings(
         prefs()?.getBoolean(ModuleSettings.onlineSourceKey(sourceId), false) ?: false
 
     fun fontSettings(): FontSettingsSnapshot {
-        val now = System.currentTimeMillis()
-        cachedFontSettings?.takeIf { now - cachedFontSettingsAtMs < CACHE_WINDOW_MS }?.let { return it }
-        val prefs = prefs() ?: return FontSettingsSnapshot()
-        return FontSettingsSnapshot(
-            globalFamily = prefs.getString(ModuleSettings.KEY_FONT_GLOBAL_FAMILY, "").orEmpty(),
-            songMapping = prefs.getString(ModuleSettings.KEY_FONT_MAPPING_SONG, "").orEmpty(),
-            kaiMapping = prefs.getString(ModuleSettings.KEY_FONT_MAPPING_KAI, "").orEmpty(),
-        ).also {
-            cachedFontSettings = it
-            cachedFontSettingsAtMs = now
-        }
+        return fontSettingsCache.getOrBuild {
+            val prefs = prefs() ?: return@getOrBuild null
+            FontSettingsSnapshot(
+                globalFamily = prefs.getString(ModuleSettings.KEY_FONT_GLOBAL_FAMILY, "").orEmpty(),
+                songMapping = prefs.getString(ModuleSettings.KEY_FONT_MAPPING_SONG, "").orEmpty(),
+                kaiMapping = prefs.getString(ModuleSettings.KEY_FONT_MAPPING_KAI, "").orEmpty(),
+            )
+        } ?: FontSettingsSnapshot()
     }
 
     fun setFontGlobalFamily(family: String) {
@@ -428,8 +420,7 @@ class XposedModuleSettings(
         val editor = prefs()?.edit() ?: return
         editor.putString(ModuleSettings.KEY_READER_HIGHLIGHT_RULES, encodeHighlightRules(next))
         editor.commit()
-        cachedSnapshot = null
-        cachedAtMs = 0L
+        snapshotCache.clear()
         cachedHighlightSettings = null
         cachedHighlightSettingsAtMs = 0L
         snapshot()
@@ -562,8 +553,7 @@ class XposedModuleSettings(
 
     private fun putBoolean(key: String, value: Boolean) {
         prefs()?.edit()?.putBoolean(key, value)?.commit()
-        cachedSnapshot = null
-        cachedAtMs = 0L
+        snapshotCache.clear()
         snapshot()
     }
 
@@ -576,17 +566,14 @@ class XposedModuleSettings(
 
     private fun putInt(key: String, value: Int) {
         prefs()?.edit()?.putInt(key, value)?.commit()
-        cachedSnapshot = null
-        cachedAtMs = 0L
+        snapshotCache.clear()
         snapshot()
     }
 
     private fun putString(key: String, value: String) {
         prefs()?.edit()?.putString(key, value)?.commit()
-        cachedSnapshot = null
-        cachedAtMs = 0L
-        cachedFontSettings = null
-        cachedFontSettingsAtMs = 0L
+        snapshotCache.clear()
+        fontSettingsCache.clear()
         cachedDialogueHighlightSettings = null
         cachedDialogueHighlightSettingsAtMs = 0L
         cachedHighlightSettings = null
@@ -608,8 +595,7 @@ class XposedModuleSettings(
                 defaultDarkStyleId?.let { putString(ModuleSettings.KEY_READER_HIGHLIGHT_DEFAULT_DARK_STYLE_ID, it) }
             }
             ?.commit()
-        cachedSnapshot = null
-        cachedAtMs = 0L
+        snapshotCache.clear()
         cachedDialogueHighlightSettings = null
         cachedDialogueHighlightSettingsAtMs = 0L
         cachedHighlightSettings = null
@@ -630,8 +616,7 @@ class XposedModuleSettings(
             ModuleSettings.ROTATION_BASE_KEYS.forEach { editor.putBoolean(it, false) }
         }
         editor.commit()
-        cachedSnapshot = null
-        cachedAtMs = 0L
+        snapshotCache.clear()
         snapshot()
     }
 
@@ -643,6 +628,8 @@ class XposedModuleSettings(
                 observedPrefs?.unregisterOnSharedPreferenceChangeListener(preferenceListener)
                 prefs.registerOnSharedPreferenceChangeListener(preferenceListener)
                 observedPrefs = prefs
+                snapshotCache.clear()
+                fontSettingsCache.clear()
             }
         }
         return prefs
