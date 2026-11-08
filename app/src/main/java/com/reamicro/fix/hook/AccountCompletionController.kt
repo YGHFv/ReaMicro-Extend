@@ -3,6 +3,7 @@ package com.reamicro.fix.hook
 import com.reamicro.fix.core.hostField
 import com.reamicro.fix.core.hostAbiField
 import com.reamicro.fix.core.hostAbiMethod
+import com.reamicro.fix.core.hostAbiMethodByArity
 
 import com.reamicro.fix.core.hostNameMatches
 import com.reamicro.fix.core.HostSymbols
@@ -109,6 +110,31 @@ class AccountCompletionController(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
 ) {
+    private val advancedSettings = AccountAdvancedSettings(
+        classLoader,
+        currentTarget = {
+            activityProvider()?.let(::currentAccountPreview)?.let {
+                AccountAdvancedRestoreState.Target(it.accountId, it.token)
+            }
+        },
+        memberAtCapture = {
+            val current = activityProvider()?.let(::currentCachedUser)
+            current != null && classLoader.hostClass("ReaMicroHost.SettingsListViewModel")
+                .hostAbiMethodByArity("m", 1).invoke(null, current) == true
+        },
+        dataStore = { activityProvider()?.let(::currentSession)?.let { method0(it, "getDataStore") } },
+        preferenceKey = { key(PREF_KEYS_CLASS, it) },
+    )
+
+    internal fun installAdvancedSettingsRestore(isEnabled: () -> Boolean) {
+        runCatching { advancedSettings.install(isEnabled) }
+            .onFailure { XposedBridge.logError("$LOG_PREFIX advanced account preference hook failed", it) }
+    }
+
+    internal fun hostSigningOut() {
+        try { persistCurrentAccountSnapshot() } finally { advancedSettings.nativeIdentityChange() }
+    }
+
     fun displayAccounts(): List<AccountDisplayItem> {
         val activity = activityProvider() ?: return emptyList()
         val current = currentAccountPreview(activity)
@@ -243,7 +269,7 @@ class AccountCompletionController(
         )
     }
 
-    fun switchToAccount(accountId: Long): AccountDisplayItem {
+    fun switchToAccount(accountId: Long): AccountDisplayItem = synchronized(advancedSettings.operationLock) {
         val activity = activityProvider() ?: error("当前没有可用页面")
         val current = currentAccountPreview(activity)
         if (current?.accountId == accountId) {
@@ -261,6 +287,8 @@ class AccountCompletionController(
         }
         val target = stored[accountId] ?: error("未找到账号凭证")
         val normalizedTarget = target.copy(lastUsedAt = System.currentTimeMillis())
+        // 身份写入触发宿主异步清理前，先持久保存切出账号的原始选择。
+        saveStoredAccounts(activity, stored.values.toList())
         restoreAccount(activity, normalizedTarget)
         stored[accountId] = normalizedTarget
         saveStoredAccounts(activity, stored.values.toList())
@@ -272,7 +300,7 @@ class AccountCompletionController(
         )
     }
 
-    fun persistCurrentAccountSnapshot(): Boolean {
+    fun persistCurrentAccountSnapshot(): Boolean = synchronized(advancedSettings.operationLock) {
         val activity = activityProvider() ?: return false
         val snapshot = captureCurrentAccount(activity) ?: return false
         val stored = loadStoredAccounts(activity)
@@ -468,12 +496,15 @@ class AccountCompletionController(
     private fun captureCurrentAccount(activity: Activity): StoredAccount? {
         val current = currentAccountPreview(activity) ?: return null
         val session = currentSession(activity) ?: return null
+        val restoring = advancedSettings.preserved(current.accountId)
+        val snapshot = captureSessionSnapshot(session)
+        val previous = loadStoredAccounts(activity).firstOrNull { it.accountId == current.accountId }?.advancedPreferences
         return current.toStoredAccount(
-            session = captureSessionSnapshot(session),
+            session = snapshot,
             webDavPrefs = captureSharedPrefsSnapshot(activity, WEBDAV_PREFS),
             localLibraryPrefs = captureSharedPrefsSnapshot(activity, LOCAL_LIBRARY_PREFS),
             hasFullState = true,
-        )
+        ).copy(advancedPreferences = restoring ?: advancedSettings.capture(current.accountId, snapshot.advanced(), previous))
     }
 
     private fun currentAccountPreview(activity: Activity): CurrentAccountPreview? {
@@ -502,7 +533,21 @@ class AccountCompletionController(
         )
     }
 
-    private fun restoreAccount(activity: Activity, account: StoredAccount, restoreDevicePreferences: Boolean = false) {
+    private fun restoreAccount(activity: Activity, account: StoredAccount, restoreDevicePreferences: Boolean = false) =
+        synchronized(advancedSettings.operationLock) {
+            val ticket = advancedSettings.begin(
+                AccountAdvancedRestoreState.Target(account.accountId, account.token), account.advancedPreferences,
+            )
+            try {
+                restoreAccountIdentity(activity, account, restoreDevicePreferences)
+                advancedSettings.ready(ticket)
+            } catch (error: Throwable) {
+                advancedSettings.cancel(ticket)
+                throw error
+            }
+        }
+
+    private fun restoreAccountIdentity(activity: Activity, account: StoredAccount, restoreDevicePreferences: Boolean) {
         // 写回前先以宿主当前行为准做字段合并，避免旧快照覆盖掉实时资料（如第三方绑定）。
         val guarded = guardUserDataAgainstHost(activity, account)
         upsertUserRow(activity, guarded)
@@ -528,7 +573,14 @@ class AccountCompletionController(
     }
 
     private fun restoreFullSessionPreferences(session: Any, snapshot: SessionSnapshot) {
-        updatePreference(session, key(PREF_KEYS_CLASS, "getDYNAMIC_COLOR"), snapshot.dynamicColor)
+        if (HostSymbols.profileId != "2.3.4-b1") {
+            // 旧宿主保留原来的完整导入行为；本版五项统一由原生权限判断后恢复。
+            updatePreference(session, key(PREF_KEYS_CLASS, "getDYNAMIC_COLOR"), snapshot.dynamicColor)
+            updatePreference(session, key(PREF_KEYS_CLASS, "getSMART_RECOGNITION"), snapshot.smartRecognition)
+            updatePreference(session, key(PREF_KEYS_CLASS, "getILLUSTRATION_OPTIMIZATION"), snapshot.illustrationOptimization)
+            updatePreference(session, key(PREF_KEYS_CLASS, "getRELATE_DOWNLOAD_COVER"), snapshot.relateDownloadCover)
+            updatePreference(session, key(PREF_KEYS_CLASS, "getCALLING_CARD_COLOR"), snapshot.callingCardColor)
+        }
         updatePreference(session, key(PREF_KEYS_CLASS, "getDARK_MODE"), snapshot.darkMode)
         updatePreference(session, key(PREF_KEYS_CLASS, "getBACKUP_TYPE"), snapshot.backupType)
         updatePreference(session, key(PREF_KEYS_CLASS, "getBOOKSHELF_TYPE"), snapshot.bookshelfType)
@@ -548,10 +600,6 @@ class AccountCompletionController(
         updatePreference(session, key(PREF_KEYS_CLASS, "getSCREEN_ALWAYS_ON"), snapshot.screenAlwaysOn)
         updatePreference(session, key(PREF_KEYS_CLASS, "getSYSTEM_BARS"), snapshot.systemBars)
         updatePreference(session, key(PREF_KEYS_CLASS, "getAGREEMENT"), snapshot.agreement)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getSMART_RECOGNITION"), snapshot.smartRecognition)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getILLUSTRATION_OPTIMIZATION"), snapshot.illustrationOptimization)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getRELATE_DOWNLOAD_COVER"), snapshot.relateDownloadCover)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getCALLING_CARD_COLOR"), snapshot.callingCardColor)
     }
 
     private fun captureSessionSnapshot(session: Any): SessionSnapshot {
@@ -2046,6 +2094,7 @@ class AccountCompletionController(
         val localLibraryPrefs: SharedPrefsSnapshot,
         val lastUsedAt: Long,
         val hasFullState: Boolean,
+        val advancedPreferences: AccountAdvancedPreferences? = null,
     ) {
         fun toJson(): JSONObject =
             JSONObject().apply {
@@ -2060,6 +2109,7 @@ class AccountCompletionController(
                 put("localLibraryPrefs", localLibraryPrefs.toJson())
                 put("lastUsedAt", lastUsedAt)
                 put("hasFullState", hasFullState)
+                advancedPreferences?.let { put("memberAdvancedPreferences", it.toJson()) }
             }
 
         fun toPortableCredential(): PortableCredential =
@@ -2098,6 +2148,7 @@ class AccountCompletionController(
                 localLibraryPrefs = if (hasFullState) localLibraryPrefs else other.localLibraryPrefs,
                 lastUsedAt = maxOf(lastUsedAt, other.lastUsedAt),
                 hasFullState = hasFullState || other.hasFullState,
+                advancedPreferences = other.advancedPreferences ?: advancedPreferences,
             )
 
         companion object {
@@ -2117,6 +2168,7 @@ class AccountCompletionController(
                         "hasFullState",
                         json.has("session") || json.has("localLibraryPrefs"),
                     ),
+                    advancedPreferences = accountAdvancedPreferencesFromJson(json.optJSONObject("memberAdvancedPreferences")),
                 )
         }
     }
@@ -2214,6 +2266,10 @@ class AccountCompletionController(
         val aliyunAuth: String,
         val yun115Auth: String,
     ) {
+        fun advanced(): AccountAdvancedPreferences = AccountAdvancedPreferences(
+            dynamicColor, smartRecognition, illustrationOptimization, relateDownloadCover, callingCardColor,
+        )
+
         fun toJson(): JSONObject =
             JSONObject().apply {
                 put("token", token)

@@ -29,7 +29,7 @@ object HostDexKit {
     private const val LIB_NAME = "libdexkit.so"
     private const val LIB_DIR_NAME = "reamicro_dexkit"
     private const val PREFS_NAME = "reamicro_fix_hostdex"
-    private const val VERDICT_PREFIX = "verdict_v1_"
+    private const val VERDICT_PREFIX = "verdict_v2_"
 
     /** 按签名反查到的宿主类名缓存（进程内有效，避免重复打开 DexKit） */
     private val methodOwnerCache = HashMap<String, String?>()
@@ -82,11 +82,14 @@ object HostDexKit {
     ): Verdict? {
         val expected = bundledShapes()[profileId] ?: return null
         if (classes.isEmpty()) return null
-        // 缓存键必须带上 profile 内容指纹：只按 APK 体积/profileId 缓存的话，
-        // 换了映射（新增/修正类）后仍会复用旧结论，新增的类就绕过了结构校验。
-        val cacheKey = "$hostApkPath#$apkSize#$profileId#${classes.size}#${classFingerprint(classes)}"
-        cachedVerdict(profileId, cacheKey)?.let { return it }
         if (hostApkPath.isNullOrBlank()) return null
+        val checkedClasses = classes.keys.intersect(expected.keys)
+        val cacheKey = runCatching { HostDexIdentity.key(File(hostApkPath), profileId, classes, expected) }
+            .getOrElse {
+                XposedBridge.logError("$LOG_PREFIX cannot fingerprint host DEX", it)
+                return null
+            }
+        cachedVerdict(profileId, cacheKey, checkedClasses)?.let { return it }
         val bridge = openBridge(hostApkPath, hostDataDir) ?: return null
         val startedAt = System.nanoTime()
         return try {
@@ -178,16 +181,6 @@ object HostDexKit {
             synchronized(methodOwnerCache) { methodOwnerCache[cacheKey] = owner }
         }
         return owner
-    }
-
-    /** 逻辑名->混淆名的顺序无关指纹，用于让校验缓存随 profile 内容失效。 */
-    private fun classFingerprint(classes: Map<String, String>): Int {
-        var hash = 17
-        for ((logical, actual) in classes.entries.sortedBy { it.key }) {
-            hash = hash * 31 + logical.hashCode()
-            hash = hash * 31 + actual.hashCode()
-        }
-        return hash
     }
 
     /** 内置指纹资产：assets/host-profiles/<profileId>.shapes。 */
@@ -347,7 +340,7 @@ object HostDexKit {
         return fallback
     }
 
-    private fun cachedVerdict(profileId: String, cacheKey: String): Verdict? {
+    private fun cachedVerdict(profileId: String, cacheKey: String, expected: Set<String>): Verdict? {
         val prefs = runCatching {
             hostApplication()?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         }.getOrNull() ?: return null
@@ -358,6 +351,7 @@ object HostDexKit {
         val ok = parts[1].toIntOrNull() ?: return null
         val total = parts[2].toIntOrNull() ?: return null
         val failed = parts[3].split(',').filter { it.isNotEmpty() }.toSet()
+        if (!HostDexIdentity.validCounts(total, ok, failed, expected)) return null
         return Verdict(profileId, total, ok, failed, cached = true, durationMs = 0L)
     }
 

@@ -15,6 +15,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.widget.EditText
+import androidx.compose.ui.text.font.FontFamily
 import java.util.WeakHashMap
 
 internal object EmbeddedHostUi {
@@ -27,7 +28,19 @@ internal object EmbeddedHostUi {
     private var lastDensity: Pair<Float,Float>?=null
     private val fontCache=WeakHashMap<ClassLoader,MutableMap<Boolean,Typeface>>()
     @Volatile private var uiFontResolver:(()->Typeface?)?=null
+    @Volatile private var uiFontFamilyResolver:((Context)->FontFamily)?=null
+    @Volatile private var materialFontFamilyResolver:((Context, FontFamily)->FontFamily)?=null
     fun bindUiFontResolver(resolver:()->Typeface?){uiFontResolver=resolver}
+    fun bindUiFontFamilyResolver(resolver:(Context)->FontFamily){uiFontFamilyResolver=resolver}
+    fun bindMaterialFontFamilyResolver(resolver:(Context,FontFamily)->FontFamily){materialFontFamilyResolver=resolver}
+    fun materialFontFamily(context:Context,nativeFamily:FontFamily):FontFamily {
+        val host=hostContext(context) ?: return nativeFamily
+        return materialFontFamilyResolver?.invoke(host,nativeFamily) ?: nativeFamily
+    }
+    fun uiFontFamily(context:Context):FontFamily {
+        val host=hostContext(context) ?: return FontFamily.Default
+        return uiFontFamilyResolver?.invoke(host) ?: StructureHome130Style.fonts(host).serif
+    }
     fun uiTypeface(context:Context):Typeface? = if(hostContext(context)==null)null else
         uiFontResolver?.invoke() ?: nativeTypeface(context)
     fun hostContext(context: Context): Context? {

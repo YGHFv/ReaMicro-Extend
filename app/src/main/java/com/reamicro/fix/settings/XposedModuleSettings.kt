@@ -559,6 +559,7 @@ class XposedModuleSettings(
 
     fun setShelfHideSync(enabled: Boolean) = putBoolean(ModuleSettings.KEY_SHELF_HIDE_SYNC, enabled)
     fun setShelfStyleButton(enabled: Boolean) = putBoolean(ModuleSettings.KEY_SHELF_STYLE_BUTTON, enabled)
+    fun setShelfDisableCoverFade(enabled: Boolean) = putBoolean(ModuleSettings.KEY_SHELF_DISABLE_COVER_FADE, enabled)
     fun setShelfBatchUpdate(enabled: Boolean) = putBoolean(ModuleSettings.KEY_SHELF_BATCH_UPDATE, enabled)
     fun setShelfAutoUpdate(enabled: Boolean) = putBoolean(ModuleSettings.KEY_SHELF_AUTO_UPDATE, enabled)
     fun setShelfCurrentOnly(enabled: Boolean) = putBoolean(ModuleSettings.KEY_SHELF_CURRENT_ONLY, enabled)
@@ -767,6 +768,7 @@ class XposedModuleSettings(
             inlineSearchIconEnabled = inlineSearchIconEnabled,
             shelfHideSync = prefs.getBoolean(ModuleSettings.KEY_SHELF_HIDE_SYNC, false),
             shelfStyleButton = prefs.getBoolean(ModuleSettings.KEY_SHELF_STYLE_BUTTON, false),
+            shelfDisableCoverFade = prefs.getBoolean(ModuleSettings.KEY_SHELF_DISABLE_COVER_FADE, false),
             shelfBatchUpdate = prefs.getBoolean(ModuleSettings.KEY_SHELF_BATCH_UPDATE, false),
             shelfAutoUpdate = prefs.getBoolean(ModuleSettings.KEY_SHELF_AUTO_UPDATE, false),
             shelfCurrentOnly = prefs.getBoolean(ModuleSettings.KEY_SHELF_CURRENT_ONLY, false),

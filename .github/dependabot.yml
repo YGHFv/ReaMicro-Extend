@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      kotlin:
+        patterns: ["org.jetbrains.kotlin*"]
+      miuix:
+        patterns: ["top.yukonga.miuix.kmp:*"]
+  - package-ecosystem: pip
+    directory: /server/reamicro-api
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /server/reamicro-api
+    schedule:
+      interval: weekly

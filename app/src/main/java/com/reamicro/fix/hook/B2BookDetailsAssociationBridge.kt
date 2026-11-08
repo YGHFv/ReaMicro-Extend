@@ -1,19 +1,8 @@
 package com.reamicro.fix.hook
 
 import android.app.Activity
-import android.content.Context as AndroidContext
-import com.reamicro.fix.core.HostAndroidViews
 import com.reamicro.fix.core.HostNativeAbi
 import com.reamicro.fix.core.HostSymbols
-import android.app.Dialog
-import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
-import android.graphics.drawable.GradientDrawable
-import android.view.Gravity
-import android.view.ViewGroup
-import android.widget.LinearLayout
-import android.widget.TextView
 import android.widget.Toast
 import com.reamicro.fix.core.B2BookAssociation
 import com.reamicro.fix.core.B2NativeUi
@@ -56,8 +45,9 @@ internal class B2BookDetailsAssociationBridge(
     private val ui by lazy { B2NativeUi(loader) }
     private val b4 = HostSymbols.abiProfileId == "2.3.3-b4"
     private val navigation = requireNotNull(HostNativeAbi.navigation(HostSymbols.profileId))
-    private val androidViews by lazy { HostAndroidViews(loader) }
+    private val editAction by lazy { HostBookEditAction(loader) }
     private var lastBarcode = ""
+    private var associationDialog = WeakReference<HostAssociationDialog>(null)
     private val topBarContext = ThreadLocal<Context?>()
 
     fun install() {
@@ -138,9 +128,12 @@ internal class B2BookDetailsAssociationBridge(
                     val context = topBarContext.get()?.takeIf(::current) ?: return
                     val barcode = barcode(context).takeIf { it.length >= 8 && it.all(Char::isDigit) } ?: return
                     if (context.localId == null || !settingsProvider().canRunAssociation) return
+                    val originalActions = param.args[7]
                     val callback = function("kotlin.jvm.functions.Function3") { values ->
                         val composer = values?.getOrNull(1) ?: return@function unit()
-                        renderBarcode(context, barcode, composer)
+                        if (originalActions != null) XposedHelpers.callMethod(originalActions, "invoke",
+                            values?.getOrNull(0), composer, values?.getOrNull(2) ?: 0)
+                        if (current(context)) renderAssociationAction(context, composer)
                         unit()
                     }
                     param.args[7] = loader.hostClass("ReaMicroHost.ComposableLambda")
@@ -182,37 +175,11 @@ internal class B2BookDetailsAssociationBridge(
             }
         }
 
-    private fun renderBarcode(context: Context, value: String, composer: Any) {
+    private fun renderAssociationAction(context: Context, composer: Any) {
+        EmbeddedHostUi.captureTypography(loader, composer)
+        BookImageDialogStyle.capture(loader, composer)
         if (b4) {
-            val factory = function("kotlin.jvm.functions.Function1") { args ->
-                val activity = requireNotNull(activityProvider())
-                TextView((args?.firstOrNull() as? AndroidContext) ?: activity).apply {
-                    val density = resources.displayMetrics.density
-                    setPadding((16 * density).toInt(), (10 * density).toInt(),
-                        (16 * density).toInt(), (10 * density).toInt())
-                    typeface = EmbeddedHostUi.uiTypeface(activity)
-                    textSize = 14f
-                    gravity = Gravity.CENTER
-                    text = value
-                    contentDescription = value
-                    importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES
-                    isFocusable = true
-                    setOnClickListener { open(context) }
-                }
-            }
-            val update = function("kotlin.jvm.functions.Function1") { args ->
-                val view = args?.firstOrNull() as? TextView ?: return@function unit()
-                view.text = value
-                view.contentDescription = value
-                view.importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES
-                activityProvider()?.let { activity ->
-                    EmbeddedHostUi.snapshot(activity)?.roles?.get("OnBackground")?.let(view::setTextColor)
-                }
-                view.setOnClickListener { open(context) }
-                unit()
-            }
-            val modifier = loader.hostClass("ReaMicroHost.Modifier").getDeclaredField("b").get(null)
-            androidViews.render(factory, requireNotNull(modifier), composer, update)
+            editAction.render("关联操作", composer) { open(context) }
             return
         }
         val onClick = function("kotlin.jvm.functions.Function0") { open(context); unit() }
@@ -224,7 +191,7 @@ internal class B2BookDetailsAssociationBridge(
         val style = XposedHelpers.callMethod(typography, "getLabelMedium")
         val method = loader.hostClass("androidx.compose.material3.TextKt")
             .hostMethodsNamed("Text-Nvy7gAk").single { it.parameterCount == 20 }
-        method.invoke(null, value, modifier, color, 0L, null, null, 0L, null, null, 0L,
+        method.invoke(null, "关联操作", modifier, color, 0L, null, null, 0L, null, null, 0L,
             0, false, 1, 1, null, style, composer, 0, 0, 131064 and (16384 or 32768).inv())
     }
 
@@ -284,51 +251,25 @@ internal class B2BookDetailsAssociationBridge(
     }
 
     private fun dialog(activity: Activity, context: Context) {
-        val dialog = Dialog(activity)
-        val density = activity.resources.displayMetrics.density
-        val dark = (activity.resources.configuration.uiMode and 0x30) == 0x20
-        val native = EmbeddedHostUi.snapshot(activity)
-        val fill = native?.brightArgb ?: if (dark) Color.rgb(35, 35, 35) else Color.WHITE
-        val foreground = native?.roles?.get("OnBackground") ?: if (dark) Color.WHITE else Color.BLACK
-        val primary = native?.roles?.get("Primary") ?: Color.rgb(57, 126, 184)
-        val card = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding((22*density).toInt(), (22*density).toInt(), (22*density).toInt(), (18*density).toInt())
-            background = GradientDrawable().apply { setColor(fill); cornerRadius = 24*density }
-        }
-        card.addView(TextView(activity).apply {
-            text = "关联操作"; textSize = 19f; setTextColor(foreground)
-            typeface = Typeface.create(EmbeddedHostUi.uiTypeface(activity), Typeface.BOLD)
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = (16*density).toInt() }
-        })
-        fun button(title: String, backgroundColor: Int, textColor: Int, action: () -> Unit) {
-            card.addView(TextView(activity).apply {
-                text = title; textSize = 16f; gravity = Gravity.CENTER; setTextColor(textColor)
-                typeface = EmbeddedHostUi.uiTypeface(activity)
-                setPadding((16*density).toInt(), (14*density).toInt(), (16*density).toInt(), (14*density).toInt())
-                background = GradientDrawable().apply { setColor(backgroundColor); cornerRadius = 12*density }
-                layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = (10*density).toInt() }
-                setOnClickListener { if (current(context)) { dialog.dismiss(); action() } else dialog.dismiss() }
-            })
-        }
         val settings = settingsProvider()
-        if (settings.canUseAssociationCoverFix) button("封面修复", fill, primary) {
-            val vm = context.vm.get()
-            val book = context.verifiedBook
-            if (vm == null || book == null || !coverFix(vm, book)) {
-                XposedBridge.logAlways("ReaMicro association cover context unavailable localId=${context.localId}")
-                Toast.makeText(activity, "详情页面已变化，请重新打开后修复封面", Toast.LENGTH_LONG).show()
+        val actions = buildList {
+            if (settings.canUseAssociationCoverFix) add(HostAssociationDialog.Action("封面修复", "重新获取关联书籍的封面") {
+                val vm = context.vm.get()
+                val book = context.verifiedBook
+                if (vm == null || book == null || !coverFix(vm, book)) {
+                    XposedBridge.logAlways("ReaMicro association cover context unavailable localId=${context.localId}")
+                    Toast.makeText(activity, "详情页面已变化，请重新打开后修复封面", Toast.LENGTH_LONG).show()
+                }
+            })
+            if (settings.canRunAssociation && settings.associationUnlinkEnabled) {
+                add(HostAssociationDialog.Action("重新关联", "解除当前关联后，选择新的关联书籍") { unlink(context, true) })
+                add(HostAssociationDialog.Action("取消关联", "保留本地书籍，解除当前书库关联", destructive = true) { unlink(context, false) })
             }
         }
-        if (settings.canRunAssociation && settings.associationUnlinkEnabled) {
-            button("取消关联", Color.argb(24, 190, 40, 40), Color.rgb(190, 40, 40)) { unlink(context, false) }
-            button("重新关联", primary, native?.roles?.get("OnPrimary") ?: Color.WHITE) { unlink(context, true) }
-        }
-        button("取消操作", fill, foreground) { }
-        dialog.setContentView(card)
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        associationDialog.get()?.dismiss()
+        val dialog = HostAssociationDialog(activity, actions) { current(context) }
+        associationDialog = WeakReference(dialog)
         dialog.show()
-        dialog.window?.setLayout((activity.resources.displayMetrics.widthPixels*0.86f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
     }
 
     private fun unlink(context: Context, again: Boolean) {

@@ -359,4 +359,6 @@ shape=org.epub.ui.SelectionPosition|Ljava/lang/Object;||L*-><clinit>()V,L*-><ini
 shape=org.epub.ui.SelectionSnapshot|Ljava/lang/Object;||L*-><clinit>()V,L*-><init>(L*L*Ljava/lang/String;)V,L*->a(L*L*L*I)L*,L*->equals(Ljava/lang/Object;)Z,L*->hashCode()I,L*->toString()Ljava/lang/String;|L*->a:L*,L*->b:L*,L*->c:Ljava/lang/String;,L*->d:I
 shape=org.epub.ui.TagLayoutContent|Ljava/lang/Object;||L*-><init>(L*Ljava/util/List;Ljava/util/Map;I)V,L*->equals(Ljava/lang/Object;)Z,L*->hashCode()I,L*->toString()Ljava/lang/String;|L*->a:L*,L*->b:Ljava/util/List;,L*->c:Ljava/util/Map;,L*->d:I
 shape=org.epub.ui.TagNeighborContext|Ljava/lang/Object;||L*-><init>()V,L*-><init>(ZZ)V,L*->equals(Ljava/lang/Object;)Z,L*->hashCode()I,L*->toString()Ljava/lang/String;|L*->a:Z,L*->b:Z
-# classes=360 skipped=0
+shape=ReaMicroHost.MutablePreferences|Ljava/lang/Object;||L*-><init>(Ljava/util/LinkedHashMap;Z)V,L*-><init>(Z)V,L*->a()Ljava/util/Map;,L*->b()V,L*->c(L*)Ljava/lang/Object;,L*->d(L*)V,L*->e(L*Ljava/lang/Object;)V,L*->equals(Ljava/lang/Object;)Z,L*->f(L*Ljava/lang/Object;)V,L*->hashCode()I,L*->toString()Ljava/lang/String;|L*->a:Ljava/util/LinkedHashMap;,L*->b:L*
+# classes=361 skipped=0
+shape=app.zhendong.reamicro.Route$S3SyncConfig|Ljava/lang/Object;||L*-><clinit>()V,L*-><init>(ILjava/lang/String;)V,L*-><init>(Ljava/lang/String;)V,L*->equals(Ljava/lang/Object;)Z,L*->hashCode()I,L*->toString()Ljava/lang/String;|L*->Companion:L*,L*->a:Ljava/lang/String;

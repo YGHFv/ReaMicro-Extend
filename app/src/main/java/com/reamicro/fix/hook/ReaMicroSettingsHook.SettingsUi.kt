@@ -491,6 +491,11 @@ internal fun ReaMicroSettingsHook.renderBookshelfCompletionSettingsContent(inner
                 onChanged = { enabled, _ -> settings.setShelfStyleButton(enabled); enabled },
             ),
             ToggleRow(
+                key = ModuleSettings.KEY_SHELF_DISABLE_COVER_FADE, title = "关闭封面渐显",
+                checked = snapshot.shelfDisableCoverFade,
+                onChanged = { enabled, _ -> settings.setShelfDisableCoverFade(enabled); enabled },
+            ),
+            ToggleRow(
                 key = ModuleSettings.KEY_SHELF_BATCH_UPDATE, title = "批量更新按钮",
                 checked = snapshot.shelfBatchUpdate,
                 onChanged = { enabled, _ ->
