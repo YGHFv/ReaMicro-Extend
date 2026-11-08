@@ -188,7 +188,7 @@ dependencies {
     implementation(project(":scripta-editor"))
     implementation("com.google.re2j:re2j:1.8")
 
-    implementation("androidx.compose.material3:material3:1.5.0-alpha22")
+    implementation("androidx.compose.material3:material3:1.5.0-rc01")
 
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.4")
@@ -197,13 +197,15 @@ dependencies {
 
     implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.4")
 
-    implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
+    implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.2")
 
     compileOnly("io.github.libxposed:api:102.0.0")
     implementation("io.github.libxposed:service:102.0.0")
 
     // 运行期 dex 结构校验（宿主重新混淆后用于判定 profile 是否仍然适用）。
-    implementation("org.luckypray:dexkit:2.0.6")
+    implementation("org.luckypray:dexkit:2.3.0")
+    implementation("com.highcapable.kavaref:kavaref-core:1.1.1")
+    implementation("com.highcapable.kavaref:kavaref-android:1.1.1")
 
     testImplementation("junit:junit:4.13.2")
 }

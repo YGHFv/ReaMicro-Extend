@@ -2,16 +2,22 @@ package com.reamicro.fix.hook
 
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 
-/** 按视觉顺序决定动作，不因隐藏同步而关闭其余独立开关。 */
+/** 同步显示与书架专属动作分开；多选和正在阅读均不注入书架动作。 */
 internal object BookshelfCompletionPolicy {
     const val AUTO_UPDATE_INTERVAL_MS = 60 * 60 * 1000L
 
-    enum class Action { SYNC, UPDATE, STYLE }
+    enum class Action { UPDATE, STYLE }
 
-    fun actions(settings: ModuleSettingsSnapshot, shelfVisible: Boolean = true): List<Action> = buildList {
-        if (shelfVisible && !settings.shelfHideSync) add(Action.SYNC)
+    fun hideSync(settings: ModuleSettingsSnapshot): Boolean = settings.moduleEnabled && settings.shelfHideSync
+
+    fun actions(
+        settings: ModuleSettingsSnapshot,
+        shelfVisible: Boolean = true,
+        selecting: Boolean = false,
+    ): List<Action> = buildList {
+        if (!settings.moduleEnabled || !shelfVisible || selecting) return@buildList
         if (settings.shelfBatchUpdate) add(Action.UPDATE)
-        if (shelfVisible && settings.shelfStyleButton) add(Action.STYLE)
+        if (settings.shelfStyleButton) add(Action.STYLE)
     }
 
     fun autoUpdate(settings: ModuleSettingsSnapshot): Boolean =

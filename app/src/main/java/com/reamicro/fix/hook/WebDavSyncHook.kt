@@ -1,20 +1,7 @@
 package com.reamicro.fix.hook
 
 import android.app.Activity
-import android.app.Dialog
-import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
-import android.graphics.drawable.RippleDrawable
-import android.content.res.ColorStateList
-import android.os.Handler
 import android.os.Looper
-import android.text.InputType
-import android.view.WindowManager
-import android.view.Gravity
-import android.view.ViewGroup
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.Toast
 import com.reamicro.fix.cloud.webdav.B2HostHttp
 import com.reamicro.fix.cloud.webdav.CleartextScope
@@ -29,14 +16,12 @@ import com.reamicro.fix.core.hostReleaseMethodByArity
 import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.core.hostMethod
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
-import com.reamicro.fix.ui.ModuleUiKit
 import com.reamicro.fix.xposed.XC_MethodHook
 import com.reamicro.fix.xposed.XposedBridge
 import com.reamicro.fix.xposed.XposedHelpers
 import java.io.File
 import java.lang.ref.WeakReference
 import java.lang.reflect.Method
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** 2.3.3 正式版经 REA/MT 双重核实的同步存储接口；不重写书架合并算法。 */
@@ -49,7 +34,8 @@ internal class WebDavSyncHook(
     private val main = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
     private val worker = com.reamicro.fix.reload.ModuleResources.pool(1) { Thread(it, "ReaMicroWebDavSync").apply { isDaemon = true } }
     private val configuring = AtomicBoolean()
-    private var session = WeakReference<Any>(null)
+    private val nativeRoutes = HostWebDavConfigurationRoute(loader, activityProvider)
+    @Volatile private var session = WeakReference<Any>(null)
     private val extraRow = ThreadLocal<Boolean>()
     private val ui = B2NativeUi(loader)
     private val http by lazy {
@@ -77,6 +63,7 @@ internal class WebDavSyncHook(
             }
         })
         hookEntry()
+        nativeRoutes.install()
         hookTransport()
         hookLocalConfigSave()
         // 关闭扩展后暂停标记配置，不能落回 AWS 签名并把 WebDAV 密码发给别的服务。
@@ -94,6 +81,9 @@ internal class WebDavSyncHook(
             override fun beforeHookedMethod(param: MethodHookParam) {
                 if (extraRow.get() == true || !settingsProvider().canRunWebDavSync) return
                 val composer = param.args[1] ?: return
+                EmbeddedHostUi.captureTypography(loader, composer)
+                BookImageDialogStyle.capture(loader, composer)
+                WebDavSyncPageStyle.capture(loader, composer)
                 extraRow.set(true)
                 try {
                     val callback = drive.functionProxy("WebDavSyncConfigure", "kotlin.jvm.functions.Function0") {
@@ -284,9 +274,8 @@ internal class WebDavSyncHook(
         }
     }
 
-    private fun saveValues(session: Any, values: Map<String, Any?>) {
-        val change = drive.functionProxy("WebDavSyncPreferences", "kotlin.jvm.functions.Function2") { args ->
-            val prefs = requireNotNull(args?.getOrNull(0))
+    private fun saveValues(session: Any, values: Map<String, Any?>, beforeWrite: () -> Unit = {}) {
+        val change = WebDavPreferencesEdit.create(loader, beforeWrite) { prefs ->
             val scopeChanged = listOf("provider", "endpoint", "bucket", "prefix").any { name ->
                 val keyName = "s3_sync_$name"
                 val key = raw("cx7").getConstructor(String::class.java).newInstance(keyName)
@@ -319,131 +308,87 @@ internal class WebDavSyncHook(
         if (!configuring.compareAndSet(false, true)) return
         worker.execute {
             runCatching { nativeValues(current) }.onSuccess { values ->
-                main.post { if (!activity.isFinishing) renderConfiguration(activity, current, values) else configuring.set(false) }
+                main.post {
+                    if (activity.isFinishing || activity.isDestroyed || session.get() !== current ||
+                        !settingsProvider().canRunWebDavSync) {
+                        configuring.set(false)
+                    } else {
+                        runCatching { renderConfiguration(activity, current, values) }
+                            .onFailure { configuring.set(false); toast("打开同步设置失败") }
+                    }
+                }
             }.onFailure { configuring.set(false); toast("读取同步设置失败") }
         }
     }
 
     private fun renderConfiguration(activity: Activity, current: Any, values: Map<String, Any?>) {
-        val kit = ModuleUiKit(activity)
-        val dialog = Dialog(activity).apply { requestWindowFeature(android.view.Window.FEATURE_NO_TITLE) }
-        dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         val connected = values["s3_sync_bucket"] == WebDavSyncProtocol.BUCKET
-        val fields = LinkedHashMap<String, EditText>()
-        fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
-        val form = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            val pad = dp(24)
-            setPadding(pad, pad, pad, pad)
-            background = kit.rounded(kit.palette.rowBackground, 28f)
-            addView(kit.textView("WebDAV 同步", 22f, kit.palette.title, true))
-            addView(kit.textView("同步书架、书籍、封面与阅读数据。", 14f, kit.palette.body).apply {
-                setPadding(0, dp(10), 0, dp(6))
-            })
-            addView(kit.textView("配置仅保存在本机，各设备需单独设置。", 12f, kit.palette.body))
-            listOf("地址" to "s3_sync_endpoint", "用户名" to "s3_sync_access_key", "密码" to "s3_sync_secret_key").forEach { (label, key) ->
-                addView(kit.textView(label, 13f, kit.palette.body).apply { setPadding(dp(4), dp(18), 0, dp(8)) })
-                val stored = if (connected) values[key] as? String ?: "" else ""
-                val edit = EditText(activity).apply {
-                    setSingleLine(true)
-                    inputType = if (label == "密码") InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                        else if (label == "地址") InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-                        else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-                    setText(stored.takeUnless { it == WebDavSyncProtocol.ANONYMOUS } ?: "")
-                    textSize = 15f
-                    includeFontPadding = false
-                    setPadding(dp(16), dp(14), dp(16), dp(14))
-                    minimumHeight = dp(52)
-                    imeOptions = if (label == "密码") android.view.inputmethod.EditorInfo.IME_ACTION_DONE
-                        else android.view.inputmethod.EditorInfo.IME_ACTION_NEXT
-                    setTextColor(kit.palette.title)
-                    setHintTextColor(kit.palette.body)
-                    hint = if (label == "地址") "https://example.com/dav/同步目录" else "匿名服务可留空"
-                    importantForAutofill = android.view.View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
-                    contentDescription = "WebDAV $label"
-                    background = kit.rounded(kit.palette.pageBackground, 14f)
-                }
-                fields[label] = edit
-                addView(edit)
-            }
-        }
+        fun stored(key: String): String = if (connected) (values[key] as? String).orEmpty()
+            .takeUnless { it == WebDavSyncProtocol.ANONYMOUS }.orEmpty() else ""
+        val initial = WebDavSyncConfigurationPage.Credentials(stored("s3_sync_endpoint"),
+            stored("s3_sync_access_key"), stored("s3_sync_secret_key"))
         val busy = AtomicBoolean()
         val dismissed = AtomicBoolean()
-        lateinit var save: android.widget.TextView
-        save = kit.button("验证并启用") {
-            if (busy.get()) return@button
-            val url = runCatching { WebDavSyncProtocol.baseUrl(fields.getValue("地址").text.toString()) }
-                .getOrElse { toast(it.message ?: "WebDAV 地址无效"); return@button }
-            val username = fields.getValue("用户名").text.toString()
-            val password = fields.getValue("密码").text.toString()
-            if (username.contains(':') || username.contains('\n')) { toast("用户名不能包含冒号或换行"); return@button }
+        lateinit var page: WebDavSyncConfigurationPage
+        fun valid() {
+            check(!dismissed.get()) { "配置已取消，未保存" }
+            check(session.get() === current) { "账号已切换，未保存" }
+            check(settingsProvider().canRunWebDavSync) { "同步扩展已关闭" }
+        }
+        fun submit(draft: WebDavSyncConfigurationPage.Credentials) {
+            if (busy.get() || dismissed.get()) return
+            val url = runCatching { valid(); WebDavSyncProtocol.baseUrl(draft.address) }
+                .getOrElse { page.error(it.message ?: "WebDAV 地址无效"); return }
+            if (draft.username.contains(':') || draft.username.contains('\n')) {
+                page.error("用户名不能包含冒号或换行")
+                return
+            }
+            if (!busy.compareAndSet(false, true)) return
             val next = mapOf(
                 "s3_sync_provider" to "S3", "s3_sync_endpoint" to url,
                 "s3_sync_bucket" to WebDavSyncProtocol.BUCKET, "s3_sync_region" to "auto",
-                "s3_sync_access_key" to username.ifEmpty { WebDavSyncProtocol.ANONYMOUS },
-                "s3_sync_secret_key" to password.ifEmpty { WebDavSyncProtocol.ANONYMOUS },
+                "s3_sync_access_key" to draft.username.ifEmpty { WebDavSyncProtocol.ANONYMOUS },
+                "s3_sync_secret_key" to draft.password.ifEmpty { WebDavSyncProtocol.ANONYMOUS },
                 "s3_sync_prefix" to "reamicro", "s3_sync_cloud_config_enabled" to false,
             )
-            busy.set(true)
-            save.text = "正在验证…"
-            save.isEnabled = false
-            fields.values.forEach { it.isEnabled = false }
+            page.verifying()
             worker.execute {
-                runCatching {
-                    check(settingsProvider().canRunWebDavSync) { "同步扩展已关闭" }
+                val writeStarted = AtomicBoolean()
+                val result = runCatching {
+                    valid()
                     val config = configType.getConstructor(raw("he9"), *Array(6) { String::class.java })
                         .newInstance(raw("he9").enumConstants!![0], url, WebDavSyncProtocol.BUCKET, "auto",
                             next["s3_sync_access_key"], next["s3_sync_secret_key"], "reamicro")
                     transport(config).verify()
-                    check(!dismissed.get()) { "配置已取消，未保存" }
-                    check(session.get() === current) { "账号已切换，未保存" }
-                    // 用户取消或探测失败均不覆盖原有 S3 配置。
-                    check(settingsProvider().canRunWebDavSync) { "同步扩展已关闭" }
+                    valid()
                     try {
-                        saveValues(current, next)
+                        saveValues(current, next) { valid(); writeStarted.set(true) }
                     } catch (error: Throwable) {
-                        runCatching { saveValues(current, values) }.onFailure(error::addSuppressed)
+                        if (writeStarted.get()) {
+                            runCatching { saveValues(current, values) }.onFailure(error::addSuppressed)
+                        }
                         throw error
                     }
-                }.onSuccess { main.post { dialog.dismiss(); toast("WebDAV 已启用，返回书架即可使用原生同步") } }
-                    .onFailure { error -> toast(error.message ?: "WebDAV 验证失败，原配置未修改") }
+                }
                 main.post {
                     busy.set(false)
                     if (!dismissed.get()) {
-                        save.text = "验证并启用"
-                        save.isEnabled = true
-                        fields.values.forEach { it.isEnabled = true }
+                        result.onSuccess {
+                            page.dismiss()
+                            toast("WebDAV 已启用，返回书架即可使用原生同步")
+                        }.onFailure { page.error(it.message ?: "WebDAV 验证失败，原配置未修改") }
                     }
                 }
             }
         }
-        val actions = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            setPadding(0, dp(24), 0, 0)
+        page = WebDavSyncConfigurationPage(activity, initial, ::submit) {
+            dismissed.set(true)
+            configuring.set(false)
         }
-        val cancel = kit.button("取消", ModuleUiKit.Role.Neutral) { dialog.dismiss() }
-        listOf(cancel, save).forEach { button ->
-            val primary = button === save
-            button.background = RippleDrawable(
-                ColorStateList.valueOf(colorWithAlpha(kit.palette.title, 28)),
-                kit.rounded(if (primary) kit.palette.primarySoft else kit.palette.pageBackground, 24f), null)
-            button.setTextColor(if (primary) kit.palette.primaryText else kit.palette.neutralText)
-            button.isFocusable = true
-            button.minHeight = dp(48)
-            actions.addView(button, LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, if (primary) 1.4f else 1f
-            ).apply { if (primary) marginStart = dp(12) })
+        if (!nativeRoutes.open(page)) {
+            page.closeEmbedded()
+            toast("同步页面尚未就绪，请重新进入同步设置")
         }
-        form.addView(actions)
-        dialog.setContentView(ScrollView(activity).apply { isFillViewport = true; addView(form) })
-        dialog.setOnDismissListener { dismissed.set(true); configuring.set(false) }
-        dialog.show()
-        dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-        dialog.window?.setLayout(minOf(dp(520), (activity.resources.displayMetrics.widthPixels * .9f).toInt()),
-            WindowManager.LayoutParams.WRAP_CONTENT)
     }
 
     private fun toast(message: String) {

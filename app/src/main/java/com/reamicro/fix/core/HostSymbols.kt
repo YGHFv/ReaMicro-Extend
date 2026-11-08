@@ -70,11 +70,16 @@ object HostSymbols {
             val matched = selection.profile
             active = matched
             if (!hostApkPath.isNullOrBlank() && !hostDataDir.isNullOrBlank() &&
-                HostAutoScanner.scanProfileAvailable(profileId) && !usesReleaseLayout) {
-                val scan = HostAutoScanner.scan(hostApkPath, hostDataDir)
-                HookInstallReport.record("HostSymbols", "automaticScan", scan != null && scan.failures.isEmpty(),
-                    scan?.failures?.takeIf { it.isNotEmpty() }?.let { IllegalStateException(it.take(8).joinToString()) })
-                // 已验证 ABI 优先；扫描补齐门面，未知构建仅装载已确认的定位结果。
+                HostAutoScanner.scanProfileAvailable(profileId)) {
+                val scan = if (usesReleaseLayout) HostAutoScanner.cachedProfile(hostApkPath, hostDataDir)
+                    else HostAutoScanner.scan(hostApkPath, hostDataDir)
+                if (scan != null || !usesReleaseLayout) {
+                    HookInstallReport.record("HostSymbols", "automaticScan", scan != null && scan.failures.isEmpty(),
+                        scan?.failures?.takeIf { it.isNotEmpty() }?.let { IllegalStateException(it.take(8).joinToString()) })
+                } else {
+                    XposedBridge.logAlways("$LOG_PREFIX scan cache unavailable; background scan will refresh it")
+                }
+                // 保留已验证的 ABI 类身份；成员通过当前 DEX 的唯一定位结果接入。
                 val scanned = scan?.profile
                 if (matched != null && scanned != null) {
                     active = HostScanOverlay.merge(matched, scanned)

@@ -76,6 +76,9 @@ jobs:
 
       - name: Install Android SDK packages
         run: |
+          set +o pipefail
+          yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses > /dev/null
+          set -o pipefail
           sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
           test -f "$ANDROID_HOME/platforms/android-37.0/android.jar"
 

@@ -1179,6 +1179,7 @@ internal fun ReaMicroSettingsHook.applyCurrentRotation() {
 }
 
 internal fun ReaMicroSettingsHook.hasManualEditFeature(): Boolean =
+    com.reamicro.fix.core.HostManualAssociationAbi.supports() ||
     ExternalSourceLoader.loadFeatures(activityProvider()?.applicationContext)
         .any { feature -> "manual_edit" in feature.capabilities }
 

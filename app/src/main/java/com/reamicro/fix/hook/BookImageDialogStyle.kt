@@ -8,7 +8,6 @@ import android.content.Context
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.em
@@ -20,7 +19,7 @@ internal object BookImageDialogStyle {
     }
     private data class Type(val size: UnitValue?, val line: UnitValue?, val spacing: UnitValue?, val weight: Int)
     @Volatile private var types: Map<String, Type> = emptyMap()
-    private val roles = listOf("TitleSmall", "BodyLarge", "BodySmall", "LabelMedium")
+    private val roles = listOf("TitleSmall", "BodyLarge", "BodyMedium", "BodySmall", "LabelLarge", "LabelMedium")
 
     fun capture(loader: ClassLoader, composer: Any?) {
         if (composer == null) return
@@ -61,8 +60,7 @@ internal object BookImageDialogStyle {
     }
 
     fun typography(context: Context, scale: Float): Typography {
-        val family = EmbeddedHostUi.uiTypeface(context)?.let { FontFamily(it) }
-            ?: StructureHome130Style.fonts(context).serif
+        val family = EmbeddedHostUi.uiFontFamily(context)
         fun style(role: String, size: Int, bold: Boolean, spacing: Float): TextStyle {
             val native = types[role]
             return TextStyle(fontFamily = family,
@@ -75,7 +73,9 @@ internal object BookImageDialogStyle {
         return Typography(
             titleSmall = style("TitleSmall", 15, true, 1f),
             bodyLarge = style("BodyLarge", 14, false, 1f),
+            bodyMedium = style("BodyMedium", 12, false, 1f),
             bodySmall = style("BodySmall", 10, false, .5f),
+            labelLarge = style("LabelLarge", 14, true, 1f),
             labelMedium = style("LabelMedium", 12, true, 1f),
         )
     }

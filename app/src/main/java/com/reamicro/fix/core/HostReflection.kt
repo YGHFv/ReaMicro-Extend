@@ -1,5 +1,7 @@
 package com.reamicro.fix.core
 
+import com.highcapable.kavaref.KavaRef.Companion.resolve
+import com.highcapable.kavaref.resolver.processor.MemberProcessor
 import java.lang.reflect.Constructor
 import java.lang.reflect.Field
 import java.lang.reflect.Method
@@ -138,15 +140,13 @@ fun Class<*>.hostField(name: String): Field {
 fun Class<*>.hostFieldOrNull(name: String): Field? = runCatching { hostField(name) }.getOrNull()
 
 fun Class<*>.hostConstructor(vararg types: Class<*>): Constructor<*> {
-    // 构造器名字不混淆，但参数类型可能已改名：先按原样匹配，再按解析后的名字匹配。
-    runCatching { getDeclaredConstructor(*types) }
-        .getOrNull()
-        ?.let { return it.apply { isAccessible = true } }
-    val wanted = types.map { HostSymbols.resolveClass(it.name) }
-    declaredConstructors.firstOrNull { constructor ->
-        val actual = constructor.parameterTypes.map { it.name }
-        actual.size == wanted.size && actual.zip(wanted).all { (left, right) -> left == right }
-    }?.let { return it.apply { isAccessible = true } }
+    findConstructorExact(types.toList())?.let { return it }
+    // 只重定位 profile 明确改名的类型；同名但不同 ClassLoader 的类不能互换。
+    val mapped = types.map { type ->
+        val resolved = HostSymbols.resolveClass(type.name)
+        if (resolved == type.name) type else Class.forName(resolved, false, classLoader)
+    }
+    if (mapped != types.toList()) findConstructorExact(mapped)?.let { return it }
     throw NoSuchMethodException("${this.name}#<init>")
 }
 
@@ -155,26 +155,68 @@ fun Any?.hostField(name: String): Field? {
     return runCatching { target.javaClass.hostField(name) }.getOrNull()
 }
 
-private fun Class<*>.findMethodExact(name: String, types: Array<out Class<*>>): Method? {
-    var current: Class<*>? = this
-    while (current != null) {
-        runCatching { current.getDeclaredMethod(name, *types) }
-            .getOrNull()
-            ?.let { return it.apply { isAccessible = true } }
-        current = current.superclass
+private fun Class<*>.findMethodExact(methodName: String, types: Array<out Class<*>>): Method? {
+    val expected = types.toList()
+    val declared = resolve().optional(silent = true).method {
+        name(methodName)
+        // parameters() 的空集合表示「不约束」，必须显式匹配零参数。
+        parameters { it == expected }
+        superclass()
+    }.map { it.self }
+    val candidates = declared.ifEmpty {
+        // 保留 getMethod 的公开接口 fallback，不依赖接口枚举顺序选第一个。
+        resolve().processor(PublicHostMembers).optional(silent = true).method {
+            name(methodName)
+            parameters { it == expected }
+        }.map { it.self }
     }
-    return runCatching { getMethod(name, *types) }
-        .getOrNull()
-        ?.apply { isAccessible = true }
+    return selectExactMethod(candidates, "${this.name}#$methodName")?.apply { isAccessible = true }
 }
 
-private fun Class<*>.findFieldExact(name: String): Field? {
-    var current: Class<*>? = this
-    while (current != null) {
-        runCatching { current.getDeclaredField(name) }
-            .getOrNull()
-            ?.let { return it.apply { isAccessible = true } }
-        current = current.superclass
+private fun Class<*>.findFieldExact(fieldName: String): Field? {
+    val declared = resolve().optional(silent = true).field {
+        name(fieldName)
+        superclass()
+    }.map { it.self }
+    val candidates = declared.ifEmpty {
+        resolve().processor(PublicHostMembers).optional(silent = true).field {
+            name(fieldName)
+        }.map { it.self }
     }
-    return runCatching { getField(name) }.getOrNull()?.apply { isAccessible = true }
+    return candidates.distinct().uniqueOrNull("${this.name}#$fieldName")?.apply { isAccessible = true }
+}
+
+private fun Class<*>.findConstructorExact(types: List<Class<*>>): Constructor<*>? =
+    resolve().optional(silent = true).constructor {
+        parameters { it == types }
+    }.map { it.self }.uniqueOrNull("${this.name}#<init>")?.apply { isAccessible = true }
+
+/** 协变返回值会同时生成实现和 bridge；按返回值特异性选择，真正歧义则停止。 */
+private fun selectExactMethod(methods: List<Method>, description: String): Method? {
+    val candidates = methods.distinct()
+    if (candidates.size < 2) return candidates.singleOrNull()
+    val narrowed = candidates.filter { candidate ->
+        candidates.all { other -> other.returnType.isAssignableFrom(candidate.returnType) }
+    }
+    val mostSpecific = narrowed.filter { candidate ->
+        narrowed.all { other -> other.declaringClass.isAssignableFrom(candidate.declaringClass) }
+    }
+    require(mostSpecific.size == 1) {
+        "Ambiguous host method $description: ${candidates.joinToString()}"
+    }
+    return mostSpecific.single()
+}
+
+private fun <T> List<T>.uniqueOrNull(description: String): T? {
+    require(size <= 1) { "Ambiguous host member $description: ${joinToString()}" }
+    return singleOrNull()
+}
+
+// 无全局成员/类名缓存；每次 resolve 绑定实际 Class，热重载和同名 ClassLoader 相互隔离。
+private object PublicHostMembers : MemberProcessor.Resolver() {
+    override fun <T : Any> getDeclaredMethods(declaringClass: Class<T>): List<Method> =
+        declaringClass.methods.toList()
+
+    override fun <T : Any> getDeclaredFields(declaringClass: Class<T>): List<Field> =
+        declaringClass.fields.toList()
 }

@@ -6,6 +6,7 @@ import com.reamicro.fix.core.hostNameMatches
 import com.reamicro.fix.core.typeMatches
 import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.core.HostAndroidViews
+import com.reamicro.fix.core.HostNativeUiAbi
 
 
 import android.content.Context
@@ -38,6 +39,12 @@ import com.reamicro.fix.online.search.sourceBaseUrl
 import com.reamicro.fix.online.search.formatOnlineWordCount
 import com.reamicro.fix.xposed.XposedBridge
 import java.lang.reflect.Method
+
+private const val DISCOVER_KIND_ROW_HEIGHT_DP = 42
+private const val DISCOVER_KIND_ROW_BOTTOM_DP = 2
+private const val DISCOVER_KIND_CONTENT_HEIGHT_DP = DISCOVER_KIND_ROW_HEIGHT_DP - DISCOVER_KIND_ROW_BOTTOM_DP
+private const val DISCOVER_TITLE_CATEGORY_TRIM_DP = 12
+private const val DISCOVER_CATEGORY_BOOK_GAP_DP = 8
 
 internal fun ReaMicroSettingsHook.renderDiscoverContent(innerPaddings: Any, composer: Any) {
     discoverVersionValue()
@@ -92,7 +99,12 @@ internal fun ReaMicroSettingsHook.renderDiscoverTopBar(title: String, composer: 
         }
         targetUnit()
     }
-    discoverColumn(discoverFillMaxWidth(modifierInstance()), content, composer)
+    // 原生标题栏为 64 raw dp；收掉底部 12dp 空白，保持标题坐标、状态栏和分类行高度。
+    // Arrangement 同步缩短 topBar 测量高度；负 Padding 会抛错，仅 offset 则会留下书籍前空白。
+    val arrangement = if (HostNativeUiAbi.supports(HostSymbols.profileId)) {
+        b2Ui.spacedBy(-DISCOVER_TITLE_CATEGORY_TRIM_DP.toFloat())
+    } else spacedBy(-DISCOVER_TITLE_CATEGORY_TRIM_DP)
+    discoverColumn(discoverFillMaxWidth(modifierInstance()), content, composer, arrangement)
 }
 
 private fun ReaMicroSettingsHook.renderDiscoverTopBarAction(
@@ -189,8 +201,16 @@ private fun ReaMicroSettingsHook.renderDiscoverKindRow(
         renderDiscoverKindExpandButton(inner)
         targetUnit()
     }
-    // Compose 的 PaddingModifier 不接受负值；压缩间距不能以让整行组合失败为代价。
-    val mod = paddingSides(discoverFillMaxWidth(modifierInstance()), 20, 0, 8, 0)
+    // 列表书目已有 10 UDP 顶部留白；仅宫格另加 8 raw dp，保持 42 UDP 分类点击区域。
+    val gap = if (DiscoverState.layout == DiscoverLayout.GRID) DISCOVER_CATEGORY_BOOK_GAP_DP.toFloat() else 0f
+    val width = discoverFillMaxWidth(modifierInstance())
+    val spaced = if (HostNativeUiAbi.supports(HostSymbols.profileId)) {
+        b2Ui.padding(width, 0f, 0f, 0f, gap)
+    } else method(PADDING_KT_CLASS, DISCOVER_PADDING_SIDES_METHOD, DISCOVER_PADDING_SIDES_PARAMETER_COUNT)
+        .invoke(null, width, 0f, 0f, 0f, gap)
+    // 外间距在 height 前，原生分组栏的底部 2 UDP 仍包含在 42 UDP 内。
+    val sized = discoverHeight(spaced, DISCOVER_KIND_ROW_HEIGHT_DP)
+    val mod = paddingSides(sized, 20, 0, 8, DISCOVER_KIND_ROW_BOTTOM_DP)
     discoverRow(mod, row, composer)
 }
 
@@ -203,14 +223,13 @@ private fun ReaMicroSettingsHook.renderDiscoverKindExpandButton(composer: Any) {
     }
     val width = if (HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.width(modifierInstance(), udp(48))
         else method(SIZE_KT_CLASS, WIDTH_METHOD, 2).invoke(null, modifierInstance(), udp(48))
-    val sized = if (HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.height(width, udp(48))
-        else method(SIZE_KT_CLASS, HEIGHT_METHOD, 2).invoke(null, width, udp(48))
+    val sized = discoverHeight(width, DISCOVER_KIND_CONTENT_HEIGHT_DP)
     val modifier = clickableModifier(sized, "DiscoverKindExpand") {
         if (activity != null) openDiscoverKindDialog(activity)
     }
     if (HostSymbols.abiProfileId == "2.3.3-b4") {
         renderDiscoverIcon(DiscoverUiIcons.chevronDown(classLoader), colorScheme(composer).longMethod("getOnBackground"),
-            composer, "选择发现分类", b2Ui.padding(modifier, udp(12), udp(12), udp(12), udp(12)))
+            composer, "选择发现分类", b2Ui.padding(modifier, udp(12), udp(8), udp(12), udp(8)))
         return
     }
     method(BOX_KT_CLASS, BOX_METHOD, 7).invoke(null, modifier, alignmentCenter(), false, content, composer, 0, 0)
@@ -225,14 +244,19 @@ private fun ReaMicroSettingsHook.renderDiscoverKindChip(
         val clickable = clickableModifier(modifierInstance(), "DiscoverKind${kind.title}") {
             DiscoverState.select(source.source.id, kind.title, activity?.applicationContext)
         }
-        val mod = paddingSides(clickable, if (first) 0 else DiscoverShelfStyle.GROUP_HORIZONTAL_PADDING,
-            DiscoverShelfStyle.GROUP_VERTICAL_PADDING, DiscoverShelfStyle.GROUP_HORIZONTAL_PADDING,
-            DiscoverShelfStyle.GROUP_VERTICAL_PADDING)
+        val mod = paddingSides(discoverHeight(clickable, DISCOVER_KIND_CONTENT_HEIGHT_DP),
+            if (first) 0 else DiscoverShelfStyle.GROUP_HORIZONTAL_PADDING, 0,
+            DiscoverShelfStyle.GROUP_HORIZONTAL_PADDING, 0)
         val weight = cls("androidx.compose.ui.text.font.FontWeight")
             .getConstructor(Int::class.javaPrimitiveType).newInstance(if (selected) 700 else 400)
         val color = colorScheme(composer).longMethod(if (selected) "getOnBackground" else "getOnSurfaceVariant")
-        renderDiscoverText(kind.title, color, textStyle(composer, "getLabelLarge", "getBodyMedium"),
-            composer, fontWeight = weight, modifier = mod)
+        val content = composableLambda(kind.title.hashCode(), FUNCTION3_CLASS) { args ->
+            val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
+            renderDiscoverText(kind.title, color, textStyle(inner, "getLabelLarge", "getBodyMedium"),
+                inner, fontWeight = weight)
+            targetUnit()
+        }
+        discoverRow(mod, content, composer)
         return
     }
     val content = composableLambda(kind.title.hashCode(), FUNCTION3_CLASS) { args ->
@@ -246,9 +270,9 @@ private fun ReaMicroSettingsHook.renderDiscoverKindChip(
     var mod = clickableModifier(modifierInstance(), "DiscoverKind${kind.title}") {
         DiscoverState.select(source.source.id, kind.title, activity?.applicationContext)
     }
-    mod = paddingSides(mod, if (first) 0 else DiscoverShelfStyle.GROUP_HORIZONTAL_PADDING,
-        DiscoverShelfStyle.GROUP_VERTICAL_PADDING, DiscoverShelfStyle.GROUP_HORIZONTAL_PADDING,
-        DiscoverShelfStyle.GROUP_VERTICAL_PADDING)
+    mod = paddingSides(discoverHeight(mod, DISCOVER_KIND_CONTENT_HEIGHT_DP),
+        if (first) 0 else DiscoverShelfStyle.GROUP_HORIZONTAL_PADDING, 0,
+        DiscoverShelfStyle.GROUP_HORIZONTAL_PADDING, 0)
     if (!selected) mod = method("androidx.compose.ui.draw.AlphaKt", "alpha", 2).invoke(null, mod, .5f)
     method(BOX_KT_CLASS, BOX_METHOD, 7).invoke(null, mod, alignmentCenter(), false, content, composer, 0, 0)
 }
@@ -851,6 +875,10 @@ private fun ReaMicroSettingsHook.discoverFillMaxWidth(base: Any): Any =
     method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, DISCOVER_FILL_MAX_WIDTH_PARAMETER_COUNT)
         .invoke(null, base, 0f, DISCOVER_FILL_MAX_WIDTH_DEFAULT_MASK, null)
 
+private fun ReaMicroSettingsHook.discoverHeight(base: Any, heightDp: Int): Any =
+    if (HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.height(base, udp(heightDp))
+    else method(SIZE_KT_CLASS, HEIGHT_METHOD, 2).invoke(null, base, udp(heightDp))
+
 private fun ReaMicroSettingsHook.discoverAspectRatio(base: Any, ratio: Float): Any =
     if (HostSymbols.abiProfileId == "2.3.3-b4") {
         // B4 默认参数已内联，false 的高度优先槽不再出现在实际签名中。
@@ -876,11 +904,13 @@ private fun ReaMicroSettingsHook.discoverWeight(scope: Any, base: Any): Any =
     else method(DISCOVER_ROW_SCOPE_INSTANCE_CLASS, DISCOVER_ROW_WEIGHT_METHOD, DISCOVER_ROW_WEIGHT_PARAMETER_COUNT)
         .invoke(scope, base, 1f, true)
 
-private fun ReaMicroSettingsHook.discoverColumn(modifier: Any, content: Any, composer: Any) {
+private fun ReaMicroSettingsHook.discoverColumn(
+    modifier: Any, content: Any, composer: Any, arrangement: Any = arrangementTop(),
+) {
     if (HostSymbols.abiProfileId == "2.3.3-b4") {
-        b2Ui.column(modifier, arrangementTop(), alignmentStart(), content, composer)
+        b2Ui.column(modifier, arrangement, alignmentStart(), content, composer)
     } else method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(null, modifier,
-        arrangementTop(), alignmentStart(), content, composer, 0, 0)
+        arrangement, alignmentStart(), content, composer, 0, 0)
 }
 
 private fun ReaMicroSettingsHook.discoverRow(

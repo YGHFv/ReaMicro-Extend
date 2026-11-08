@@ -186,6 +186,7 @@ internal fun ReaMicroSettingsHook.hookLazyListItem() {
 }
 
 internal fun ReaMicroSettingsHook.hookHostAccountSignOut() {
+    accountController.installAdvancedSettingsRestore { settings.snapshot().canRunAccountCompletion }
     runCatching {
         XposedBridge.hookAllMethods(
             cls(USER_REPOSITORY_CLASS),
@@ -193,7 +194,7 @@ internal fun ReaMicroSettingsHook.hookHostAccountSignOut() {
             object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!settings.snapshot().canRunAccountCompletion) return
-                    runCatching { accountController.persistCurrentAccountSnapshot() }
+                    runCatching { accountController.hostSigningOut() }
                         .onFailure {
                             XposedBridge.log("$LOG_PREFIX failed to persist account before sign out: ${it.stackTraceToString()}")
                         }

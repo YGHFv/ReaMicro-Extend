@@ -36,6 +36,8 @@ class ReaMicroHookEntry {
     private val installedFeatureIds = linkedSetOf<String>()
     private val disabledFeatureIds = linkedSetOf<String>()
     private var bookshelfCompletion: BookshelfCompletionHook? = null
+    private var coverFade: CoverFadeHook? = null
+    private var bookBackupScroll: BookBackupScrollHook? = null
     private var attachReloadedActivity: ((Activity) -> Unit)? = null
 
     internal fun attachAfterHotReload(activity: Activity) {
@@ -127,6 +129,11 @@ class ReaMicroHookEntry {
                 settingsProvider = settingsProvider,
             ).install()
         }
+        if (com.reamicro.fix.core.HostManualAssociationAbi.supports()) {
+            installFeature("ManualAssociationUiHook") {
+                ManualAssociationUiHook(classLoader, activityProvider, settingsProvider).install()
+            }
+        }
         val profileBackgroundHook = ProfileBackgroundHook(
             classLoader = classLoader,
             activityProvider = activityProvider,
@@ -169,6 +176,12 @@ class ReaMicroHookEntry {
         )
         installFeature("WebDavDriveHook", webDavDriveHook::install)
         if (com.reamicro.fix.core.HostSymbols.usesReleaseLayout) {
+            installFeature("CoverFadeHook") {
+                coverFade = CoverFadeHook(classLoader, settingsProvider).also { it.install() }
+            }
+            installFeature("BookBackupScrollHook") {
+                bookBackupScroll = BookBackupScrollHook(classLoader, settingsProvider).also { it.install() }
+            }
             installFeature("HomeDefaultPageHook") {
                 HomeDefaultPageHook(classLoader, settingsProvider).install()
             }
@@ -253,6 +266,8 @@ class ReaMicroHookEntry {
             installMemoryCallbacks(activity.application, readerHook, readerFontCompletionHook, readerDialogueHighlightHook,
                 profileBackgroundHook, bookDetailsAssociationActionHook)
             bookshelfCompletion?.onHostStarted()
+            coverFade?.onHostStarted()
+            bookBackupScroll?.onHostStarted()
             startForegroundHeartbeat()
         }
         HookInstallReport.install(ENTRY_FEATURE_ID, "mainActivityCreate") {
@@ -283,6 +298,8 @@ class ReaMicroHookEntry {
                         RotationOrientationController.apply(activity, moduleSettings.snapshot())
                         webDavDriveHook.cleanupStartupCacheIfNeeded(activity)
                         bookshelfCompletion?.onHostStarted()
+                        coverFade?.onHostStarted()
+                        bookBackupScroll?.onHostStarted()
                         profileBackgroundHook.refreshRandomImageFor(activity)
                         ApiPackageAutoUpdater.checkIfDue(activity.applicationContext, moduleSettings)
                         CloudTaskNotificationPoller.poll(activity.applicationContext)
@@ -404,6 +421,8 @@ class ReaMicroHookEntry {
                 heartbeatHandler.removeCallbacksAndMessages(null)
                 moduleSettings.closeForReload()
                 bookshelfCompletion?.closeForReload()
+                coverFade?.closeForReload()
+                bookBackupScroll?.closeForReload()
                 readerHook.onHostActivityDestroyed("API102 hot reload")
                 readerFontCompletionHook.releaseMemory("API102 hot reload")
                 readerDialogueHighlightHook.releaseMemory("API102 hot reload")
@@ -440,6 +459,8 @@ class ReaMicroHookEntry {
             onSearchSourceDisabled = ::disableSearchSource,
         )
         features.forEach { feature ->
+            if (com.reamicro.fix.core.HostManualAssociationAbi.supports() &&
+                (feature.id == "manual-edit" || "manual_edit" in feature.capabilities)) return@forEach
             val disabledReason = ExternalFeatureCompatibility.disabledReason(feature.id, feature.capabilities)
             if (disabledReason != null) {
                 if (disabledFeatureIds.add(feature.id)) {

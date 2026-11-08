@@ -57,15 +57,20 @@ object HostAutoScanner {
                 MessageDigest.getInstance("SHA-256").digest(rules).hex())
             val cache = JSONObject(File(dataDir, "code_cache/reamicro_dexkit/automatic-cache.json").readText(Charsets.UTF_8))
             if (cache.optString("key") != key) return@synchronized null
-            Report(cache.getInt("total"), cache.getInt("succeeded"), cache.getJSONArray("failures").strings(),
-                true, 0, false, HostProfile.parse(cache.getString("profile"))).also { last = it }
+            readCachedReport(cache, JSONObject(rules.toString(Charsets.UTF_8)))?.also { last = it }
         }.getOrNull()
     }
 
     fun scanProfileAvailable(profileId: String): Boolean =
         profileId in setOf("2.3.3-rc3", "2.3.3", "2.3.4-b1", "identity", "automatic")
 
-    fun scan(apk: String, dataDir: String, force: Boolean = false): Report? = synchronized(lock) {
+    /** 已知 ABI 首次启动不做全量扫描；后台扫描完成后的下次启动才应用其定位结果。 */
+    fun cachedProfile(apk: String, dataDir: String): Report? = scanInternal(apk, dataDir, false, true)
+
+    fun scan(apk: String, dataDir: String, force: Boolean = false): Report? =
+        scanInternal(apk, dataDir, force, false)
+
+    private fun scanInternal(apk: String, dataDir: String, force: Boolean, cacheOnly: Boolean): Report? = synchronized(lock) {
         if (running) return@synchronized null
         running = true
         val started = System.nanoTime()
@@ -88,15 +93,15 @@ object HostAutoScanner {
             val cache = File(dataDir, "code_cache/reamicro_dexkit/automatic-cache.json")
             val previous = runCatching { JSONObject(cache.readText(Charsets.UTF_8)) }.getOrNull()
                 ?.takeIf { it.optString("key") == key }
-            if (!force && previous != null) {
-                val parsed = HostProfile.parse(previous.getString("profile"))
-                loadedProfileText = previous.getString("profile")
-                val report = Report(previous.getInt("total"), previous.getInt("succeeded"),
-                    previous.getJSONArray("failures").strings(), true, 0, true, parsed)
+            val cached = if (!force && previous != null) readCachedReport(previous, rules) else null
+            if (cached != null) {
+                loadedProfileText = requireNotNull(previous).getString("profile")
+                val report = cached.copy(unchanged = true)
                 last = report
                 XposedBridge.logAlways("ReaMicro ${report.summary()}")
                 return@synchronized report
             }
+            if (cacheOnly) return@synchronized null
             val bridge = HostDexKit.openBridge(apk, dataDir) ?: return@synchronized null
             bridge.use {
                 val resolved = linkedMapOf<String, String>()
@@ -111,6 +116,10 @@ object HostAutoScanner {
                 val shapeCache = HashMap<String, List<String>>()
                 val allClasses by lazy { bridge.findClass(FindClass.create()) }
                 fun matchesClass(type: ClassData, rule: JSONObject): Boolean {
+                    val anchors = rule.optJSONArray("strings")?.strings().orEmpty()
+                    if (anchors.isNotEmpty() && !type.methods.flatMap { it.usingStrings }.containsAll(anchors)) return false
+                    val parent = rule.optString("superClass")
+                    if (parent.isNotEmpty() && type.superClass?.name != parent) return false
                     val expected = rule.optJSONArray("methodShapes")?.strings() ?: return true
                     val actual = shapeCache.getOrPut(type.name) {
                         type.methods.map {
@@ -135,10 +144,10 @@ object HostAutoScanner {
                     val stable = rule.optString("stable")
                     val hits = when {
                         stable.isNotEmpty() -> listOfNotNull(bridge.getClassData(stable))
-                        anchors.isNotEmpty() -> bridge.findClass(FindClass.create().matcher(
+                        anchors.isNotEmpty() && !rule.has("relation") -> bridge.findClass(FindClass.create().matcher(
                             ClassMatcher.create().usingEqStrings(anchors),
                         ))
-                        rule.has("methodShapes") -> allClasses
+                        rule.has("methodShapes") && !rule.has("relation") -> allClasses
                         else -> emptyList()
                     }
                     val filtered = hits.filter { matchesClass(it, rule) }
@@ -150,16 +159,20 @@ object HostAutoScanner {
                         val owner = resolved[relation.getString("owner")] ?: return@forEach
                         val index = relation.getInt("index")
                         var hits = bridge.getClassData(owner)?.methods.orEmpty().filter { matches(it, relation) }
-                        if (hits.isEmpty()) {
-                            val opcodes = ruleOpCodes(relation)
+                        if (hits.isEmpty() && (relation.has("opcodes") || relation.has("strings"))) {
+                            val matcher = MethodMatcher.create()
+                            relation.optJSONArray("opcodes")?.let {
+                                matcher.opCodes(ruleOpCodes(relation), OpCodeMatchType.Equals)
+                            }
+                            relation.optJSONArray("strings")?.strings()?.let { matcher.usingEqStrings(it) }
                             hits = bridge.findMethod(FindMethod.create().matcher(
-                                MethodMatcher.create().opCodes(opcodes, OpCodeMatchType.Equals),
+                                matcher,
                             )).filter { matches(it, relation) }
                         }
                         val values = hits.mapNotNull { method ->
                             if (index < 0) method.returnTypeName else method.paramTypeNames.getOrNull(index)
                         }.distinct().filter { name ->
-                            !rule.has("methodShapes") || bridge.getClassData(name)?.let { matchesClass(it, rule) } == true
+                            bridge.getClassData(name)?.let { matchesClass(it, rule) } == true
                         }
                         val actual = HostScanRules.unique(values)
                         if (actual != null) resolved[rule.getString("id")] = actual
@@ -192,12 +205,11 @@ object HostAutoScanner {
                     if (types != null) candidates = candidates.filter { candidate ->
                         val actual = candidate.paramTypeNames + candidate.returnTypeName
                         actual.size == types.size && types.indices.all { index ->
-                            val expected = resolved[types[index]]
-                            expected == null || actual[index] == expected
+                            HostScanRules.matchesLogicalType(types[index], actual[index], resolved)
                         }
                     }
                     val calls = rule.optJSONArray("stableCalls")?.strings().orEmpty().toSet()
-                    if (candidates.size > 1 && calls.isNotEmpty()) {
+                    if (calls.isNotEmpty()) {
                         candidates = candidates.filter { stableCalls(it, 2) == calls }
                     }
                     val calledBy = rule.optJSONObject("calledBy")
@@ -226,7 +238,7 @@ object HostAutoScanner {
                         }
                     }
                     val numbers = rule.optJSONArray("numbers")
-                    if (numbers != null && candidates.size > 1) {
+                    if (numbers != null) {
                         val query = MethodMatcher.create().usingNumbers(
                             (0 until numbers.length()).map { numbers.getInt(it) as Number },
                         )
@@ -291,6 +303,18 @@ object HostAutoScanner {
             running = false
         }
     }
+
+    private fun readCachedReport(cache: JSONObject, rules: JSONObject): Report? = runCatching {
+        val total = listOf("classes", "methods", "fields").sumOf { rules.getJSONArray(it).length() }
+        val succeeded = cache.getInt("succeeded")
+        val failures = cache.getJSONArray("failures").strings()
+        require(cache.getInt("total") == total && succeeded in 0..total && failures.size == total - succeeded)
+        val profile = HostProfile.parse(cache.getString("profile"))
+        require(profile.fingerprint.packageName == HostProfile.HOST_PACKAGE && profile.fingerprint.id == "automatic")
+        require(profile.classes.size + profile.typeAliases.size + profile.methods.size + profile.fields.size == succeeded)
+        require(profile.methodOwners.keys == profile.methods.keys)
+        Report(total, succeeded, failures, true, 0, false, profile)
+    }.getOrNull()
 
     private fun matches(method: MethodData, rule: JSONObject): Boolean {
         val signature = method.descriptor.substringAfter("->").substringAfter(method.name)

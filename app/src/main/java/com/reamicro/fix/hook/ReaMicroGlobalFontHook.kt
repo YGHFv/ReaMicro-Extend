@@ -6,6 +6,9 @@ import android.graphics.Typeface
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.core.hostNameMatches
@@ -28,6 +31,7 @@ class ReaMicroGlobalFontHook(
     private val methodCache = HashMap<String, Method>()
     private val fontFamilyCache = HashMap<String, Any>()
     private val androidTypefaceCache = HashMap<String, Typeface>()
+    private val composeFontFamilyCache = HashMap<String, FontFamily>()
     private val failedFontFamilyLogKeys = HashSet<String>()
     private val readerTextDepth = ThreadLocal.withInitial { 0 }
     private val fontPreviewDepth = ThreadLocal.withInitial { 0 }
@@ -36,6 +40,11 @@ class ReaMicroGlobalFontHook(
 
     fun install() {
         EmbeddedHostUi.bindUiFontResolver(::globalAndroidTypeface)
+        EmbeddedHostUi.bindUiFontFamilyResolver(::globalComposeFontFamily)
+        EmbeddedHostUi.bindMaterialFontFamilyResolver { host, nativeFamily ->
+            val selection = if (settings.snapshot().canUseFontSettings) settings.fontSettings().globalFamily else ""
+            if (selection.isBlank()) nativeFamily else globalComposeFontFamily(host)
+        }
         hookReaderTextScopes()
         hookReaderFontPreviewScopes()
         hookThemeSerifFont()
@@ -49,6 +58,7 @@ class ReaMicroGlobalFontHook(
         synchronized(androidTypefaceCache) {
             androidTypefaceCache.clear()
         }
+        synchronized(composeFontFamilyCache) { composeFontFamilyCache.clear() }
     }
 
     private fun hookThemeSerifFont() {
@@ -271,6 +281,26 @@ class ReaMicroGlobalFontHook(
     }
 
     internal fun globalAndroidTypeface(): Typeface? = resolveGlobalAndroidTypefaceCached()?.typeface
+
+    /** Module Compose must select real font weights, which a single loaded Typeface cannot do. */
+    private fun globalComposeFontFamily(host: android.content.Context): FontFamily {
+        val selection = if (settings.snapshot().canUseFontSettings) settings.fontSettings().globalFamily else ""
+        if (selection == FAMILY_SYSTEM) return FontFamily.Default
+        val file = if (selection.isBlank() || selection == FAMILY_SOURCE_HAN_SERIF) null
+            else resolveFontFile(selection)
+        val key = com.reamicro.fix.epub.editor.FontSelectionResolution.cacheKey(selection, file)
+        synchronized(composeFontFamilyCache) {
+            composeFontFamilyCache[key]?.let { return it }
+        }
+        val family = if (file == null) StructureHome130Style.fonts(host).serif else {
+            runCatching {
+                FontFamily(Font(file, weight = FontWeight.Normal), Font(file, weight = FontWeight.Bold))
+            }.onFailure { logResolveFontFamilyFailure(selection, it) }
+                .getOrElse { StructureHome130Style.fonts(host).serif }
+        }
+        synchronized(composeFontFamilyCache) { composeFontFamilyCache[key] = family }
+        return family
+    }
 
     private fun resolveAndroidTypeface(selection: String): Typeface? {
         val resolvedFile = if (isBuiltinFontSelection(selection)) null else resolveFontFile(selection) ?: return null

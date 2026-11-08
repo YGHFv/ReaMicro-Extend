@@ -25,6 +25,7 @@ object ModuleSettings {
     const val KEY_INLINE_SEARCH_ICON_ENABLED = "inline_search_icon_enabled"
     const val KEY_SHELF_HIDE_SYNC = "shelf_hide_sync"
     const val KEY_SHELF_STYLE_BUTTON = "shelf_style_button"
+    const val KEY_SHELF_DISABLE_COVER_FADE = "shelf_disable_cover_fade"
     const val KEY_SHELF_BATCH_UPDATE = "shelf_batch_update"
     const val KEY_SHELF_AUTO_UPDATE = "shelf_auto_update"
     const val KEY_SHELF_CURRENT_ONLY = "shelf_current_only"
@@ -214,6 +215,7 @@ data class ModuleSettingsSnapshot(
     val inlineSearchIconEnabled: Boolean = ModuleSettings.DEFAULT_INLINE_SEARCH_ICON_ENABLED,
     val shelfHideSync: Boolean = false,
     val shelfStyleButton: Boolean = false,
+    val shelfDisableCoverFade: Boolean = false,
     val shelfBatchUpdate: Boolean = false,
     val shelfAutoUpdate: Boolean = false,
     val shelfCurrentOnly: Boolean = false,
