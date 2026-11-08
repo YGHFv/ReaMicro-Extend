@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.createLifecycleAwareWindowRecomposer
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -67,6 +68,7 @@ internal class WebDavSyncConfigurationPage(
     private var configurationEpoch by mutableIntStateOf(0)
     private var closed = false
     private var compose: ComposeView? = null
+    private var recomposer: Recomposer? = null
     private var callbackRegistered = false
     private var back: (() -> Unit)? = null
     private var canceled by mutableStateOf(false)
@@ -102,6 +104,10 @@ internal class WebDavSyncConfigurationPage(
                 importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
                 setViewTreeLifecycleOwner(owner)
                 setViewTreeSavedStateRegistryOwner(owner)
+                // The host window's owner belongs to another Compose/ClassLoader tree.
+                val pageRecomposer = createLifecycleAwareWindowRecomposer(lifecycle = owner.lifecycle)
+                this@WebDavSyncConfigurationPage.recomposer = pageRecomposer
+                setParentCompositionContext(pageRecomposer)
                 setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
                 setContent { this@WebDavSyncConfigurationPage.ConfigurationContent() }
             }
@@ -146,16 +152,21 @@ internal class WebDavSyncConfigurationPage(
                 view?.disposeComposition()
             } finally {
                 try {
-                    owner.close()
+                    recomposer?.cancel()
+                    recomposer = null
                 } finally {
                     try {
-                        if (callbackRegistered) {
-                            callbackRegistered = false
-                            activity.unregisterComponentCallbacks(callback)
-                        }
+                        owner.close()
                     } finally {
-                        releaseSecure?.invoke()
-                        releaseSecure = null
+                        try {
+                            if (callbackRegistered) {
+                                callbackRegistered = false
+                                activity.unregisterComponentCallbacks(callback)
+                            }
+                        } finally {
+                            releaseSecure?.invoke()
+                            releaseSecure = null
+                        }
                     }
                 }
             }
