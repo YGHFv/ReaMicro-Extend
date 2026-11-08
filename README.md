@@ -1,4 +1,18 @@
-# 阅微补全计划（ReaMicro Extend）
+<h1 align="center">阅微补全计划（ReaMicro Extend）</h1>
+
+<p align="center">
+  <a href="https://developer.android.com/about/versions/oreo"><img src="https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&amp;logoColor=white" alt="Android 8.0+ (minSdk 26)"/></a>
+  <a href="https://github.com/compose-miuix-ui/miuix"><img src="https://img.shields.io/badge/UI--Framework-Miuix--Compose-0084FF.svg" alt="UI-Framework Miuix-Compose"/></a>
+  <a href="https://github.com/libxposed/api"><img src="https://img.shields.io/badge/Hook--Framework-libxposed%20102-purple.svg" alt="Hook-Framework libxposed 102"/></a>
+  <br/>
+  <a href="https://github.com/YGHFv/ReaMicro-Extend/releases"><img src="https://img.shields.io/github/v/release/YGHFv/ReaMicro-Extend?label=Releases&amp;color=orange" alt="Releases"/></a>
+  <a href="https://github.com/YGHFv/ReaMicro-Extend/actions"><img src="https://img.shields.io/github/actions/workflow/status/YGHFv/ReaMicro-Extend/ci.yml?branch=main&amp;label=Actions" alt="Actions"/></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Changelog-%E6%9B%B4%E6%96%B0%E6%97%A5%E5%BF%97-00A98F" alt="更新日志"/></a>
+</p>
+
+<p align="center">
+  <a href="https://qm.qq.com/q/6yhxHOVvzy"><img src="https://img.shields.io/badge/QQ%20%E4%BA%A4%E6%B5%81%E7%BE%A4-0084FF?style=flat&amp;logo=qq&amp;logoColor=white" alt="QQ 交流群"/></a>
+</p>
 
 阅微补全计划（ReaMicro Extend）是一个面向阅微的 LSPosed 扩展模块，用来补全阅微在搜索、在线源、云盘、阅读、文件编辑和字体管理上的一些日常使用能力。
 
@@ -91,7 +105,7 @@
 - 期物典当的「禁当期物」列出席物点选锁定，弹窗内可「刷新期物清单」现拉当日期物与背包全量（名字与品质只在服务端，任务没跑过也能列全）；按品质从高到低排列，期物名用游戏内一致的品质色显示；默认跳过祈禳/传承/夺宝要用的消耗品，一项都不锁则不禁止。
 - 任务通知直接显示奖励明细并给物品上品质色；自动行商通知带新行商结束时间与新运签效果。
 - Root 唤醒仍受休眠、断网、登录失效和内核策略影响，不保证绝对准点；云端任务仍由 API 服务器执行。
-- 模块安装、启停及使用限制见 [Root 模块说明](module/README.md)。
+- 配套 Root 模块源码见 [reamicro-automation](module/reamicro-automation/)。
 
 ### 屏幕方向
 
@@ -229,8 +243,20 @@ sdk.dir=C:/Users/<name>/AppData/Local/Android/Sdk
 感谢以下开源项目及其开发者：
 
 - [KernelSU](https://github.com/tiann/KernelSU)：界面与特效参考。
-- [Miuix](https://github.com/miuix-kotlin-multiplatform/miuix)：界面组件库。
+- [Miuix](https://github.com/compose-miuix-ui/miuix)：界面组件库。
 - [Scripta](https://github.com/YuKongA/scripta)：代码编辑器。
+- [DexKit](https://github.com/LuckyPray/DexKit)：DEX 解析与宿主类、方法定位。
+- [KavaRef](https://github.com/HighCapable/KavaRef)：基于 Kotlin 的 Java 反射工具库。
 - [齊伋體 qiji-font](https://github.com/LingDong-/qiji-font)：开屏页字体。
 
 本项目使用上述项目的相关代码与组件时，遵守各自的许可证，并保留相应的版权与许可声明。
+
+## Star History
+
+<a href="https://www.star-history.com/#YGHFv/ReaMicro-Extend&amp;Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=YGHFv/ReaMicro-Extend&amp;type=Date&amp;theme=dark"/>
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=YGHFv/ReaMicro-Extend&amp;type=Date"/>
+    <img src="https://api.star-history.com/svg?repos=YGHFv/ReaMicro-Extend&amp;type=Date" alt="Star History Chart"/>
+  </picture>
+</a>
