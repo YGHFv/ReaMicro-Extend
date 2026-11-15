@@ -27,7 +27,7 @@ dependencies {
     implementation("cn.wanghaomiao:JsoupXpath:2.5.5")
     implementation("com.jayway.jsonpath:json-path:3.0.0")
     implementation("org.apache.commons:commons-text:1.15.0")
-    implementation("cn.hutool:hutool-crypto:5.8.22")
+    implementation("cn.hutool:hutool-crypto:5.8.48")
     implementation("com.github.bumptech.glide:glide:5.0.9")
     implementation("androidx.media3:media3-common:1.11.0")
     implementation("me.zhanghai.android.libarchive:library:1.1.6")
